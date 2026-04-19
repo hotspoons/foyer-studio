@@ -1,0 +1,21 @@
+[package]
+name = "foyer-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Foyer Studio CLI entrypoint."
+
+[[bin]]
+name = "foyer"
+path = "src/main.rs"
+
+[dependencies]
+foyer-server.workspace = true
+foyer-backend-stub.workspace = true
+foyer-backend-host.workspace = true
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

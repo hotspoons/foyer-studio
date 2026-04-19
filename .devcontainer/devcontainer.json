@@ -1,0 +1,60 @@
+{
+  "name": "Foyer Studio Development",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".",
+    "options": [
+      "--platform=${localEnv:DOCKER_DEFAULT_PLATFORM:linux/arm64}"
+    ]
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {}
+  },
+  "runArgs": [
+    "--platform=${localEnv:DOCKER_DEFAULT_PLATFORM:linux/arm64}"
+  ],
+  "containerEnv": {
+    "CARGO_TERM_COLOR": "always"
+  },
+  "workspaceFolder": "/workspaces/foyer-studio",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/foyer-studio,type=bind,consistency=cached",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.shell.linux": "/bin/bash",
+        "terminal.integrated.fontFamily": "MesloLGS NF, FiraCode Nerd Font Mono, JetBrainsMono Nerd Font, monospace",
+        "terminal.integrated.customGlyphs": true,
+        "shellcheck.ignorePatterns": {
+          "**/*.env": true,
+          "**/*.env*": true,
+          "Justfile": true
+        },
+        "files.associations": {
+          "Justfile": "just",
+          "justfile": "just"
+        },
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.cargo.features": "all"
+      },
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates",
+        "ms-azuretools.vscode-docker",
+        "editorconfig.editorconfig",
+        "timonwong.shellcheck",
+        "skellock.just",
+        "ms-vscode.cpptools",
+        "anthropic.claude-code"
+      ]
+    }
+  },
+  "initializeCommand": "sh -c 'mkdir -p \"$HOME/.claude\" && touch \"$HOME/.claude.json\"'",
+  "onCreateCommand": "bash .devcontainer/post-create.sh",
+  "mounts": [
+    "source=${localWorkspaceFolder}/../ardour,target=/workspaces/ardour,type=bind,consistency=cached",
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude.json,target=/home/vscode/.claude.json,type=bind",
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/home/vscode/.claude,type=bind"
+  ]
+}

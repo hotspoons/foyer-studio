@@ -1,0 +1,18 @@
+[package]
+name = "foyer-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "DAW-agnostic IPC wire protocol between Foyer shims and the Rust sidecar."
+
+[dependencies]
+foyer-schema.workspace = true
+serde.workspace = true
+rmp-serde.workspace = true
+bytes = "1"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "io-util"] }

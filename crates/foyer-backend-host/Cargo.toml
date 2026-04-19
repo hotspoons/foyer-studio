@@ -1,0 +1,25 @@
+[package]
+name = "foyer-backend-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Generic IPC-based Backend. Speaks foyer-ipc to any conforming shim."
+
+[dependencies]
+foyer-schema.workspace = true
+foyer-backend.workspace = true
+foyer-ipc.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time"] }
+futures.workspace = true
+async-stream = "0.3"
+rmp-serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tempfile = "3"
+serde_json.workspace = true
+futures.workspace = true

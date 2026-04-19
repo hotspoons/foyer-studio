@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Foyer protocol tester</title>
+<style>
+  :root { color-scheme: dark; --bg:#111; --fg:#ddd; --mut:#888; --ok:#4c8; --warn:#c84; --err:#c44; --line:#222; }
+  html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font:13px/1.4 ui-monospace,Menlo,Consolas,monospace; height:100%; }
+  body { display:grid; grid-template-rows:auto auto 1fr auto; gap:0; height:100vh; }
+  header { padding:8px 12px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; }
+  header input { flex:1; background:#000; color:var(--fg); border:1px solid var(--line); padding:4px 8px; font:inherit; }
+  header button { background:#222; color:var(--fg); border:1px solid var(--line); padding:4px 10px; font:inherit; cursor:pointer; }
+  header button:hover { background:#333; }
+  #status { padding:0 12px; color:var(--mut); }
+  #status.open { color:var(--ok); }
+  #status.err  { color:var(--err); }
+  #log { overflow:auto; padding:8px 12px; }
+  .row { display:flex; gap:8px; padding:2px 0; border-bottom:1px dotted var(--line); white-space:pre-wrap; word-break:break-all; }
+  .tag { color:var(--mut); flex:0 0 80px; }
+  .tag.out { color:var(--warn); }
+  .tag.in  { color:var(--ok); }
+  footer { padding:8px 12px; border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  footer label { color:var(--mut); }
+  footer input { background:#000; color:var(--fg); border:1px solid var(--line); padding:4px 6px; font:inherit; }
+</style>
+</head>
+<body>
+<header>
+  <label>ws:</label>
+  <input id="url" value="ws://127.0.0.1:3838/ws?origin=tester">
+  <button id="connect">Connect</button>
+  <button id="disconnect" disabled>Disconnect</button>
+  <button id="subscribe" disabled>subscribe</button>
+  <button id="snapshot" disabled>request_snapshot</button>
+</header>
+<div id="status">idle</div>
+<div id="log"></div>
+<footer>
+  <label>control_set</label>
+  <input id="sid" placeholder="id (e.g. transport.tempo)" size="28">
+  <input id="sval" placeholder="value (number / true / false / text)" size="28">
+  <button id="send" disabled>send</button>
+  <span style="flex:1"></span>
+  <button id="clear">clear log</button>
+</footer>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const log = $('log');
+  const status = $('status');
+  let ws = null;
+
+  function setStatus(text, cls = '') {
+    status.textContent = text;
+    status.className = cls;
+  }
+  function line(tag, cls, text) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const t = document.createElement('span');
+    t.className = 'tag ' + cls;
+    t.textContent = tag;
+    const b = document.createElement('span');
+    b.textContent = text;
+    row.appendChild(t);
+    row.appendChild(b);
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+  }
+  function buttons(connected) {
+    $('connect').disabled    = connected;
+    $('disconnect').disabled = !connected;
+    $('subscribe').disabled  = !connected;
+    $('snapshot').disabled   = !connected;
+    $('send').disabled       = !connected;
+  }
+  function send(body) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const env = { schema: [0, 1], seq: 0, origin: 'tester', body };
+    const text = JSON.stringify(env);
+    ws.send(text);
+    line('→', 'out', text);
+  }
+  function parseValue(raw) {
+    const t = raw.trim();
+    if (t === 'true')  return true;
+    if (t === 'false') return false;
+    if (t === '')      return '';
+    const n = Number(t);
+    return Number.isNaN(n) ? t : n;
+  }
+
+  $('connect').addEventListener('click', () => {
+    try { ws = new WebSocket($('url').value); }
+    catch (e) { setStatus('bad url: ' + e.message, 'err'); return; }
+    setStatus('connecting…');
+    ws.addEventListener('open',  () => { setStatus('open', 'open'); buttons(true); });
+    ws.addEventListener('error', () => { setStatus('error', 'err'); });
+    ws.addEventListener('close', () => { setStatus('closed'); buttons(false); ws = null; });
+    ws.addEventListener('message', (ev) => {
+      line('←', 'in', typeof ev.data === 'string' ? ev.data : '[binary ' + ev.data.size + 'B]');
+    });
+  });
+  $('disconnect').addEventListener('click', () => ws && ws.close());
+  $('subscribe').addEventListener('click', () => send({ type: 'subscribe' }));
+  $('snapshot').addEventListener('click',  () => send({ type: 'request_snapshot' }));
+  $('send').addEventListener('click', () => {
+    const id = $('sid').value.trim();
+    if (!id) return;
+    send({ type: 'control_set', id, value: parseValue($('sval').value) });
+  });
+  $('clear').addEventListener('click', () => { log.innerHTML = ''; });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+[package]
+name = "foyer-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Backend trait for Foyer. StubBackend and HostBackend both implement this."
+
+[dependencies]
+foyer-schema.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+futures.workspace = true
+thiserror.workspace = true

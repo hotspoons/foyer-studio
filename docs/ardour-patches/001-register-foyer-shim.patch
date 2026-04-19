@@ -1,0 +1,22 @@
+diff --git a/libs/surfaces/wscript b/libs/surfaces/wscript
+index ca338929c4..da50df88f4 100644
+--- a/libs/surfaces/wscript
++++ b/libs/surfaces/wscript
+@@ -65,6 +65,10 @@ def configure(conf):
+         children += [ 'websockets' ]
+         children += [ 'mcp_http' ]
+ 
++    import os
++    if os.path.isdir(os.path.join(conf.path.abspath(), 'foyer_shim')):
++        children += [ 'foyer_shim' ]
++
+     for i in children:
+         conf.recurse(i)
+ 
+@@ -92,3 +96,6 @@ def build(bld):
+     if bld.is_defined ('HAVE_WEBSOCKETS'):
+         bld.recurse('websockets')
+         bld.recurse('mcp_http')
++    import os
++    if os.path.isdir(os.path.join(bld.path.abspath(), 'foyer_shim')):
++        bld.recurse('foyer_shim')

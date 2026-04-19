@@ -1,0 +1,40 @@
+#!/usr/bin/env python
+#
+# Foyer Studio — Ardour shim build recipe.
+#
+# Meant to be dropped into Ardour's libs/surfaces/foyer_shim/ or built out-of-tree
+# by symlinking this directory into Ardour's source tree. The waf machinery is
+# Ardour-compatible so either works.
+
+import os
+
+
+def options(opt):
+    pass
+
+
+def configure(conf):
+    pass
+
+
+def build(bld):
+    obj = bld(features='cxx cxxshlib')
+    obj.source = '''
+        src/interface.cc
+        src/surface.cc
+        src/signal_bridge.cc
+        src/ipc.cc
+        src/dispatch.cc
+        src/schema_map.cc
+        src/msgpack_out.cc
+    '''
+    obj.defines = ['PACKAGE="foyer_shim"', 'ARDOURSURFACE_DLL_EXPORTS']
+    obj.includes = ['.', './src']
+    obj.name = 'libfoyer_shim'
+    obj.target = 'foyer_shim'
+    obj.uselib = 'GLIBMM XML SIGCPP'
+    obj.use = 'libardour libardour_cp libgtkmm2ext libpbd'
+    obj.install_path = os.path.join(bld.env['LIBDIR'], 'surfaces')
+
+    if bld.env['build_target'] == 'mingw':
+        obj.defines += ['_WIN32_WINNT=0x0601', 'WINVER=0x0601']

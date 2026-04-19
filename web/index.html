@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Foyer Studio</title>
+<link rel="stylesheet" href="/styles/tw.build.css">
+
+<script type="importmap">
+{
+  "imports": {
+    "lit":                     "/vendor/lit/index.js",
+    "lit/":                    "/vendor/lit/",
+    "lit-html":                "/vendor/lit-html/lit-html.js",
+    "lit-html/":               "/vendor/lit-html/",
+    "lit-element":             "/vendor/lit-element/index.js",
+    "lit-element/":            "/vendor/lit-element/",
+    "@lit/reactive-element":   "/vendor/@lit/reactive-element/reactive-element.js",
+    "@lit/reactive-element/":  "/vendor/@lit/reactive-element/"
+  }
+}
+</script>
+<script type="module" src="/src/app.js"></script>
+</head>
+<body class="h-screen overflow-hidden flex flex-col">
+  <foyer-app></foyer-app>
+</body>
+</html>

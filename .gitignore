@@ -1,0 +1,12 @@
+/target
+Cargo.lock.bak
+*.swp
+.DS_Store
+/web/styles/tw.build.css
+/.bin/
+
+# Core dumps — sometimes a crashed hardour / foyer / shim dumps into the repo root.
+/core
+core.*
+*.core
+vgcore.*
