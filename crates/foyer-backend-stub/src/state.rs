@@ -29,6 +29,15 @@ impl StubState {
         }
     }
 
+    /// Launcher mode — no tracks, no meters, transport only.
+    pub(crate) fn empty() -> Self {
+        Self {
+            session: fixtures::empty_session(),
+            meters: HashMap::new(),
+            tick: 0,
+        }
+    }
+
     pub(crate) fn session_clone(&self) -> Session {
         self.session.clone()
     }

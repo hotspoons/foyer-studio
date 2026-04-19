@@ -12,10 +12,15 @@ path = "src/main.rs"
 
 [dependencies]
 foyer-server.workspace = true
+foyer-schema.workspace = true
+foyer-backend.workspace = true
 foyer-backend-stub.workspace = true
 foyer-backend-host.workspace = true
+foyer-config.workspace = true
+async-trait.workspace = true
 clap = { version = "4", features = ["derive"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+dirs = "5"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process"] }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

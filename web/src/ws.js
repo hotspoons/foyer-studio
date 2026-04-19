@@ -22,6 +22,13 @@ export class FoyerWs extends EventTarget {
     this._lastSeq = 0;
     this._backoff = 500;
     this._closed = false;
+    // Outbox: commands sent before the socket opens (common on first-
+    // paint — components mount and fire `list_backends`/`browse_path`
+    // in `connectedCallback` while the WS is still handshaking). Flushed
+    // in order on "open". Capped so a permanently-offline socket doesn't
+    // balloon memory.
+    this._outbox = [];
+    this._outboxCap = 256;
   }
 
   connect() {
@@ -40,10 +47,19 @@ export class FoyerWs extends EventTarget {
    * audio_*). The envelope is built for you.
    */
   send(body) {
-    if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return false;
     const env = { schema: [0, 1], seq: 0, origin: this.origin, body };
-    this._ws.send(JSON.stringify(env));
-    return true;
+    const text = JSON.stringify(env);
+    if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+      this._ws.send(text);
+      return true;
+    }
+    // Socket not open yet (or has closed between a reconnect). Queue
+    // and flush on next "open" — keeps component-mount code paths simple
+    // (they can `send()` in `connectedCallback` without gating).
+    if (this._outbox.length < this._outboxCap) {
+      this._outbox.push(text);
+    }
+    return false;
   }
 
   /** Ask for a fresh snapshot. */
@@ -72,6 +88,15 @@ export class FoyerWs extends EventTarget {
     ws.addEventListener("open", () => {
       this._backoff = 500;
       this.dispatchEvent(new CustomEvent("status", { detail: "open" }));
+      // Flush anything components queued while the WS was still
+      // handshaking. Order is preserved (FIFO).
+      if (this._outbox.length) {
+        const pending = this._outbox;
+        this._outbox = [];
+        for (const text of pending) {
+          try { ws.send(text); } catch {}
+        }
+      }
       // Subscribe explicitly in case the server didn't send us cached snapshot yet.
       if (this._lastSeq === 0) this.send({ type: "subscribe" });
     });

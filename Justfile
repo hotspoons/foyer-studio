@@ -22,9 +22,52 @@ clippy:
 check: fmt-check clippy test
 
 # --- dev loops ---
-# start foyer-cli with the stub backend; tester.html served from ./web
+# Launch foyer with whatever `default_backend` is in config.yaml (stub on
+# first run — dummy data, no DAW process). `just run` is the everyday
+# "bring up the UI" command.
+run *args:
+    cargo run --bin foyer -- serve {{args}}
+
+# Launch with the stub (dummy) backend explicitly — useful if config
+# default got changed and you just want the demo UI back.
 run-stub *args:
-    cargo run --bin foyer -- serve --backend=stub {{args}}
+    cargo run --bin foyer -- serve --backend stub {{args}}
+
+# Launch with the Ardour backend. If PROJECT is given, the configured
+# executable is spawned with the project as argv and we wait for the
+# shim to advertise before serving. Without PROJECT, discovery picks
+# the single live shim (fails if none is running).
+#
+#   just run-ardour                        # attach to already-running Ardour
+#   just run-ardour /tmp/foyer-session/foyer-smoke.ardour
+run-ardour project="" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{project}}" ]; then
+      cargo run --bin foyer -- serve --backend ardour --project "{{project}}" {{args}}
+    else
+      cargo run --bin foyer -- serve --backend ardour {{args}}
+    fi
+
+# Print the list of backends configured in $XDG_DATA_HOME/foyer/config.yaml
+# (creates the file on first call with sensible defaults).
+backends:
+    cargo run --bin foyer -- backends
+
+# Print the absolute path of config.yaml.
+config-path:
+    cargo run --bin foyer -- config-path
+
+# Scan for DAW executables and write the results into config.yaml. Safe to
+# re-run; existing paths are preserved unless you pass `--force`. Checks
+# $PATH, macOS app bundles, and the sibling Ardour checkout at
+# $FOYER_ARDOUR_BUILD_ROOT (default /workspaces/ardour).
+#
+#   just configure               # detect missing paths, write
+#   just configure --dry-run     # preview without writing
+#   just configure --force       # overwrite even if already set
+configure *args:
+    cargo run --bin foyer -- configure {{args}}
 
 # --- web (M4) ---
 # tailwind standalone binary lives in ./.bin/ after first run; committed artifact is web/styles/tw.build.css
@@ -131,7 +174,7 @@ shim-e2e:
     for i in {1..40}; do [ -S /tmp/foyer.sock ] && break; sleep 0.5; done
     [ -S /tmp/foyer.sock ] || { echo "FAIL: shim socket never appeared"; tail -20 /tmp/hardour.log; exit 1; }
     echo "✓ shim socket up at /tmp/foyer.sock"
-    {{justfile_directory()}}/target/debug/foyer serve --backend=host --socket=/tmp/foyer.sock --listen=127.0.0.1:3842 --web-root={{justfile_directory()}}/web > /tmp/foyer-cli.log 2>&1 &
+    {{justfile_directory()}}/target/debug/foyer serve --backend ardour --socket /tmp/foyer.sock --listen 127.0.0.1:3842 --web-root {{justfile_directory()}}/web > /tmp/foyer-cli.log 2>&1 &
     FP=$!
     for i in {1..30}; do curl -sf http://127.0.0.1:3842/index.html > /dev/null 2>&1 && break; sleep 0.5; done
     kill -0 $FP 2>/dev/null || { echo "FAIL: foyer-cli died"; cat /tmp/foyer-cli.log; exit 1; }

@@ -19,6 +19,49 @@ Entries follow a loose shape:
 
 ---
 
+## Browser-triggered DAW launch + live backend swap
+
+- **Status:** core path landed; UX polish pending
+- **Owner:** unassigned
+
+End-to-end flow now works: boot `foyer serve` (stub-first), open the
+session picker, click a project, sidecar spawns the configured DAW,
+waits for shim advertisement, and atomically swaps its backend. The
+WebSocket never drops — clients re-snapshot from the new backend.
+
+- [foyer-server](../crates/foyer-server/src/lib.rs) holds
+  `RwLock<Arc<dyn Backend>>` + `Mutex<Option<JoinHandle>>` for the
+  event pump. `AppState::swap_backend` aborts the old pump, spawns a
+  new one, drops the cached snapshot, and broadcasts
+  `Event::BackendSwapped`.
+- `BackendSpawner` trait exposed from foyer-server; CLI's
+  `CliSpawner` implements it (stub ↦ fresh `StubBackend`, ardour ↦
+  spawn exec + wait for advertisement + `HostBackend::connect`).
+- Schema additions: `Command::{ListBackends, LaunchProject}` +
+  `Event::{BackendsListed, BackendSwapped}`.
+- Browser [session-view](../web/src/components/session-view.js)
+  issues `launch_project` on click, prefers `kind: ardour` backends
+  for `.ardour` paths, surfaces `launch_failed` errors inline, and
+  re-requests a snapshot on `backend_swapped`.
+- `StubBackend` now tracks its meter-tick task handle and aborts
+  it in `Drop` so repeated swaps don't leak timers.
+
+Still to do (nice-to-haves, not blockers):
+
+- **Backend picker UI**: `BackendsListed` is already cached in the
+  session view; wire up an explicit "Open with: [Ardour ▾] / [Dummy]"
+  dropdown instead of the path-based inference.
+- **Recent projects**: `foyer-config.launcher.recent` is defined but
+  unused. Surface it above the file browser, and have
+  `CliSpawner::launch` `Config::record_recent + save` on success.
+- **Launcher-only start**: a fresh install boots into stub-with-picker,
+  which works but requires the user to notice that the session view
+  is the launcher. A dedicated "pick a DAW" splash before any tile
+  content renders would be more obvious.
+- **More DAWs**: `BackendKind` currently has `Stub | Ardour`. Adding
+  Reaper / Bitwig / Pro Tools etc. is trivial at the config layer but
+  gated on a shim for each one.
+
 ## Multi-monitor / multi-window support
 
 - **Status:** pending (foundation landed)
@@ -227,3 +270,29 @@ doesn't exist is the actual MCP round-trip: tool registration, model
 calls, tool-use loop, streaming response rendering. Rich's WebLLM +
 external-OpenAI-compatible config is pre-wired; once the runtime
 lands, switching between them should be a config toggle.
+
+
+
+---
+
+## Rich notes:
+
+- Can we also add a midi track view with an editor and a piano along the bottom like other DAWs? The midi editor should be a modal, but also can be a dockable view if desired?
+
+- I am thinking that the agent and layouts views also appear in the right panel slideout when the FABs are docked, and they only appear as floating windows when undocked
+
+- We need a track editor UI when right clicking on track's label strip in the timeine and mixer so we can rename the track, set colors, set busses and groupings. Should also have the full mixer editor view in the track editor UI so you can manage the track's mixer settings from the timeline if you don't have the mixer open. Should be in a model or overlay, not a full window
+
+- busses and groups - need to support this! 
+
+- show unsaved session changes in main view
+
+- add undo and redo (ctrl/cmd z/ ctrl/cmd + shift z) capability with buttons (should apply on back end if possible)
+
+- add cut/copy/paste actions
+
+- add 'console' window that can show the stderr/out of ardour plus any internal console it exposes (not sure if it has one)
+
+- add detection to see if the client is connecting from the local machine or a remote machine via IP address probably
+
+- add "share session connection" or something button that will generate a QR code with the local machine's IP address. Will need to do some introspection on the back end to figure this out. This is for local connections only - when we go through the gateway we'll need to include primatives for generating session tokens and session IDs from the main server for remote services to connect to

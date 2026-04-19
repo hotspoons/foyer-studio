@@ -5,6 +5,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { getTransportPref, toggleTransportPref } from "../transport-settings.js";
+import { showProjectPicker } from "./project-picker-modal.js";
 
 // Category → menu label + order. Categories not listed are skipped.
 const MENU_ORDER = [
@@ -24,7 +25,7 @@ const LAUNCH_VIEWS = [
   { view: "mixer",    label: "Mixer",    icon: "adjustments-horizontal" },
   { view: "timeline", label: "Timeline", icon: "list-bullet" },
   { view: "plugins",  label: "Plugins",  icon: "puzzle-piece" },
-  { view: "session",  label: "Session",  icon: "folder-open" },
+  { view: "session",  label: "Projects", icon: "folder-open" },
 ];
 
 export class MainMenu extends LitElement {
@@ -183,6 +184,18 @@ export class MainMenu extends LitElement {
     if (a.id === "transport.return_on_stop") {
       toggleTransportPref("returnOnStop");
       this.requestUpdate();
+      return;
+    }
+    // Session-level actions that deserve a picker rather than a blind
+    // `invoke_action` dispatch. The backend's action handler for these
+    // either isn't implemented yet or doesn't know where the file is —
+    // both flows need the user to name a path first.
+    if (a.id === "session.open") {
+      showProjectPicker("open");
+      return;
+    }
+    if (a.id === "session.new") {
+      showProjectPicker("new");
       return;
     }
     window.__foyer?.ws?.send({ type: "invoke_action", id: a.id });

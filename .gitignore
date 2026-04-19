@@ -10,3 +10,9 @@ Cargo.lock.bak
 core.*
 *.core
 vgcore.*
+
+# Local DAW sessions, scratch projects, recordings. Drop downloaded Ardour
+# sessions here — the whole dir is untracked so session audio / binaries
+# never land in git. Point foyer's launcher.jail at this dir (or its
+# parent) to have the project picker see them.
+/sessions/

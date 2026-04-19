@@ -9,6 +9,7 @@ members = [
     "crates/foyer-server",
     "crates/foyer-cli",
     "crates/foyer-desktop",
+    "crates/foyer-config",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ foyer-backend-host  = { path = "crates/foyer-backend-host" }
 foyer-server        = { path = "crates/foyer-server" }
 foyer-cli           = { path = "crates/foyer-cli" }
 foyer-desktop       = { path = "crates/foyer-desktop" }
+foyer-config        = { path = "crates/foyer-config" }
 
 # serde stack
 serde       = { version = "1", features = ["derive"] }

@@ -20,7 +20,7 @@ pub use action::{Action, ActionCategory};
 pub use audio::{AudioFormat, AudioSource, LatencyReport, SampleFormat};
 pub use fs::{FsEntry, FsEntryKind, PathListing};
 pub use id::EntityId;
-pub use message::{Command, ControlUpdate, Envelope, Event, Patch, Seq};
+pub use message::{BackendInfo, Command, ControlUpdate, Envelope, Event, Patch, Seq};
 pub use plugin::{PluginCatalogEntry, PluginFormat, PluginRole};
 pub use session::{Bus, PluginInstance, Send, Session, Track, TrackKind, Transport};
 pub use timeline::{Region, RegionPatch, TimelineMeta, WaveformPeaks, WaveformRequest};

@@ -7,9 +7,13 @@ import { showPreview } from "./preview-modal.js";
 
 export class SessionView extends LitElement {
   static properties = {
-    _listing: { state: true, type: Object },
-    _error:   { state: true, type: String },
-    _opening: { state: true, type: String },
+    _listing:           { state: true, type: Object },
+    _error:             { state: true, type: String },
+    _opening:           { state: true, type: String },
+    _backends:          { state: true, type: Array },
+    _activeBackend:     { state: true, type: String },
+    _selectedBackendId: { state: true, type: String },
+    _showHidden:        { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -64,6 +68,134 @@ export class SessionView extends LitElement {
       text-align: center;
       color: var(--color-text-muted);
     }
+    .empty {
+      padding: 32px 24px;
+      text-align: center;
+      color: var(--color-text-muted);
+      max-width: 520px;
+      margin: 0 auto;
+    }
+    .empty-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--color-text);
+      margin-bottom: 10px;
+    }
+    .empty-sub {
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .empty-sub code {
+      font-family: var(--font-mono);
+      padding: 1px 5px;
+      background: var(--color-surface-elevated);
+      border-radius: var(--radius-sm);
+      color: var(--color-accent-3);
+      font-size: 10px;
+    }
+    .toggle-hidden {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font: inherit;
+      font-family: var(--font-sans);
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+      background: transparent;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      padding: 3px 8px;
+      margin-right: 4px;
+      cursor: pointer;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+    .toggle-hidden:hover {
+      color: var(--color-text);
+      border-color: var(--color-accent);
+    }
+    .toggle-hidden.on {
+      color: var(--color-accent-3);
+      border-color: var(--color-accent);
+      background: color-mix(in oklab, var(--color-accent) 12%, transparent);
+    }
+    .tog-label { display: inline-flex; align-items: center; gap: 5px; }
+    .tog-count {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      padding: 0 5px;
+      border-radius: 8px;
+      background: color-mix(in oklab, var(--color-accent) 22%, transparent);
+      color: var(--color-accent-3);
+    }
+
+    /* Backend picker — a strip of chips, one per configured backend.
+     * Selected chip overrides the path-extension inference that used to
+     * decide whether to spawn Ardour or the stub. The chip matching the
+     * currently-active backend gets a small "live" dot. */
+    .picker {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 14px;
+      background: var(--color-surface-elevated);
+      border-bottom: 1px solid var(--color-border);
+      font-size: 10px;
+      color: var(--color-text-muted);
+      flex-wrap: wrap;
+    }
+    .picker .label {
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-right: 2px;
+    }
+    .chip {
+      font: inherit;
+      font-family: var(--font-sans);
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--color-border);
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: color 0.1s, border-color 0.1s, background 0.1s;
+    }
+    .chip:hover { color: var(--color-text); border-color: var(--color-accent); }
+    .chip.selected {
+      color: var(--color-accent-3);
+      border-color: var(--color-accent);
+      background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+    }
+    .chip.disabled { opacity: 0.45; cursor: not-allowed; }
+    .chip .live-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--color-success);
+      box-shadow: 0 0 6px color-mix(in oklab, var(--color-success) 60%, transparent);
+    }
+
+    /* "Spawning… Waiting for shim…" feedback while a launch is in flight. */
+    .launching {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--color-border);
+      background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+      color: var(--color-text);
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+    .launching .spinner {
+      width: 10px; height: 10px;
+      border: 2px solid color-mix(in oklab, var(--color-accent) 40%, transparent);
+      border-top-color: var(--color-accent-3);
+      border-radius: 50%;
+      animation: foyer-spin 0.8s linear infinite;
+    }
+    @keyframes foyer-spin { to { transform: rotate(360deg); } }
   `;
 
   constructor() {
@@ -71,6 +203,12 @@ export class SessionView extends LitElement {
     this._listing = null;
     this._error = "";
     this._opening = "";
+    this._backends = [];
+    this._activeBackend = null;
+    // `null` means "infer from path at click time". A user click on a
+    // chip pins it explicitly until they click another chip.
+    this._selectedBackendId = null;
+    this._showHidden = false;
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
   }
 
@@ -79,12 +217,57 @@ export class SessionView extends LitElement {
     const ws = window.__foyer?.ws;
     if (ws) {
       ws.addEventListener("envelope", this._envelopeHandler);
-      this._browse("");
+      ws.send({ type: "list_backends" });
     }
+    // Hash-route the picker path so browser back/forward buttons walk the
+    // file-tree history. Format: `#projects=<url-encoded path>`. Empty or
+    // non-matching hashes resolve to the jail root. Multiple projects
+    // tiles stay in sync because they all read the same hash.
+    this._hashHandler = () => this._sendBrowse(this._pathFromHash());
+    window.addEventListener("hashchange", this._hashHandler);
+    this._sendBrowse(this._pathFromHash());
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
+    window.removeEventListener("hashchange", this._hashHandler);
     super.disconnectedCallback();
+  }
+
+  /**
+   * Parse the current jail-relative path out of `location.hash`. Any hash
+   * we don't own (e.g. legacy `#mixer`) maps to the jail root so we never
+   * error on an unrelated fragment.
+   */
+  _pathFromHash() {
+    const m = /^#projects=(.*)$/.exec(location.hash || "");
+    if (!m) return "";
+    try { return decodeURIComponent(m[1]); } catch { return ""; }
+  }
+
+  /**
+   * Push a navigation step. Sets the hash, which fires `hashchange`,
+   * which dispatches to `_sendBrowse`. No direct WS send here so the
+   * "user clicked a folder" and "user hit back" code paths are the
+   * same — both land via hashchange.
+   */
+  _navigate(path) {
+    const encoded = path ? encodeURIComponent(path) : "";
+    const target = `#projects=${encoded}`;
+    if (location.hash !== target) {
+      location.hash = target;
+    } else {
+      // No hash change but the caller asked for a refresh (e.g. after
+      // toggling show-hidden) — issue the browse directly.
+      this._sendBrowse(path);
+    }
+  }
+
+  _sendBrowse(path) {
+    window.__foyer?.ws?.send({
+      type: "browse_path",
+      path: path || "",
+      show_hidden: !!this._showHidden,
+    });
   }
 
   _onEnvelope(env) {
@@ -97,20 +280,116 @@ export class SessionView extends LitElement {
       this._error = body.message;
     } else if (body.type === "error" && body.code === "no_jail") {
       this._error = body.message;
+    } else if (body.type === "error" && body.code === "launch_failed") {
+      this._error = body.message;
+      this._opening = "";
     } else if (body.type === "session_changed") {
       // Another client (or the agent) opened a session — surface briefly.
       this._opening = body.path || "";
+    } else if (body.type === "backend_swapped") {
+      // Sidecar finished spawning the DAW for us. Clear the opening-state
+      // and ask for a fresh snapshot — the existing store-attach wiring
+      // will repopulate every view from the new backend.
+      this._opening = "";
+      window.__foyer?.ws?.requestSnapshot?.();
+    } else if (body.type === "backends_listed") {
+      this._backends = body.backends || [];
+      this._activeBackend = body.active || null;
     }
   }
 
   _browse(path) {
-    window.__foyer?.ws?.send({ type: "browse_path", path });
+    this._navigate(path || "");
+  }
+
+  _toggleHidden() {
+    this._showHidden = !this._showHidden;
+    // Same path, different filter — re-send directly (navigate would
+    // no-op because the hash is unchanged).
+    this._sendBrowse(this._listing?.path || "");
   }
 
   _open(entry) {
     if (entry.kind !== "session_dir") return;
+    // Guard against spam-click while a launch is still in flight — the
+    // sidecar would queue two swaps racing each other.
+    if (this._opening) return;
     this._opening = entry.path;
-    window.__foyer?.ws?.send({ type: "open_session", path: entry.path });
+    // Pick a backend: use the active one if set; otherwise the first
+    // project-capable entry; otherwise the first enabled entry. For
+    // Ardour sessions we prefer an ardour-kind backend so picking an
+    // .ardour file actually spawns Ardour rather than the stub.
+    const backend = this._pickBackendForPath(entry.path);
+    window.__foyer?.ws?.send({
+      type: "launch_project",
+      backend_id: backend,
+      project_path: entry.path,
+    });
+  }
+
+  _pickBackendForPath(path) {
+    const list = this._backends || [];
+    // Explicit user pick wins — they clicked a chip, honor it.
+    if (this._selectedBackendId) {
+      const sel = list.find((b) => b.id === this._selectedBackendId && b.enabled);
+      if (sel) return sel.id;
+    }
+    const looksArdour = /\.ardour$/i.test(path) || /\.ardour\//i.test(path);
+    if (looksArdour) {
+      const ard = list.find((b) => b.kind === "ardour" && b.enabled);
+      if (ard) return ard.id;
+    }
+    // Respect the active backend if the user hasn't signalled otherwise.
+    if (this._activeBackend) return this._activeBackend;
+    const preferred = list.find((b) => b.requires_project && b.enabled)
+      || list.find((b) => b.enabled);
+    return preferred?.id || "stub";
+  }
+
+  _selectBackend(id) {
+    // Toggle: clicking the already-selected chip goes back to inference.
+    this._selectedBackendId = this._selectedBackendId === id ? null : id;
+  }
+
+  _renderPicker() {
+    const backends = (this._backends || []).filter((b) => b.enabled);
+    if (backends.length <= 1) return null;
+    return html`
+      <div class="picker">
+        <span class="label">Open with</span>
+        ${backends.map((b) => {
+          const selected = this._selectedBackendId === b.id
+            || (!this._selectedBackendId && this._activeBackend === b.id);
+          return html`
+            <button
+              class=${`chip ${selected ? "selected" : ""}`}
+              title=${b.requires_project
+                ? `${b.label} — needs a project`
+                : `${b.label} — demo / no DAW`}
+              @click=${() => this._selectBackend(b.id)}
+            >
+              ${b.label}
+              ${this._activeBackend === b.id
+                ? html`<span class="live-dot" title="currently active"></span>`
+                : null}
+            </button>
+          `;
+        })}
+      </div>
+    `;
+  }
+
+  _renderLaunching() {
+    if (!this._opening) return null;
+    const id = this._selectedBackendId
+      || this._pickBackendForPath(this._opening);
+    const label = (this._backends || []).find((b) => b.id === id)?.label || id;
+    return html`
+      <div class="launching">
+        <div class="spinner"></div>
+        <span>Launching <strong>${label}</strong> for ${this._opening}…</span>
+      </div>
+    `;
   }
 
   _up() {
@@ -136,6 +415,8 @@ export class SessionView extends LitElement {
       ? this._listing.path.split("/").filter(Boolean)
       : [];
     return html`
+      ${this._renderPicker()}
+      ${this._renderLaunching()}
       <div class="toolbar">
         <div class="crumbs">
           <button @click=${() => this._browse("")}>${icon("folder-open", 12)} jail</button>
@@ -145,11 +426,55 @@ export class SessionView extends LitElement {
           })}
         </div>
         <span style="flex:1"></span>
+        <button
+          class=${`toggle-hidden ${this._showHidden ? "on" : ""}`}
+          title=${this._showHidden ? "Hide dotfiles" : "Show dotfiles"}
+          @click=${() => this._toggleHidden()}
+        >
+          ${icon(this._showHidden ? "eye" : "eye-slash", 12)}
+          <span class="tog-label">
+            ${this._showHidden ? "Hidden" : "Hidden"}
+            ${this._listing.hidden_count > 0 && !this._showHidden
+              ? html`<span class="tog-count">${this._listing.hidden_count}</span>`
+              : null}
+          </span>
+        </button>
         ${this._listing.is_root ? null : html`<button @click=${() => this._up()}>..</button>`}
       </div>
       ${this._error ? html`<div class="error">${this._error}</div>` : null}
       <div class="list">
-        ${this._listing.entries.map(e => this._renderRow(e))}
+        ${this._listing.entries.length === 0
+          ? this._renderEmpty()
+          : this._listing.entries.map(e => this._renderRow(e))}
+      </div>
+    `;
+  }
+
+  _renderEmpty() {
+    const hidden = this._listing?.hidden_count || 0;
+    const path = this._listing?.path || "(jail root)";
+    if (hidden > 0) {
+      return html`
+        <div class="empty">
+          <div class="empty-title">Nothing visible in ${path || "the jail"}</div>
+          <div class="empty-sub">
+            ${hidden} hidden ${hidden === 1 ? "entry is" : "entries are"} being
+            filtered. Toggle the <em>Hidden</em> button in the toolbar, or edit
+            <code>launcher.jail</code> in <code>config.yaml</code> to point
+            at a directory with projects.
+          </div>
+        </div>
+      `;
+    }
+    return html`
+      <div class="empty">
+        <div class="empty-title">This jail is empty</div>
+        <div class="empty-sub">
+          No files or folders at <code>${path || "jail root"}</code>.
+          Drop an Ardour session here, or edit
+          <code>launcher.jail</code> in <code>config.yaml</code> to browse
+          somewhere else. Run <code>foyer config-path</code> to find the file.
+        </div>
       </div>
     `;
   }

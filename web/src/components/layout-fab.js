@@ -28,15 +28,15 @@ const PRESET_ORDER = [
   { id: "timeline-over-mixer",          label: "Timeline over Mixer",     tag: "stack" },
   { id: "mixer-over-timeline",          label: "Mixer over Timeline",     tag: "stack" },
   { id: "everything",                   label: "Everything",              tag: "full" },
-  { id: "session+timeline+mixer",       label: "Session · Timeline · Mixer", tag: "3-col" },
-  { id: "session+timeline-over-mixer",  label: "Session · Timeline / Mixer", tag: "tri" },
-  { id: "session-left-timeline-right",  label: "Session + Timeline",      tag: "S · T" },
+  { id: "session+timeline+mixer",       label: "Projects · Timeline · Mixer", tag: "3-col" },
+  { id: "session+timeline-over-mixer",  label: "Projects · Timeline / Mixer", tag: "tri" },
+  { id: "session-left-timeline-right",  label: "Projects + Timeline",     tag: "P · T" },
   { id: "plugins-left-mixer-right",     label: "Plugins + Mixer",         tag: "P · M" },
   { id: "mixer-left-plugins-right",     label: "Mixer + Plugins",         tag: "M · P" },
   { id: "mixer",                        label: "Mixer only",              tag: "single" },
   { id: "timeline",                     label: "Timeline only",           tag: "single" },
   { id: "plugins",                      label: "Plugins only",            tag: "single" },
-  { id: "session",                      label: "Session only",            tag: "single" },
+  { id: "session",                      label: "Projects only",           tag: "single" },
 ];
 
 const DEFAULT_HIDDEN = new Set(["mixer", "timeline", "plugins", "session"]);

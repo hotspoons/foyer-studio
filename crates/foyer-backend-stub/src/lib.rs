@@ -52,22 +52,54 @@ pub struct StubBackend {
     jail: Option<Arc<Jail>>,
     regions: Arc<Mutex<regions::RegionStore>>,
     waveforms: Arc<Mutex<waveform::WaveformCache>>,
+    /// Handle to the meter-tick task — aborted on drop so repeated
+    /// backend-swaps don't leak a tick task per swap.
+    meter_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for StubBackend {
+    fn drop(&mut self) {
+        if let Some(h) = self.meter_handle.take() {
+            h.abort();
+        }
+    }
 }
 
 impl StubBackend {
     pub fn new() -> Self {
         let state = Arc::new(Mutex::new(StubState::new()));
         let (tx, _) = broadcast::channel(EVENT_CHANNEL_CAP);
-        let backend = Self {
+        let mut backend = Self {
             state,
             tx,
             ingress_capture: Arc::new(Mutex::new(Vec::new())),
             jail: None,
             regions: Arc::new(Mutex::new(regions::RegionStore::new())),
             waveforms: Arc::new(Mutex::new(waveform::WaveformCache::new())),
+            meter_handle: None,
         };
-        backend.spawn_meter_tick();
+        backend.meter_handle = Some(backend.spawn_meter_tick());
         backend
+    }
+
+    /// Launcher-mode stub: empty Session (no tracks, regions, or plugins),
+    /// transport still present so the toolbar renders. Use this when the
+    /// sidecar boots in "picker-only" mode — the user hasn't opened a
+    /// project yet, so the mixer/timeline should render their empty-state
+    /// rather than showing the demo fixtures. No meter tick is spawned
+    /// since there are no tracks to meter.
+    pub fn launcher() -> Self {
+        let state = Arc::new(Mutex::new(StubState::empty()));
+        let (tx, _) = broadcast::channel(EVENT_CHANNEL_CAP);
+        Self {
+            state,
+            tx,
+            ingress_capture: Arc::new(Mutex::new(Vec::new())),
+            jail: None,
+            regions: Arc::new(Mutex::new(regions::RegionStore::new())),
+            waveforms: Arc::new(Mutex::new(waveform::WaveformCache::new())),
+            meter_handle: None,
+        }
     }
 
     /// Attach a jail so filesystem browsing works against the given root.
@@ -82,7 +114,7 @@ impl StubBackend {
         self.ingress_capture.lock().await.clone()
     }
 
-    fn spawn_meter_tick(&self) {
+    fn spawn_meter_tick(&self) -> tokio::task::JoinHandle<()> {
         let state = self.state.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -93,7 +125,7 @@ impl StubBackend {
                 // No subscribers is fine — broadcast::send returns err, ignore it.
                 let _ = tx.send(Event::MeterBatch { values: updates });
             }
-        });
+        })
     }
 }
 
@@ -364,12 +396,16 @@ impl Backend for StubBackend {
         ])
     }
 
-    async fn browse_path(&self, path: &str) -> Result<PathListing, BackendError> {
+    async fn browse_path(
+        &self,
+        path: &str,
+        show_hidden: bool,
+    ) -> Result<PathListing, BackendError> {
         let jail = self
             .jail
             .as_ref()
             .ok_or_else(|| BackendError::Other("no jail configured".into()))?;
-        jail.browse(path)
+        jail.browse(path, show_hidden)
     }
 
     async fn open_session(&self, path: &str) -> Result<(), BackendError> {

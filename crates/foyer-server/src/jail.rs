@@ -40,7 +40,7 @@ impl Jail {
         &self.root
     }
 
-    pub fn browse(&self, rel: &str) -> Result<PathListing, JailError> {
+    pub fn browse(&self, rel: &str, show_hidden: bool) -> Result<PathListing, JailError> {
         let rel = normalize_relative(rel);
         let abs = self.root.join(&rel);
         let canon = abs
@@ -51,10 +51,12 @@ impl Jail {
         }
 
         let mut entries = Vec::new();
+        let mut hidden_count: u32 = 0;
         let rd = std::fs::read_dir(&canon).map_err(|e| JailError::Io(e.to_string()))?;
         for dent in rd.flatten() {
             let name = dent.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
+            if !show_hidden && name.starts_with('.') {
+                hidden_count = hidden_count.saturating_add(1);
                 continue;
             }
             let entry_path = canon.join(&name);
@@ -104,6 +106,7 @@ impl Jail {
             path: rel_to_wire(&rel),
             entries,
             is_root: rel.components().count() == 0,
+            hidden_count,
         })
     }
 }

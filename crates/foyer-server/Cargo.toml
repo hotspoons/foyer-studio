@@ -16,6 +16,8 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 

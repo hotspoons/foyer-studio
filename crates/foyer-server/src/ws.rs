@@ -85,6 +85,7 @@ async fn handle(
                     {
                         tracing::warn!("client command rejected: {e}");
                     }
+                    // reader_state is Arc<AppState>, takes &Arc by ref
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -124,7 +125,7 @@ where
 }
 
 async fn dispatch_command(
-    state: &AppState,
+    state: &std::sync::Arc<AppState>,
     origin: Option<&str>,
     text: &str,
 ) -> Result<(), DispatchError> {
@@ -135,7 +136,7 @@ async fn dispatch_command(
             // Easy case: produce a fresh snapshot synchronously and push into the
             // broadcast stream. All connected clients will see it — not just the asker
             // — which is the correct fan-out behavior.
-            let snapshot = state.backend.snapshot().await?;
+            let snapshot = state.backend().await.snapshot().await?;
             let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
             let out = Envelope {
                 schema: SCHEMA_VERSION,
@@ -150,7 +151,7 @@ async fn dispatch_command(
             let _ = state.tx.send(out);
         }
         Command::ControlSet { id, value } => {
-            state.backend.set_control(id.clone(), value.clone()).await?;
+            state.backend().await.set_control(id.clone(), value.clone()).await?;
             // The backend's event stream will reflect the change; we also emit a
             // synthetic ControlUpdate tagged with the caller's origin so the UI
             // knows who moved the fader.
@@ -167,14 +168,14 @@ async fn dispatch_command(
             let _ = state.tx.send(out);
         }
         Command::ListActions => {
-            let actions = state.backend.list_actions().await?;
+            let actions = state.backend().await.list_actions().await?;
             broadcast_event(state, Event::ActionsList { actions }).await;
         }
         Command::InvokeAction { id } => {
-            state.backend.invoke_action(id).await?;
+            state.backend().await.invoke_action(id).await?;
         }
         Command::ListRegions { track_id } => {
-            let (timeline, regions) = state.backend.list_regions(track_id.clone()).await?;
+            let (timeline, regions) = state.backend().await.list_regions(track_id.clone()).await?;
             broadcast_event(
                 state,
                 Event::RegionsList {
@@ -186,11 +187,11 @@ async fn dispatch_command(
             .await;
         }
         Command::ListPlugins => {
-            let entries = state.backend.list_plugins().await?;
+            let entries = state.backend().await.list_plugins().await?;
             broadcast_event(state, Event::PluginsList { entries }).await;
         }
-        Command::BrowsePath { path } => match &state.jail {
-            Some(jail) => match jail.browse(&path) {
+        Command::BrowsePath { path, show_hidden } => match &state.jail {
+            Some(jail) => match jail.browse(&path, show_hidden) {
                 Ok(listing) => broadcast_event(state, Event::PathListed { listing }).await,
                 Err(e) => {
                     broadcast_event(
@@ -214,7 +215,7 @@ async fn dispatch_command(
                 .await;
             }
         },
-        Command::OpenSession { path } => match state.backend.open_session(&path).await {
+        Command::OpenSession { path } => match state.backend().await.open_session(&path).await {
             Ok(()) => {
                 broadcast_event(
                     state,
@@ -224,7 +225,7 @@ async fn dispatch_command(
                 )
                 .await;
                 // Follow up with a fresh snapshot so the UI repopulates.
-                let snapshot = state.backend.snapshot().await?;
+                let snapshot = state.backend().await.snapshot().await?;
                 broadcast_event(
                     state,
                     Event::SessionSnapshot {
@@ -245,7 +246,7 @@ async fn dispatch_command(
             }
         },
         Command::SaveSession { as_path } => {
-            if let Err(e) = state.backend.save_session(as_path.as_deref()).await {
+            if let Err(e) = state.backend().await.save_session(as_path.as_deref()).await {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -256,7 +257,7 @@ async fn dispatch_command(
                 .await;
             }
         }
-        Command::UpdateRegion { id, patch } => match state.backend.update_region(id, patch).await {
+        Command::UpdateRegion { id, patch } => match state.backend().await.update_region(id, patch).await {
             Ok(region) => broadcast_event(state, Event::RegionUpdated { region }).await,
             Err(e) => {
                 broadcast_event(
@@ -271,7 +272,7 @@ async fn dispatch_command(
         },
         Command::DeleteRegion { id } => {
             let region_id = id.clone();
-            match state.backend.delete_region(id).await {
+            match state.backend().await.delete_region(id).await {
                 Ok(track_id) => {
                     broadcast_event(
                         state,
@@ -292,7 +293,7 @@ async fn dispatch_command(
             }
         }
         Command::ListWaveform { region_id, samples_per_peak } => {
-            match state.backend.load_waveform(region_id, samples_per_peak).await {
+            match state.backend().await.load_waveform(region_id, samples_per_peak).await {
                 Ok(peaks) => broadcast_event(state, Event::WaveformData { peaks }).await,
                 Err(e) => {
                     broadcast_event(
@@ -307,7 +308,7 @@ async fn dispatch_command(
             }
         }
         Command::ClearWaveformCache { region_id } => {
-            match state.backend.clear_waveform_cache(region_id).await {
+            match state.backend().await.clear_waveform_cache(region_id).await {
                 Ok(dropped) => broadcast_event(state, Event::WaveformCacheCleared { dropped }).await,
                 Err(e) => {
                     broadcast_event(
@@ -335,6 +336,54 @@ async fn dispatch_command(
                 },
             )
             .await;
+        }
+        Command::ListBackends => {
+            let backends = state
+                .spawner
+                .as_ref()
+                .map(|s| s.list())
+                .unwrap_or_default();
+            let active = state.active_backend_id.read().await.clone();
+            broadcast_event(state, Event::BackendsListed { backends, active }).await;
+        }
+        Command::LaunchProject {
+            backend_id,
+            project_path,
+        } => {
+            let Some(spawner) = state.spawner.clone() else {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "no_spawner".into(),
+                        message: "this sidecar has no backend spawner configured".into(),
+                    },
+                )
+                .await;
+                return Ok(());
+            };
+            let path = project_path
+                .as_deref()
+                .map(std::path::Path::new);
+            match spawner.launch(&backend_id, path).await {
+                Ok(new_backend) => {
+                    // Swap atomically. `swap_backend` aborts the old
+                    // pump, spawns a new one for `new_backend`, drops
+                    // the cached snapshot, and emits `BackendSwapped`.
+                    state
+                        .swap_backend(backend_id, project_path, new_backend)
+                        .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "launch_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
         }
     }
     Ok(())

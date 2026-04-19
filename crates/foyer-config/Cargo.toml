@@ -1,0 +1,17 @@
+[package]
+name = "foyer-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Foyer Studio user config file (backends, launcher defaults)."
+
+[dependencies]
+serde      = { workspace = true, features = ["derive"] }
+serde_yaml = "0.9"
+anyhow.workspace = true
+tracing.workspace = true
+dirs       = "5"
+
+[dev-dependencies]
+tempfile   = "3"

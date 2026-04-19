@@ -64,6 +64,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libasound2-dev \
       libjack-jackd2-dev \
       libsndfile1-dev \
+      # ---- audio runtime (optional — dummy mode works without hardware) ----
+      # jackd2 ships the `jackd` daemon so Ardour can use its native backend
+      # inside the container via `jackd -d dummy` (no audio device required).
+      # See `just jack-dummy` in the root justfile. On Linux hosts you can
+      # also pass /dev/snd + the PulseAudio socket through for real audio —
+      # see the commented block in devcontainer.json.
+      jackd2 \
+      alsa-utils \
+      pulseaudio-utils \
       # ---- foyer native deps ----
       libopus-dev \
       # ---- tauri/wry desktop shell (M4.5) ----

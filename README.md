@@ -134,7 +134,8 @@ crates/
   foyer-backend-stub      in-memory fake session for demo mode
   foyer-backend-host      generic IPC client for any shim
   foyer-server            WS + HTTP static server + jail
-  foyer-cli               `foyer serve --backend=stub|host ...`
+  foyer-config            YAML config + XDG data dir ($HOME/.local/share/foyer)
+  foyer-cli               `foyer serve [--backend ID] [--project PATH] ...`
   foyer-desktop           wry + tao native wrapper (no Electron)
 
 shims/

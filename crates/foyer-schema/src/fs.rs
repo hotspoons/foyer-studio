@@ -41,4 +41,13 @@ pub struct PathListing {
     pub entries: Vec<FsEntry>,
     /// True if this path is the jail root. Clients render `..` differently.
     pub is_root: bool,
+    /// Count of dotfile entries that were filtered out (when `show_hidden`
+    /// is false on `BrowsePath`). UIs use this to offer a "show N hidden"
+    /// toggle when the visible listing is empty but the directory isn't.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hidden_count: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

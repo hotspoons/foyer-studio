@@ -594,6 +594,17 @@ pub(crate) fn initial_session() -> Session {
     }
 }
 
+/// Session with no tracks/plugins/regions — only the transport stub. Used
+/// when the sidecar boots in launcher mode (Ardour is the configured
+/// default but the user hasn't picked a project yet). The mixer/timeline
+/// render their empty state so no demo data bleeds into the picker UX.
+pub(crate) fn empty_session() -> Session {
+    let mut s = initial_session();
+    s.tracks.clear();
+    s.meta = serde_json::json!({ "project": null, "sample_rate": 48000, "launcher": true });
+    s
+}
+
 /// Peak meters for every track — a flat list so the stub state can iterate cheaply.
 pub(crate) fn peak_meter_ids(session: &Session) -> Vec<EntityId> {
     session

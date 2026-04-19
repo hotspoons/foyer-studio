@@ -1,5 +1,10 @@
-// Top-level navigation between surfaces: mixer, timeline, plugins, session.
+// Top-level navigation between surfaces: mixer, timeline, plugins, projects.
 // Hash-routed — setting `location.hash` switches the visible surface.
+//
+// Note: the view id "session" is kept for backward-compat with saved layouts;
+// the user-facing label is "Projects" because this surface is a project
+// picker, not a view of the currently-loaded session (which is what the
+// right-dock "Session" info panel shows).
 
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
@@ -8,7 +13,7 @@ export const VIEWS = [
   { id: "mixer",    label: "Mixer",    icon: "adjustments-horizontal" },
   { id: "timeline", label: "Timeline", icon: "list-bullet" },
   { id: "plugins",  label: "Plugins",  icon: "puzzle-piece" },
-  { id: "session",  label: "Session",  icon: "folder-open" },
+  { id: "session",  label: "Projects", icon: "folder-open" },
 ];
 
 export function currentView() {

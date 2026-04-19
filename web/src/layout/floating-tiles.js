@@ -61,7 +61,7 @@ const VIEW_LABELS = {
   mixer: "Mixer",
   timeline: "Timeline",
   plugins: "Plugins",
-  session: "Session",
+  session: "Projects",
   preview: "Preview",
   plugin_panel: "Plugin",
 };

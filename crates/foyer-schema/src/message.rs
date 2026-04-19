@@ -164,6 +164,35 @@ pub enum Event {
         /// Number of regions whose cached peaks were dropped.
         dropped: u32,
     },
+    /// Reply to `Command::ListBackends`. Describes which backend adapters
+    /// the sidecar's config has defined (e.g. "ardour", "stub").
+    BackendsListed {
+        backends: Vec<BackendInfo>,
+        /// Which of them is currently live. Empty before any backend
+        /// has been attached.
+        active: Option<String>,
+    },
+    /// Emitted when the sidecar swaps its active backend (e.g. after the
+    /// picker opens a project). Clients should re-request a snapshot.
+    BackendSwapped {
+        backend_id: String,
+        /// Jail-relative path to the project, if any was opened.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        project_path: Option<String>,
+    },
+}
+
+/// Metadata for a single backend entry in the sidecar's config — what
+/// the picker UI needs to render a "pick a DAW" dropdown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackendInfo {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub enabled: bool,
+    /// True if launching this backend requires (or benefits from) a
+    /// project path. The stub accepts `None`; Ardour needs one.
+    pub requires_project: bool,
 }
 
 /// Everything a subscriber (sidecar speaking to a shim, or browser speaking to the
@@ -218,8 +247,12 @@ pub enum Command {
     /// Ask for the plugin catalog.
     ListPlugins,
     /// Browse a path inside the jail. `""` / `"/"` / `"."` mean root.
+    /// `show_hidden` = `true` surfaces dotfile entries; default behavior
+    /// hides them so the picker stays uncluttered.
     BrowsePath {
         path: String,
+        #[serde(default)]
+        show_hidden: bool,
     },
     /// Load a session at `path` (jail-relative).
     OpenSession {
@@ -250,6 +283,18 @@ pub enum Command {
     ClearWaveformCache {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         region_id: Option<EntityId>,
+    },
+
+    /// Ask for the configured backend list. Answered with
+    /// `Event::BackendsListed`.
+    ListBackends,
+    /// Launch the named backend (optionally with a project file), then
+    /// atomically swap the sidecar's active backend. Answered with
+    /// `Event::BackendSwapped` on success, `Event::Error` on failure.
+    LaunchProject {
+        backend_id: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        project_path: Option<String>,
     },
 }
 

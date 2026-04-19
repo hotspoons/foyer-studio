@@ -88,7 +88,11 @@ pub trait Backend: Send + Sync + 'static {
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {
         Ok(Vec::new())
     }
-    async fn browse_path(&self, _path: &str) -> Result<PathListing, BackendError> {
+    async fn browse_path(
+        &self,
+        _path: &str,
+        _show_hidden: bool,
+    ) -> Result<PathListing, BackendError> {
         Err(BackendError::Other("browsing not supported".into()))
     }
     async fn open_session(&self, path: &str) -> Result<(), BackendError> {

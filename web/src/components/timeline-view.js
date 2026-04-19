@@ -38,6 +38,7 @@ export class TimelineView extends LitElement {
     _timeline: { state: true, type: Object },
     _zoom: { state: true, type: Number },
     _playheadSamples: { state: true, type: Number },
+    _selection: { state: true, type: Object },
   };
 
   static styles = css`
@@ -176,6 +177,30 @@ export class TimelineView extends LitElement {
       border: 6px solid transparent;
       border-top-color: var(--color-danger);
     }
+
+    /* Left-click-drag selection range. Drawn in two pieces so the ruler
+     * reads as a bright highlight while the body overlay is just a dim
+     * wash — same pattern as pretty much every DAW's ruler selection. */
+    .selection-body {
+      position: absolute;
+      top: ${RULER_HEIGHT}px;
+      bottom: 0;
+      background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+      border-left: 1px solid color-mix(in oklab, var(--color-accent) 70%, transparent);
+      border-right: 1px solid color-mix(in oklab, var(--color-accent) 70%, transparent);
+      pointer-events: none;
+      z-index: 3;
+    }
+    .selection-ruler {
+      position: absolute;
+      top: 0;
+      height: ${RULER_HEIGHT}px;
+      background: color-mix(in oklab, var(--color-accent) 55%, transparent);
+      border-left: 1px solid var(--color-accent);
+      border-right: 1px solid var(--color-accent);
+      pointer-events: none;
+      z-index: 4;
+    }
   `;
 
   constructor() {
@@ -189,6 +214,8 @@ export class TimelineView extends LitElement {
     this._onWfUpdate = () => this._repaintWaveforms();
     this._drag = null;
     this._laneHeights = this._loadLaneHeights();
+    // { startSamples, endSamples } — null when nothing is selected.
+    this._selection = null;
   }
 
   _loadLaneHeights() {
@@ -299,7 +326,6 @@ export class TimelineView extends LitElement {
       <div class="scroll" @wheel=${(e) => this._onWheel(e)}>
         <div class="grid" style="width:${gridWidth}px">
           <div class="ruler"
-               @click=${(e) => this._seekFromRuler(e)}
                @wheel=${(e) => this._onRulerWheel(e)}
                @pointerdown=${(e) => this._onRulerPointerDown(e)}
                @contextmenu=${(e) => e.preventDefault()}>
@@ -316,9 +342,23 @@ export class TimelineView extends LitElement {
             `)}
           </div>
           ${tracks.map(t => this._renderLane(t))}
+          ${this._renderSelection()}
           ${this._renderPlayhead()}
         </div>
       </div>
+    `;
+  }
+
+  _renderSelection() {
+    if (!this._selection) return null;
+    const sr = this._timeline?.sample_rate || 48_000;
+    const a = Math.min(this._selection.startSamples, this._selection.endSamples);
+    const b = Math.max(this._selection.startSamples, this._selection.endSamples);
+    const leftPx = HEAD_WIDTH + (a / sr) * this._zoom;
+    const widthPx = Math.max(1, ((b - a) / sr) * this._zoom);
+    return html`
+      <div class="selection-body" style="left:${leftPx}px;width:${widthPx}px"></div>
+      <div class="selection-ruler" style="left:${leftPx}px;width:${widthPx}px"></div>
     `;
   }
 
@@ -478,24 +518,18 @@ export class TimelineView extends LitElement {
     }
   }
 
-  _seekFromRuler(ev) {
-    // Suppress the seek if the click came out of a middle/right-button pan.
-    if (this._rulerPanSwallowClick) { this._rulerPanSwallowClick = false; return; }
-    const rulerRect = ev.currentTarget.getBoundingClientRect();
-    const x = ev.clientX - rulerRect.left - HEAD_WIDTH;
-    if (x < 0) return;
+  /** Convert a clientX into a sample position in the timeline. */
+  _samplesAtX(clientX, rulerEl) {
+    const rect = rulerEl.getBoundingClientRect();
+    const x = clientX - rect.left - HEAD_WIDTH;
     const sr = this._timeline?.sample_rate || 48_000;
-    const samples = Math.max(0, Math.round((x / this._zoom) * sr));
-    this._playheadSamples = samples;
-    window.__foyer?.ws?.controlSet("transport.position", samples);
+    return Math.max(0, Math.round((x / this._zoom) * sr));
   }
 
   /**
    * Wheel over the ruler scrolls horizontally instead of zooming — the
    * ruler is a navigation surface, the waveforms underneath are for zoom.
-   * Vertical wheel delta translates to horizontal scroll; any native
-   * horizontal delta (from trackpads) is honored too. Stop propagation so
-   * the outer `.scroll` wheel handler doesn't also zoom.
+   * Stop propagation so the outer `.scroll` wheel handler doesn't zoom.
    */
   _onRulerWheel(ev) {
     const scroll = this.renderRoot.querySelector(".scroll");
@@ -504,34 +538,97 @@ export class TimelineView extends LitElement {
     ev.stopPropagation();
     const dx = ev.deltaX || 0;
     const dy = ev.deltaY || 0;
-    // Shift on trackpads already yields deltaX; on mice it flips the axis
-    // too. Either way the right answer is "combine the axes and scroll."
     scroll.scrollLeft += (Math.abs(dx) > Math.abs(dy) ? dx : dy);
   }
 
   /**
-   * Middle-click (button 1) or right-click (button 2) on the ruler starts
-   * a scrub-pan of the view. Left-click still seeks via `@click`. We flag
-   * `_rulerPanSwallowClick` on drag so the click-seek fires only for true
-   * clicks, not at the end of a pan-drag.
+   * Unified pointer-down on the ruler:
+   *   · button 0 (left)      — seek-or-select. If the pointer moves >2px
+   *                            before release, it becomes a selection
+   *                            range drag; otherwise it's a simple click
+   *                            seek (and clears any prior selection).
+   *   · button 1 (middle)    — pan the view horizontally.
+   *   · button 2 (right)     — pan the view horizontally.
+   *
+   * The two-intent left-click — "click to seek, drag to select" — is the
+   * standard ruler gesture in most DAWs. The 2px threshold is just
+   * enough to separate a real drag from hand shake on a click.
    */
   _onRulerPointerDown(ev) {
-    if (ev.button !== 1 && ev.button !== 2) return;
+    if (ev.button === 1 || ev.button === 2) {
+      this._startRulerPan(ev);
+      return;
+    }
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    const target = ev.currentTarget;
+    const startClientX = ev.clientX;
+    const startSamples = this._samplesAtX(ev.clientX, target);
+    let moved = false;
+    try { target.setPointerCapture?.(ev.pointerId); } catch {}
+
+    const move = (e) => {
+      const dx = e.clientX - startClientX;
+      if (!moved && Math.abs(dx) > 2) {
+        moved = true;
+        // Crossing the threshold: we're now in selection mode. Drop the
+        // seek-on-release intent by clearing the playhead-follow state.
+      }
+      if (moved) {
+        const endSamples = this._samplesAtX(e.clientX, target);
+        this._selection = { startSamples, endSamples };
+      }
+    };
+    const up = (e) => {
+      try { target.releasePointerCapture?.(ev.pointerId); } catch {}
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (!moved) {
+        // Simple click — seek and clear any prior selection.
+        this._selection = null;
+        const samples = this._samplesAtX(e.clientX, target);
+        this._playheadSamples = samples;
+        window.__foyer?.ws?.controlSet("transport.position", samples);
+        return;
+      }
+      // Finalize selection. If the user dragged a single point (e.g.
+      // mouse jitter), drop it to avoid a zero-width band.
+      if (this._selection) {
+        const { startSamples: a, endSamples: b } = this._selection;
+        if (Math.abs(a - b) < 1) {
+          this._selection = null;
+        } else {
+          const lo = Math.min(a, b);
+          const hi = Math.max(a, b);
+          this.dispatchEvent(new CustomEvent("timeline-selection", {
+            detail: { startSamples: lo, endSamples: hi },
+            bubbles: true, composed: true,
+          }));
+        }
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  /** Middle/right-button pan — drag the ruler to scroll the view. */
+  _startRulerPan(ev) {
     const scroll = this.renderRoot.querySelector(".scroll");
     if (!scroll) return;
     ev.preventDefault();
     ev.stopPropagation();
     const startX = ev.clientX;
     const origScroll = scroll.scrollLeft;
-    let moved = false;
     const target = ev.currentTarget;
     try { target.setPointerCapture?.(ev.pointerId); } catch {}
     const prevCursor = target.style.cursor;
     target.style.cursor = "grabbing";
     const move = (e) => {
-      const dx = e.clientX - startX;
-      if (Math.abs(dx) > 2) moved = true;
-      scroll.scrollLeft = origScroll - dx;
+      scroll.scrollLeft = origScroll - (e.clientX - startX);
     };
     const up = () => {
       target.style.cursor = prevCursor;
@@ -539,7 +636,6 @@ export class TimelineView extends LitElement {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
-      if (moved && ev.button === 0) this._rulerPanSwallowClick = true;
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);

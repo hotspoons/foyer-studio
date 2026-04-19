@@ -18,7 +18,7 @@ const KIND_META = {
   mixer:        { icon: "adjustments-horizontal", label: "Mixer" },
   timeline:     { icon: "list-bullet",            label: "Timeline" },
   plugins:      { icon: "puzzle-piece",           label: "Plugins" },
-  session:      { icon: "folder-open",            label: "Session" },
+  session:      { icon: "folder-open",            label: "Projects" },
   preview:      { icon: "document",               label: "Preview" },
   plugin_panel: { icon: "puzzle-piece",           label: "Plugin" },
 };
