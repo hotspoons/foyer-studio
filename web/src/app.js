@@ -81,8 +81,15 @@ export class FoyerApp extends LitElement {
     this._session = null;
 
     const wsUrl = this._resolveWsUrl();
-    this.ws = new FoyerWs({ url: wsUrl, origin: "web" });
-    this.store = new Store({ selfOrigin: "web" });
+    // Window index: today Foyer runs in a single browser window so the
+    // index is always 0 and the origin string ends up as "web-0". The
+    // indexed shape is in place so when multi-monitor pop-out windows
+    // land (TODO.md — "Multi-monitor / multi-window support") each window
+    // claims its own slot via `?window=N` without any wire-format change.
+    this.windowIndex = this._resolveWindowIndex();
+    const originTag = `web-${this.windowIndex}`;
+    this.ws = new FoyerWs({ url: wsUrl, origin: originTag });
+    this.store = new Store({ selfOrigin: originTag });
     this.store.attach(this.ws);
     this.store.addEventListener("change", () => {
       this._status = this.store.state.status;
@@ -112,6 +119,10 @@ export class FoyerApp extends LitElement {
       // the left of the right-dock. Called by slots.js + drop-zones.js so
       // docked windows never overlap the top bars or the right rail.
       workspaceRect: () => this._workspaceRect(),
+      // Zero-indexed browser-window slot. Today this is always 0 (one
+      // browser window per sidecar); future multi-monitor pop-outs will
+      // get 1, 2, … via `?window=N` in the URL.
+      windowIndex: this.windowIndex,
     };
   }
 
@@ -176,6 +187,25 @@ export class FoyerApp extends LitElement {
     const loc = window.location;
     const proto = loc.protocol === "https:" ? "wss:" : "ws:";
     return `${proto}//${loc.host}/ws`;
+  }
+
+  /**
+   * Resolve the zero-indexed window slot for this browser window. Default
+   * 0. Override by loading `?window=N` in the URL. Used as the suffix in
+   * the WS `origin` tag (`web-0`, `web-1`, …) so the sidecar can tell
+   * multiple Foyer windows apart — e.g. one per monitor in a future
+   * multi-monitor setup. Non-integer or negative values collapse to 0.
+   */
+  _resolveWindowIndex() {
+    try {
+      const raw = new URLSearchParams(window.location.search).get("window");
+      if (raw == null || raw === "") return 0;
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isFinite(n) || n < 0) return 0;
+      return n;
+    } catch {
+      return 0;
+    }
   }
 
   render() {

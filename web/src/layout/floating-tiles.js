@@ -568,6 +568,11 @@ export class FloatingTiles extends LitElement {
       const r = rightDock?.railRect?.();
       return !!(r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
     };
+    // Hold any of Alt/Ctrl/Shift during the drag to hide the slot grid and
+    // place the window at raw pixel coordinates — releasing while held
+    // commits the absolute rect without snapping. Modifier state is polled
+    // every pointermove so the user can grab & release mid-drag.
+    const isBypass = (e) => !!(e && (e.altKey || e.ctrlKey || e.shiftKey));
     const move = (e) => {
       const nowOverRail = isOverRail(e.clientX, e.clientY);
       if (nowOverRail !== overRail) {
@@ -581,7 +586,12 @@ export class FloatingTiles extends LitElement {
         h: entry.h,
       });
       this.store.floatSet(entry.id, { x: clamped.x, y: clamped.y, slot: null });
-      zones.update(e.clientX, e.clientY);
+      if (isBypass(e)) {
+        zones.setBypassed(true);
+      } else {
+        zones.setBypassed(false);
+        zones.update(e.clientX, e.clientY);
+      }
     };
     const up = (e) => {
       hdr.classList.remove("dragging");
@@ -596,8 +606,8 @@ export class FloatingTiles extends LitElement {
         this.store.floatSet(entry.id, { minimized: true });
         return;
       }
-      // Alt held at release means "no snapping, I meant those pixels."
-      const altBypass = !!e?.altKey;
+      // Alt/Ctrl/Shift held at release means "no snapping, I meant those pixels."
+      const altBypass = isBypass(e);
       if (snap && !altBypass) {
         const rect = slotBounds(snap);
         if (rect) {
@@ -670,10 +680,11 @@ export class FloatingTiles extends LitElement {
         ny = oy + (oh - h);
         nh = h;
       }
-      // Hold Alt (Option on macOS) to bypass slot snapping — same chord
-      // as every design tool out there. The resize commits raw pixels
-      // regardless of whether the rect matches a slot.
-      const match = e.altKey ? null : slotForRect({ x: nx, y: ny, w: nw, h: nh });
+      // Hold Alt (Option on macOS), Ctrl, or Shift to bypass slot snapping
+      // — same chord family as every design tool. The resize commits raw
+      // pixels regardless of whether the rect matches a slot.
+      const bypass = e.altKey || e.ctrlKey || e.shiftKey;
+      const match = bypass ? null : slotForRect({ x: nx, y: ny, w: nw, h: nh });
       if (match) {
         // Snap to the slot's canonical bounds so the window crisply
         // settles onto rails during a slot-compatible drag.

@@ -19,6 +19,71 @@ Entries follow a loose shape:
 
 ---
 
+## Multi-monitor / multi-window support
+
+- **Status:** pending (foundation landed)
+- **Owner:** unassigned
+
+Today a Foyer instance lives in one browser window. On multi-monitor
+setups that's a real limitation — engineers routinely want timeline +
+transport on one screen and mixer + plugins on another, and the
+in-window floating-tile layer isn't a substitute for a native OS
+window the user can fling to a specific monitor.
+
+What's already in place:
+
+- WebSocket origin carries a zero-indexed window slot: `web-0`,
+  `web-1`, … The default window is always `-0`; future pop-outs will
+  pass `?window=N` in the URL and claim their own slot. See
+  `_resolveWindowIndex()` in
+  [web/src/app.js](../web/src/app.js). Exposed on
+  `window.__foyer.windowIndex` so any future UI that wants to show the
+  current window number can read it.
+- The sidecar is already shim-aware (per-pid advertisement files, see
+  [DECISIONS.md #13](DECISIONS.md)) so attaching multiple browser
+  windows to the same sidecar is already supported on the backend.
+  Each window gets its own WebSocket connection; the sidecar doesn't
+  need any code change to fan control updates out to all connected
+  clients.
+
+What's missing:
+
+- **Pop-out affordance**: a window-manager menu entry or `Ctrl+Alt+N`
+  chord that opens a new browser window at `?window=N` (next free
+  slot). The current Foyer shell (`foyer-app`) needs to notice the
+  `?window=` param at load time and render WITHOUT duplicating global
+  chrome — e.g. a pop-out window probably shouldn't render its own
+  transport bar if `window.opener` is a primary Foyer window.
+- **UI-state fan-out across windows**: tile layout, docked FABs, and
+  window-list are persisted in `localStorage` today. Multi-window
+  needs either (a) a `BroadcastChannel("foyer")` fan-out so
+  `localStorage` writes replicate live, or (b) a small SharedWorker
+  that owns the layout store and both windows subscribe. Option (a)
+  is less code; option (b) is cleaner if we also want to avoid
+  duplicated WS traffic (each window currently opens its own
+  connection).
+- **Window discovery on the sidecar side**: knowing which
+  `web-<N>` origins are currently connected lets the backend route
+  per-window preferences (e.g. "window 1 wants MeterBatch updates,
+  window 0 does not because it's not rendering the mixer"). Not
+  required for MVP, but unblocks bandwidth wins later.
+- **Screen-aware window placement**: `navigator.windowControlsOverlay`
+  + `window.getScreenDetails()` (see existing probe in
+  [web/src/screens.js](../web/src/screens.js)) let the pop-out code
+  pick which monitor a new window opens on. The slot picker will want
+  to respect screen geometry — a "send to monitor 2" chord is probably
+  the main user ask.
+- **Focus / z-index coordination**: when one window raises a floating
+  tile, the other window shouldn't. The `BroadcastChannel` approach
+  above gives us the substrate for "I am focused" / "you take over"
+  handoffs.
+
+Design decision still open: whether the native wrapper
+(`foyer-desktop`, wry/tao) opens pop-outs as native OS windows (with
+chrome) or chromeless frames that imitate the in-app window shell.
+Probably chromeless for parity, but that adds window-drag
+re-implementation on the native side.
+
 ## Multi-session management
 
 - **Status:** pending

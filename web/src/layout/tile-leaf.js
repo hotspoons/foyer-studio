@@ -401,18 +401,27 @@ export class TileLeaf extends LitElement {
     zones.show();
     zones.update(x, y);
 
+    // Alt/Ctrl/Shift during the tear drag hides the slot grid and drops the
+    // torn-out window at raw pixel coordinates — same bypass chord as the
+    // floating-tile drag path.
+    const isBypass = (e) => !!(e && (e.altKey || e.ctrlKey || e.shiftKey));
     const move = (e) => {
       const nx = Math.max(0, e.clientX - w / 2);
       const ny = Math.max(0, e.clientY - 12);
       this.store.floatSet(id, { x: nx, y: ny, slot: null });
-      zones.update(e.clientX, e.clientY);
+      if (isBypass(e)) {
+        zones.setBypassed(true);
+      } else {
+        zones.setBypassed(false);
+        zones.update(e.clientX, e.clientY);
+      }
     };
-    const up = () => {
+    const up = (e) => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       const snap = zones.currentSlot();
       zones.hide();
-      if (snap) {
+      if (snap && !isBypass(e)) {
         const rect = slotBounds(snap);
         if (rect) {
           this.store.floatSet(id, { ...rect, slot: snap });
@@ -553,18 +562,24 @@ export class TileLeaf extends LitElement {
     zones.show();
     zones.update(x, y);
 
+    const isBypass = (e) => !!(e && (e.altKey || e.ctrlKey || e.shiftKey));
     const move = (e) => {
       const nx = Math.max(0, e.clientX - w / 2);
       const ny = Math.max(0, e.clientY - 14);
       this.store.floatSet(id, { x: nx, y: ny, slot: null });
-      zones.update(e.clientX, e.clientY);
+      if (isBypass(e)) {
+        zones.setBypassed(true);
+      } else {
+        zones.setBypassed(false);
+        zones.update(e.clientX, e.clientY);
+      }
     };
-    const up = () => {
+    const up = (e) => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       const snap = zones.currentSlot();
       zones.hide();
-      if (snap) {
+      if (snap && !isBypass(e)) {
         const rect = slotBounds(snap);
         if (rect) {
           this.store.floatSet(id, { ...rect, slot: snap });

@@ -118,6 +118,23 @@ class DropZonesOverlay {
     this.current = null;
   }
 
+  /**
+   * Temporarily hide the grid while the user holds a bypass modifier
+   * (Alt/Ctrl/Shift during a drag). The overlay is not destroyed — the next
+   * `update()` call after un-bypassing will repaint targets. We clear
+   * `current` so a release while bypassed won't snap to a stale target.
+   */
+  setBypassed(bypassed) {
+    if (!this.el) return;
+    if (bypassed) {
+      this.el.style.display = "none";
+      for (const [, cell] of this.highlights) cell.style.opacity = "0";
+      this.current = null;
+    } else {
+      this.el.style.display = "block";
+    }
+  }
+
   /** Rebuild positions if the viewport changed. */
   _relayout() {
     for (const [id, cell] of this.highlights) {
@@ -157,53 +174,62 @@ class DropZonesOverlay {
       priorities = MIDDLE_TARGETS[hBand];
     }
 
-    // Dim everything that's not in this band so the user sees only the
-    // relevant options.
-    const activeSet = new Set(priorities);
-    for (const [id, cell] of this.highlights) {
-      const isActive = activeSet.has(id);
-      // Small visible hint for inactive-band targets; the in-band targets
-      // get a clearer preview background once one is hit.
-      if (!isActive) {
-        cell.style.opacity = "0";
-        continue;
-      }
-      // In-band baseline (dim but visible so the user knows where zones are).
-      if (cell.style.opacity === "0" || cell.style.opacity === "") {
-        cell.style.opacity = "0.22";
-      }
-    }
-
-    // First in priority order that contains (x,y).
+    // Pick the hover target first (highest-priority target containing the
+    // pointer). We need this *before* the visibility pass so we can hide
+    // any in-band sibling that's fully contained by it — e.g. when
+    // right-half is the active target, we hide right-third which would
+    // otherwise bleed through as a dimmed rectangle on top of it.
     let best = null;
+    let bestRect = null;
     for (const id of priorities) {
       const b = slotBounds(id);
       if (!b) continue;
       if (x < b.x || x > b.x + b.w) continue;
       if (y < b.y || y > b.y + b.h) continue;
       best = id;
+      bestRect = b;
       break;
     }
+
+    const EPS = 1;
+    const contained = (inner, outer) =>
+      inner.x >= outer.x - EPS &&
+      inner.y >= outer.y - EPS &&
+      inner.x + inner.w <= outer.x + outer.w + EPS &&
+      inner.y + inner.h <= outer.y + outer.h + EPS;
+
+    const activeSet = new Set(priorities);
+    for (const [id, cell] of this.highlights) {
+      const isActive = activeSet.has(id);
+      if (!isActive) { cell.style.opacity = "0"; continue; }
+      if (id === best) continue; // handled below at 0.9
+      // Suppress siblings that the active target fully contains so the hover
+      // target reads as a clean highlight. Non-contained peers stay dim.
+      if (best && bestRect) {
+        const b = slotBounds(id);
+        if (b && contained(b, bestRect)) { cell.style.opacity = "0"; continue; }
+      }
+      cell.style.opacity = "0.22";
+      cell.style.background =
+        "color-mix(in oklab, var(--color-accent) 6%, transparent)";
+    }
+
     if (best !== this.current) {
-      if (this.current) {
+      if (this.current && this.current !== best) {
         const prev = this.highlights.get(this.current);
         if (prev) {
-          // Non-active in-band zones stay faintly visible so the user still
-          // sees the grid. Out-of-band zones were already hidden above.
-          const stillInBand = activeSet.has(this.current);
-          prev.style.opacity = stillInBand ? "0.22" : "0";
           prev.style.background =
             "color-mix(in oklab, var(--color-accent) 6%, transparent)";
         }
       }
       this.current = best;
-      if (best) {
-        const el = this.highlights.get(best);
-        if (el) {
-          el.style.opacity = "0.9";
-          el.style.background =
-            "color-mix(in oklab, var(--color-accent) 22%, transparent)";
-        }
+    }
+    if (best) {
+      const el = this.highlights.get(best);
+      if (el) {
+        el.style.opacity = "0.9";
+        el.style.background =
+          "color-mix(in oklab, var(--color-accent) 22%, transparent)";
       }
     }
     return best;

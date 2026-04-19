@@ -3,6 +3,7 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
+import { showPreview } from "./preview-modal.js";
 
 export class SessionView extends LitElement {
   static properties = {
@@ -176,20 +177,10 @@ export class SessionView extends LitElement {
   }
 
   _preview(entry) {
-    const layout = window.__foyer?.layout;
-    if (!layout) return;
-    // Split the focused tile to the right with a preview of the chosen file.
-    layout.split("row", "preview", "after");
-    // After split, focus moved to the new leaf. Patch its props.
-    const { tree, focusId } = layout;
-    const withProps = (n) => {
-      if (n.kind === "leaf" && n.id === focusId) {
-        return { ...n, view: "preview", props: { path: entry.path } };
-      }
-      if (n.kind === "split") return { ...n, children: n.children.map(withProps) };
-      return n;
-    };
-    layout.setTree(withProps(tree));
+    // Previews are transient — open them as a scrim modal rather than
+    // splitting the focused tile (which made for cramped strips on any
+    // layout that wasn't already wide).
+    showPreview(entry.path);
   }
 }
 

@@ -28,7 +28,8 @@ const PRESET_ORDER = [
   { id: "timeline-over-mixer",          label: "Timeline over Mixer",     tag: "stack" },
   { id: "mixer-over-timeline",          label: "Mixer over Timeline",     tag: "stack" },
   { id: "everything",                   label: "Everything",              tag: "full" },
-  { id: "session+timeline+mixer",       label: "Session · Timeline + Mixer", tag: "tri" },
+  { id: "session+timeline+mixer",       label: "Session · Timeline · Mixer", tag: "3-col" },
+  { id: "session+timeline-over-mixer",  label: "Session · Timeline / Mixer", tag: "tri" },
   { id: "session-left-timeline-right",  label: "Session + Timeline",      tag: "S · T" },
   { id: "plugins-left-mixer-right",     label: "Plugins + Mixer",         tag: "P · M" },
   { id: "mixer-left-plugins-right",     label: "Mixer + Plugins",         tag: "M · P" },
@@ -204,7 +205,7 @@ export class LayoutFab extends QuadrantFab {
   _dockMeta() {
     return {
       label: "Layouts",
-      icon: "squares-2x2",
+      icon: "square-3-stack-3d",
       accent: "accent-2",
       expandsRail: false,
     };
@@ -221,13 +222,12 @@ export class LayoutFab extends QuadrantFab {
   }
 
   _renderFabContent() {
+    // Stacked-layers metaphor — "saved layout stacks" — distinct from the
+    // window-manager 2x2 grid in the right-dock rail.
     return html`
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="3" width="8" height="8" rx="1"/>
-        <rect x="13" y="3" width="8" height="8" rx="1"/>
-        <rect x="3" y="13" width="8" height="8" rx="1"/>
-        <rect x="13" y="13" width="8" height="8" rx="1"/>
+           stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6.429 9.75 2.25 12l4.179 2.25m0-4.5 5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0 4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0-5.571 3-5.571-3"/>
       </svg>
     `;
   }

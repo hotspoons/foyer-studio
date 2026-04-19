@@ -298,7 +298,11 @@ export class TimelineView extends LitElement {
       </div>
       <div class="scroll" @wheel=${(e) => this._onWheel(e)}>
         <div class="grid" style="width:${gridWidth}px">
-          <div class="ruler" @click=${(e) => this._seekFromRuler(e)}>
+          <div class="ruler"
+               @click=${(e) => this._seekFromRuler(e)}
+               @wheel=${(e) => this._onRulerWheel(e)}
+               @pointerdown=${(e) => this._onRulerPointerDown(e)}
+               @contextmenu=${(e) => e.preventDefault()}>
             ${ticks.map(({ t, major }) => html`
               <span class="tick ${major ? 'major' : 'minor'}"
                     style="left:${HEAD_WIDTH + t * this._zoom}px">
@@ -475,6 +479,8 @@ export class TimelineView extends LitElement {
   }
 
   _seekFromRuler(ev) {
+    // Suppress the seek if the click came out of a middle/right-button pan.
+    if (this._rulerPanSwallowClick) { this._rulerPanSwallowClick = false; return; }
     const rulerRect = ev.currentTarget.getBoundingClientRect();
     const x = ev.clientX - rulerRect.left - HEAD_WIDTH;
     if (x < 0) return;
@@ -482,6 +488,62 @@ export class TimelineView extends LitElement {
     const samples = Math.max(0, Math.round((x / this._zoom) * sr));
     this._playheadSamples = samples;
     window.__foyer?.ws?.controlSet("transport.position", samples);
+  }
+
+  /**
+   * Wheel over the ruler scrolls horizontally instead of zooming — the
+   * ruler is a navigation surface, the waveforms underneath are for zoom.
+   * Vertical wheel delta translates to horizontal scroll; any native
+   * horizontal delta (from trackpads) is honored too. Stop propagation so
+   * the outer `.scroll` wheel handler doesn't also zoom.
+   */
+  _onRulerWheel(ev) {
+    const scroll = this.renderRoot.querySelector(".scroll");
+    if (!scroll) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const dx = ev.deltaX || 0;
+    const dy = ev.deltaY || 0;
+    // Shift on trackpads already yields deltaX; on mice it flips the axis
+    // too. Either way the right answer is "combine the axes and scroll."
+    scroll.scrollLeft += (Math.abs(dx) > Math.abs(dy) ? dx : dy);
+  }
+
+  /**
+   * Middle-click (button 1) or right-click (button 2) on the ruler starts
+   * a scrub-pan of the view. Left-click still seeks via `@click`. We flag
+   * `_rulerPanSwallowClick` on drag so the click-seek fires only for true
+   * clicks, not at the end of a pan-drag.
+   */
+  _onRulerPointerDown(ev) {
+    if (ev.button !== 1 && ev.button !== 2) return;
+    const scroll = this.renderRoot.querySelector(".scroll");
+    if (!scroll) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const startX = ev.clientX;
+    const origScroll = scroll.scrollLeft;
+    let moved = false;
+    const target = ev.currentTarget;
+    try { target.setPointerCapture?.(ev.pointerId); } catch {}
+    const prevCursor = target.style.cursor;
+    target.style.cursor = "grabbing";
+    const move = (e) => {
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) > 2) moved = true;
+      scroll.scrollLeft = origScroll - dx;
+    };
+    const up = () => {
+      target.style.cursor = prevCursor;
+      try { target.releasePointerCapture?.(ev.pointerId); } catch {}
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (moved && ev.button === 0) this._rulerPanSwallowClick = true;
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   }
 
   _startDrag(ev, region, mode) {

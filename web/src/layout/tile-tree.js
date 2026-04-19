@@ -247,8 +247,17 @@ export const PRESETS = {
   "mixer-left-plugins-right":    () => split(DIR.ROW,    [leaf("mixer"), leaf("plugins")]),
   "session-left-timeline-right": () => split(DIR.ROW,    [leaf("session"), leaf("timeline")]),
 
-  // Three-pane studio layout.
-  "session+timeline+mixer": () => split(DIR.ROW, [
+  // Three-column layout: session is a narrow left rail (1/6), timeline and
+  // mixer each take 5/12 of the width. All three are full-height so nothing
+  // is ever vertically cropped — the mental model is "file browser + two
+  // equal work surfaces" which is the common DAW shape.
+  "session+timeline+mixer": () => ({
+    ...split(DIR.ROW, [leaf("session"), leaf("timeline"), leaf("mixer")]),
+    ratios: [1/6, 5/12, 5/12],
+  }),
+  // Older stacked shape kept under a second id for anyone who prefers the
+  // session-rail + timeline-over-mixer arrangement.
+  "session+timeline-over-mixer": () => split(DIR.ROW, [
     leaf("session"),
     split(DIR.COLUMN, [leaf("timeline"), leaf("mixer")]),
   ]),
