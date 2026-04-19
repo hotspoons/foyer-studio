@@ -24,8 +24,12 @@
 #include <string>
 #include <vector>
 
+#include "ardour/automation_control.h"
+#include "ardour/file_source.h"
+#include "ardour/region.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
+#include "ardour/source.h"
 #include "ardour/stripable.h"
 #include "ardour/track.h"
 #include "pbd/controllable.h"
@@ -182,18 +186,42 @@ encode_control_update (Session& session, const Controllable& c)
 	});
 }
 
+namespace {
+// Verbose state dump we scatter through the transport paths so bugs
+// like "play lights on at load" can be diagnosed from daw.log.
+std::string
+transport_state_str (ARDOUR::Session& s)
+{
+	std::ostringstream o;
+	o << "sample=" << s.transport_sample ()
+	  << " rolling()=" << s.transport_rolling ()
+	  << " state_rolling()=" << s.transport_state_rolling ()
+	  << " stopped()=" << s.transport_stopped ()
+	  << " stopped_or_stopping()=" << s.transport_stopped_or_stopping ()
+	  << " actively_recording()=" << s.actively_recording ()
+	  << " get_play_loop()=" << s.get_play_loop ();
+	return o.str ();
+}
+} // namespace
+
 std::vector<std::uint8_t>
 encode_transport_state (Session& session)
 {
 	// A compact `MeterBatch` with just the transport fields. The frontend
 	// treats this the same as a metering batch for animation purposes.
+	//
+	// `transport_rolling()` turned out to read truthy on a freshly
+	// loaded session (the FSM's default_speed is 1.0, so speed != 0
+	// even when we haven't actually started). `!transport_stopped()`
+	// reflects the FSM state machine directly — matches what "the
+	// play button should be lit" really means.
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
 		o.str ("dir");  o.str ("event");
 		o.str ("type"); o.str ("meter_batch");
 		o.str ("values");
-		// Fields: tempo, playing, recording
-		o.array (3);
+		// Fields: tempo, playing, recording, position
+		o.array (4);
 
 		o.map (2);
 		o.str ("id");    o.str ("transport.tempo");
@@ -201,17 +229,30 @@ encode_transport_state (Session& session)
 
 		o.map (2);
 		o.str ("id");    o.str ("transport.playing");
-		o.str ("value"); o.b (session.transport_rolling ());
+		// FSM has 5 motion states (Stopped, Rolling, DeclickToStop,
+		// DeclickToLocate, WaitingForLocate). Only `Rolling` means we're
+		// actually playing — `!stopped()` incorrectly reads `true` while
+		// the FSM is in a transient post-load WaitingForLocate state.
+		o.str ("value"); o.b (session.transport_state_rolling ());
 
 		o.map (2);
 		o.str ("id");    o.str ("transport.recording");
-		o.str ("value"); o.b (session.actively_recording ());
+		// `actively_recording()` only returns true mid-record (armed +
+		// rolling). For the UI toggle "is the record button lit" we
+		// want the arm state, not the rolling-and-capturing state —
+		// `get_record_enabled()` = `record_status() >= Enabled`.
+		o.str ("value"); o.b (session.get_record_enabled ());
+
+		o.map (2);
+		o.str ("id");    o.str ("transport.position");
+		o.str ("value"); o.f64 (static_cast<double> (session.transport_sample ()));
 	});
 }
 
 std::vector<std::uint8_t>
 encode_session_snapshot (Session& session)
 {
+	PBD::warning << "foyer_shim: SNAPSHOT: " << transport_state_str (session) << endmsg;
 	// M3 baseline: a minimal snapshot shape. Parameter metadata for plugins
 	// gets filled in for M5; for now we emit transport + tracks with
 	// gain/pan/mute/solo parameters only. The Rust HostBackend doesn't care
@@ -224,14 +265,14 @@ encode_session_snapshot (Session& session)
 		o.str ("type"); o.str ("session_snapshot");
 		o.str ("session");
 
-		// Session { schema_version, transport, tracks, meta }
-		o.map (4);
+		// Session { schema_version, transport, tracks, dirty, meta }
+		o.map (5);
 		o.str ("schema_version"); o.array (2); o.u (0); o.u (1);
 
 		// Transport is a struct; map keys are Rust field names, values are Parameter structs.
 		double tempo_bpm = Temporal::TempoMap::fetch ()->metric_at (Temporal::timepos_t (session.transport_sample ())).tempo ().note_types_per_minute ();
 		bool playing_b   = session.transport_rolling ();
-		bool recording_b = session.actively_recording ();
+		bool recording_b = session.get_record_enabled ();
 		bool looping_b   = session.get_play_loop ();
 
 		auto emit_param_num = [&] (const char* id, const char* label, const char* kind, double v) {
@@ -253,6 +294,13 @@ encode_session_snapshot (Session& session)
 
 		o.str ("transport");
 		o.map (7);
+		// NB: `transport_rolling()` reads truthy on a fresh session
+		// because the FSM's default speed is non-zero; `!transport_stopped()`
+		// also reads truthy while the FSM is transiently in
+		// WaitingForLocate after load. `transport_state_rolling()`
+		// maps 1:1 onto the FSM's Rolling state — exactly the
+		// "play button should be lit" semantic.
+		playing_b = session.transport_state_rolling ();
 		o.str ("playing");            emit_param_bool ("transport.playing",   "Play",     playing_b);
 		o.str ("recording");          emit_param_bool ("transport.recording", "Record",   recording_b);
 		o.str ("looping");            emit_param_bool ("transport.looping",   "Loop",     looping_b);
@@ -313,11 +361,20 @@ encode_session_snapshot (Session& session)
 		for (auto const& s : ids) {
 			auto it = route_by_id.find (s.self_id);
 			std::vector<schema_map::PluginDesc> plugins;
+			std::shared_ptr<AutomationControl> rec_ctl;
 			if (it != route_by_id.end ()) {
 				plugins = schema_map::enumerate_plugins (it->second);
+				rec_ctl = it->second->rec_enable_control ();
 			}
 
-			const std::size_t track_fields = plugins.empty () ? 8 : 9;
+			// Base track shape is 8 fields (id, name, kind, color, gain,
+			// pan, mute, solo). `record_arm` and `plugins` are both
+			// skip-when-missing in the schema, so we only bump the map
+			// size for the ones actually present.
+			std::size_t track_fields = 8;
+			if (rec_ctl) ++track_fields;
+			if (!plugins.empty ()) ++track_fields;
+
 			o.map (track_fields);
 			o.str ("id");   o.str (s.self_id);
 			o.str ("name"); o.str (s.name);
@@ -327,6 +384,10 @@ encode_session_snapshot (Session& session)
 			o.str ("pan");  emit_param_num  ((s.self_id + ".pan").c_str (),  "Pan",  "continuous", 0.0);
 			o.str ("mute"); emit_param_bool ((s.self_id + ".mute").c_str (), "Mute", false);
 			o.str ("solo"); emit_param_bool ((s.self_id + ".solo").c_str (), "Solo", false);
+			if (rec_ctl) {
+				o.str ("record_arm");
+				emit_param_bool ((s.self_id + ".rec").c_str (), "Rec", rec_ctl->get_value () >= 0.5);
+			}
 
 			if (!plugins.empty ()) {
 				o.str ("plugins");
@@ -344,7 +405,228 @@ encode_session_snapshot (Session& session)
 			}
 		}
 
+		o.str ("dirty"); o.b (session.dirty ());
 		o.str ("meta"); o.nil ();
+	});
+}
+
+// `Event::SessionDirtyChanged { dirty }` — emitted whenever libardour's
+// Session::DirtyChanged signal fires. Clients mirror it onto the status
+// bar indicator; we don't bother re-sending the whole snapshot.
+std::vector<std::uint8_t>
+encode_session_dirty_changed (bool dirty)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");   o.str ("event");
+		o.str ("type");  o.str ("session_dirty_changed");
+		o.str ("dirty"); o.b (dirty);
+	});
+}
+
+namespace {
+
+// Emit a single `Region` struct map. The size is variable because three of
+// its fields use `skip_serializing_if = "Option::is_none"` on the Rust side
+// (color, source_path, source_offset_samples). Keep this in lock-step with
+// `foyer_schema::Region`.
+void
+emit_region_map (Out& o, const schema_map::RegionDesc& r)
+{
+	std::size_t n = 6; // id, track_id, name, start_samples, length_samples, muted
+	const bool emit_color       = !r.color.empty ();
+	const bool emit_source_path = !r.source_path.empty ();
+	const bool emit_source_off  = r.has_source_offset && !r.source_path.empty ();
+	if (emit_color)       ++n;
+	if (emit_source_path) ++n;
+	if (emit_source_off)  ++n;
+
+	o.map (n);
+	o.str ("id");             o.str (r.id);
+	o.str ("track_id");       o.str (r.track_id);
+	o.str ("name");           o.str (r.name);
+	o.str ("start_samples");  o.u (r.start_samples);
+	o.str ("length_samples"); o.u (r.length_samples);
+	if (emit_color)       { o.str ("color"); o.str (r.color); }
+	o.str ("muted"); o.b (r.muted);
+	if (emit_source_path) { o.str ("source_path"); o.str (r.source_path); }
+	if (emit_source_off)  { o.str ("source_offset_samples"); o.u (r.source_offset_samples); }
+}
+
+} // namespace
+
+std::vector<std::uint8_t>
+encode_regions_list (Session& session, const std::string& track_id)
+{
+	auto regions = schema_map::enumerate_regions (session, track_id);
+	const std::uint32_t sample_rate = static_cast<std::uint32_t> (session.sample_rate ());
+	const std::uint64_t length_samples =
+	    static_cast<std::uint64_t> (std::max<samplepos_t> (session.current_end_sample (), 0));
+
+	return envelope_event ([&] (Out& o) {
+		o.map (5);
+		o.str ("dir");      o.str ("event");
+		o.str ("type");     o.str ("regions_list");
+		o.str ("track_id"); o.str (track_id);
+
+		o.str ("timeline");
+		o.map (2);
+		o.str ("sample_rate");    o.u (sample_rate);
+		o.str ("length_samples"); o.u (length_samples);
+
+		o.str ("regions");
+		o.array (regions.size ());
+		for (auto const& r : regions) emit_region_map (o, r);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_region_updated (Session& session, const std::string& region_id)
+{
+	auto hit = schema_map::find_region (session, region_id);
+	if (!hit.region) return {};
+
+	schema_map::RegionDesc d;
+	d.id             = region_id;
+	d.track_id       = hit.track_id;
+	d.name           = hit.region->name ();
+	d.start_samples  = static_cast<std::uint64_t> (std::max<samplepos_t> (hit.region->position_sample (), 0));
+	d.length_samples = static_cast<std::uint64_t> (std::max<samplecnt_t> (hit.region->length_samples (), 0));
+	d.muted          = hit.region->muted ();
+	d.color          = "";
+	auto src = hit.region->source (0);
+	if (src) {
+		auto fs = std::dynamic_pointer_cast<FileSource> (src);
+		if (fs) {
+			d.source_path            = fs->path ();
+			d.source_offset_samples  =
+			    static_cast<std::uint64_t> (std::max<samplecnt_t> (hit.region->start_sample (), 0));
+			d.has_source_offset      = true;
+		}
+	}
+
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");    o.str ("event");
+		o.str ("type");   o.str ("region_updated");
+		o.str ("region");
+		emit_region_map (o, d);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_region_removed (const std::string& track_id, const std::string& region_id)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");       o.str ("event");
+		o.str ("type");      o.str ("region_removed");
+		o.str ("track_id");  o.str (track_id);
+		o.str ("region_id"); o.str (region_id);
+	});
+}
+
+namespace {
+
+// Compact param-map emitter shared by TrackUpdated. Keeps the wire-shape
+// identical to what `encode_session_snapshot` emits for the same field.
+void
+emit_named_param (Out& o, const std::string& id, const char* label,
+                  const char* kind, bool is_bool, double num_val, bool bool_val)
+{
+	o.map (5);
+	o.str ("id");    o.str (id);
+	o.str ("kind");  o.str (kind);
+	o.str ("label"); o.str (label);
+	o.str ("scale"); o.str ("linear");
+	o.str ("value");
+	if (is_bool) o.b (bool_val); else o.f64 (num_val);
+}
+
+} // namespace
+
+std::vector<std::uint8_t>
+encode_track_updated (Session& session, const std::string& track_id)
+{
+	// Find the route by foyer id ("track.<stripable-id>").
+	if (track_id.rfind ("track.", 0) != 0) return {};
+	const std::string sid = track_id.substr (6);
+	std::shared_ptr<Route> route;
+	std::shared_ptr<Stripable> stripable;
+	{
+		std::shared_ptr<RouteList const> routes = session.get_routes ();
+		for (auto const& r : *routes) {
+			if (!r) continue;
+			std::ostringstream tmp;
+			tmp << r->id ();
+			if (tmp.str () != sid) continue;
+			route     = r;
+			stripable = r;
+			break;
+		}
+	}
+	if (!route) return {};
+
+	// Re-describe the stripable the same way the snapshot does.
+	auto ids = schema_map::enumerate_stripables (session);
+	schema_map::StripableIds matched;
+	bool found_ids = false;
+	for (auto const& s : ids) {
+		if (s.self_id == track_id) { matched = s; found_ids = true; break; }
+	}
+	if (!found_ids) return {};
+
+	auto plugins = schema_map::enumerate_plugins (route);
+	auto rec_ctl = route->rec_enable_control ();
+
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");   o.str ("event");
+		o.str ("type");  o.str ("track_updated");
+		o.str ("track");
+
+		std::size_t track_fields = 8;
+		if (rec_ctl) ++track_fields;
+		if (!plugins.empty ()) ++track_fields;
+
+		o.map (track_fields);
+		o.str ("id");   o.str (matched.self_id);
+		o.str ("name"); o.str (matched.name);
+		o.str ("kind"); o.str (matched.kind);
+		if (!matched.color.empty ()) { o.str ("color"); o.str (matched.color); }
+		else                         { o.str ("color"); o.nil (); }
+		// Values echo the snapshot shape; the client overwrites them from
+		// ControlUpdate events, so exact numerical accuracy isn't required.
+		o.str ("gain"); emit_named_param (o, matched.self_id + ".gain", "Gain", "continuous", false, route->gain_control () ? route->gain_control ()->get_value () : 0.0, false);
+		o.str ("pan");  emit_named_param (o, matched.self_id + ".pan",  "Pan",  "continuous", false, route->pan_azimuth_control () ? route->pan_azimuth_control ()->get_value () : 0.0, false);
+		o.str ("mute"); emit_named_param (o, matched.self_id + ".mute", "Mute", "trigger", true, 0.0, route->mute_control () && route->mute_control ()->get_value () >= 0.5);
+		o.str ("solo"); emit_named_param (o, matched.self_id + ".solo", "Solo", "trigger", true, 0.0, route->solo_control () && route->solo_control ()->get_value () >= 0.5);
+		if (rec_ctl) {
+			o.str ("record_arm");
+			emit_named_param (o, matched.self_id + ".rec", "Rec", "trigger", true, 0.0, rec_ctl->get_value () >= 0.5);
+		}
+
+		if (!plugins.empty ()) {
+			o.str ("plugins");
+			o.array (plugins.size ());
+			for (auto const& pd : plugins) {
+				o.map (5);
+				o.str ("id");       o.str (pd.id);
+				o.str ("name");     o.str (pd.name);
+				o.str ("uri");      o.str (pd.uri);
+				o.str ("bypassed"); o.b (pd.bypassed);
+				o.str ("params");
+				o.array (pd.params.size ());
+				for (auto const& p : pd.params) {
+					o.map (5);
+					o.str ("id");    o.str (p.id);
+					o.str ("kind");  o.str (p.kind);
+					o.str ("label"); o.str (p.label);
+					o.str ("scale"); o.str (p.scale);
+					o.str ("value"); o.f64 (p.value);
+				}
+			}
+		}
 	});
 }
 

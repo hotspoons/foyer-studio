@@ -17,7 +17,6 @@
 // The `rectById` provider is injected so we don't hard-couple to the DOM.
 
 import { DIR } from "./tile-tree.js";
-import { getTransportPref } from "../transport-settings.js";
 
 const STORAGE_MOD = "foyer.keymap.mod";
 
@@ -74,15 +73,38 @@ export class Keybinds {
         const st = window.__foyer?.store?.state?.controls;
         const playing = !!(st && st.get("transport.playing"));
         if (playing) {
+          // Return-on-stop behavior lives in transport-return.js — it
+          // watches the store transition and handles the locate. No
+          // special-casing here.
           ws.send({ type: "invoke_action", id: "transport.stop" });
-          if (getTransportPref("returnOnStop")) {
-            ws.controlSet("transport.position", 0);
-          }
         } else {
           ws.send({ type: "invoke_action", id: "transport.play" });
         }
       }
       return;
+    }
+
+    // Edit chords — Ctrl/Cmd + Z/Y/X/C/V. These route to the backend's
+    // `edit.*` action catalog entries so whatever the DAW would do for
+    // those menu items fires. Gated off the same input-focus check at
+    // the top: if the user is typing into a text field, we bail so
+    // native editing still works.
+    const cmdOrCtrl = e.ctrlKey || e.metaKey;
+    if (cmdOrCtrl && !e.altKey) {
+      const ws = window.__foyer?.ws;
+      const key = e.key.toLowerCase();
+      let action = null;
+      if (key === "z" && !e.shiftKey)      action = "edit.undo";
+      else if (key === "z" && e.shiftKey)  action = "edit.redo";
+      else if (key === "y" && !e.shiftKey) action = "edit.redo";
+      else if (key === "x" && !e.shiftKey) action = "edit.cut";
+      else if (key === "c" && !e.shiftKey) action = "edit.copy";
+      else if (key === "v" && !e.shiftKey) action = "edit.paste";
+      if (action && ws) {
+        e.preventDefault();
+        ws.send({ type: "invoke_action", id: action });
+        return;
+      }
     }
 
     if (!this._mod(e)) return;

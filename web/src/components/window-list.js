@@ -19,6 +19,7 @@ const KIND_META = {
   timeline:     { icon: "list-bullet",            label: "Timeline" },
   plugins:      { icon: "puzzle-piece",           label: "Plugins" },
   session:      { icon: "folder-open",            label: "Projects" },
+  console:      { icon: "command-line",           label: "Console" },
   preview:      { icon: "document",               label: "Preview" },
   plugin_panel: { icon: "puzzle-piece",           label: "Plugin" },
 };

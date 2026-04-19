@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{EntityId, Parameter};
+use crate::{io::IoPort, EntityId, Parameter};
 
 /// Distinguishes audio/MIDI tracks from internal buses. Kept coarse on purpose; more
 /// host-specific flavors map to the nearest neighbor.
@@ -61,6 +61,64 @@ pub struct Track {
     pub plugins: Vec<PluginInstance>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub peak_meter: Option<EntityId>,
+    /// Which track/bus group this track belongs to, if any. Free-form
+    /// reference — the shim populates it from its own group model
+    /// (Ardour RouteGroup, Reaper track folder, etc.).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub group_id: Option<EntityId>,
+    /// Addressable I/O ports. `inputs` are where the track records from
+    /// (mic/instrument routing); `outputs` are where its signal goes
+    /// post-fader. Clients use these as targets for remote streaming.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub inputs: Vec<IoPort>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub outputs: Vec<IoPort>,
+}
+
+/// Group / submix metadata. Purely a display + drag-affinity hint for
+/// clients — the actual audio routing is still expressed via `sends`
+/// and each track's `outputs`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Group {
+    pub id: EntityId,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub color: Option<String>,
+    /// Track ids that belong to this group. Order is display order.
+    #[serde(default)]
+    pub members: Vec<EntityId>,
+}
+
+/// Patch set for [`Command::UpdateTrack`]. `None` fields are left
+/// unchanged. Named fields map directly onto shim-side setters; enum-like
+/// fields (like `kind`) are deliberately missing — kind changes require
+/// recreating the track.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TrackPatch {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub group_id: Option<EntityId>,
+    /// Assign the track's main output to this bus. `Some("")` clears
+    /// the assignment back to master.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bus_assign: Option<EntityId>,
+}
+
+/// Patch set for [`Command::UpdateGroup`]. Same `None`-leaves-unchanged
+/// shape as `TrackPatch`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GroupPatch {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub color: Option<String>,
+    /// Replace the member list wholesale. For incremental membership
+    /// changes use separate `Command::MoveTrackToGroup` (not in schema yet).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub members: Option<Vec<EntityId>>,
 }
 
 /// Alias for readability in code paths that semantically talk about buses; structurally
@@ -77,6 +135,20 @@ pub struct Transport {
     pub time_signature_den: Parameter,
     /// Playhead position in beats. Read-mostly; updated at ~30 Hz via `control.update`.
     pub position_beats: Parameter,
+    /// Punch-in / punch-out enables. Boolean triggers; positions are
+    /// expressed via the session's range markers (not in schema yet).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub punch_in: Option<Parameter>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub punch_out: Option<Parameter>,
+    /// Audible metronome toggle.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub metronome: Option<Parameter>,
+    /// External sync source ("internal" | "jack" | "mtc" | "ltc" | "mclk").
+    /// Free-form so hosts that invent new sync modes can stream them
+    /// through without a schema bump.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sync_source: Option<Parameter>,
 }
 
 /// The full session snapshot. Shipped on connect and on demand for resync.
@@ -85,6 +157,19 @@ pub struct Session {
     pub schema_version: (u16, u16),
     pub transport: Transport,
     pub tracks: Vec<Track>,
+    /// Declared groups. Membership is also mirrored on each track's
+    /// `group_id` for quick lookup, but `groups` is the authoritative
+    /// ordering source when two clients race to rename / reorder.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub groups: Vec<Group>,
+    /// Whether the host DAW considers the session to have unsaved
+    /// changes. Updated via [`crate::Event::SessionDirtyChanged`].
+    #[serde(default)]
+    pub dirty: bool,
+    /// Ticks per quarter note for MIDI data. `None` falls back to the
+    /// MIDI de-facto 960 on the client side.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ppqn: Option<u32>,
     /// Optional free-form metadata: project name, sample rate, etc.
     #[serde(default)]
     pub meta: serde_json::Value,
@@ -175,6 +260,10 @@ mod tests {
                     group: None,
                     value: ControlValue::Float(0.0),
                 },
+                punch_in: None,
+                punch_out: None,
+                metronome: None,
+                sync_source: None,
             },
             tracks: vec![Track {
                 id: EntityId::new("track.abc"),
@@ -199,7 +288,13 @@ mod tests {
                 sends: vec![],
                 plugins: vec![],
                 peak_meter: Some(EntityId::new("track.abc.meter")),
+                group_id: None,
+                inputs: vec![],
+                outputs: vec![],
             }],
+            groups: vec![],
+            dirty: false,
+            ppqn: Some(960),
             meta: serde_json::json!({"project": "demo", "sample_rate": 48000}),
         };
 

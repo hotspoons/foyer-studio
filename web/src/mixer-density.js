@@ -33,7 +33,10 @@ export const DENSITIES = {
   compact: {
     label: "Compact",
     trackWidth: 58,
-    plugins: false,
+    // Keep the plugin strip rendered so the "+" add affordance stays
+    // reachable. maxLines=0 means only existing plugins peek through via
+    // the "(+N more)" counter and the add button below.
+    plugins: true,
     pluginsLines: 0,
     sendsLines: 0,
     meterWidth: 6,
@@ -44,7 +47,7 @@ export const DENSITIES = {
   narrow: {
     label: "Narrow",
     trackWidth: 36,
-    plugins: false,
+    plugins: true,
     pluginsLines: 0,
     sendsLines: 0,
     meterWidth: 4,

@@ -237,6 +237,7 @@ export const PRESETS = {
   timeline: () => leaf("timeline"),
   plugins:  () => leaf("plugins"),
   session:  () => leaf("session"),
+  console:  () => leaf("console"),
 
   // Two-pane arrangements — any combination of main surfaces can live together.
   "timeline-over-mixer":         () => split(DIR.COLUMN, [leaf("timeline"), leaf("mixer")]),

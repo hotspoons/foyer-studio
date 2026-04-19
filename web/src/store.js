@@ -135,6 +135,25 @@ export class Store extends EventTarget {
         this.dispatchEvent(new CustomEvent("reload-requested"));
         break;
       }
+      case "track_updated": {
+        // Splice the updated track in place and re-emit so views with a
+        // reactive controller on `change` repaint.
+        const s = this.state.session;
+        const updated = body.track;
+        if (s && updated && Array.isArray(s.tracks)) {
+          const i = s.tracks.findIndex((t) => t.id === updated.id);
+          if (i >= 0) s.tracks[i] = updated;
+        }
+        this._emit();
+        break;
+      }
+      case "session_dirty_changed": {
+        if (this.state.session) {
+          this.state.session.dirty = !!body.dirty;
+          this._emit();
+        }
+        break;
+      }
       default:
         // unknown / not-yet-handled event types pass silently
         break;

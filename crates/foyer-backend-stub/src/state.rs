@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use foyer_backend::BackendError;
-use foyer_schema::{ControlUpdate, ControlValue, EntityId, Parameter, Session};
+use foyer_schema::{ControlUpdate, ControlValue, EntityId, Parameter, Session, Track, TrackPatch};
 
 use crate::fixtures;
 
@@ -125,6 +125,41 @@ impl StubState {
             });
         }
         out
+    }
+
+    /// Apply a `TrackPatch` in place and return the updated track. Returns
+    /// `None` if no track matches `id`. Mirrors the shim-side semantic:
+    /// name/color changes update immediately; `group_id` is stored
+    /// verbatim; `bus_assign` is a no-op in the stub until we model
+    /// routing.
+    pub(crate) fn update_track(
+        &mut self,
+        id: &EntityId,
+        patch: &TrackPatch,
+    ) -> Option<Track> {
+        let t = self.session.tracks.iter_mut().find(|t| &t.id == id)?;
+        if let Some(name) = patch.name.as_ref() {
+            t.name = name.clone();
+        }
+        if let Some(color) = patch.color.as_ref() {
+            // Empty string = "clear the color".
+            t.color = if color.is_empty() {
+                None
+            } else {
+                Some(color.clone())
+            };
+        }
+        if let Some(group_id) = patch.group_id.as_ref() {
+            t.group_id = if group_id.as_str().is_empty() {
+                None
+            } else {
+                Some(group_id.clone())
+            };
+        }
+        // bus_assign is intentionally not modeled in the stub — the real
+        // shim does the routing; this backend is only about making the
+        // UI repaint.
+        Some(t.clone())
     }
 
     fn find_param_mut(&mut self, id: &EntityId) -> Option<&mut Parameter> {

@@ -14,6 +14,7 @@ export const VIEWS = [
   { id: "timeline", label: "Timeline", icon: "list-bullet" },
   { id: "plugins",  label: "Plugins",  icon: "puzzle-piece" },
   { id: "session",  label: "Projects", icon: "folder-open" },
+  { id: "console",  label: "Console",  icon: "command-line" },
 ];
 
 export function currentView() {

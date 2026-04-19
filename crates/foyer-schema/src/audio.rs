@@ -49,6 +49,51 @@ pub enum AudioSource {
     Monitor,
     /// A named virtual input port on the host (ingress).
     VirtualInput { name: String },
+    /// A specific I/O port (see `foyer_schema::io::IoPort`). Used for
+    /// tracking-grade remote mics/instruments that need to address an
+    /// exact port rather than the aggregated track.
+    Port { id: EntityId },
+}
+
+/// How PCM frames for an audio stream move between sidecar and browser.
+///
+/// Control-plane negotiation (format, `stream_id`) still travels over the
+/// WebSocket regardless of transport. Only the PCM payload path differs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AudioTransport {
+    /// Binary WebSocket frames. Simplest path — works everywhere, no
+    /// TURN/STUN, but has browser buffering characteristics that add ~40
+    /// ms of effective latency. Good for monitoring, not for tracking.
+    WebSocket,
+    /// WebRTC PeerConnection (datachannel for opus, or RTP audio track).
+    /// The shim emits an `AudioSdpOffer` event in reply; the client
+    /// answers with `Command::AudioSdpAnswer`. ICE candidates travel via
+    /// `AudioIceCandidate` events/commands.
+    WebRtc,
+}
+
+/// Signaling payload exchanged during WebRTC setup. Kept opaque so we
+/// don't try to re-implement browser SDP semantics server-side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SdpPayload {
+    pub sdp: String,
+    /// `"offer"` | `"answer"` | `"pranswer"` — matches `RTCSdpType` on the
+    /// browser side verbatim.
+    #[serde(rename = "type")]
+    pub sdp_type: String,
+}
+
+/// A single WebRTC ICE candidate as emitted/consumed by the browser's
+/// `RTCPeerConnection`. The shim treats this payload opaquely — it just
+/// relays candidates through to the peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IceCandidate {
+    pub candidate: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sdp_mid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sdp_m_line_index: Option<u16>,
 }
 
 /// Round-trip latency measurement produced by an audio-path calibration probe.

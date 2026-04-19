@@ -324,16 +324,36 @@ async fn serve(
         (BackendKind::Ardour, None) if project.is_none() => {
             // Prefer an already-running Ardour if its shim is advertised
             // — that lets `just run` attach to a DAW you launched by hand.
-            // Fall through to launcher-mode stub if discovery finds nothing.
-            match discovery::pick_single() {
-                Ok(adv) => {
-                    let host = HostBackend::connect(adv.socket.clone())
-                        .await
-                        .with_context(|| format!("connect to shim at {}", adv.socket.display()))?;
-                    tracing::info!("connected to advertised shim at {}", adv.socket.display());
-                    Arc::new(host)
+            // Fall through to launcher-mode stub if discovery finds nothing
+            // OR if the advertised socket turns out to be stale (process
+            // alive as a zombie, listener gone). `is_alive()` checks /proc
+            // but can miss half-dead states; the connect attempt is the
+            // authoritative liveness test.
+            let mut connected: Option<HostBackend> = None;
+            if let Ok(adv) = discovery::pick_single() {
+                match HostBackend::connect(adv.socket.clone()).await {
+                    Ok(host) => {
+                        tracing::info!(
+                            "connected to advertised shim at {}",
+                            adv.socket.display()
+                        );
+                        connected = Some(host);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "advertised shim at {} is stale ({e}); sweeping + booting launcher",
+                            adv.socket.display()
+                        );
+                        // Sweep the broken pair so later discoveries don't
+                        // keep tripping over it.
+                        let _ = std::fs::remove_file(&adv.advert_path);
+                        let _ = std::fs::remove_file(&adv.socket);
+                    }
                 }
-                Err(_) => {
+            }
+            match connected {
+                Some(host) => Arc::new(host),
+                None => {
                     tracing::info!(
                         "no Ardour shim advertised — booting empty launcher; pick a project \
                          in the session view to spawn Ardour"
@@ -522,13 +542,21 @@ async fn launch_and_wait_for_shim(
         //        loads the surface library but never instantiates the
         //        shim — no advertisement is written and the sidecar
         //        times out waiting.
+        // NOTE on quoting: the `{shim}` / `{dir}` / `{name}` etc. come
+        // from `shell_escape()` which wraps them in single quotes so
+        // they're safe as STANDALONE arguments (e.g. `VAR='...'`).
+        // Inside a double-quoted string those single quotes become
+        // literal. So we first assign each path to a bash var (where
+        // bash strips the surrounding quotes), then interpolate the
+        // var inside double-quoted compound strings.
         let script = format!(
             r#"set -e
 export TOP={top}
 source "$TOP/build/gtk2_ardour/ardev_common_waf.sh"
 : "${{ARDOUR_BACKEND:=None (Dummy)}}"
 export ARDOUR_BACKEND
-export ARDOUR_SURFACES_PATH="{shim}${{ARDOUR_SURFACES_PATH:+:$ARDOUR_SURFACES_PATH}}"
+FOYER_SHIM_DIR={shim}
+export ARDOUR_SURFACES_PATH="$FOYER_SHIM_DIR${{ARDOUR_SURFACES_PATH:+:$ARDOUR_SURFACES_PATH}}"
 
 DIR={dir}
 NAME={name}

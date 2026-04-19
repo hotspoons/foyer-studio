@@ -2,7 +2,7 @@
 // sample positions with waveform peaks rendered inside each region.
 //
 // Features:
-//   - Zoom slider (10..400 px/s)
+//   - Zoom slider (2..4000 px/s) — 4 k px/s = sample-level at 48 kHz
 //   - Playhead rendered from transport.position, click ruler to seek
 //   - Major (every 5s) + minor (every 1s) grid lines
 //   - Drag region body to move; drag edges to resize — optimistic + UpdateRegion
@@ -22,7 +22,11 @@ const LANE_HEIGHT_MAX = 240;
 const RULER_HEIGHT = 26;
 const HEAD_WIDTH = 140;
 const EDGE_GRAB = 6;
-const TIERS = [64, 128, 256, 512, 1024, 2048, 4096, 8192];
+// Sample-level detail at extreme zoom requires tiers smaller than 64 —
+// at 4000 px/s on 48 kHz audio each pixel covers ~12 source samples, so
+// a tier of 64 spreads one peak over 5+ pixels and the bar looks blocky.
+// Adding 8/16/32 lets the decoder honor finer resolution when asked.
+const TIERS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
 const LANE_HEIGHT_KEY = "foyer.timeline.lane-heights.v1";
 
 function pickTier(samplesPerPx) {
@@ -120,9 +124,49 @@ export class TimelineView extends LitElement {
       padding: 0 10px;
       background: var(--color-surface-elevated);
       border-right: 1px solid var(--color-border);
+      gap: 3px;
     }
     .lane-name { font-size: 11px; font-weight: 600; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .lane-kind { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-text-muted); }
+    .lane-controls {
+      display: flex;
+      gap: 3px;
+      margin-top: 2px;
+    }
+    .lane-ctl-btn {
+      flex: 1;
+      font-family: var(--font-sans);
+      font-size: 9px;
+      font-weight: 700;
+      padding: 2px 0;
+      border-radius: 3px;
+      border: 1px solid var(--color-border);
+      background: var(--color-surface);
+      color: var(--color-text-muted);
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.1s ease;
+      text-align: center;
+    }
+    .lane-ctl-btn:hover {
+      border-color: var(--color-accent);
+      color: var(--color-text);
+    }
+    .lane-ctl-btn.on.mute {
+      background: color-mix(in oklab, var(--color-warning) 35%, transparent);
+      border-color: var(--color-warning);
+      color: var(--color-warning);
+    }
+    .lane-ctl-btn.on.solo {
+      background: color-mix(in oklab, #dece5c 35%, transparent);
+      border-color: #dece5c;
+      color: #dece5c;
+    }
+    .lane-ctl-btn.on.rec {
+      background: color-mix(in oklab, var(--color-danger, #d04040) 35%, transparent);
+      border-color: var(--color-danger, #d04040);
+      color: var(--color-danger, #d04040);
+    }
     .region {
       position: absolute;
       top: 4px; bottom: 4px;
@@ -242,11 +286,18 @@ export class TimelineView extends LitElement {
       this._wfCache = new WaveformCache(ws);
       this._wfCache.addEventListener("update", this._onWfUpdate);
     }
+    // Timeline-wide re-render on any control change (mute/solo/rec
+    // buttons on track heads depend on current control values). This is
+    // coarse but timelines aren't re-rendered frequently and we don't
+    // want to spin up a ControlController per track.
+    this._onStoreControl = () => this.requestUpdate();
+    window.__foyer?.store?.addEventListener("control", this._onStoreControl);
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     this._wfCache?.removeEventListener("update", this._onWfUpdate);
     this._wfCache?.dispose();
+    window.__foyer?.store?.removeEventListener("control", this._onStoreControl);
     super.disconnectedCallback();
   }
 
@@ -290,12 +341,30 @@ export class TimelineView extends LitElement {
       }
     } else if (body.type === "control_update" && body.update?.id === "transport.position") {
       this._playheadSamples = Number(body.update.value) || 0;
+    } else if (body.type === "meter_batch" && Array.isArray(body.values)) {
+      // Shim's tick thread batches transport.position in with tempo /
+      // playing / recording updates at ~30 Hz while rolling. Pick out
+      // the position entry so the playhead animates.
+      for (const u of body.values) {
+        if (u?.id === "transport.position") {
+          this._playheadSamples = Number(u.value) || 0;
+          break;
+        }
+      }
     }
   }
 
   _samplesPerPx() {
     const sr = this._timeline?.sample_rate || 48_000;
     return sr / Math.max(1, this._zoom);
+  }
+
+  _toggleTrackBool(id) {
+    if (!id) return;
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    const cur = !!window.__foyer?.store?.state?.controls?.get(id);
+    ws.controlSet(id, cur ? 0 : 1);
   }
 
   render() {
@@ -316,8 +385,12 @@ export class TimelineView extends LitElement {
     return html`
       <div class="toolbar">
         <span>Zoom</span>
-        <input type="range" min="10" max="400" step="1" .value=${String(this._zoom)}
-               @input=${(e) => { this._zoom = Number(e.currentTarget.value); }}>
+        <input type="range" min="0" max="1000" step="1"
+               .value=${String(Math.round(Math.log(this._zoom / 2) / Math.log(4000 / 2) * 1000))}
+               @input=${(e) => {
+                 const t = Number(e.currentTarget.value) / 1000;
+                 this._zoom = Math.max(2, Math.min(4000, Math.round(2 * Math.pow(4000 / 2, t))));
+               }}>
         <span>${this._zoom} px/s · tier=${pickTier(this._samplesPerPx())}</span>
         <span style="flex:1"></span>
         <button @click=${this._clearCache} title="Drop all cached peak files">Clear peak cache</button>
@@ -372,11 +445,29 @@ export class TimelineView extends LitElement {
     const regions = this._regionsByTrack[track.id] || [];
     const sr = this._timeline?.sample_rate || 48_000;
     const h = this._laneHeightFor(track.id);
+    const controls = window.__foyer?.store?.state?.controls;
+    const muted = !!(controls && controls.get(track.mute?.id));
+    const soloed = !!(controls && controls.get(track.solo?.id));
+    const armed = !!(controls && track.record_arm && controls.get(track.record_arm.id));
+    const canArm = !!track.record_arm;
     return html`
       <div class="lane" style="height:${h}px">
         <div class="lane-head" style="height:${h}px">
           <div class="lane-name" title=${track.name}>${track.name}</div>
           <div class="lane-kind">${track.kind}</div>
+          <div class="lane-controls">
+            <div class="lane-ctl-btn mute ${muted ? "on" : ""}"
+                 title="Mute (${muted ? "on" : "off"})"
+                 @click=${() => this._toggleTrackBool(track.mute?.id)}>M</div>
+            <div class="lane-ctl-btn solo ${soloed ? "on" : ""}"
+                 title="Solo (${soloed ? "on" : "off"})"
+                 @click=${() => this._toggleTrackBool(track.solo?.id)}>S</div>
+            ${canArm ? html`
+              <div class="lane-ctl-btn rec ${armed ? "on" : ""}"
+                   title="Record arm (${armed ? "on" : "off"})"
+                   @click=${() => this._toggleTrackBool(track.record_arm?.id)}>R</div>
+            ` : null}
+          </div>
         </div>
         ${regions.map(r => {
           const leftPx = HEAD_WIDTH + (r.start_samples / sr) * this._zoom;
@@ -439,7 +530,7 @@ export class TimelineView extends LitElement {
     const sr = this._timeline?.sample_rate || 48_000;
     const t0 = pointerX / this._zoom;
     const factor = dy < 0 ? 1.18 : 1 / 1.18;
-    const next = Math.max(10, Math.min(400, Math.round(this._zoom * factor)));
+    const next = Math.max(2, Math.min(4000, Math.round(this._zoom * factor)));
     if (next === this._zoom) return;
     this._zoom = next;
     // Keep `t0` under the cursor: the new scroll position lines up so the

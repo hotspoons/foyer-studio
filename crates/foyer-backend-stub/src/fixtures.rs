@@ -81,6 +81,9 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
         sends: vec![],
         plugins: default_inserts_for(slug),
         peak_meter: Some(EntityId::new(format!("track.{slug}.meter"))),
+        group_id: None,
+        inputs: vec![],
+        outputs: vec![],
     }
 }
 
@@ -581,6 +584,10 @@ pub(crate) fn initial_session() -> Session {
                 group: None,
                 value: ControlValue::Float(0.0),
             },
+            punch_in: None,
+            punch_out: None,
+            metronome: None,
+            sync_source: None,
         },
         tracks: vec![
             track("kick", "Kick", TrackKind::Audio, Some("#c04040")),
@@ -590,6 +597,9 @@ pub(crate) fn initial_session() -> Session {
             track("reverb_bus", "Reverb", TrackKind::Bus, Some("#808080")),
             track("master", "Master", TrackKind::Master, None),
         ],
+        groups: vec![],
+        dirty: false,
+        ppqn: Some(960),
         meta: serde_json::json!({ "project": "demo", "sample_rate": 48000 }),
     }
 }

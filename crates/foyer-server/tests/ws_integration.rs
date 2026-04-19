@@ -154,14 +154,24 @@ async fn second_client_gets_cached_snapshot_without_request() {
     }
 
     // Second client connects fresh — should receive snapshot proactively.
+    // The unicast ClientGreeting lands first (per-connection metadata);
+    // the snapshot is the next event, either from the cached catch-up
+    // path or the initial replay.
     let (mut ws2, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    let first = tokio::time::timeout(Duration::from_millis(1500), ws2.next())
-        .await
-        .expect("timed out waiting for first frame");
-    let env = envelope_of(first);
+    let deadline = std::time::Instant::now() + Duration::from_millis(2000);
+    let mut saw_snapshot = false;
+    while std::time::Instant::now() < deadline {
+        let Ok(frame) = tokio::time::timeout(Duration::from_millis(500), ws2.next()).await else {
+            break;
+        };
+        let env = envelope_of(frame);
+        if matches!(env.body, Event::SessionSnapshot { .. }) {
+            saw_snapshot = true;
+            break;
+        }
+    }
     assert!(
-        matches!(env.body, Event::SessionSnapshot { .. }),
-        "expected snapshot on connect, got {:?}",
-        env.body
+        saw_snapshot,
+        "expected snapshot in the first few events, never saw one"
     );
 }

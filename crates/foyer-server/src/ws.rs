@@ -18,8 +18,9 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::response::IntoResponse;
+use std::net::{IpAddr, SocketAddr};
 use foyer_schema::{Command, ControlUpdate, Envelope, Event, SCHEMA_VERSION};
 use futures::{SinkExt, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
@@ -29,11 +30,68 @@ use crate::{AppState, SharedState};
 pub(crate) async fn upgrade(
     ws: WebSocketUpgrade,
     Query(params): Query<HashMap<String, String>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): SharedState,
 ) -> impl IntoResponse {
     let since: Option<u64> = params.get("since").and_then(|s| s.parse().ok());
     let origin = params.get("origin").cloned();
-    ws.on_upgrade(move |sock| handle(sock, state, since, origin))
+    ws.on_upgrade(move |sock| handle(sock, state, since, origin, peer))
+}
+
+/// Enumerate URLs the sidecar is likely reachable at from other machines
+/// on the same LAN. Used for "share session" QR generation — the first
+/// entry is the one we expect to Just Work; the rest are alternates
+/// (IPv6, additional NICs). We skip loopback so the list is empty when
+/// nothing outside the current host could connect — the client uses that
+/// emptiness as a signal that share-session won't work here.
+fn reachable_urls(hostname: &str, port: u16) -> Vec<String> {
+    use local_ip_address::list_afinet_netifas;
+    let mut urls = Vec::new();
+    if port == 0 {
+        return urls;
+    }
+    if let Ok(ifaces) = list_afinet_netifas() {
+        for (_name, ip) in ifaces {
+            if ip.is_loopback() {
+                continue;
+            }
+            // Skip IPv6 link-local — user-hostile addresses with zone ids.
+            if let IpAddr::V6(v6) = ip {
+                if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                    continue;
+                }
+            }
+            let host = match ip {
+                IpAddr::V4(v4) => v4.to_string(),
+                IpAddr::V6(v6) => format!("[{v6}]"),
+            };
+            urls.push(format!("http://{host}:{port}/"));
+        }
+    }
+    // Hostname URL last — most portable but depends on the other machine's
+    // mDNS / DNS resolving it. Real IPs first so QR scans "just work."
+    if !hostname.is_empty() {
+        urls.push(format!("http://{hostname}:{port}/"));
+    }
+    urls
+}
+
+/// True for loopback / link-local IPs — i.e. "same machine" or "same LAN
+/// segment where no DNS / routing happened." Drives the client-side
+/// `is_local` flag: remote clients see a "share session" prompt instead
+/// of the local-only controls, and a future gateway mode can enforce
+/// stricter auth when `is_local` is false.
+fn is_local_addr(addr: &SocketAddr) -> bool {
+    match addr.ip() {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.is_private(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                // fe80::/10 — IPv6 link-local. No stdlib helper, hand-check.
+                || (v6.segments()[0] & 0xffc0 == 0xfe80)
+                // Unique-local fc00::/7 (approx private).
+                || (v6.segments()[0] & 0xfe00 == 0xfc00)
+        }
+    }
 }
 
 async fn handle(
@@ -41,9 +99,37 @@ async fn handle(
     state: std::sync::Arc<AppState>,
     since: Option<u64>,
     origin: Option<String>,
+    peer: SocketAddr,
 ) {
     let (mut tx_ws, mut rx_ws) = sock.split();
     let mut rx_broadcast = state.tx.subscribe();
+
+    // Unicast greeting: tells this specific client whether it's local or
+    // remote. Sent before any catch-up / snapshot so the UI can paint
+    // with the right context from frame one. Also includes the server's
+    // reachable URLs so a local client can build a QR to share with a
+    // phone or another machine on the LAN.
+    {
+        let is_local = is_local_addr(&peer);
+        let server_host = std::env::var("FOYER_SERVER_HOSTNAME")
+            .or_else(|_| hostname::get().map(|h| h.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        let port = state.listen_port.load(Ordering::Relaxed);
+        let server_urls = reachable_urls(&server_host, port);
+        let greeting = Envelope {
+            schema: SCHEMA_VERSION,
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            body: Event::ClientGreeting {
+                remote_addr: peer.to_string(),
+                is_local,
+                server_host,
+                server_port: port,
+                server_urls,
+            },
+        };
+        let _ = send_env(&mut tx_ws, &greeting).await;
+    }
 
     // Initial catch-up: either replay from ring or send snapshot.
     if let Some(since_seq) = since {
@@ -172,7 +258,30 @@ async fn dispatch_command(
             broadcast_event(state, Event::ActionsList { actions }).await;
         }
         Command::InvokeAction { id } => {
-            state.backend().await.invoke_action(id).await?;
+            // Route to the backend. If the action is unknown (shim hasn't
+            // wired it up yet) we translate the error into a user-visible
+            // `Event::Error` so the startup-errors modal / console view
+            // pick it up — silently WARN-logging meant the UI had no idea
+            // the click did nothing. Transport actions land via the
+            // trait-default translation to set_control so they keep
+            // working even against a shim that doesn't know about them.
+            let id_str = id.as_str().to_string();
+            match state.backend().await.invoke_action(id).await {
+                Ok(()) => {}
+                Err(foyer_backend::BackendError::UnknownAction(_)) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "action_unimplemented".into(),
+                            message: format!(
+                                "Action `{id_str}` isn't wired up in the current backend yet."
+                            ),
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => return Err(DispatchError::Backend(e)),
+            }
         }
         Command::ListRegions { track_id } => {
             let (timeline, regions) = state.backend().await.list_regions(track_id.clone()).await?;
@@ -384,6 +493,66 @@ async fn dispatch_command(
                     .await;
                 }
             }
+        }
+
+        // ─── schema-defined but not yet wired commands ─────────────────
+        // These landed as part of the schema push; each will grow a real
+        // match arm as it gets integrated. Until then the sidecar tells
+        // the client "we know about this but haven't hooked it up yet"
+        // instead of silently dropping it.
+        Command::UpdateTrack { id, patch } => {
+            match state.backend().await.update_track(id, patch).await {
+                Ok(track) => {
+                    broadcast_event(
+                        state,
+                        Event::TrackUpdated {
+                            track: Box::new(track),
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "update_track_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::CreateGroup { .. }
+        | Command::UpdateGroup { .. }
+        | Command::DeleteGroup { .. }
+        | Command::AddPlugin { .. }
+        | Command::RemovePlugin { .. }
+        | Command::MovePlugin { .. }
+        | Command::ListPluginPresets { .. }
+        | Command::LoadPluginPreset { .. }
+        | Command::SavePluginPreset { .. }
+        | Command::OpenPluginGui { .. }
+        | Command::ClosePluginGui { .. }
+        | Command::AddNote { .. }
+        | Command::UpdateNote { .. }
+        | Command::DeleteNote { .. }
+        | Command::Locate { .. }
+        | Command::AudioStreamOpen { .. }
+        | Command::AudioStreamClose { .. }
+        | Command::AudioSdpAnswer { .. }
+        | Command::AudioIceCandidate { .. } => {
+            broadcast_event(
+                state,
+                Event::Error {
+                    code: "command_unimplemented".into(),
+                    message: format!(
+                        "command {:?} accepted by schema but not yet wired to the backend",
+                        std::mem::discriminant(&env.body)
+                    ),
+                },
+            )
+            .await;
         }
     }
     Ok(())

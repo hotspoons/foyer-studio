@@ -5,7 +5,9 @@
 
 #include "pbd/abstract_ui.inc.cc" // instantiate AbstractUI<FoyerShimUIRequest>
 #include "pbd/i18n.h"
+#include "pbd/pthread_utils.h"
 #include "ardour/session.h"
+#include "ardour/session_event.h"
 
 #include "dispatch.h"
 #include "ipc.h"
@@ -34,6 +36,18 @@ FoyerShim::~FoyerShim ()
 	_dispatcher.reset ();
 	_ipc.reset ();
 	BaseUI::quit ();
+}
+
+void
+FoyerShim::thread_init ()
+{
+	// Same pattern every other ControlProtocol follows (see
+	// MackieControlProtocol::thread_init). Without these two registrations
+	// any call from this thread into Ardour code that allocates via the
+	// per-thread pool (e.g. Playlist::region_list, SessionEvent::alloc)
+	// aborts with a FATAL "no per-thread pool" error.
+	PBD::notify_event_loops_about_thread_creation (pthread_self (), event_loop_name (), 2048);
+	ARDOUR::SessionEvent::create_per_thread_pool (event_loop_name (), 128);
 }
 
 int

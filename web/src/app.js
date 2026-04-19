@@ -5,6 +5,7 @@ import { LitElement, html, css } from "lit";
 import { FoyerWs } from "./ws.js";
 import { Store } from "./store.js";
 import { applyTheme } from "./theme.js";
+import { installTransportReturn } from "./transport-return.js";
 
 import { LayoutStore } from "./layout/layout-store.js";
 import { Keybinds } from "./layout/keybinds.js";
@@ -21,6 +22,7 @@ import "./components/agent-panel.js";
 import "./components/command-palette.js";
 import "./components/layout-fab.js";
 import "./components/automation-panel.js";
+import "./components/startup-errors.js";
 import { bootAutomation } from "./components/automation-panel.js";
 import { installBindingsRuntime } from "./layout/layout-bindings.js";
 import { installSlotKeybinds } from "./layout/slot-keybinds.js";
@@ -91,6 +93,12 @@ export class FoyerApp extends LitElement {
     this.ws = new FoyerWs({ url: wsUrl, origin: originTag });
     this.store = new Store({ selfOrigin: originTag });
     this.store.attach(this.ws);
+    // Cross-cutting play/stop post-transport behavior (leave / zero /
+    // play_start). Watches the store for transport.playing transitions
+    // and issues a `transport.position` controlSet when stop fires —
+    // consolidated in one place so transport-bar and the Space keybind
+    // don't each need their own copy.
+    installTransportReturn({ store: this.store, ws: this.ws });
     this.store.addEventListener("change", () => {
       this._status = this.store.state.status;
       this._session = this.store.state.session;
@@ -227,6 +235,7 @@ export class FoyerApp extends LitElement {
       <foyer-layout-fab .store=${this.layout}></foyer-layout-fab>
       <foyer-command-palette></foyer-command-palette>
       <foyer-automation-panel></foyer-automation-panel>
+      <foyer-startup-errors></foyer-startup-errors>
     `;
   }
 }

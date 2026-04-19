@@ -8,8 +8,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    audio::{AudioTransport, IceCandidate, SdpPayload},
+    midi::{MidiNote, MidiNotePatch},
+    session::{Group, GroupPatch, Track, TrackPatch},
     Action, AudioFormat, AudioSource, ControlValue, EntityId, LatencyReport, PathListing,
-    PluginCatalogEntry, Region, RegionPatch, Session, TimelineMeta, WaveformPeaks,
+    PluginCatalogEntry, PluginInstance, PluginPreset, Region, RegionPatch, Session, TimelineMeta,
+    WaveformPeaks,
 };
 
 /// Monotonic, server-assigned sequence number. Drops/out-of-order packets are detected
@@ -180,7 +184,108 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         project_path: Option<String>,
     },
+    /// Sent once to each newly-connected client so it can figure out
+    /// whether its WebSocket arrived over loopback (same box as the
+    /// sidecar) or from a remote host. Drives the "share session" UX
+    /// and any privacy-sensitive affordances.
+    ClientGreeting {
+        remote_addr: String,
+        is_local: bool,
+        /// Human-friendly identifier for the sidecar host the client is
+        /// attached to. Empty if not known.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        server_host: String,
+        /// Port the sidecar is listening on. Lets the client build
+        /// share-URLs that match the server's actual config.
+        #[serde(default, skip_serializing_if = "is_zero_u16")]
+        server_port: u16,
+        /// URLs the sidecar thinks it's reachable at (one per non-loopback
+        /// interface). Usable as the payload of a "share session" QR. The
+        /// first entry is the one most likely to work on a LAN; others
+        /// are alternates (IPv6, additional NICs).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        server_urls: Vec<String>,
+    },
+
+    // ───── track / group / plugin lifecycle ─────────────────────────────
+    TrackUpdated {
+        track: Box<Track>,
+    },
+    GroupUpdated {
+        group: Group,
+    },
+    /// A plugin instance has been inserted on a track. Clients should
+    /// splice this into the track's `plugins` array.
+    PluginAdded {
+        track_id: EntityId,
+        plugin: Box<PluginInstance>,
+    },
+    /// A plugin instance has been removed. Clients should drop it from
+    /// the track's `plugins` array.
+    PluginRemoved {
+        track_id: EntityId,
+        plugin_id: EntityId,
+    },
+    /// A plugin instance has been moved within a track's chain.
+    PluginMoved {
+        track_id: EntityId,
+        plugin_id: EntityId,
+        /// New slot index.
+        index: u32,
+    },
+    /// The presets the plugin exposes, answering `Command::ListPluginPresets`.
+    PluginPresetsListed {
+        plugin_id: EntityId,
+        presets: Vec<PluginPreset>,
+    },
+    /// Plugin GUI state changed — either opened by another user or
+    /// closed by the host. Clients use this to keep the "Open/Close
+    /// plugin editor" toggle in sync.
+    PluginGuiState {
+        plugin_id: EntityId,
+        /// "floating" | "docked" | "closed".
+        state: String,
+    },
+
+    // ───── MIDI ─────────────────────────────────────────────────────────
+    /// One or more notes on a region changed. Matches the granularity
+    /// piano-roll edits produce — a chord drag emits a single event
+    /// with all affected notes in `notes`.
+    RegionNotesUpdated {
+        region_id: EntityId,
+        notes: Vec<MidiNote>,
+    },
+    /// Specific notes were deleted from a region.
+    RegionNotesRemoved {
+        region_id: EntityId,
+        note_ids: Vec<EntityId>,
+    },
+
+    // ───── session lifecycle ────────────────────────────────────────────
+    /// The host DAW's dirty flag flipped. Surfaces in the status bar as
+    /// a "•" chip next to the session name.
+    SessionDirtyChanged {
+        dirty: bool,
+    },
+
+    // ───── audio streaming negotiation ──────────────────────────────────
+    /// WebRTC SDP offer/answer from the shim. Client replies with
+    /// `Command::AudioSdpAnswer` carrying its own SDP.
+    AudioSdpOffer {
+        stream_id: u32,
+        sdp: SdpPayload,
+    },
+    AudioSdpAnswer {
+        stream_id: u32,
+        sdp: SdpPayload,
+    },
+    AudioIceCandidate {
+        stream_id: u32,
+        candidate: IceCandidate,
+    },
 }
+
+fn is_zero_u16(n: &u16) -> bool { *n == 0 }
 
 /// Metadata for a single backend entry in the sidecar's config — what
 /// the picker UI needs to render a "pick a DAW" dropdown.
@@ -296,6 +401,119 @@ pub enum Command {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         project_path: Option<String>,
     },
+
+    // ───── track / group / plugin lifecycle ─────────────────────────────
+    /// Mutate a track. Fields in `patch` that are `None` stay unchanged.
+    /// Emits `Event::TrackUpdated` on success.
+    UpdateTrack {
+        id: EntityId,
+        patch: TrackPatch,
+    },
+    /// Create a new group / submix. Answered with `Event::GroupUpdated`.
+    CreateGroup {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        color: Option<String>,
+        #[serde(default)]
+        members: Vec<EntityId>,
+    },
+    UpdateGroup {
+        id: EntityId,
+        patch: GroupPatch,
+    },
+    DeleteGroup {
+        id: EntityId,
+    },
+
+    /// Add a plugin to a track's effect chain at `index` (append if `None`).
+    /// `plugin_uri` is a plugin catalog URI — see `PluginCatalogEntry`.
+    AddPlugin {
+        track_id: EntityId,
+        plugin_uri: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        index: Option<u32>,
+    },
+    RemovePlugin {
+        plugin_id: EntityId,
+    },
+    MovePlugin {
+        plugin_id: EntityId,
+        new_index: u32,
+    },
+    /// Ask the shim/host for the presets a plugin exposes. Answered with
+    /// `Event::PluginPresetsListed`.
+    ListPluginPresets {
+        plugin_id: EntityId,
+    },
+    LoadPluginPreset {
+        plugin_id: EntityId,
+        preset_id: EntityId,
+    },
+    /// Capture the plugin's current parameter values as a new preset,
+    /// stored alongside the session.
+    SavePluginPreset {
+        plugin_id: EntityId,
+        name: String,
+    },
+    /// Ask the host to open the plugin's native GUI in its own window.
+    /// Most hosts route this to the editor window they'd normally open
+    /// on double-click in their mixer.
+    OpenPluginGui {
+        plugin_id: EntityId,
+    },
+    ClosePluginGui {
+        plugin_id: EntityId,
+    },
+
+    // ───── MIDI ─────────────────────────────────────────────────────────
+    AddNote {
+        region_id: EntityId,
+        note: MidiNote,
+    },
+    UpdateNote {
+        region_id: EntityId,
+        note_id: EntityId,
+        patch: MidiNotePatch,
+    },
+    DeleteNote {
+        region_id: EntityId,
+        note_id: EntityId,
+    },
+
+    // ───── transport ────────────────────────────────────────────────────
+    /// Move the playhead to the given sample position. Distinct from
+    /// setting `transport.position` via `ControlSet` because it carries
+    /// "stop and seek" semantics on hosts that distinguish.
+    Locate {
+        samples: u64,
+    },
+
+    // ───── audio streaming negotiation ──────────────────────────────────
+    /// Open an audio stream with an explicit transport. Replaces the
+    /// older `AudioEgressStart` / `AudioIngressOpen` when the client
+    /// wants WebRTC — for plain WebSocket it's optional. Direction
+    /// (ingress vs egress) is implicit in `source`: `Port` / `VirtualInput`
+    /// are ingress sinks; `Master` / `Track` / `Monitor` are egress taps.
+    AudioStreamOpen {
+        stream_id: u32,
+        source: AudioSource,
+        format: AudioFormat,
+        transport: AudioTransport,
+    },
+    AudioStreamClose {
+        stream_id: u32,
+    },
+    /// Client's WebRTC answer in response to an `AudioSdpOffer`.
+    AudioSdpAnswer {
+        stream_id: u32,
+        sdp: SdpPayload,
+    },
+    /// ICE candidate from the client, to be forwarded to the shim's
+    /// peer-connection.
+    AudioIceCandidate {
+        stream_id: u32,
+        candidate: IceCandidate,
+    },
 }
 
 #[cfg(test)]
@@ -363,6 +581,9 @@ mod tests {
             sends: vec![],
             plugins: vec![],
             peak_meter: None,
+            group_id: None,
+            inputs: vec![],
+            outputs: vec![],
         };
         let patch = Patch::TrackAdded { track: Box::new(t) };
         let j = serde_json::to_string(&patch).unwrap();

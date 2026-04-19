@@ -7,6 +7,23 @@ import "./toggle.js";
 import "./meter.js";
 import "./plugin-strip.js";
 import { ControlController } from "../store.js";
+import { showContextMenu } from "./context-menu.js";
+
+// Curated palette for the "Set color" submenu. Close to DAW defaults so
+// colors carry some semantic weight (reds for drums, blues for bass,
+// etc.) without forcing users into a custom-picker popup for the common
+// case. "Clear" removes the color entirely.
+const COLOR_PALETTE = [
+  { label: "Red",        hex: "#c04040" },
+  { label: "Orange",     hex: "#c08040" },
+  { label: "Yellow",     hex: "#c0b040" },
+  { label: "Green",      hex: "#40c080" },
+  { label: "Teal",       hex: "#40a0b0" },
+  { label: "Blue",       hex: "#4080c0" },
+  { label: "Purple",     hex: "#9060c0" },
+  { label: "Pink",       hex: "#c06090" },
+  { label: "Gray",       hex: "#808080" },
+];
 
 function normToDb(n) {
   n = Math.max(0, Math.min(1, n));
@@ -26,6 +43,7 @@ export class TrackStrip extends LitElement {
     density: { type: Object },
     widthMode: { type: String },
     overrideWidth: { type: Number },
+    _renaming: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -69,6 +87,20 @@ export class TrackStrip extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      cursor: text;
+    }
+    .name-input {
+      font-family: var(--font-sans);
+      font-weight: 600;
+      text-align: center;
+      color: var(--color-text);
+      background: var(--color-surface);
+      border: 1px solid var(--color-accent);
+      border-radius: 3px;
+      padding: 2px 4px;
+      width: 100%;
+      box-sizing: border-box;
+      outline: none;
     }
     .kind {
       font-size: 9px;
@@ -169,7 +201,18 @@ export class TrackStrip extends LitElement {
 
     return html`
       ${d.showColorBar ? html`<div class="swatch" style=${swatchStyle}></div>` : null}
-      <div class="name" style=${nameStyle} title=${t.name}>${t.name}</div>
+      ${this._renaming
+        ? html`
+          <input class="name-input" style=${nameStyle}
+                 .value=${t.name}
+                 @keydown=${(e) => this._onRenameKey(e)}
+                 @blur=${(e) => this._commitRename(e.currentTarget.value)}>
+        `
+        : html`
+          <div class="name" style=${nameStyle} title="${t.name} — right-click for options"
+               @dblclick=${() => this._startRename()}
+               @contextmenu=${(e) => this._onContextMenu(e)}>${t.name}</div>
+        `}
       ${d.showKind ? html`<div class="kind">${t.kind}</div>` : null}
       ${d.plugins ? html`
         <foyer-plugin-strip
@@ -252,6 +295,69 @@ export class TrackStrip extends LitElement {
   _setBool(id, v) {
     if (!id) return;
     window.__foyer.ws.controlSet(id, v ? 1 : 0);
+  }
+
+  // ── rename / color / right-click menu ──────────────────────────────
+  _onContextMenu(ev) {
+    if (!this.track) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const t = this.track;
+    showContextMenu(ev, [
+      { label: "Rename", icon: "pencil-square", action: () => this._startRename() },
+      {
+        label: "Set color",
+        icon: "swatch",
+        submenu: [
+          ...COLOR_PALETTE.map((c) => ({
+            label: c.label,
+            icon: "square-3-stack-3d",
+            action: () => this._updatePatch({ color: c.hex }),
+          })),
+          { separator: true },
+          { label: "Clear", icon: "x-mark", action: () => this._updatePatch({ color: "" }) },
+        ],
+      },
+      { separator: true },
+      { label: `ID: ${t.id}`, disabled: true },
+    ]);
+  }
+
+  _startRename() {
+    this._renaming = true;
+  }
+
+  _onRenameKey(ev) {
+    if (ev.key === "Enter") {
+      this._commitRename(ev.currentTarget.value);
+      ev.preventDefault();
+    } else if (ev.key === "Escape") {
+      this._renaming = false;
+      ev.preventDefault();
+    }
+  }
+
+  _commitRename(value) {
+    const trimmed = (value || "").trim();
+    this._renaming = false;
+    if (!trimmed || trimmed === this.track?.name) return;
+    this._updatePatch({ name: trimmed });
+  }
+
+  _updatePatch(patch) {
+    if (!this.track?.id) return;
+    window.__foyer?.ws?.send({ type: "update_track", id: this.track.id, patch });
+  }
+
+  updated(changed) {
+    super.updated?.(changed);
+    if (this._renaming && changed.has("_renaming")) {
+      const input = this.shadowRoot?.querySelector("input.name-input");
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    }
   }
 }
 customElements.define("foyer-track-strip", TrackStrip);

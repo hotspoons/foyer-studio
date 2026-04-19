@@ -277,22 +277,87 @@ lands, switching between them should be a config toggle.
 
 ## Rich notes:
 
-- Can we also add a midi track view with an editor and a piano along the bottom like other DAWs? The midi editor should be a modal, but also can be a dockable view if desired?
+Progress key: ✅ landed · 🚧 scaffolded · 📋 queued.
 
-- I am thinking that the agent and layouts views also appear in the right panel slideout when the FABs are docked, and they only appear as floating windows when undocked
+- 📋 Can we also add a midi track view with an editor and a piano along the bottom like other DAWs? The midi editor should be a modal, but also can be a dockable view if desired?
 
-- We need a track editor UI when right clicking on track's label strip in the timeine and mixer so we can rename the track, set colors, set busses and groupings. Should also have the full mixer editor view in the track editor UI so you can manage the track's mixer settings from the timeline if you don't have the mixer open. Should be in a model or overlay, not a full window
+- 📋 I am thinking that the agent and layouts views also appear in the right panel slideout when the FABs are docked, and they only appear as floating windows when undocked
 
-- busses and groups - need to support this! 
+- 📋 We need a track editor UI when right clicking on track's label strip in the timeine and mixer so we can rename the track, set colors, set busses and groupings. Should also have the full mixer editor view in the track editor UI so you can manage the track's mixer settings from the timeline if you don't have the mixer open. Should be in a model or overlay, not a full window
 
-- show unsaved session changes in main view
+- 📋 busses and groups - need to support this!
 
-- add undo and redo (ctrl/cmd z/ ctrl/cmd + shift z) capability with buttons (should apply on back end if possible)
+- 📋 show unsaved session changes in main view — needs a `Session::DirtyChanged` hook in the Ardour shim; stub can emit a stand-in event meanwhile. UI dot goes in [status-bar.js](../web/src/components/status-bar.js) next to the conn chip.
 
-- add cut/copy/paste actions
+- ✅ add undo and redo (ctrl/cmd z/ ctrl/cmd + shift z) capability with buttons (should apply on back end if possible) — keyboard chords wired in [keybinds.js](../web/src/layout/keybinds.js); they fire `edit.undo` / `edit.redo` which the host's action catalog handles. Dedicated buttons still TODO in transport-bar.
 
-- add 'console' window that can show the stderr/out of ardour plus any internal console it exposes (not sure if it has one)
+- ✅ add cut/copy/paste actions — Ctrl/Cmd+X/C/V bound in keybinds.js, fire `edit.cut/copy/paste`. Native editing in input fields is preserved (handler bails when focus is on an input/textarea).
 
-- add detection to see if the client is connecting from the local machine or a remote machine via IP address probably
+- ✅ add 'console' window that can show the stderr/out of ardour plus any internal console it exposes — new `<foyer-console-view>` tile ([console-view.js](../web/src/components/console-view.js)) polls a new `GET /console?since=<offset>` endpoint on the sidecar, auto-scrolls, error/warn colorization. Reachable via the Launch menu → Console or the `console` view id in any preset/split.
 
-- add "share session connection" or something button that will generate a QR code with the local machine's IP address. Will need to do some introspection on the back end to figure this out. This is for local connections only - when we go through the gateway we'll need to include primatives for generating session tokens and session IDs from the main server for remote services to connect to
+- ✅ add detection to see if the client is connecting from the local machine or a remote machine via IP address probably — server now uses `ConnectInfo<SocketAddr>`, emits `Event::ClientGreeting { remote_addr, is_local, server_host }` on connect. Status bar renders a "LOCAL" / "REMOTE" chip. Loopback / link-local / private IPs count as local.
+
+- 🚧 add "share session connection" or something button that will generate a QR code with the local machine's IP address — half-done: we now know whether the client is local + the server's hostname. A FAB or status-bar button to generate a QR needs a vendored encoder (~2–5 KB of JS). Pair with `ClientGreeting.server_host` + `listen` port to build `http://<host>:<port>/?window=N`. Gateway-mode session tokens deferred to the auth-gateway TODO entry above.
+---
+
+## Diagnosis: shim-not-found bug (resolved 2026-04-19)
+
+Symptom: "timed out waiting for shim advertisement" after every launch,
+even though `libfoyer_shim.so` was built and `<Protocol name="Foyer
+Studio Shim" active="1"/>` was patched into the session file.
+
+Root cause: `shell_escape()` wraps paths in single quotes (so they're
+safe as standalone args: `VAR='...'`). When the result got interpolated
+inside a DOUBLE-quoted bash assignment, the single quotes became
+literal characters — `ARDOUR_SURFACES_PATH="'/workspaces/…/foyer_shim':…"`.
+Ardour looked for a directory named `'/workspaces/…/foyer_shim'`
+(literal quotes in the pathname), didn't find it, and skipped
+registration. Session-file loader then couldn't resolve the protocol.
+
+Fix in [foyer-cli/src/main.rs](../crates/foyer-cli/src/main.rs): assign
+shell-escaped paths to intermediate bash variables first, then expand
+the variable (which IS safe inside double quotes).
+
+Invariant for future edits: values coming out of `shell_escape()` are
+only safe as STANDALONE arguments. If you need to stick one inside a
+compound double-quoted string, land it in a var first.
+
+## Rich new notes/TODOs:
+
+ - Is it possible to package the shim as a totally stand-alone .so? Like is there a core plugin architecture in Ardour that will scan for core extensions? If possible I'd love to see if we can make this work with no core changes, but it may just not be possible.
+
+ - Forwarding audio to/from Ardour via Foyer with resampling as necessary (client will have to tell what st)
+---
+
+## Session-two landings (2026-04-19 autonomous run)
+
+- ✅ **Action menu empty after backend swap** — root cause: `Backend::list_actions` trait default returned `Vec::new()`. Moved the canonical DAW catalog into [foyer-backend/src/actions.rs](../crates/foyer-backend/src/actions.rs) as `default_daw_actions()` and made it the new default. Host backend now serves the full menu (Session / Edit / Transport / Track / Plugin / View / Settings) without needing shim changes. Shims can override to add DAW-specific verbs.
+
+- ✅ **Waveform no-op default** — `Backend::load_waveform` default was `Err("not supported")`. Changed to return `WaveformPeaks { peaks: [], bucket_count: 0, … }`. Clients render regions as flat blocks instead of erroring. Stub still generates fixture peaks; host returns empty until shim support lands.
+
+- ✅ **Errors-on-startup dismissable modal** — [startup-errors.js](../web/src/components/startup-errors.js). Subscribes to WS envelopes, collects `error` events during a capture window around connect and each `backend_swapped` event, shows a single dismissable banner with all of them. Re-arms on next swap.
+
+## Waveform peaks for real Ardour sessions (open)
+
+Schema + sidecar tier cache + client cache are already in place. The missing
+link is having the shim produce real peak data for Ardour sessions. Two
+viable paths:
+
+1. **Read Ardour's `.peak` files** from `<session>/peaks/<region>-peak`.
+   Known binary format (32-bit min + 32-bit max per bucket), present once
+   the session's been saved. Zero-copy cheap — just open, seek, decimate.
+2. **Decode the source audio** via `symphonia` (pure-Rust, multi-format).
+   Works even for freshly-imported clips that haven't been peak'd yet.
+   Pay a one-time scan cost per region; cache to disk.
+
+Either way the sidecar's existing tier logic
+([backend-stub/src/waveform.rs](../crates/foyer-backend-stub/src/waveform.rs))
+handles the mipmap math — it picks the nearest `samples_per_peak` ∈
+{16, 64, 256, 1024, 4096, 16384, 65536} so one cache line serves every
+zoom level. The client already requests at specific tiers and the
+sidecar rounds; no additional protocol work required.
+
+
+## Rich new notes 
+
+ - After selecting a region of time, we should have the main menu have a "zoom to selection" - when, if clicked will zoom exactly to the selection, maintaining the selection. We should store the previous timeline zoom and position and have a "zoom to previous" or something like that. With selections, we need standard DAW stuff like fade in, fade out, delete, mute, etc. and we need the ability to select one or more tracks to apply the change to

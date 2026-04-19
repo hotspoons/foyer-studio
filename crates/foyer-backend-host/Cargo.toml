@@ -19,6 +19,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Decoder for real waveform peaks — pure Rust, multi-format. Scope kept
+# tight to the containers/codecs most Ardour sessions use: uncompressed
+# WAV/BWF/AIFF + FLAC + Vorbis. MP3/AAC need extra (non-default) features.
+symphonia = { version = "0.5", default-features = false, features = ["wav", "flac", "pcm", "aiff", "vorbis", "ogg"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

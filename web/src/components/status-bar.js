@@ -3,6 +3,7 @@ import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { cycleTheme, getTheme, onThemeChange, THEME_META } from "../theme.js";
 import { promptText } from "./prompt-modal.js";
+import { showShareModal } from "./share-modal.js";
 import "./main-menu.js";
 
 export class StatusBar extends LitElement {
@@ -12,6 +13,7 @@ export class StatusBar extends LitElement {
     _fullscreen: { state: true, type: Boolean },
     _peers: { state: true, type: Array },
     _layoutTick: { state: true, type: Number },
+    _greeting: { state: true, type: Object },
   };
 
   static styles = css`
@@ -55,6 +57,41 @@ export class StatusBar extends LitElement {
     .dot.closed { background: var(--color-text-muted); }
     .dot.error  { background: var(--color-danger);  box-shadow: 0 0 10px rgba(239, 68, 68, 0.45); }
     .label { text-transform: uppercase; letter-spacing: 0.08em; font-size: 10px; }
+    .conn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+    }
+    .conn.local { color: var(--color-success); border-color: color-mix(in oklab, var(--color-success) 40%, transparent); }
+    .conn.remote { color: var(--color-warning); border-color: color-mix(in oklab, var(--color-warning) 40%, transparent); }
+    .conn .tag { text-transform: uppercase; letter-spacing: 0.08em; font-size: 9px; }
+    .share-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font: inherit;
+      font-family: var(--font-sans);
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+      background: transparent;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      padding: 2px 8px;
+      cursor: pointer;
+    }
+    .share-btn:hover {
+      color: var(--color-accent-3);
+      border-color: var(--color-accent);
+      background: color-mix(in oklab, var(--color-accent) 12%, transparent);
+    }
     .spacer { flex: 1; }
     button {
       display: inline-flex;
@@ -135,6 +172,19 @@ export class StatusBar extends LitElement {
       this._peers = store?.activePeers?.() || [];
     };
     this._onLayoutChange = () => { this._layoutTick++; };
+    this._greeting = null;
+    this._onEnvelope = (ev) => {
+      const body = ev.detail?.body;
+      if (body?.type === "client_greeting") {
+        this._greeting = {
+          remoteAddr: body.remote_addr,
+          isLocal: !!body.is_local,
+          serverHost: body.server_host || "",
+          serverPort: body.server_port || 0,
+          serverUrls: body.server_urls || [],
+        };
+      }
+    };
   }
 
   connectedCallback() {
@@ -143,6 +193,11 @@ export class StatusBar extends LitElement {
     document.addEventListener("fullscreenchange", this._onFsChange);
     window.__foyer?.store?.addEventListener("peers", this._onPeers);
     window.__foyer?.layout?.addEventListener("change", this._onLayoutChange);
+    window.__foyer?.ws?.addEventListener("envelope", this._onEnvelope);
+    // Re-render on any store change so the "Unsaved" chip reflects
+    // Session.dirty flips without polling.
+    this._onStoreChange = () => this.requestUpdate();
+    window.__foyer?.store?.addEventListener("change", this._onStoreChange);
     this._peerTick = setInterval(this._onPeers, 3000);
   }
   disconnectedCallback() {
@@ -150,12 +205,53 @@ export class StatusBar extends LitElement {
     document.removeEventListener("fullscreenchange", this._onFsChange);
     window.__foyer?.store?.removeEventListener("peers", this._onPeers);
     window.__foyer?.layout?.removeEventListener("change", this._onLayoutChange);
+    window.__foyer?.ws?.removeEventListener("envelope", this._onEnvelope);
+    window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
     clearInterval(this._peerTick);
     super.disconnectedCallback();
   }
 
   _toggleTheme() {
     this._theme = cycleTheme();
+  }
+
+  _renderConnChip() {
+    const g = this._greeting;
+    if (!g) return null;
+    const cls = g.isLocal ? "local" : "remote";
+    const tag = g.isLocal ? "local" : "remote";
+    const title = g.isLocal
+      ? `Connected from ${g.remoteAddr}${g.serverHost ? ` (sidecar @ ${g.serverHost})` : ""}`
+      : `Remote session — client at ${g.remoteAddr}${g.serverHost ? `, sidecar @ ${g.serverHost}` : ""}`;
+    const canShare = g.isLocal && (g.serverUrls?.length > 0);
+    return html`
+      <span class="conn ${cls}" title=${title}>
+        <span class="tag">${tag}</span>
+      </span>
+      ${canShare ? html`
+        <button
+          class="share-btn"
+          title="Share this session with another device on the LAN"
+          @click=${() => showShareModal(g.serverUrls)}
+        >
+          ${icon("arrow-top-right-on-square", 12)}
+          <span>Share</span>
+        </button>
+      ` : null}
+    `;
+  }
+
+  _renderSessionDirty() {
+    const s = window.__foyer?.store?.state?.session;
+    if (!s?.dirty) return null;
+    return html`
+      <span class="conn" title="Session has unsaved changes"
+            style="color: var(--color-warning); border-color: color-mix(in oklab, var(--color-warning) 60%, var(--color-border));">
+        <span style="width:6px; height:6px; border-radius:50%; background: var(--color-warning);
+                     box-shadow: 0 0 6px color-mix(in oklab, var(--color-warning) 60%, transparent);"></span>
+        <span>Unsaved</span>
+      </span>
+    `;
   }
 
   _renderLayoutChip() {
@@ -239,6 +335,8 @@ export class StatusBar extends LitElement {
               ${this._peers.length} peer${this._peers.length === 1 ? "" : "s"}
             </span>`
           : null}
+        ${this._renderConnChip()}
+        ${this._renderSessionDirty()}
         ${this._renderLayoutChip()}
       </div>
       <!-- DAW application menus (Session / Edit / Transport / Track / Plugin /

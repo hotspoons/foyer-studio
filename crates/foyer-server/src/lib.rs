@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use foyer_backend::Backend;
@@ -119,6 +120,10 @@ pub(crate) struct AppState {
     pub(crate) pump_handle: Mutex<Option<JoinHandle<()>>>,
     /// Optional filesystem jail for the session picker.
     pub(crate) jail: Option<Jail>,
+    /// Port this server is listening on — snapshotted from `Config::listen`
+    /// at `run()` time so the WS handler can include it in the client
+    /// greeting for share-session URLs.
+    pub(crate) listen_port: std::sync::atomic::AtomicU16,
 }
 
 impl AppState {
@@ -216,6 +221,7 @@ impl Server {
             spawner,
             pump_handle: Mutex::new(None),
             jail: None,
+            listen_port: std::sync::atomic::AtomicU16::new(0),
         });
         Self { state }
     }
@@ -255,6 +261,8 @@ impl Server {
         let mut router = Router::new()
             .route("/ws", get(ws::upgrade))
             .route("/files/*path", get(files::serve_file))
+            .route("/console", get(console_tail))
+            .route("/qr", get(qr_svg))
             .with_state(self.state.clone())
             .layer(TraceLayer::new_for_http())
             .layer(CorsLayer::permissive());
@@ -265,8 +273,20 @@ impl Server {
         }
 
         let listener = tokio::net::TcpListener::bind(config.listen).await?;
+        self.state
+            .listen_port
+            .store(config.listen.port(), std::sync::atomic::Ordering::Relaxed);
         tracing::info!("foyer-server listening on http://{}", config.listen);
-        axum::serve(listener, router).await?;
+        // `into_make_service_with_connect_info` lets the WS handler
+        // receive the caller's `SocketAddr` via `ConnectInfo` — the
+        // `upgrade` fn uses that to decide whether a client is local
+        // (loopback / link-local) or remote. Without this extractor the
+        // handler would have no way to see the peer address.
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -298,3 +318,124 @@ async fn event_pump(
 
 /// Axum handler state extractor used by the ws module.
 pub(crate) type SharedState = State<Arc<AppState>>;
+
+/// `GET /console?since=<byte-offset>` — tail the DAW stdout/stderr log.
+/// Returns a JSON blob with the current file size and any bytes newer
+/// than `since` (capped so a multi-megabyte log can't nuke a browser).
+/// The console view polls this at a low cadence to feel live without a
+/// WS upgrade just for log text.
+#[derive(serde::Deserialize)]
+struct ConsoleQuery {
+    /// Byte offset the caller already has. Start with 0.
+    #[serde(default)]
+    since: u64,
+}
+
+#[derive(serde::Serialize)]
+struct ConsoleReply {
+    /// Total size of the log file right now.
+    size: u64,
+    /// Offset the next poll should pass as `since` to get only new bytes.
+    next_since: u64,
+    /// UTF-8 lossy chunk between `since` and `next_since`.
+    chunk: String,
+    /// Absolute path of the log, for debugging.
+    path: String,
+    /// True if the file doesn't exist yet (nothing has been logged).
+    missing: bool,
+}
+
+async fn console_tail(
+    State(_state): SharedState,
+    axum::extract::Query(q): axum::extract::Query<ConsoleQuery>,
+) -> impl IntoResponse {
+    use axum::Json;
+    // Log path mirrors what foyer-cli writes to. Kept in sync manually
+    // — both resolve `$XDG_STATE_HOME/foyer/daw.log`. Hard-wired here
+    // instead of plumbing through CLI config because the server is the
+    // natural HTTP surface and the cost of a re-resolve is a syscall.
+    let base = dirs::state_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let path = base.join("foyer").join("daw.log");
+    let size = match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        Err(_) => {
+            return Json(ConsoleReply {
+                size: 0,
+                next_since: 0,
+                chunk: String::new(),
+                path: path.display().to_string(),
+                missing: true,
+            });
+        }
+    };
+    let from = q.since.min(size);
+    // Cap per-poll read so a huge log can't stall the client. The next
+    // poll picks up the tail.
+    const MAX_CHUNK: u64 = 256 * 1024;
+    let to = (from + MAX_CHUNK).min(size);
+    let chunk = match read_range(&path, from, to) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => String::new(),
+    };
+    Json(ConsoleReply {
+        size,
+        next_since: to,
+        chunk,
+        path: path.display().to_string(),
+        missing: false,
+    })
+}
+
+/// `GET /qr?data=<url>` — render the provided text as a QR code SVG.
+/// Used by the "share session" button: client picks the URL (which can
+/// include the sidecar's LAN IP), hits this endpoint, gets back an SVG
+/// it can drop into a modal. Server-side so there's no QR library to
+/// vendor for the browser.
+#[derive(serde::Deserialize)]
+struct QrQuery {
+    data: String,
+}
+
+async fn qr_svg(
+    State(_state): SharedState,
+    axum::extract::Query(q): axum::extract::Query<QrQuery>,
+) -> impl IntoResponse {
+    use qrcode::render::svg;
+    use qrcode::{EcLevel, QrCode};
+
+    // Low error-correction is fine for connection URLs (short payload,
+    // high-quality on-screen rendering). Size the SVG module to something
+    // that reads well at ~300px on a phone screen.
+    let svg = match QrCode::with_error_correction_level(q.data.as_bytes(), EcLevel::L) {
+        Ok(code) => code
+            .render::<svg::Color<'_>>()
+            .min_dimensions(256, 256)
+            .dark_color(svg::Color("#f8fafc"))
+            .light_color(svg::Color("#0f172a"))
+            .build(),
+        Err(e) => format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 240 240\">\
+             <rect width=\"240\" height=\"240\" fill=\"#0f172a\"/>\
+             <text x=\"20\" y=\"120\" fill=\"#ef4444\" font-family=\"monospace\" font-size=\"10\">\
+             qr error: {e}</text></svg>"
+        ),
+    };
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+        svg,
+    )
+}
+
+fn read_range(path: &std::path::Path, from: u64, to: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    if from > 0 {
+        f.seek(SeekFrom::Start(from))?;
+    }
+    let mut buf = vec![0u8; (to - from) as usize];
+    let n = f.read(&mut buf)?;
+    buf.truncate(n);
+    Ok(buf)
+}

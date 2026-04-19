@@ -26,6 +26,7 @@ const LAUNCH_VIEWS = [
   { view: "timeline", label: "Timeline", icon: "list-bullet" },
   { view: "plugins",  label: "Plugins",  icon: "puzzle-piece" },
   { view: "session",  label: "Projects", icon: "folder-open" },
+  { view: "console",  label: "Console",  icon: "command-line" },
 ];
 
 export class MainMenu extends LitElement {

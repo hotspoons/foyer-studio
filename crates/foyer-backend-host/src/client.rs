@@ -18,7 +18,8 @@ use foyer_ipc::{
     Control,
 };
 use foyer_schema::{
-    AudioFormat, AudioSource, Command, Envelope, Event, LatencyReport, Session, SCHEMA_VERSION,
+    AudioFormat, AudioSource, Command, EntityId, Envelope, Event, LatencyReport, Region,
+    RegionPatch, Session, TimelineMeta, Track, TrackPatch, SCHEMA_VERSION,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -79,6 +80,18 @@ struct Shared {
     pending_ingress: Mutex<HashMap<u32, oneshot::Sender<Result<(), ClientError>>>>,
     pending_latency: Mutex<HashMap<u32, oneshot::Sender<LatencyReport>>>,
     pending_snapshot: Mutex<Vec<oneshot::Sender<Session>>>,
+    /// In-flight `list_regions` requests keyed by `track_id`. The shim
+    /// answers with a `RegionsList` event whose `track_id` matches the
+    /// request — that's how we route replies back to the right awaiter.
+    pending_regions: Mutex<HashMap<EntityId, Vec<oneshot::Sender<(TimelineMeta, Vec<Region>)>>>>,
+    pending_update_region: Mutex<HashMap<EntityId, Vec<oneshot::Sender<Region>>>>,
+    pending_delete_region: Mutex<HashMap<EntityId, Vec<oneshot::Sender<EntityId>>>>,
+    pending_update_track: Mutex<HashMap<EntityId, Vec<oneshot::Sender<Track>>>>,
+    /// Cache of known regions, keyed by region id. Populated from every
+    /// `RegionsList` / `RegionUpdated` event; drained on `RegionRemoved`.
+    /// Used to look up `source_path` when the sidecar needs to decode
+    /// peaks for a region the client asked about.
+    regions_cache: Mutex<HashMap<EntityId, Region>>,
     /// Where to route incoming audio frames, keyed by stream_id.
     audio_routes: Mutex<HashMap<u32, AudioRoute>>,
 }
@@ -111,6 +124,11 @@ impl HostClient {
             pending_ingress: Mutex::new(HashMap::new()),
             pending_latency: Mutex::new(HashMap::new()),
             pending_snapshot: Mutex::new(Vec::new()),
+            pending_regions: Mutex::new(HashMap::new()),
+            pending_update_region: Mutex::new(HashMap::new()),
+            pending_delete_region: Mutex::new(HashMap::new()),
+            pending_update_track: Mutex::new(HashMap::new()),
+            regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
         });
         tokio::spawn(writer_task(w, out_rx));
@@ -249,6 +267,89 @@ impl HostClient {
             .await?;
         timeout(rx, "latency_probe").await
     }
+
+    pub async fn list_regions(
+        &self,
+        track_id: EntityId,
+    ) -> Result<(TimelineMeta, Vec<Region>), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_regions
+            .lock()
+            .await
+            .entry(track_id.clone())
+            .or_default()
+            .push(tx);
+        self.send_command(Command::ListRegions {
+            track_id: track_id.clone(),
+        })
+        .await?;
+        timeout(rx, "list_regions").await
+    }
+
+    pub async fn update_region(
+        &self,
+        id: EntityId,
+        patch: RegionPatch,
+    ) -> Result<Region, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_update_region
+            .lock()
+            .await
+            .entry(id.clone())
+            .or_default()
+            .push(tx);
+        self.send_command(Command::UpdateRegion {
+            id: id.clone(),
+            patch,
+        })
+        .await?;
+        timeout(rx, "update_region").await
+    }
+
+    pub async fn delete_region(&self, id: EntityId) -> Result<EntityId, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_delete_region
+            .lock()
+            .await
+            .entry(id.clone())
+            .or_default()
+            .push(tx);
+        self.send_command(Command::DeleteRegion { id: id.clone() })
+            .await?;
+        timeout(rx, "delete_region").await
+    }
+
+    /// Look up a cached region by id. Populated from every `RegionsList` /
+    /// `RegionUpdated` event the reader task sees. Returns `None` if the
+    /// region has never been fetched or was since removed — the caller
+    /// should fall back to a placeholder in that case.
+    pub async fn region_by_id(&self, id: &EntityId) -> Option<Region> {
+        self.shared.regions_cache.lock().await.get(id).cloned()
+    }
+
+    pub async fn update_track(
+        &self,
+        id: EntityId,
+        patch: TrackPatch,
+    ) -> Result<Track, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_update_track
+            .lock()
+            .await
+            .entry(id.clone())
+            .or_default()
+            .push(tx);
+        self.send_command(Command::UpdateTrack {
+            id: id.clone(),
+            patch,
+        })
+        .await?;
+        timeout(rx, "update_track").await
+    }
 }
 
 async fn timeout<T>(rx: oneshot::Receiver<T>, label: &'static str) -> Result<T, ClientError> {
@@ -376,6 +477,72 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                 Event::LatencyReport { stream_id, report } => {
                     if let Some(w) = shared.pending_latency.lock().await.remove(stream_id) {
                         let _ = w.send(*report);
+                    }
+                }
+                Event::RegionsList {
+                    track_id,
+                    timeline,
+                    regions,
+                } => {
+                    // Update the per-region cache + resolve any pending
+                    // list_regions awaiter for this track.
+                    {
+                        let mut cache = shared.regions_cache.lock().await;
+                        for r in regions {
+                            cache.insert(r.id.clone(), r.clone());
+                        }
+                    }
+                    if let Some(waiters) =
+                        shared.pending_regions.lock().await.remove(track_id)
+                    {
+                        for w in waiters {
+                            let _ = w.send((*timeline, regions.clone()));
+                        }
+                    }
+                }
+                Event::RegionUpdated { region } => {
+                    shared
+                        .regions_cache
+                        .lock()
+                        .await
+                        .insert(region.id.clone(), region.clone());
+                    if let Some(waiters) = shared
+                        .pending_update_region
+                        .lock()
+                        .await
+                        .remove(&region.id)
+                    {
+                        for w in waiters {
+                            let _ = w.send(region.clone());
+                        }
+                    }
+                }
+                Event::TrackUpdated { track } => {
+                    if let Some(waiters) = shared
+                        .pending_update_track
+                        .lock()
+                        .await
+                        .remove(&track.id)
+                    {
+                        for w in waiters {
+                            let _ = w.send((**track).clone());
+                        }
+                    }
+                }
+                Event::RegionRemoved {
+                    track_id,
+                    region_id,
+                } => {
+                    shared.regions_cache.lock().await.remove(region_id);
+                    if let Some(waiters) = shared
+                        .pending_delete_region
+                        .lock()
+                        .await
+                        .remove(region_id)
+                    {
+                        for w in waiters {
+                            let _ = w.send(track_id.clone());
+                        }
                     }
                 }
                 Event::Error { code, message } => {

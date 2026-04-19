@@ -34,7 +34,7 @@ use foyer_backend::{Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx};
 use foyer_schema::{
     Action, AudioFormat, AudioSource, ControlUpdate, ControlValue, EntityId, Event, LatencyReport,
     PathListing, PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch, Session,
-    TimelineMeta, WaveformPeaks,
+    TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 use futures::{Stream, StreamExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -302,6 +302,24 @@ impl Backend for StubBackend {
         .ok_or_else(|| BackendError::Other(format!("unknown region {id}")))?;
         self.waveforms.lock().await.clear_region(&id);
         Ok(track_id)
+    }
+
+    async fn update_track(
+        &self,
+        id: EntityId,
+        patch: TrackPatch,
+    ) -> Result<Track, BackendError> {
+        let updated = self
+            .state
+            .lock()
+            .await
+            .update_track(&id, &patch)
+            .ok_or_else(|| BackendError::Other(format!("unknown track {id}")))?;
+        // Echo to all subscribers so every browser repaints, not just the caller.
+        let _ = self.tx.send(Event::TrackUpdated {
+            track: Box::new(updated.clone()),
+        });
+        Ok(updated)
     }
 
     async fn update_region(

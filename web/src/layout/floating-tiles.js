@@ -19,6 +19,7 @@ import "../components/mixer.js";
 import "../components/timeline-view.js";
 import "../components/plugins-view.js";
 import "../components/session-view.js";
+import "../components/console-view.js";
 import "../components/plugin-panel.js";
 import "./text-preview.js";
 import "./slot-picker.js";
@@ -62,6 +63,7 @@ const VIEW_LABELS = {
   timeline: "Timeline",
   plugins: "Plugins",
   session: "Projects",
+  console: "Console",
   preview: "Preview",
   plugin_panel: "Plugin",
 };
@@ -516,6 +518,8 @@ export class FloatingTiles extends LitElement {
         return html`<foyer-plugins-view></foyer-plugins-view>`;
       case "session":
         return html`<foyer-session-view></foyer-session-view>`;
+      case "console":
+        return html`<foyer-console-view></foyer-console-view>`;
       case "preview":
         return html`<foyer-text-preview .path=${e.props?.path || ""}></foyer-text-preview>`;
       case "plugin_panel": {

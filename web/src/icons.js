@@ -190,6 +190,18 @@ const PATHS = {
     '<path d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z"/>',
   stop: '<path d="M5.25 7.5A2.25 2.25 0 0 1 7.5 5.25h9a2.25 2.25 0 0 1 2.25 2.25v9a2.25 2.25 0 0 1-2.25 2.25h-9a2.25 2.25 0 0 1-2.25-2.25v-9Z"/>',
   record: '<circle cx="12" cy="12" r="7"/>',
+  pause:
+    '<path d="M6.75 5.25a.75.75 0 0 1 .75-.75H9a.75.75 0 0 1 .75.75v13.5a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V5.25Zm7.5 0A.75.75 0 0 1 15 4.5h1.5a.75.75 0 0 1 .75.75v13.5a.75.75 0 0 1-.75.75H15a.75.75 0 0 1-.75-.75V5.25Z"/>',
+  backward:
+    '<path d="M9.195 18.44c1.25.71 2.805-.19 2.805-1.629v-2.34l6.945 3.968c1.25.715 2.805-.185 2.805-1.624V7.185c0-1.44-1.555-2.34-2.805-1.625L12 9.529v-2.34c0-1.44-1.555-2.34-2.805-1.625l-7.108 4.061c-1.26.72-1.26 2.536 0 3.256l7.108 4.061Z"/>',
+  forward:
+    '<path d="M14.805 5.56c-1.25-.715-2.805.185-2.805 1.624v2.34L5.055 5.56c-1.25-.715-2.805.185-2.805 1.625v9.629c0 1.44 1.555 2.34 2.805 1.625L12 14.404v2.34c0 1.44 1.555 2.34 2.805 1.625l7.108-4.061c1.26-.72 1.26-2.536 0-3.256l-7.108-4.061Z"/>',
+  "backward-step":
+    '<path d="M18.705 5.56a1.125 1.125 0 0 0-1.69-.97l-10.5 6a1.125 1.125 0 0 0 0 1.95l10.5 6a1.125 1.125 0 0 0 1.69-.97V5.56ZM5.25 5.25a.75.75 0 0 0-.75.75v12a.75.75 0 0 0 1.5 0V6a.75.75 0 0 0-.75-.75Z"/>',
+  "forward-step":
+    '<path d="M5.295 5.56A1.125 1.125 0 0 1 6.985 4.59l10.5 6a1.125 1.125 0 0 1 0 1.95l-10.5 6a1.125 1.125 0 0 1-1.69-.97V5.56ZM18.75 5.25a.75.75 0 0 1 .75.75v12a.75.75 0 0 1-1.5 0V6a.75.75 0 0 1 .75-.75Z"/>',
+  loop:
+    '<path d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 0 0-3.7-3.7 48.678 48.678 0 0 0-7.324 0 4.006 4.006 0 0 0-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 0 0 3.7 3.7 48.656 48.656 0 0 0 7.324 0 4.006 4.006 0 0 0 3.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3-3 3"/>',
 
   // Misc that foyer specifically needs
   "musical-note":
@@ -220,12 +232,20 @@ const ALIASES = {
   settings: "cog-6-tooth",
 };
 
+// Transport-shaped icons render better as solid fills than outlines —
+// Heroicons ships these specifically as the "mini solid" glyph family.
+const SOLID_NAMES = new Set([
+  "play", "pause", "stop", "record",
+  "backward", "forward", "backward-step", "forward-step",
+  // `loop` is an outlined arrow pair; keep it as stroke.
+]);
+
 // Path → full SVG string (lazy).
 function svgFor(name) {
   if (ALIASES[name]) name = ALIASES[name];
   const p = PATHS[name];
   if (!p) return null;
-  return outline(p);
+  return SOLID_NAMES.has(name) ? filled(p) : outline(p);
 }
 
 // Public: a dict of ready-to-embed SVG strings, keyed by Heroicons name.

@@ -1,263 +1,384 @@
 # Handoff — Foyer Studio (next Claude picks up here)
 
 Context is tight. Read this top-to-bottom, then skim
-[docs/DECISIONS.md](DECISIONS.md) — the "why" behind the current design.
-[docs/PLAN.md](PLAN.md) is the canonical product plan; [docs/TODO.md](TODO.md)
-the loose backlog. Memory at
-`~/.claude/projects/-workspaces-foyer-studio/memory/` covers Rich's
-preferences — read it and don't re-ask. Key rules in particular:
+[docs/DECISIONS.md](DECISIONS.md) and [docs/TODO.md](TODO.md).
+Memory at `~/.claude/projects/-workspaces-foyer-studio/memory/`
+covers Rich's preferences — read it and don't re-ask. Rules that
+still apply:
 
-- **No Node tooling.** No `node`/`npm`/bundlers/linters/test runners.
-  Browser is the only JS runtime. Vendor ESM under `web/vendor/` if you
-  must. Tailwind uses the standalone binary at `.bin/tailwindcss`.
+- **No Node tooling.** No `node`/`npm`/bundlers/linters. Browser is the
+  only JS runtime. Vendor ESM under `web/vendor/` if you must.
+  Tailwind uses the standalone binary at `.bin/tailwindcss`.
 - **Non-viral license everywhere except `shims/ardour/`.** The C++ shim
-  is GPL by construction; everything else is permissive.
+  is GPL by construction; Rust + web are permissive.
 - **Ship-first, then log.** When a design tradeoff appears, pick the
   first sensible option and append an ADR entry in DECISIONS.md —
   don't stop to ask.
 - **Speech-to-text artifacts:** "our door" = Ardour.
 
-## 30-second orientation
+## 2026-04-19 update — real regions + peaks landed
 
-Foyer is a **web-native, DAW-agnostic control surface** with a modern
-UI built as a full-screen desktop environment (not a browser page).
-Three layers:
+The three deferred items from the original handoff (regions in the
+shim, `update_region` / `delete_region` dispatch, symphonia peak
+decoder) are all done:
+
+- Shim now emits real regions (per-track playlist walk) in response
+  to `Command::ListRegions`, along with `RegionAdded` / `RegionRemoved`
+  signals subscribed per playlist → `Event::RegionsList` /
+  `Event::RegionRemoved`. See
+  [shims/ardour/src/schema_map.cc](../shims/ardour/src/schema_map.cc)
+  (`enumerate_regions` + `find_region`),
+  [shims/ardour/src/msgpack_out.cc](../shims/ardour/src/msgpack_out.cc)
+  (`encode_regions_list` / `encode_region_updated` / `encode_region_removed`),
+  [shims/ardour/src/dispatch.cc](../shims/ardour/src/dispatch.cc)
+  (new `Kind::{ListRegions, UpdateRegion, DeleteRegion}`),
+  [shims/ardour/src/signal_bridge.cc](../shims/ardour/src/signal_bridge.cc)
+  (`subscribe_playlist_for_route`).
+- Host backend proxies `list_regions` / `update_region` /
+  `delete_region` to the shim (no more stopgap demo regions) and
+  caches regions client-side so `load_waveform` can look up
+  `source_path` + `source_offset_samples`. See
+  [foyer-backend-host/src/client.rs](../crates/foyer-backend-host/src/client.rs)
+  (`pending_regions` / `pending_update_region` / `pending_delete_region`
+  + `regions_cache`) and
+  [foyer-backend-host/src/lib.rs](../crates/foyer-backend-host/src/lib.rs).
+- Symphonia-backed peak decoder in
+  [foyer-backend-host/src/waveform.rs](../crates/foyer-backend-host/src/waveform.rs)
+  — mono downmix, min/max per bucket, capped at 8192 buckets, EOF-safe.
+  Falls back to `synth_waveform` when no `source_path` is known or
+  the decode fails.
+
+What's still open from this group: the region cache is per-connection
+(lives in `HostClient`), so if the shim swaps backends we lose peaks
+until the client re-calls `list_regions`. That's fine — the frontend
+does exactly that on `backend_swapped`.
+
+## Current state — what works end-to-end (2026-04-19)
+
+1. `just run` starts the sidecar with the config-default backend
+   (currently `ardour`; stub is a fallback). On a fresh box the config
+   is auto-seeded at `$XDG_DATA_HOME/foyer/config.yaml` with sensible
+   defaults including an auto-detected Ardour binary path (falls back
+   to `/workspaces/ardour/build/` dev tree; picks the headless
+   `hardour` binary when `$DISPLAY` is empty — full detection in
+   [foyer-config/src/lib.rs](../crates/foyer-config/src/lib.rs)).
+2. Browser connects, picker shows `LOCAL` / `REMOTE` chip + a Share
+   button (QR code over LAN, [share-modal.js](../web/src/components/share-modal.js)).
+3. Project picker at the top-left — `Session → Open Session` —
+   launches a modal ([project-picker-modal.js](../web/src/components/project-picker-modal.js))
+   with an "Open" / "New" mode. Clicking a session folder fires
+   `launch_project`. Sidecar spawns `hardour` with the ardev env
+   sourced, patches the `.ardour` XML to activate the Foyer Studio
+   Shim (inserts `<Protocol name="Foyer Studio Shim" active="1"/>`
+   before `</ControlProtocols>`), bootstraps a new session via
+   `ardour<N>-new_empty_session` if the file doesn't exist yet.
+4. Shim advertises at `/tmp/foyer/ardour-<pid>.{sock,json}` in ~0.7s;
+   `HostBackend::connect` attaches; `Server::swap_backend` atomically
+   replaces the in-process backend. WS stays open — all clients
+   re-snapshot automatically.
+5. Menu bar populates (Session / Edit / Transport / Track / Plugin /
+   View / Settings) from the canonical catalog in
+   [foyer-backend/src/actions.rs](../crates/foyer-backend/src/actions.rs).
+   Transport verbs (play/stop/record/loop/goto_start) work headless
+   because the trait default translates them to `set_control` calls.
+6. Startup-errors modal ([startup-errors.js](../web/src/components/startup-errors.js))
+   surfaces any errors (missing plugins, shim complaints) in a single
+   dismissable banner — no more log-scraping to find them.
+7. Console view ([console-view.js](../web/src/components/console-view.js))
+   tails `$XDG_STATE_HOME/foyer/daw.log` (where the spawner redirects
+   DAW stdout/stderr) via a new `GET /console?since=<offset>` endpoint.
+   Auto-scrolls, classes `[ERROR]` / `[WARNING]` lines.
+
+## Rich's new notes — focus areas for the next turn
+
+Pulled from [docs/TODO.md lines 274–329](TODO.md):
+
+### Immediate UI gaps (📋 queued)
+
+- **MIDI track view + piano roll editor** — modal + optionally
+  dockable. Big feature, needs backend event support for MIDI notes
+  (not in schema yet).
+- **Agent / Layouts as right-panel slideouts when docked** — today
+  those FABs open floating panels regardless of dock state; should
+  switch rendering when the FAB is docked into the right rail.
+- **Track editor on right-click** — name / color / bus / group, plus
+  a compact mixer strip reachable from the timeline. Modal or overlay,
+  not a full window. Needs new `Command::UpdateTrack { id, patch }`
+  in the schema + shim wiring for rename / color / enable.
+- **Busses + groups** — mixer already shows a `Reverb` bus from
+  fixtures; real bus routing + group edits are missing. Schema already
+  has `Bus` / `Send` in [foyer-schema/src/session.rs](../crates/foyer-schema/src/session.rs);
+  shim side needs to populate + respond to mutation commands.
+- **Unsaved-session-changes indicator** — blocked on shim
+  `Session::DirtyChanged` emit. Stub can fake it meanwhile by
+  flipping a bool on `control_set`. UI dot goes in
+  [status-bar.js](../web/src/components/status-bar.js) next to the
+  conn chip.
+- **Undo / redo buttons** — keyboard chords work (Ctrl/Cmd+Z / Shift+Z
+  / Y fire `edit.undo` / `edit.redo`); dedicated buttons in the
+  transport-bar are still open.
+
+### Rich's just-added notes
+
+- **Package the shim as a stand-alone .so** — can Ardour be extended
+  via its official plugin / extension path so we don't need a fork at
+  all? Worth investigating: Ardour's `ControlProtocolManager` already
+  scans `ARDOUR_SURFACES_PATH` for `.so` files and dlopens any that
+  export `protocol_descriptor()` (that's how our shim loads *today*).
+  What's not yet tested: whether a built shim from an out-of-tree
+  CMake or waf script (linking against Ardour's installed headers
+  via a public SDK) works on a stock upstream Ardour without our
+  patched source tree. Current setup has the shim living inside
+  Ardour's `libs/surfaces/foyer_shim/` (via a symlink in
+  `just shim-link`). Goal: move to a genuinely standalone build that
+  compiles outside the Ardour tree + loads into an unmodified
+  upstream binary. If Ardour's public C++ API isn't stable enough for
+  that, document the blocker and the commits that would need to be
+  upstreamed.
+
+- **Audio forwarding both directions, with resampling** — the
+  headline next milestone. Schema already has the audio primitives
+  (`AudioFormat`, `AudioSource`, `LatencyReport` in
+  [foyer-schema/src/audio.rs](../crates/foyer-schema/src/audio.rs),
+  commands `audio_egress_start/stop`, `audio_ingress_open/close`,
+  `latency_probe`). The `rubato` crate is already in the workspace
+  deps for sample-rate conversion. What's missing:
+  - **Egress (Ardour → browser):** shim needs to capture a designated
+    route's output (bus or master) into a ring buffer, push frames
+    out the UDS as `FrameKind::Audio` packets. Sidecar decodes,
+    resamples to the browser's requested rate, re-encodes as Opus
+    via the existing `opus` dep, streams via `MediaSource` extensions
+    or WebRTC. WebRTC gives better latency; `MediaSource` is simpler.
+  - **Ingress (browser → Ardour):** `getUserMedia()` → Opus →
+    sidecar decode → resample → UDS → shim writes into an Ardour
+    input port. Blocked on Ardour exposing a "remote input" port
+    type; our shim will need to register one at surface-init.
+  - **Resampling:** `rubato` handles arbitrary ratios. Client tells
+    server its sample rate in the `audio_egress_start` command
+    (`AudioFormat { sample_rate, channels, encoding }`); the sidecar
+    picks a resampler for the DAW-rate → client-rate path.
+  - **Latency calibration:** `latency_probe` already in the schema.
+    Backend trait has `measure_latency(stream_id)` — host backend
+    proxies to shim; shim runs a round-trip. Needs wiring.
+
+## Known broken / half-done
+
+Everything not marked ✅ in [TODO.md "Rich notes"](TODO.md) is open.
+Specific blockers:
+
+- **Action dispatch for non-transport verbs.** Shim decoder only
+  recognizes `subscribe / request_snapshot / control_set / audio_* /
+  latency_probe`. The sidecar now surfaces unknown actions as
+  `Event::Error { code: "action_unimplemented" }` so users see the
+  gap instead of silent log-warn spam. Fix in shim:
+  [shims/ardour/src/dispatch.cc](../shims/ardour/src/dispatch.cc)
+  — add `Kind::InvokeAction` to `DecodedCmd` + the `decode()` match;
+  add a dispatch switch that maps:
+  - `edit.undo` → `session.undo(1)`
+  - `edit.redo` → `session.redo(1)`
+  - `session.save` → `session.save_state("")`
+  - `session.export` → template save (Session has `export_state`)
+  - `track.add_audio` → `session.new_audio_track(1, 2, ...)`
+  - `track.add_bus` → `session.new_audio_route(...)`
+
+  Cut/copy/paste live in the GUI-only `Editor` action manager — can't
+  be dispatched from headless `hardour`. Document that as a known
+  limit; surface it in the error toast when `hardour` is running.
+
+- **Track editor, rename, color** — no schema support for track
+  mutation yet. Need `Command::UpdateTrack { id, patch }` (similar
+  shape to `UpdateRegion`). Shim-side: `Route::set_name()`,
+  `PresentationInfo::set_color()`.
+
+- **Session dirty flag** — no event yet. Shim needs to subscribe
+  `Session::DirtyChanged` and emit `Event::SessionDirty { dirty }`.
+  Schema doesn't have that variant yet; add it.
+
+## Architecture reference
 
 ```
- Ardour (or any DAW) ──(libfoyer_shim.so, GPL, ~1.6k LOC C++)
-                          │  Unix socket, MessagePack frames + raw PCM
-                          ▼
-                    foyer-server (Rust, non-GPL)
-                    WS + HTTP + Jail + plugin-param introspection
-                          │  WebSocket JSON (MsgPack hot path deferred)
-                          ▼
-                    Lit 3.3 web UI (no bundler, no npm)
+ Ardour (libardour) ──(libfoyer_shim.so, GPL, ~1.7k LOC C++)
+                         │  Unix socket, MessagePack frames + raw PCM
+                         ▼
+                   foyer-server (Rust, non-GPL)
+                   WS + HTTP + jail + /console + /qr + backend swap
+                         │  WebSocket JSON  ·  MsgPack hot path deferred
+                         ▼
+                   Lit 3.3 web UI (no bundler, vendored ESM)
 ```
 
-The web UI is a full desktop environment with custom tile tree, floating
-windows with slot pinning, dedicated plugin-float layer, draggable FABs,
-context menus, keyboard chord system, automation panel (AHK-flavored),
-and a rails-style presets manager. See [DECISIONS.md](DECISIONS.md) for
-every engineering call we've made.
+Key crates:
 
-## What just shipped (last session)
+- **[foyer-schema](../crates/foyer-schema/)** — wire types. `Command` /
+  `Event` enums + `Session` / `Track` / `Region` / `Parameter`.
+  Changes here ripple to both shim (C++ decoder) and browser.
+- **[foyer-ipc](../crates/foyer-ipc/)** — length-prefixed MessagePack
+  framing between sidecar and shim.
+- **[foyer-backend](../crates/foyer-backend/)** — `Backend` trait +
+  `default_daw_actions()` + `synth_waveform()`. Trait defaults
+  handle transport verbs, synthesized peaks. Overriding method
+  wins but should usually extend rather than replace.
+- **[foyer-backend-stub](../crates/foyer-backend-stub/)** — in-memory
+  demo backend with realistic plugin fixtures, timeline regions,
+  meter tick. Used for `--backend stub` + launcher mode.
+- **[foyer-backend-host](../crates/foyer-backend-host/)** — proxies
+  `Backend` calls to an IPC-connected shim. Currently only wires:
+  `snapshot`, `subscribe`, `set_control`, audio commands,
+  `measure_latency`. Everything else goes to the trait default.
+  That's where most "still doesn't work" complaints start.
+- **[foyer-server](../crates/foyer-server/)** — axum + WS + HTTP.
+  Holds `RwLock<Arc<dyn Backend>>` for live backend swap
+  (`AppState::swap_backend`). Routes: `/ws`, `/files/*`, `/console`,
+  `/qr?data=`. `ConnectInfo<SocketAddr>` → `ClientGreeting` with
+  local/remote detection + reachable URLs for the Share flow.
+- **[foyer-config](../crates/foyer-config/)** — YAML config at
+  `$XDG_DATA_HOME/foyer/config.yaml`. Seeds on first run with `stub`
+  + `ardour` entries. `detect_ardour_executable()` handles
+  `$PATH` + macOS bundles + `/workspaces/ardour/build/...` dev trees
+  + headless preference when `$DISPLAY` is empty.
+- **[foyer-cli](../crates/foyer-cli/)** — `foyer serve` / `backends`
+  / `config-path` / `configure`. `CliSpawner` implements
+  `BackendSpawner`: spawns Ardour with env sourced via a bash
+  wrapper script (sources `ardev_common_waf.sh`, sets
+  `ARDOUR_BACKEND="None (Dummy)"` for devcontainers without JACK,
+  prepends `foyer_shim` to `ARDOUR_SURFACES_PATH`, patches the
+  session file to activate the protocol, bootstraps a new session
+  via `ardour<N>-new_empty_session` if needed, splits the project
+  path into `DIR SNAPSHOT_NAME` for Ardour's two-arg form).
 
-This session added a *lot*. Highlights of what's now working:
+Watch out: `shell_escape()` in the CLI wraps paths in single quotes
+for STANDALONE argv use. **Do not interpolate its output inside
+double-quoted bash strings** — single quotes become literal and
+paths break silently. The fix pattern is assigning to a bash
+variable first, then expanding the variable. See
+[TODO.md — Diagnosis: shim-not-found bug](TODO.md) for the scar story.
 
-- **Plugin parameter UI end-to-end.** Realistic fixtures in the stub,
-  `<foyer-plugin-panel>` renders any `PluginInstance.params` schema-
-  driven. Ardour shim emits plugin params too (compiles cleanly; only
-  lacks signal-hookup for external-change notifications).
-- **Tile tree + tile-leaf tear-out.** Pointerdown on a tile header past
-  an 8px threshold detaches into a floating window.
-- **Floating windows with first-class slot system** (halves / thirds /
-  quadrants / fullscreen / center). Every float has a `slot: <id> | null`
-  field. Non-null = relative (reflows on workspace resize); null =
-  absolute. Small drags within tolerance re-adopt the slot; big drags
-  go absolute. Alt modifier bypasses snap.
-- **Dedicated plugin-float layer** — [DECISIONS.md #12](DECISIONS.md).
-  Plugin windows live in their own z-850 `<foyer-plugin-layer>`,
-  auto-packed via shelf packing in [plugin-packer.js](../web/src/layout/plugin-packer.js).
-  Global `Ctrl+Shift+P` shows/hides them all. Plugin panels measure
-  their own natural size post-mount and resize the window to fit.
-- **Right-dock is "hallowed ground"** for workspace reservation. Its
-  full width (rail + any expanded panel) is excluded from the workspace
-  rect, so slot-pinned windows reflow when the dock opens/closes.
-  Event: `foyer:dock-resized`. Right-dock now has rail buttons for
-  Actions, Session, Windows (new!), plus any docked FAB.
-- **Docked FABs** — agent-panel + layout-fab register themselves via
-  `layout.registerFab(id, meta, instance)`. Click rail icon = open
-  quadrant panel near rail; drag rail icon off = tear out and keep
-  following cursor until release. "Undock" button inside the pop-out
-  panel too.
-- **Status bar absorbed the main-menu row** — one less chrome row.
-  Hosts FOYER brand, status dot, peers badge, layout save chip,
-  `<foyer-main-menu>` (New launcher + DAW dropdowns), Full/Restore
-  toggle, Theme.
-- **Rectangle-inspired slot chords** in [slots.js](../web/src/layout/slots.js)
-  `SLOT_SHORTCUTS` — `Ctrl+Alt+Shift+<arrows / UIJK / 1–5 / F / C>`.
-  Runtime in [slot-keybinds.js](../web/src/layout/slot-keybinds.js)
-  snaps the topmost float (or tears the focused tile) to the slot.
-- **Sane sticky defaults per view** — mixer → right-half, timeline →
-  left-half, plugins → left-third, session → right-third.
-- **Global window list** — [window-list.js](../web/src/components/window-list.js)
-  groups Tiled / Floating / Minimized / Plugins / Docked FABs. Click
-  row to focus/raise/restore; × to close. Reachable via rail icon.
-- **Styled prompt modal** replaces `window.prompt()` for save-layout.
-  No more native dialogs anywhere.
-- **`<foyer-number>` scrub-drag widget** for tempo — drag horizontally
-  with Shift/Ctrl modifiers for fine/coarse steps, double-click to
-  type, wheel + arrow keys. Wired into transport tempo.
-- **Transport ticker** — stub advances `transport.position` at sample-
-  rate × 33ms while `transport.playing = true`, emits `control.update`
-  so the timeline playhead visibly moves.
-- **Return-to-start-on-stop** — client pref in [transport-settings.js](../web/src/transport-settings.js),
-  exposed as a checkbox-style item in the Transport menu. Both the
-  Space keybind and the transport-bar Play toggle honor it.
-- **Context menu fix.** The `_onDoc` dismissal in [context-menu.js](../web/src/components/context-menu.js)
-  used `host.contains(ev.target)`, which fails across shadow-DOM
-  retargeting. Now uses `composedPath()`. Same pattern applied in
-  main-menu. Menu items finally fire their actions.
-- **Click-to-raise** via document-level capture pointerdown that walks
-  `composedPath` looking for a `.window` in our shadow root. Beats
-  child handlers that would otherwise swallow the pointerdown.
-- **Keyed `repeat()` on floating windows** — fixed the "click window A
-  grabs window B" bug caused by Lit reusing DOM nodes across re-renders
-  with stale `@pointerdown` handlers.
+### Web UI entrypoints
 
-## You're in the middle of something
+- `<foyer-app>` — [app.js](../web/src/app.js) — shell. Holds
+  `this.ws` + `this.store` + `this.layout`. Exposes
+  `window.__foyer.{ws, store, layout, workspaceRect, windowIndex}`.
+- `<foyer-status-bar>` — [status-bar.js](../web/src/components/status-bar.js)
+  — top row. Renders `LOCAL`/`REMOTE` chip, `Share` button,
+  layout-dirty chip, theme + fullscreen buttons. Hosts the main
+  menu (Session / Edit / Transport / …).
+- `<foyer-tile-container>` / `<foyer-tile-leaf>` — the tile tree.
+  Leaves render view components by string id (`mixer`, `timeline`,
+  `plugins`, `session`, `console`). Saved layouts store `view`
+  strings; if you rename a view id you break layouts.
+- `<foyer-floating-tiles>` — absolute windows with slot pinning,
+  8-handle resize, adjacent-window paired resize.
+- `<foyer-plugin-layer>` — z-850 dedicated layer for plugin UIs.
+- View components live in [web/src/components/](../web/src/components/).
+  Thirty-odd tiles all about the same shape: Lit element that reads
+  `window.__foyer.store` state + optionally subscribes to WS
+  envelopes for live updates.
 
-I was ~halfway through **paired adjacent-window resize** in
-[floating-tiles.js](../web/src/layout/floating-tiles.js) when context
-forced this handoff. What's there:
+## Build / test
 
-- `_startResize` gathers `partners = this._collectResizePartners(entry, dir, 8)`
-  at the start of a resize. **This method is not yet written.**
-- The `move` closure doesn't yet apply paired deltas to the partner
-  windows. You need to finish both.
-
-What to build:
-
-1. `_collectResizePartners(entry, dir, tol)` — walk `this.store.floating()`,
-   filter to visible windows, find any whose opposite edge lines up
-   with `entry`'s `dir` edge within `tol` pixels AND whose perpendicular
-   extent overlaps our entry's. For a right-edge drag on entry A:
-   partners are windows B where `|B.x - (A.x + A.w)| < tol` AND the
-   y-ranges overlap. Record `{ id, origX, origY, origW, origH, edge }`
-   per partner.
-
-2. In the `move` closure, after computing `nx/ny/nw/nh` for the entry,
-   iterate partners: each partner's matching edge should move by the
-   same `dx`/`dy` so the shared border stays glued. A right-edge drag
-   of entry A that moves A's `w` by `+dx` should push each paired B's
-   `x` by `+dx` and shrink `B.w` by `-dx`. Apply `minW/minH` clamps.
-
-3. Alt-bypass: if `e.altKey`, skip partner updates (user opted out of
-   paired resize).
-
-4. Slot semantics during paired drag: commit both windows as absolute
-   (`slot: null`) during the drag. On release, run each through
-   `slotForRect` — if a pair still matches canonical slots together
-   (e.g. left-half + right-half within tolerance), re-adopt both.
-
-The drop-zones hover / snap logic during resize isn't yet run either.
-Leave it off for paired drags — the slot system handles single-window
-snap; paired is opt-in "splitter" behavior.
-
-## What else is pending (queue)
-
-From TODO.md and the in-flight lists, roughly by priority:
-
-1. **Finish paired adjacent-window resize** (above).
-2. **Plugin float persistence in named layouts.** Saving a layout
-   should serialize the set of open plugin IDs so loading the layout
-   reopens the same plugins. `layout.saveNamed()` currently only
-   serializes the tile tree. Extend the serialized format.
-3. **Layout undo/redo** with `Ctrl/Cmd+Z` / `Shift+Z` / `Ctrl+Y`. The
-   store has a clear natural history boundary — every `_emit()` after
-   a tree/floating/dockedFabs mutation could push a snapshot onto a
-   ring buffer. Keep depth ~50, skip while dragging (use a `_drafting`
-   flag the drag handlers set).
-4. **MessagePack hot path on WebSocket.** `ControlUpdate` +
-   `MeterBatch` as binary frames with an opt-in `?binary=1` query
-   param. Server has `rmp-serde`; browser decoder is ~150 lines by
-   hand (per the no-Node rule).
-5. **Ardour shim: outbound plugin signal hookups.** The shim accepts
-   plugin-param `ControlSet` and emits plugin descriptions in the
-   snapshot, but doesn't yet subscribe to `Plugin::ParameterChanged`
-   / `PluginInsert::ActiveChanged` so Ardour-side tweaks don't echo
-   out. See `shims/ardour/src/signal_bridge.{h,cc}`.
-6. **Multi-monitor-aware slot picker.** `screens.js` probe is wired
-   but the picker doesn't offer "target this slot on monitor 2."
-7. **Canvas-based timeline + mixer rendering.** Queued for perf.
-8. **Auth gateway** — design in
-   [docs/PROPOSAL-auth-gateway.md](PROPOSAL-auth-gateway.md).
-
-## Running the stack
-
-```bash
-# Stub backend (demo mode):
-pkill -9 -f 'foyer serve' 2>/dev/null; sleep 1
-/workspaces/foyer-studio/target/debug/foyer serve \
-  --backend=stub \
-  --listen=127.0.0.1:3838 \
-  --web-root=/workspaces/foyer-studio/web \
-  --jail=/tmp/foyer-jail &
-
-just tw-build                          # rebuild Tailwind CSS
-cargo test --workspace                 # 16 tests; everything should pass
-
-# Full Ardour path (/workspaces/ardour is the fork at
-# hotspoons/zzz-forks-ardour.git on branch foyer-studio-integration):
-just ardour-configure && just ardour-build
-just shim-build
-just shim-e2e
+```
+cargo build --workspace        # should be clean
+cargo test --workspace         # 18 suites should all pass
+just run                       # boots stub → picker → swap to ardour on project-click
+just run-ardour <project>      # direct-spawn path
+just shim-build                # compiles libfoyer_shim.so into Ardour's tree
+just shim-e2e                  # full E2E headless smoke
+just configure                 # auto-detect Ardour exec + jail
 ```
 
-Smoke probes:
-- `python3 /tmp/ws_probe.py` — connects, dumps plugin counts per track
-- `python3 /tmp/ws_control.py` — sets a plugin param and watches the echo
+## The audio-forwarding plan, in order
 
-## Background task lifecycle gotchas
+This is the big next mission. Suggested phasing:
 
-- `pkill -9 -f 'foyer serve'` kills everything matching. Always pgrep
-  to verify.
-- Background commands started via `run_in_background: true` get
-  SIGTERM'd when the Bash tool "completes," which can nuke the server
-  process. Start the server with `&` inside a shell, then return — the
-  parent shell exiting is fine, the child stays up.
+1. **M6a — egress to browser** (1–2 sessions of work)
+   - Shim: register an egress ring per route on `audio_egress_start`;
+     tap `AudioPort::get_audio_buffer()` from a process-thread-side
+     callback (already possible via `Session::attach_Process()` hook).
+     Push frames as `FrameKind::Audio` over UDS.
+   - Sidecar: resample with `rubato` to the browser-requested rate,
+     encode Opus (crate already in workspace deps), fan out to the
+     subscribing WS client as binary frames.
+   - Browser: `MediaSource` or `AudioWorklet`-based decoder. Start
+     with `MediaSource` — less plumbing.
 
-## Conventions (durable)
+2. **M6b — latency probe** (half a session)
+   - Shim: insert a marker, wait for it to come back, measure
+     frames. Emit `latency.report`.
+   - Browser: ask before arming record, refuse to arm until probe
+     clears.
 
-- `just` over ad-hoc shell scripts.
-- Rust primary; C++ minimized to the shim.
-- DAW-agnostic schema — every type in `foyer-schema` should plausibly
-  describe a Reaper or Bitwig backend too.
-- Decisions go in [DECISIONS.md](DECISIONS.md). Log when you make one;
-  don't re-litigate six months later.
-- `docs/TODO.md` for scope work; `docs/HANDOFF.md` (this file) for
-  state-of-play.
-- For UI changes, rebuild Tailwind (`just tw-build`) if you touched
-  `.css` classes — otherwise your changes won't apply.
+3. **M6c — ingress from browser** (1 session)
+   - Register an Ardour port type per ingress stream. Browser
+     streams mic via Opus; sidecar decodes + resamples to DAW rate;
+     shim writes into the port's audio buffer in process-thread.
 
-## File map — read first
+4. **M6d — transport sync + word-clock** (polish)
 
-1. [docs/PLAN.md](PLAN.md) — canonical product plan.
-2. [docs/DECISIONS.md](DECISIONS.md) — every tradeoff, why we picked
-   what we did (14 entries as of this handoff).
-3. [docs/TODO.md](TODO.md) — loose backlog.
-4. [crates/foyer-schema/src/message.rs](../crates/foyer-schema/src/message.rs)
-   — wire contract (Command + Event enums).
-5. [web/src/layout/layout-store.js](../web/src/layout/layout-store.js)
-   — authoritative floating-window + tile-tree state.
-6. [web/src/layout/floating-tiles.js](../web/src/layout/floating-tiles.js)
-   — window drag/resize/raise/tear-out/slot-matching. Biggest + most
-   behavior-dense file.
-7. [web/src/layout/slots.js](../web/src/layout/slots.js) — slot
-   definitions, bounds functions, `SLOT_SHORTCUTS`, `slotForRect`
-   tolerance match.
-8. [crates/foyer-backend-stub/src/state.rs](../crates/foyer-backend-stub/src/state.rs)
-   — where fake data comes from, including the new transport ticker.
+Each stage has a natural demo: "play a session in Ardour, hear it in
+your browser"; "record vocals from your browser, see the waveform
+land in Ardour."
 
-## Git state
+## The standalone-shim investigation
 
-Current branch on `/workspaces/foyer-studio`: `main`.
+Track this as its own experiment, separate from the audio work. The
+question is: **can `libfoyer_shim.so` ship as a binary that loads into
+an unmodified upstream Ardour?** Today the shim lives at
+`shims/ardour/src/` and is symlinked into `ardour/libs/surfaces/foyer_shim/`
+where waf picks it up. The entry point it exposes
+(`extern "C" protocol_descriptor()`) is exactly what Ardour's
+`ControlProtocolManager::control_protocol_discover()` looks for when
+scanning `ARDOUR_SURFACES_PATH`. So in principle the shim IS already a
+loadable plugin — but the build is tied to Ardour's tree via waf.
 
-Fork repo for Ardour: `https://github.com/hotspoons/zzz-forks-ardour.git`
-— branches `foyer-studio-integration` (two patches) and
-`upstream-master` (mirror of upstream).
+Plan:
 
-## Known-good state
+1. Port the shim's build to CMake. It depends on `libardour` +
+   `libpbd` + the Control Protocol headers. If Ardour ships
+   pkg-config files (it doesn't by default on Linux distros), use
+   those; otherwise document an `ARDOUR_SRC` pointer the user sets
+   to their Ardour checkout.
+2. Test loading the built `.so` on a vanilla Ardour install (e.g.
+   Debian's packaged Ardour 7 or a nightly). Set
+   `ARDOUR_SURFACES_PATH=<shim-build-dir>` and check that Ardour's
+   Preferences → Control Surfaces lists "Foyer Studio Shim".
+3. If it works: ship the shim as a separately-downloadable binary
+   keyed to Ardour major versions. Drop the fork dependency
+   entirely.
+4. If it doesn't: identify what ABI-breaking calls we rely on,
+   minimize them, upstream a tiny stable-SDK patch series to Ardour.
+   Forks live on `hotspoons/zzz-forks-ardour` branch
+   `foyer-studio-integration`.
 
-- Rust workspace compiles + all 16 tests pass.
-- Every web asset serves 200 from `foyer serve` stub mode.
-- Python WS probe confirms plugin params flow and `ControlSet`
-  round-trips.
+## Known-good state as of this handoff
+
+- Rust workspace compiles clean.
+- All 18 test suites pass (`cargo test --workspace`).
+- `just run` → session picker → click `asdf` → `hardour` spawns →
+  shim advertises in ~0.7s → Foyer UI reconnects to the real
+  backend. Mixer shows real tracks. Timeline shows placeholder
+  regions (stopgap from host backend). Transport Play/Stop/Rec
+  work (via set_control translation). Other menu clicks show a
+  user-visible "action unimplemented" toast instead of silent
+  log warnings.
+- QR share: Share button appears when client is local + server has
+  at least one non-loopback reachable URL. Click → modal with QR
+  SVG (rendered server-side, no browser-side QR lib) + copyable
+  URL.
+- Console view tails `~/.local/state/foyer/daw.log`.
 
 ## One-line rule
 
-If you're about to do something that takes more than one tool call,
-write a TodoWrite list first. Fifty-plus web files and eight Rust
-crates — scope drift is the biggest risk.
+If you're about to do something that takes more than one tool
+call, write a TodoWrite list first. Fifty-plus web files and nine
+Rust crates — scope drift is the biggest risk.
+
+Start here:
+
+1. Read [docs/TODO.md](TODO.md) lines 274–329 for Rich's latest asks.
+2. Pick one of three: (a) wire regions in the shim, (b) wire
+   `invoke_action` in the shim, (c) start the M6a egress milestone.
+3. If you pick audio: the browser-side AudioWorklet skeleton is the
+   right first commit — pure frontend, no shim changes needed to
+   start.
 
 Good luck.

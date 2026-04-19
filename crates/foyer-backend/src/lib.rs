@@ -7,12 +7,16 @@
 
 #![forbid(unsafe_code)]
 
+mod actions;
+pub use actions::default_daw_actions;
+
 use std::pin::Pin;
 
 use async_trait::async_trait;
 use foyer_schema::{
     Action, AudioFormat, AudioSource, ControlValue, EntityId, Event, LatencyReport, PathListing,
-    PluginCatalogEntry, Region, RegionPatch, Session, TimelineMeta, WaveformPeaks,
+    PluginCatalogEntry, Region, RegionPatch, Session, TimelineMeta, Track, TrackPatch,
+    WaveformPeaks,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -68,9 +72,53 @@ pub trait Backend: Send + Sync + 'static {
     // still compiles and runs.
 
     async fn list_actions(&self) -> Result<Vec<Action>, BackendError> {
-        Ok(Vec::new())
+        // Common DAW verbs — every backend gets these for free, shims can
+        // override to add their own or replace with a curated set.
+        Ok(default_daw_actions())
     }
     async fn invoke_action(&self, id: EntityId) -> Result<(), BackendError> {
+        // Transport actions map 1:1 onto control sets — every backend has
+        // transport.playing / recording / looping / position controls,
+        // so wiring these through the generic control plane means the
+        // host backend gets Play/Stop/Record/Loop support without the
+        // shim implementing an action dispatch table. Shims can still
+        // override `invoke_action` to take precedence when they want
+        // richer behavior (e.g. Ardour's "goto_start" may do more than
+        // just zero the position).
+        use foyer_schema::ControlValue;
+        let s = id.as_str();
+        match s {
+            "transport.play" => {
+                return self
+                    .set_control(EntityId::new("transport.playing"), ControlValue::Bool(true))
+                    .await;
+            }
+            "transport.stop" => {
+                return self
+                    .set_control(EntityId::new("transport.playing"), ControlValue::Bool(false))
+                    .await;
+            }
+            "transport.record" => {
+                return self
+                    .set_control(EntityId::new("transport.recording"), ControlValue::Bool(true))
+                    .await;
+            }
+            "transport.loop" => {
+                // Toggle isn't expressible as a bare `set_control` — we
+                // flip to true here and rely on shim-side smarts to
+                // interpret a second invocation. Good enough until a
+                // dedicated toggle action lands.
+                return self
+                    .set_control(EntityId::new("transport.looping"), ControlValue::Bool(true))
+                    .await;
+            }
+            "transport.goto_start" => {
+                return self
+                    .set_control(EntityId::new("transport.position"), ControlValue::Float(0.0))
+                    .await;
+            }
+            _ => {}
+        }
         Err(BackendError::UnknownAction(id))
     }
     async fn list_regions(
@@ -110,6 +158,18 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Region, BackendError> {
         Err(BackendError::Other("update_region not supported".into()))
     }
+    /// Mutate a track's metadata (name, color, group, bus assignment).
+    /// Fields in `patch` that are `None` stay unchanged. On success the
+    /// backend returns the updated `Track` so the server can rebroadcast
+    /// it — that's authoritative even if the shim applies the change
+    /// asynchronously (e.g. after clamping).
+    async fn update_track(
+        &self,
+        _id: EntityId,
+        _patch: TrackPatch,
+    ) -> Result<Track, BackendError> {
+        Err(BackendError::Other("update_track not supported".into()))
+    }
     /// Remove a region from its track. Returns the track id the region was
     /// on (so the server can emit `RegionRemoved { track_id, region_id }`).
     async fn delete_region(&self, _id: EntityId) -> Result<EntityId, BackendError> {
@@ -117,10 +177,22 @@ pub trait Backend: Send + Sync + 'static {
     }
     async fn load_waveform(
         &self,
-        _region_id: EntityId,
-        _samples_per_peak: u32,
+        region_id: EntityId,
+        samples_per_peak: u32,
     ) -> Result<WaveformPeaks, BackendError> {
-        Err(BackendError::Other("load_waveform not supported".into()))
+        // Default: synthesize a deterministic placeholder waveform so the
+        // timeline has SOMETHING to draw even when the shim hasn't yet
+        // wired up real peak extraction. The shape is seeded by the
+        // region id so every region looks unique but stable across
+        // zoom-level changes. Real peaks land once a shim provides
+        // `Region.source_path` + the sidecar reads audio with symphonia;
+        // this fallback is purely cosmetic.
+        //
+        // Bucket count is arbitrary here (we don't know the region
+        // length from this call), so we pick a fixed 240-bucket default.
+        // That's enough to read as "waveform" at any zoom, and the
+        // client's tier cache still rounds requests the normal way.
+        Ok(synth_waveform(region_id, samples_per_peak, 240))
     }
     async fn clear_waveform_cache(
         &self,
@@ -146,4 +218,61 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<PcmTx, BackendError>;
 
     async fn measure_latency(&self, stream_id: u32) -> Result<LatencyReport, BackendError>;
+}
+
+/// Generate a deterministic placeholder waveform for a region. Used by the
+/// default `Backend::load_waveform` so backends without real peak extraction
+/// (host, pre-shim-wiring) still produce something the UI can render.
+///
+/// Algorithm: a sum of three sinusoids at different frequencies with amplitudes
+/// that decay, plus a small quasi-random wiggle, all seeded by the region id's
+/// FNV hash so each region looks distinct. Returns min/max pairs per bucket
+/// (what the client expects). No unsafe, no `rand` dep — just deterministic
+/// math, which is the invariant we actually want (same region → same shape).
+pub fn synth_waveform(
+    region_id: EntityId,
+    samples_per_peak: u32,
+    bucket_count: u32,
+) -> WaveformPeaks {
+    let seed = fnv1a(region_id.as_str().as_bytes());
+    // Per-region parameters extracted from the seed.
+    let freq_a = 0.12 + (seed as f32 / u64::MAX as f32) * 0.18;
+    let freq_b = 0.03 + ((seed >> 16) as f32 / u64::MAX as f32) * 0.06;
+    let phase  = ((seed >> 32) as f32 / u64::MAX as f32) * std::f32::consts::TAU;
+    let peak_amp = 0.55 + ((seed >> 8) as f32 / u64::MAX as f32) * 0.30;
+
+    let mut peaks = Vec::with_capacity(bucket_count as usize * 2);
+    for i in 0..bucket_count {
+        let t = i as f32 / bucket_count as f32;
+        // Envelope: quick attack, sustained body, soft decay.
+        let env = (1.0 - (2.0 * t - 1.0).powi(6)).max(0.0);
+        // Three harmonics so the shape doesn't look like a pure sine.
+        let base = (t * bucket_count as f32 * freq_a + phase).sin() * 0.6
+                 + (t * bucket_count as f32 * freq_b + phase * 0.5).sin() * 0.25
+                 + ((i * 37 + 17) as f32).sin() * 0.10;
+        let amp = env * peak_amp * base;
+        // Bucket is (min, max) — fake a slight min/max spread.
+        let spread = env * 0.05;
+        let lo = (amp - spread).clamp(-1.0, 1.0);
+        let hi = (amp + spread).clamp(-1.0, 1.0);
+        peaks.push(lo);
+        peaks.push(hi);
+    }
+    WaveformPeaks {
+        region_id,
+        channels: 1,
+        samples_per_peak,
+        peaks,
+        bucket_count,
+    }
+}
+
+/// FNV-1a 64-bit — simple hash with no dep. Used for deterministic seeding.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }

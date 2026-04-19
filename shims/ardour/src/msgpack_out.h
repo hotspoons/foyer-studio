@@ -14,6 +14,7 @@
 #define foyer_shim_msgpack_out_h
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace ARDOUR {
@@ -38,6 +39,26 @@ std::vector<std::uint8_t> encode_transport_state (ARDOUR::Session&);
 /// Encode a `session.patch` op=reload. Used when we don't want to compute
 /// per-op patches for a structural change.
 std::vector<std::uint8_t> encode_patch_reload ();
+
+/// Encode `Event::RegionsList` — the reply to a `Command::ListRegions` for
+/// one track. Carries timeline meta (sample rate + length) alongside the
+/// regions so the client can lay things out without a second round trip.
+std::vector<std::uint8_t> encode_regions_list (ARDOUR::Session&, const std::string& track_id);
+
+/// Encode `Event::RegionUpdated` — a single region changed (position, length,
+/// name, muted, etc). Clients patch their per-track region list in place.
+std::vector<std::uint8_t> encode_region_updated (ARDOUR::Session&, const std::string& region_id);
+
+/// Encode `Event::RegionRemoved` — the region was removed from its track.
+std::vector<std::uint8_t> encode_region_removed (const std::string& track_id, const std::string& region_id);
+
+/// Encode `Event::TrackUpdated { track }` for the route whose Foyer id
+/// is `track_id`. Emits an empty payload if the track isn't found —
+/// the caller should check `.empty()` before sending.
+std::vector<std::uint8_t> encode_track_updated (ARDOUR::Session&, const std::string& track_id);
+
+/// Encode `Event::SessionDirtyChanged { dirty }`.
+std::vector<std::uint8_t> encode_session_dirty_changed (bool dirty);
 
 } // namespace ArdourSurface::msgpack_out
 

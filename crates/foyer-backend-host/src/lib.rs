@@ -22,8 +22,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmRx, PcmTx};
 use foyer_schema::{
-    AudioFormat, AudioSource, Command, ControlValue, EntityId, LatencyReport, Session,
+    AudioFormat, AudioSource, Command, ControlValue, EntityId, LatencyReport, Region, RegionPatch,
+    Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
+
+mod waveform;
 
 pub use client::{HostClient, HostClientConfig};
 
@@ -105,6 +108,78 @@ impl Backend for HostBackend {
             .measure_latency(stream_id)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn list_regions(
+        &self,
+        track_id: EntityId,
+    ) -> Result<(TimelineMeta, Vec<Region>), BackendError> {
+        self.client
+            .list_regions(track_id)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn update_region(
+        &self,
+        id: EntityId,
+        patch: RegionPatch,
+    ) -> Result<Region, BackendError> {
+        self.client
+            .update_region(id, patch)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn delete_region(&self, id: EntityId) -> Result<EntityId, BackendError> {
+        self.client
+            .delete_region(id)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn update_track(
+        &self,
+        id: EntityId,
+        patch: TrackPatch,
+    ) -> Result<Track, BackendError> {
+        self.client
+            .update_track(id, patch)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn load_waveform(
+        &self,
+        region_id: EntityId,
+        samples_per_peak: u32,
+    ) -> Result<WaveformPeaks, BackendError> {
+        // If the shim fed us a `source_path` for this region, decode the
+        // file with symphonia and decimate to the requested tier. The
+        // cache lookup is populated by the reader task as it sees
+        // `RegionsList` / `RegionUpdated` events — so a `load_waveform`
+        // call for a region the client hasn't listed yet falls through
+        // to the placeholder, which is fine.
+        if let Some(region) = self.client.region_by_id(&region_id).await {
+            if let Some(path) = region.source_path.as_deref() {
+                match waveform::decode_peaks(
+                    std::path::Path::new(path),
+                    region_id.clone(),
+                    samples_per_peak,
+                    region.source_offset_samples.unwrap_or(0),
+                    region.length_samples,
+                ) {
+                    Ok(peaks) => return Ok(peaks),
+                    Err(e) => {
+                        tracing::warn!(
+                            "symphonia decode failed for {region_id:?} ({path}): {e} — \
+                             falling back to synthesized peaks"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(foyer_backend::synth_waveform(region_id, samples_per_peak, 240))
     }
 }
 

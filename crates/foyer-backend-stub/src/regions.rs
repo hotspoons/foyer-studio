@@ -85,6 +85,9 @@ fn synthesize_for(track_id: &EntityId) -> Vec<Region> {
             length_samples: dur,
             color: None,
             muted: false,
+            source_path: None,
+            source_offset_samples: None,
+            notes: vec![],
         });
     }
     out

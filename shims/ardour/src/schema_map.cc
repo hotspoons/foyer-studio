@@ -5,13 +5,18 @@
 
 #include <sstream>
 
+#include "ardour/audioregion.h"
+#include "ardour/file_source.h"
 #include "ardour/parameter_descriptor.h"
 #include "ardour/plug_insert_base.h"
+#include "ardour/playlist.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
+#include "ardour/region.h"
 #include "ardour/route.h"
 #include "ardour/route_group.h"
 #include "ardour/session.h"
+#include "ardour/source.h"
 #include "ardour/stripable.h"
 #include "ardour/track.h"
 #include "pbd/controllable.h"
@@ -47,14 +52,48 @@ kind_of (const Stripable& s)
 std::string
 color_hex (const Stripable& s)
 {
-	(void)s;
-	// Ardour stores colors as uint32 in the PresentationInfo; we can thread
-	// that through here once we wire PresentationInfo access. Until then,
-	// empty string — UI picks a default.
-	return "";
+	// Ardour's PresentationInfo stores color as ARGB in a uint32 (top
+	// byte is alpha). We only emit an RGB web hex — the alpha is
+	// implicitly opaque on the client.
+	const std::uint32_t c = static_cast<std::uint32_t> (s.presentation_info ().color ());
+	// Unset / transparent black is used as "no color assigned" by several
+	// Ardour code paths. Fall through to "" so the client renders its
+	// default gradient instead of #000.
+	if (c == 0) return "";
+	const std::uint32_t r = (c >> 24) & 0xff;
+	const std::uint32_t g = (c >> 16) & 0xff;
+	const std::uint32_t b = (c >>  8) & 0xff;
+	char buf[8];
+	std::snprintf (buf, sizeof (buf), "#%02x%02x%02x", r, g, b);
+	return std::string (buf);
 }
 
 } // namespace
+
+std::uint32_t
+color_from_hex (const std::string& s)
+{
+	// Accepts "#rrggbb" or "rrggbb"; anything else returns 0 (clear).
+	std::string h = s;
+	if (!h.empty () && h[0] == '#') h.erase (0, 1);
+	if (h.size () != 6) return 0;
+	auto nib = [] (char c) -> int {
+		if (c >= '0' && c <= '9') return c - '0';
+		if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+		if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+		return -1;
+	};
+	int bytes[6];
+	for (int i = 0; i < 6; ++i) {
+		bytes[i] = nib (h[i]);
+		if (bytes[i] < 0) return 0;
+	}
+	const std::uint32_t r = (bytes[0] << 4) | bytes[1];
+	const std::uint32_t g = (bytes[2] << 4) | bytes[3];
+	const std::uint32_t b = (bytes[4] << 4) | bytes[5];
+	// ARGB layout — alpha = 0xff (opaque).
+	return (r << 24) | (g << 16) | (b << 8) | 0xff;
+}
 
 std::string id_gain  (const Stripable& s) { return "track." + stripable_id_string (s) + ".gain"; }
 std::string id_pan   (const Stripable& s) { return "track." + stripable_id_string (s) + ".pan"; }
@@ -291,6 +330,117 @@ enumerate_stripables (Session& session)
 		out.push_back (std::move (ids));
 	}
 	return out;
+}
+
+namespace {
+
+std::string
+region_pbd_id_string (const Region& r)
+{
+	std::ostringstream o;
+	o << r.id ();
+	return o.str ();
+}
+
+// Pull the on-disk path from a region's first source when that source is a
+// FileSource. Empty otherwise (silent sources, MIDI, etc).
+std::string
+region_source_path (const Region& r)
+{
+	auto src = r.source (0);
+	if (!src) return {};
+	auto fs = std::dynamic_pointer_cast<FileSource> (src);
+	if (!fs) return {};
+	return fs->path ();
+}
+
+// Best-effort: find the track whose id matches the `"track.<pbd-id>"` form
+// that msgpack_out emits. Busses/masters are skipped — they don't host
+// regions.
+std::shared_ptr<Track>
+track_by_foyer_id (Session& session, const std::string& track_id)
+{
+	if (track_id.rfind ("track.", 0) != 0) return {};
+	const std::string sid = track_id.substr (6);
+	std::shared_ptr<RouteList const> routes = session.get_routes ();
+	for (auto const& r : *routes) {
+		if (!r) continue;
+		std::ostringstream tmp;
+		tmp << r->id ();
+		if (tmp.str () != sid) continue;
+		return std::dynamic_pointer_cast<Track> (r);
+	}
+	return {};
+}
+
+RegionDesc
+describe_region (const Region& r, const std::string& track_id)
+{
+	RegionDesc d;
+	d.id              = "region." + region_pbd_id_string (r);
+	d.track_id        = track_id;
+	d.name            = r.name ();
+	d.start_samples   = static_cast<std::uint64_t> (std::max<samplepos_t> (r.position_sample (), 0));
+	d.length_samples  = static_cast<std::uint64_t> (std::max<samplecnt_t> (r.length_samples (), 0));
+	d.muted           = r.muted ();
+	d.color           = ""; // PresentationInfo color would go here — deferred.
+	d.source_path     = region_source_path (r);
+	d.source_offset_samples = static_cast<std::uint64_t> (std::max<samplecnt_t> (r.start_sample (), 0));
+	d.has_source_offset     = !d.source_path.empty ();
+	return d;
+}
+
+} // namespace
+
+std::vector<RegionDesc>
+enumerate_regions (Session& session, const std::string& track_id)
+{
+	std::vector<RegionDesc> out;
+	auto track = track_by_foyer_id (session, track_id);
+	if (!track) return out;
+	auto playlist = track->playlist ();
+	if (!playlist) return out;
+
+	std::shared_ptr<RegionList> regions = playlist->region_list ();
+	if (!regions) return out;
+
+	out.reserve (regions->size ());
+	for (auto const& r : *regions) {
+		if (!r) continue;
+		out.push_back (describe_region (*r, track_id));
+	}
+	return out;
+}
+
+RegionHit
+find_region (Session& session, const std::string& region_id)
+{
+	RegionHit hit;
+	if (region_id.rfind ("region.", 0) != 0) return hit;
+	const std::string rid = region_id.substr (7);
+
+	std::shared_ptr<RouteList const> routes = session.get_routes ();
+	for (auto const& r : *routes) {
+		if (!r) continue;
+		auto track = std::dynamic_pointer_cast<Track> (r);
+		if (!track) continue;
+		auto playlist = track->playlist ();
+		if (!playlist) continue;
+		auto regs = playlist->region_list ();
+		if (!regs) continue;
+		for (auto const& reg : *regs) {
+			if (!reg) continue;
+			std::ostringstream tmp;
+			tmp << reg->id ();
+			if (tmp.str () != rid) continue;
+			hit.region   = reg;
+			std::ostringstream trk;
+			trk << r->id ();
+			hit.track_id = "track." + trk.str ();
+			return hit;
+		}
+	}
+	return hit;
 }
 
 } // namespace ArdourSurface::schema_map

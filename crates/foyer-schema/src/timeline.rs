@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::EntityId;
+use crate::{midi::MidiNote, EntityId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Region {
@@ -20,6 +20,26 @@ pub struct Region {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub color: Option<String>,
     pub muted: bool,
+    /// Absolute path to the audio source file backing this region, when
+    /// the shim knows it. Used by the sidecar to decode + decimate on
+    /// demand (see `foyer-backend`'s fallback peak-generation path).
+    /// Stub backends and DAWs that can't expose their source layout
+    /// leave this `None` — the sidecar then falls back to synthesized
+    /// placeholder peaks.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_path: Option<String>,
+    /// Offset into `source_path` where this region starts, in source
+    /// samples. Lets the sidecar skip past parts of the file that
+    /// belong to other regions on the same source.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_offset_samples: Option<u64>,
+    /// For MIDI regions: the sequence of notes contained in this
+    /// region, in tick-relative coordinates (see `foyer_schema::midi`).
+    /// Audio regions leave this empty. Piano-roll clients render
+    /// directly from this list; listing-only clients (like the main
+    /// timeline lozenges) can ignore it.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub notes: Vec<MidiNote>,
 }
 
 /// Minimal viewport/scale info UIs need to lay out regions consistently.
@@ -98,6 +118,9 @@ mod tests {
             length_samples: 96_000,
             color: Some("#c04040".into()),
             muted: false,
+            source_path: None,
+            source_offset_samples: None,
+            notes: vec![],
         };
         let j = serde_json::to_string(&r).unwrap();
         let back: Region = serde_json::from_str(&j).unwrap();

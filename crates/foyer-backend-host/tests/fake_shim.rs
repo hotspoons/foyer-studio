@@ -106,6 +106,10 @@ fn fake_session() -> Session {
                 group: None,
                 value: ControlValue::Float(0.0),
             },
+            punch_in: None,
+            punch_out: None,
+            metronome: None,
+            sync_source: None,
         },
         tracks: vec![Track {
             id: EntityId::new("track.x"),
@@ -120,7 +124,13 @@ fn fake_session() -> Session {
             sends: vec![],
             plugins: vec![],
             peak_meter: None,
+            group_id: None,
+            inputs: vec![],
+            outputs: vec![],
         }],
+        groups: vec![],
+        dirty: false,
+        ppqn: Some(960),
         meta: serde_json::Value::Null,
     }
 }
