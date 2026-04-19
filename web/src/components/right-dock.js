@@ -5,6 +5,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { scrollbarStyles } from "../shared-styles.js";
+import "./window-list.js";
 
 const KEY = "foyer.rightdock.v1";
 
@@ -275,6 +276,11 @@ export class RightDock extends LitElement {
                 @click=${() => this._toggle("session")} title="Session info">
           ${icon("folder-open", 16)}
         </button>
+        <button class=${this._open && this._panel === "windows" ? "active" : ""}
+                @click=${() => this._toggle("windows")}
+                title="Open windows — click to focus, × to close">
+          ${icon("squares-2x2", 16)}
+        </button>
         ${this._renderDockedFabs()}
         ${this._minimized.length ? html`<div class="rail-sep"></div>` : null}
         ${this._minimized.map(
@@ -357,9 +363,11 @@ export class RightDock extends LitElement {
   }
 
   /**
-   * Undock a rail FAB and position it at the cursor, ready for the user to
-   * continue dragging via the FAB's own pointer flow. Kept simple: undock,
-   * set the FAB's position near the cursor, restore visible FAB state.
+   * Undock a rail FAB and keep it glued to the cursor until the user
+   * releases. The pointer is already down when this fires, so we hook
+   * window-level pointermove/pointerup and drive the FAB's `(right,
+   * bottom)` anchors directly — effectively "hand off the drag" without
+   * the user having to re-click.
    */
   _tearFabFromRail(id, x, y) {
     const layout = window.__foyer?.layout;
@@ -367,16 +375,29 @@ export class RightDock extends LitElement {
     const fab = layout.fabInstance?.(id);
     layout.undockFab(id);
     if (!fab) return;
-    // Place the FAB approximately under the cursor. Its internal state
-    // uses (right, bottom) anchors so translate from (x, y).
+
     const size = 48;
-    const right = Math.max(8, window.innerWidth - x - size / 2);
-    const bottom = Math.max(8, window.innerHeight - y - size / 2);
-    fab._fabRight = right;
-    fab._fabBottom = bottom;
-    fab._open = false;
-    fab._persist?.();
-    fab.requestUpdate?.();
+    const place = (cx, cy) => {
+      const right = Math.max(0, Math.min(window.innerWidth - size, window.innerWidth - cx - size / 2));
+      const bottom = Math.max(0, Math.min(window.innerHeight - size, window.innerHeight - cy - size / 2));
+      fab._fabRight = right;
+      fab._fabBottom = bottom;
+      fab._open = false;
+      fab.requestUpdate?.();
+    };
+    place(x, y);
+
+    const move = (e) => place(e.clientX, e.clientY);
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      fab._persist?.();
+      fab.requestUpdate?.();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   }
 
   _onFabIconContext(ev, id) {
@@ -413,6 +434,7 @@ export class RightDock extends LitElement {
   _renderPanel() {
     if (this._panel === "actions") return this._renderActions();
     if (this._panel === "session") return this._renderSession();
+    if (this._panel === "windows") return html`<foyer-window-list></foyer-window-list>`;
     return null;
   }
 

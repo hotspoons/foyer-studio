@@ -17,6 +17,7 @@
 // The `rectById` provider is injected so we don't hard-couple to the DOM.
 
 import { DIR } from "./tile-tree.js";
+import { getTransportPref } from "../transport-settings.js";
 
 const STORAGE_MOD = "foyer.keymap.mod";
 
@@ -72,10 +73,14 @@ export class Keybinds {
         // Toggle playing: if currently playing, stop; else play.
         const st = window.__foyer?.store?.state?.controls;
         const playing = !!(st && st.get("transport.playing"));
-        ws.send({
-          type: "invoke_action",
-          id: playing ? "transport.stop" : "transport.play",
-        });
+        if (playing) {
+          ws.send({ type: "invoke_action", id: "transport.stop" });
+          if (getTransportPref("returnOnStop")) {
+            ws.controlSet("transport.position", 0);
+          }
+        } else {
+          ws.send({ type: "invoke_action", id: "transport.play" });
+        }
       }
       return;
     }

@@ -10,6 +10,7 @@ pub(crate) fn catalog() -> Vec<Action> {
         mk("transport.record", "Record", ActionCategory::Transport, Some("record"), Some("R")),
         mk("transport.loop", "Toggle Loop", ActionCategory::Transport, Some("loop"), Some("L")),
         mk("transport.goto_start", "Locate to Start", ActionCategory::Transport, Some("backward"), Some("Home")),
+        mk("transport.return_on_stop", "Return to start on stop", ActionCategory::Transport, Some("arrow-path"), None),
         // Session
         mk("session.new", "New Session…", ActionCategory::Session, Some("document-plus"), Some("Cmd+N")),
         mk("session.open", "Open Session…", ActionCategory::Session, Some("folder-open"), Some("Cmd+O")),

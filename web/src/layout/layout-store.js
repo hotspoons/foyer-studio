@@ -4,6 +4,32 @@
 import * as Tree from "./tile-tree.js";
 import { slotBounds } from "./slots.js";
 
+/**
+ * Sane first-open slot defaults per view, borrowed from pro-DAW
+ * conventions:
+ *
+ * - **Mixer → right-half** — Pro Tools Mix window, Reaper mixer dock,
+ *   Ardour's mixer-on-the-right default.
+ * - **Timeline → left-half** — the companion surface; editor lives
+ *   opposite the mixer so both can be open.
+ * - **Plugins browser → left-third** — matches Ableton/Bitwig "devices
+ *   panel on the side" affordance.
+ * - **Session picker → right-third** — file-tree placement convention
+ *   from IDEs and DAW browsers.
+ * - **Preview → center** — text previews are transient, center of
+ *   workspace is a reasonable short-lived spot.
+ *
+ * User can override via the re-slot menu; the override gets written
+ * into `foyer.layout.sticky.<view>` and wins on subsequent opens.
+ */
+const DEFAULT_STICKY_SLOT = {
+  mixer:    "right-half",
+  timeline: "left-half",
+  plugins:  "left-third",
+  session:  "right-third",
+  preview:  "center",
+};
+
 const CUR_KEY = "foyer.layout.current.v1";
 const NAMED_KEY = "foyer.layout.named.v1";
 const FOCUS_KEY = "foyer.layout.focus.v1";
@@ -233,9 +259,11 @@ export class LayoutStore extends EventTarget {
    *   - { x, y, w, h }     — raw rect in viewport px
    */
   openFloating(view, props = {}, placement) {
-    // If caller didn't specify a placement, prefer the sticky slot for this view.
+    // If caller didn't specify a placement, prefer the user's sticky slot
+    // for this view, then fall back to the project-level sane default
+    // (cribbed from Pro Tools / Reaper / Ableton conventions).
     if (!placement) {
-      const sticky = this.stickySlotFor(view);
+      const sticky = this.stickySlotFor(view) || DEFAULT_STICKY_SLOT[view];
       if (sticky) placement = { slot: sticky };
     }
     const id = this._pushFloat(view, props, placement);

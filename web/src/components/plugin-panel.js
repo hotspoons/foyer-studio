@@ -140,6 +140,7 @@ export class PluginPanel extends LitElement {
       if (!p) return;
       if (p.params?.some((x) => x.id === id)) this.requestUpdate();
     };
+    this._measured = false;
   }
 
   connectedCallback() {
@@ -151,6 +152,37 @@ export class PluginPanel extends LitElement {
     window.__foyer?.store?.removeEventListener("control", this._onControl);
     window.__foyer?.store?.removeEventListener("change", this._onControl);
     super.disconnectedCallback();
+  }
+
+  /**
+   * After first render, measure the content's natural size (groups grid at
+   * min-content width × its vertical extent) and bubble an event so the
+   * plugin-layer can resize the window to fit. Avoids opening every plugin
+   * window oversized.
+   */
+  updated() {
+    if (this._measured || !this.plugin) return;
+    // Wait for layout to settle — .groups inside header+body must have
+    // painted so `scrollWidth / scrollHeight` reflect natural sizing.
+    requestAnimationFrame(() => {
+      if (this._measured) return;
+      const groups = this.renderRoot.querySelector(".groups");
+      const header = this.renderRoot.querySelector("header");
+      if (!groups) return;
+      const rect = groups.getBoundingClientRect();
+      const headerH = header?.getBoundingClientRect().height ?? 44;
+      // scrollWidth gives the content's natural width ignoring overflow.
+      // For single-column layouts it's close to the grid's minmax(180,1fr).
+      const natW = Math.max(260, Math.ceil(groups.scrollWidth + 24));
+      const natH = Math.max(240, Math.ceil(groups.scrollHeight + headerH + 16));
+      this._measured = true;
+      this.dispatchEvent(new CustomEvent("natural-size", {
+        detail: { pluginId: this.plugin.id, w: natW, h: natH },
+        bubbles: true,
+        composed: true,
+      }));
+      void rect;
+    });
   }
 
   render() {

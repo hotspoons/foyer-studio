@@ -4,6 +4,7 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
+import { getTransportPref, toggleTransportPref } from "../transport-settings.js";
 
 // Category → menu label + order. Categories not listed are skipped.
 const MENU_ORDER = [
@@ -176,7 +177,21 @@ export class MainMenu extends LitElement {
   _invoke(a) {
     if (!a.enabled) return;
     this._openMenu = "";
+    // Client-side preferences that look like actions in the catalog — we
+    // intercept them before forwarding to the backend so a toggle flips
+    // localStorage instead of firing a DAW command.
+    if (a.id === "transport.return_on_stop") {
+      toggleTransportPref("returnOnStop");
+      this.requestUpdate();
+      return;
+    }
     window.__foyer?.ws?.send({ type: "invoke_action", id: a.id });
+  }
+
+  /** True if an action is a client-side toggle and currently on. */
+  _isChecked(id) {
+    if (id === "transport.return_on_stop") return !!getTransportPref("returnOnStop");
+    return false;
   }
 
   render() {
@@ -261,13 +276,19 @@ export class MainMenu extends LitElement {
       </button>
       ${open ? html`
         <div class="dropdown" style="left:${this._menuLeftFor(cat)}px">
-          ${items.map(a => html`
-            <div class="item ${a.enabled ? '' : 'disabled'}"
-                 @click=${() => this._invoke(a)}>
-              <span class="label">${a.label}</span>
-              ${a.shortcut ? html`<span class="shortcut">${a.shortcut}</span>` : null}
-            </div>
-          `)}
+          ${items.map(a => {
+            const checked = this._isChecked(a.id);
+            return html`
+              <div class="item ${a.enabled ? '' : 'disabled'}"
+                   @click=${() => this._invoke(a)}>
+                <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">
+                  ${checked ? icon("check", 11) : null}
+                </span>
+                <span class="label">${a.label}</span>
+                ${a.shortcut ? html`<span class="shortcut">${a.shortcut}</span>` : null}
+              </div>
+            `;
+          })}
         </div>
       ` : null}
     `;

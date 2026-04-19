@@ -3,6 +3,7 @@ import { LitElement, html, css } from "lit";
 import "./toggle.js";
 import "./number-scrub.js";
 import { ControlController } from "../store.js";
+import { getTransportPref } from "../transport-settings.js";
 
 export class TransportBar extends LitElement {
   static styles = css`
@@ -72,7 +73,13 @@ export class TransportBar extends LitElement {
   }
 
   _set(id, v) {
-    window.__foyer.ws.controlSet(id, v ? 1 : 0);
+    const ws = window.__foyer.ws;
+    ws.controlSet(id, v ? 1 : 0);
+    // Return-to-start-on-stop pref: when play is toggled off (v=false) and
+    // the user wants the playhead reset, snap transport.position to 0.
+    if (id === "transport.playing" && !v && getTransportPref("returnOnStop")) {
+      ws.controlSet("transport.position", 0);
+    }
   }
   _onTempo = (ev) => {
     const v = Number(ev.detail?.value);

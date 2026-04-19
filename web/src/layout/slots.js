@@ -9,23 +9,41 @@
 // The slot id is also remembered per-view-type (localStorage) so the next time
 // you open the same view with no explicit slot, it returns to the same place.
 
-/** Default keyboard shortcut per slot — surfaced in the re-slot menu. */
+/**
+ * Default keyboard shortcuts per slot. Modeled on Rectangle for macOS
+ * (the de-facto standard for window-placement chords), with one key
+ * change: we layer in `Shift` to keep the chord set free of Foyer's
+ * existing `Ctrl+Alt+H/J/K/L` tile-focus family.
+ *
+ * - **Halves:** `Ctrl+Alt+Shift+Arrow` — the mental model that every
+ *   Rectangle / Magnet / Windows-PowerToys-FancyZones user shares.
+ * - **Quadrants:** `U/I/J/K` (Rectangle's native mapping; physically
+ *   grouped on the keyboard, easy to grow into without remembering).
+ * - **Thirds:** `1/2/3` + `4/5` for two-thirds — rough parity with
+ *   Rectangle's D/F/G/E/T, but numeric keys are more discoverable
+ *   for a new user.
+ * - **Center / Fullscreen:** `C` and `F`, matching Rectangle verbatim.
+ *
+ * The runtime installer is in `web/src/layout/slot-keybinds.js`. All
+ * bindings are rewirable at runtime (future slot editor) — these are
+ * defaults, not destiny.
+ */
 export const SLOT_SHORTCUTS = {
-  "left-half":       "Ctrl+Alt+1",
-  "right-half":      "Ctrl+Alt+2",
-  "top-half":        "Ctrl+Alt+3",
-  "bottom-half":     "Ctrl+Alt+4",
-  "left-third":      "Ctrl+Alt+Q",
-  "center-third":    "Ctrl+Alt+W",
-  "right-third":     "Ctrl+Alt+E",
-  "left-two-thirds": "Ctrl+Alt+A",
-  "right-two-thirds":"Ctrl+Alt+D",
-  "tl":              "Ctrl+Alt+U",
-  "tr":              "Ctrl+Alt+I",
-  "bl":              "Ctrl+Alt+J",
-  "br":              "Ctrl+Alt+K",
-  "center":          "Ctrl+Alt+5",
-  "full":            "Ctrl+Alt+F",
+  "left-half":       "Ctrl+Alt+Shift+Left",
+  "right-half":      "Ctrl+Alt+Shift+Right",
+  "top-half":        "Ctrl+Alt+Shift+Up",
+  "bottom-half":     "Ctrl+Alt+Shift+Down",
+  "left-third":      "Ctrl+Alt+Shift+1",
+  "center-third":    "Ctrl+Alt+Shift+2",
+  "right-third":     "Ctrl+Alt+Shift+3",
+  "left-two-thirds": "Ctrl+Alt+Shift+4",
+  "right-two-thirds":"Ctrl+Alt+Shift+5",
+  "tl":              "Ctrl+Alt+Shift+U",
+  "tr":              "Ctrl+Alt+Shift+I",
+  "bl":              "Ctrl+Alt+Shift+J",
+  "br":              "Ctrl+Alt+Shift+K",
+  "center":          "Ctrl+Alt+Shift+C",
+  "full":            "Ctrl+Alt+Shift+F",
 };
 
 /**

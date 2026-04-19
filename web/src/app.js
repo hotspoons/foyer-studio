@@ -23,6 +23,7 @@ import "./components/layout-fab.js";
 import "./components/automation-panel.js";
 import { bootAutomation } from "./components/automation-panel.js";
 import { installBindingsRuntime } from "./layout/layout-bindings.js";
+import { installSlotKeybinds } from "./layout/slot-keybinds.js";
 
 applyTheme();
 
@@ -96,6 +97,10 @@ export class FoyerApp extends LitElement {
 
     // User-defined chords for layouts (preset or named) fire before Keybinds.
     installBindingsRuntime(this.layout);
+    // Rectangle-style slot chords (Ctrl+Alt+Shift+<key>) snap the focused
+    // window to a named slot. See web/src/layout/slots.js SLOT_SHORTCUTS
+    // for the default map.
+    installSlotKeybinds(this.layout);
 
     this.keybinds = new Keybinds(this.layout, () => this._collectRects());
 

@@ -73,10 +73,12 @@ impl StubState {
         }
     }
 
-    /// Rotate through meters and emit a batch of pseudo-random drifting values.
+    /// Rotate through meters and emit a batch of pseudo-random drifting values,
+    /// plus advance `transport.position` while playing. Runs at ~30 Hz from
+    /// `spawn_meter_tick`, so the playhead updates look smooth in the UI.
     pub(crate) fn tick_meters(&mut self) -> Vec<ControlUpdate> {
         self.tick = self.tick.wrapping_add(1);
-        let mut out = Vec::with_capacity(self.meters.len());
+        let mut out = Vec::with_capacity(self.meters.len() + 1);
         for (i, (id, p)) in self.meters.iter_mut().enumerate() {
             let phase = (self.tick as f64 * 0.07 + i as f64 * 1.3).sin();
             // map [-1, 1] → [-60, -6] dB
@@ -85,6 +87,32 @@ impl StubState {
             out.push(ControlUpdate {
                 id: id.clone(),
                 value: p.value.clone(),
+            });
+        }
+        // Playhead: advance when `transport.playing` is true, freeze when not.
+        let playing = matches!(self.session.transport.playing.value, ControlValue::Bool(true));
+        if playing {
+            // Ticker runs every ~33ms; sample_rate=48_000. Advance by one
+            // tick's worth of samples per tick.
+            let sr: f64 = self
+                .session
+                .meta
+                .get("sample_rate")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(48_000.0);
+            let step = sr * 0.033;
+            let pos = &mut self.session.transport.position_beats;
+            let current = match pos.value {
+                ControlValue::Float(f) => f,
+                ControlValue::Int(i) => i as f64,
+                _ => 0.0,
+            };
+            let length_samples: f64 = 48_000.0 * 60.0; // 60s demo timeline
+            let next = (current + step) % length_samples;
+            pos.value = ControlValue::Float(next);
+            out.push(ControlUpdate {
+                id: pos.id.clone(),
+                value: pos.value.clone(),
             });
         }
         out

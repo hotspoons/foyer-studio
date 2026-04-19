@@ -188,6 +188,7 @@ export class PluginLayer extends LitElement {
             ? html`<foyer-plugin-panel
                 .plugin=${info.plugin}
                 .trackName=${info.trackName}
+                @natural-size=${(ev) => this._onNaturalSize(ev, p.id)}
               ></foyer-plugin-panel>`
             : html`<div style="padding:20px;color:var(--color-text-muted)">
                 Plugin no longer in session.
@@ -197,6 +198,20 @@ export class PluginLayer extends LitElement {
              @pointerdown=${(ev) => this._startResize(ev, p)}></div>
       </div>
     `;
+  }
+
+  /** Plugin panel reports its content's natural size; adopt it if the
+   *  user hasn't already resized this plugin window manually. */
+  _onNaturalSize(ev, pluginId) {
+    const { pluginId: id, w, h } = ev.detail || {};
+    if (id !== pluginId) return;
+    const entry = this._entries.find((e) => e.plugin_id === pluginId);
+    if (!entry) return;
+    // Only adopt if the existing size looks like a heuristic default —
+    // i.e. the user hasn't dragged the corner handle yet. Heuristic:
+    // if width is still the baseline from `heuristicSize`, accept.
+    if (entry._userResized) return;
+    this.store.setPluginFloatSize(pluginId, w, h);
   }
 
   _locatePlugin(pluginId) {

@@ -46,11 +46,15 @@ export class TrackStrip extends LitElement {
       background: linear-gradient(180deg, var(--color-surface-muted), var(--color-surface-elevated));
     }
     .channel-resize {
+      /* Stays INSIDE the strip's right edge so it doesn't trespass into
+       * the floating-window edge-resize zone. A channel-resize floating
+       * 3px past the strip's right used to fight the window's east
+       * resize handle for clicks. */
       position: absolute;
-      top: 0; bottom: 0; right: -3px;
-      width: 6px;
+      top: 0; bottom: 0; right: 0;
+      width: 5px;
       cursor: ew-resize;
-      z-index: 5;
+      z-index: 2;
       transition: background 0.12s ease;
     }
     .channel-resize:hover,

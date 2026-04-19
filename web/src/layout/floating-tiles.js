@@ -142,10 +142,13 @@ export class FloatingTiles extends LitElement {
     header button:hover { color: var(--color-text); border-color: var(--color-border); }
     .body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
 
-    /* 8 resize handles — four edges + four corners. */
+    /* 8 resize handles — four edges + four corners. Z-index high enough
+     * to beat any internal widget that uses position:relative/absolute
+     * with its own stacking context (track-strip's channel-resize handle
+     * was the original offender). */
     .h {
       position: absolute;
-      z-index: 3;
+      z-index: 50;
     }
     .h.n { top: -3px; left: 8px; right: 8px; height: 8px; cursor: ns-resize; }
     .h.s { bottom: -3px; left: 8px; right: 8px; height: 8px; cursor: ns-resize; }
@@ -593,7 +596,9 @@ export class FloatingTiles extends LitElement {
         this.store.floatSet(entry.id, { minimized: true });
         return;
       }
-      if (snap) {
+      // Alt held at release means "no snapping, I meant those pixels."
+      const altBypass = !!e?.altKey;
+      if (snap && !altBypass) {
         const rect = slotBounds(snap);
         if (rect) {
           this.store.floatSet(entry.id, { ...rect, slot: snap });
@@ -603,6 +608,7 @@ export class FloatingTiles extends LitElement {
         }
         return;
       }
+      if (altBypass) return; // keep the absolute rect we committed during drag
       // No explicit drop-zone target. If the release rect still matches a
       // slot (within tolerance), re-adopt that slot — small nudges on a
       // slot-pinned window stay relative. Otherwise the window is absolute.
@@ -635,6 +641,12 @@ export class FloatingTiles extends LitElement {
 
     this.store.raiseFloat(entry.id);
 
+    // Paired-window resize: any other visible window whose opposite edge
+    // touches OUR resize edge (within 8px tolerance) grows or shrinks
+    // opposite our drag. "Two adjacent windows sharing a border act like
+    // a splitter." Holding Alt disables pairing.
+    const partners = this._collectResizePartners(entry, dir, 8);
+
     // Resize model (per Rich): a slot-pinned window stays RELATIVE through
     // the drag — as long as the resized rect still matches some slot (within
     // tolerance) we keep it tagged with that slot so workspace reflows
@@ -658,7 +670,10 @@ export class FloatingTiles extends LitElement {
         ny = oy + (oh - h);
         nh = h;
       }
-      const match = slotForRect({ x: nx, y: ny, w: nw, h: nh });
+      // Hold Alt (Option on macOS) to bypass slot snapping — same chord
+      // as every design tool out there. The resize commits raw pixels
+      // regardless of whether the rect matches a slot.
+      const match = e.altKey ? null : slotForRect({ x: nx, y: ny, w: nw, h: nh });
       if (match) {
         // Snap to the slot's canonical bounds so the window crisply
         // settles onto rails during a slot-compatible drag.
