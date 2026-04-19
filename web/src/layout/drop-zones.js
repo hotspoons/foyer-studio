@@ -16,23 +16,23 @@
 
 import { SLOT_PRESETS, slotBounds } from "./slots.js";
 
-// Subset of SLOT_PRESETS we expose as drop targets. The ergonomic set — not
-// every preset is a useful drop target during a drag. Order matters: earlier
-// entries are tested first.
-const DROP_TARGETS = [
-  "left-third",
-  "center-third",
-  "right-third",
-  "left-half",
-  "right-half",
-  "top-half",
-  "bottom-half",
-  "tl",
-  "tr",
-  "bl",
-  "br",
-  "full",
-];
+// Drop targets organized by band. Hit-testing picks from the band that
+// matches the pointer's vertical position, so dragging in the middle of the
+// viewport surfaces full-height thirds/columns instead of quadrants.
+//
+// - `top`    : pointer is in the top 25% → quadrants + top-half
+// - `middle` : pointer is in the middle 50% → full-height columns
+// - `bottom` : pointer is in the bottom 25% → quadrants + bottom-half
+//
+// The `full` target is always available as a final fallback.
+const BAND_TARGETS = {
+  top:    ["tl", "tr", "top-half", "left-half", "right-half", "full"],
+  middle: ["left-third", "center-third", "right-third", "left-half", "right-half", "full"],
+  bottom: ["bl", "br", "bottom-half", "left-half", "right-half", "full"],
+};
+
+/** Union of everything we might render. */
+const ALL_TARGETS = Array.from(new Set(Object.values(BAND_TARGETS).flat()));
 
 class DropZonesOverlay {
   constructor() {
@@ -56,7 +56,7 @@ class DropZonesOverlay {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const pad = 24;
-    for (const id of DROP_TARGETS) {
+    for (const id of ALL_TARGETS) {
       const b = slotBounds(id, vw, vh, pad);
       if (!b) continue;
       const cell = document.createElement("div");
@@ -127,27 +127,49 @@ class DropZonesOverlay {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const pad = 24;
-    // Pick the smallest-area region containing (x,y). "Smallest" because
-    // corner-quadrants nest inside halves which nest inside fullscreen —
-    // user intent is usually the most specific.
+
+    // Which band is the pointer in? Top/bottom 25% → quadrant-style;
+    // middle 50% → full-height columns.
+    const topEdge = vh * 0.25;
+    const bottomEdge = vh * 0.75;
+    const band = y < topEdge ? "top" : y > bottomEdge ? "bottom" : "middle";
+    const priorities = BAND_TARGETS[band];
+
+    // Dim everything that's not in this band so the user sees only the
+    // relevant options.
+    const activeSet = new Set(priorities);
+    for (const [id, cell] of this.highlights) {
+      const isActive = activeSet.has(id);
+      // Small visible hint for inactive-band targets; the in-band targets
+      // get a clearer preview background once one is hit.
+      if (!isActive) {
+        cell.style.opacity = "0";
+        continue;
+      }
+      // In-band baseline (dim but visible so the user knows where zones are).
+      if (cell.style.opacity === "0" || cell.style.opacity === "") {
+        cell.style.opacity = "0.22";
+      }
+    }
+
+    // First in priority order that contains (x,y).
     let best = null;
-    let bestArea = Infinity;
-    for (const id of DROP_TARGETS) {
+    for (const id of priorities) {
       const b = slotBounds(id, vw, vh, pad);
       if (!b) continue;
       if (x < b.x || x > b.x + b.w) continue;
       if (y < b.y || y > b.y + b.h) continue;
-      const area = b.w * b.h;
-      if (area < bestArea) {
-        best = id;
-        bestArea = area;
-      }
+      best = id;
+      break;
     }
     if (best !== this.current) {
       if (this.current) {
         const prev = this.highlights.get(this.current);
         if (prev) {
-          prev.style.opacity = "0";
+          // Non-active in-band zones stay faintly visible so the user still
+          // sees the grid. Out-of-band zones were already hidden above.
+          const stillInBand = activeSet.has(this.current);
+          prev.style.opacity = stillInBand ? "0.22" : "0";
           prev.style.background =
             "color-mix(in oklab, var(--color-accent) 6%, transparent)";
         }

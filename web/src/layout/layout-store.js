@@ -37,6 +37,32 @@ export class LayoutStore extends EventTarget {
     // runtime by each QuadrantFab instance so the right-dock knows how to
     // render its rail icon and panel without a circular import.
     this._fabRegistry = new Map();
+    // Baseline = the serialized tree that matched the last loaded preset or
+    // named layout. `isDirty()` compares the current tree against this.
+    this._baseline = Tree.serialize(this.tree);
+    this._baselineKind = null; // "preset" | "named" | null
+    this._baselineName = null;
+  }
+
+  /**
+   * True when the tree has been edited since the last loaded/saved layout.
+   * Comparison is against the serialized baseline, so reordering back to the
+   * same shape registers as "clean" even if the user fumbled around.
+   */
+  isDirty() {
+    return Tree.serialize(this.tree) !== this._baseline;
+  }
+
+  /** Last-loaded layout identity, or null if the tree is freeform. */
+  currentLayoutIdentity() {
+    if (!this._baselineKind) return null;
+    return { kind: this._baselineKind, name: this._baselineName };
+  }
+
+  _markBaseline(kind, name) {
+    this._baseline = Tree.serialize(this.tree);
+    this._baselineKind = kind;
+    this._baselineName = name;
   }
 
   _read(k) {
@@ -312,15 +338,25 @@ export class LayoutStore extends EventTarget {
 
   saveNamed(name) {
     this.named[name] = Tree.serialize(this.tree);
+    this._markBaseline("named", name);
     this._emit();
   }
   loadNamed(name) {
     const raw = this.named[name];
     const t = Tree.deserialize(raw);
-    if (t) { this.tree = t; this.focusId = Tree.leaves(t)[0]?.id || null; this._emit(); }
+    if (t) {
+      this.tree = t;
+      this.focusId = Tree.leaves(t)[0]?.id || null;
+      this._markBaseline("named", name);
+      this._emit();
+    }
   }
   deleteNamed(name) {
     delete this.named[name];
+    if (this._baselineKind === "named" && this._baselineName === name) {
+      this._baselineKind = null;
+      this._baselineName = null;
+    }
     this._emit();
   }
   listNamed() {
@@ -332,6 +368,7 @@ export class LayoutStore extends EventTarget {
     if (!fn) return;
     this.tree = fn();
     this.focusId = Tree.leaves(this.tree)[0]?.id || null;
+    this._markBaseline("preset", name);
     this._emit();
   }
 }

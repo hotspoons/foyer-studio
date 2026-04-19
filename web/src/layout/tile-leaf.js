@@ -204,16 +204,22 @@ export class TileLeaf extends LitElement {
         this._menuMode = "";
       }
     };
+    // The body of this tile reads session from the data store at render time,
+    // so we need to re-render whenever the snapshot / controls change — not
+    // only on layout changes.
+    this._onDataChange = () => this.requestUpdate();
   }
 
   connectedCallback() {
     super.connectedCallback();
     this.store?.addEventListener("change", this._onStoreChange);
     this._onStoreChange();
+    window.__foyer?.store?.addEventListener("change", this._onDataChange);
     document.addEventListener("click", this._onDocClick, true);
   }
   disconnectedCallback() {
     this.store?.removeEventListener("change", this._onStoreChange);
+    window.__foyer?.store?.removeEventListener("change", this._onDataChange);
     document.removeEventListener("click", this._onDocClick, true);
     super.disconnectedCallback();
   }

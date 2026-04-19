@@ -9,6 +9,7 @@ export class StatusBar extends LitElement {
     _theme: { state: true, type: String },
     _fullscreen: { state: true, type: Boolean },
     _peers: { state: true, type: Array },
+    _layoutTick: { state: true, type: Number },
   };
 
   static styles = css`
@@ -78,6 +79,34 @@ export class StatusBar extends LitElement {
       background: var(--color-accent-3);
       box-shadow: 0 0 6px color-mix(in oklab, var(--color-accent) 40%, transparent);
     }
+    .layout-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 10px; letter-spacing: 0.06em;
+      padding: 2px 8px;
+      border: 1px solid var(--color-border);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      transition: all 0.12s ease;
+      font-family: var(--font-sans);
+    }
+    .layout-chip:hover {
+      color: var(--color-text);
+      border-color: var(--color-accent);
+      background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+    }
+    .layout-chip.dirty {
+      color: var(--color-warning);
+      border-color: color-mix(in oklab, var(--color-warning) 60%, var(--color-border));
+      background: color-mix(in oklab, var(--color-warning) 10%, transparent);
+    }
+    .layout-chip.dirty::before {
+      content: "";
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--color-warning);
+      box-shadow: 0 0 6px color-mix(in oklab, var(--color-warning) 60%, transparent);
+    }
   `;
 
   constructor() {
@@ -85,12 +114,14 @@ export class StatusBar extends LitElement {
     this._theme = getTheme();
     this._fullscreen = !!document.fullscreenElement;
     this._peers = [];
+    this._layoutTick = 0;
     this._offThemeChange = null;
     this._onFsChange = () => { this._fullscreen = !!document.fullscreenElement; };
     this._onPeers = () => {
       const store = window.__foyer?.store;
       this._peers = store?.activePeers?.() || [];
     };
+    this._onLayoutChange = () => { this._layoutTick++; };
   }
 
   connectedCallback() {
@@ -98,12 +129,14 @@ export class StatusBar extends LitElement {
     this._offThemeChange = onThemeChange(() => { this._theme = getTheme(); });
     document.addEventListener("fullscreenchange", this._onFsChange);
     window.__foyer?.store?.addEventListener("peers", this._onPeers);
+    window.__foyer?.layout?.addEventListener("change", this._onLayoutChange);
     this._peerTick = setInterval(this._onPeers, 3000);
   }
   disconnectedCallback() {
     this._offThemeChange?.();
     document.removeEventListener("fullscreenchange", this._onFsChange);
     window.__foyer?.store?.removeEventListener("peers", this._onPeers);
+    window.__foyer?.layout?.removeEventListener("change", this._onLayoutChange);
     clearInterval(this._peerTick);
     super.disconnectedCallback();
   }
@@ -111,6 +144,48 @@ export class StatusBar extends LitElement {
   _toggleTheme() {
     this._theme = cycleTheme();
   }
+
+  _renderLayoutChip() {
+    void this._layoutTick; // touch the tick prop so Lit re-renders on change
+    const layout = window.__foyer?.layout;
+    if (!layout) return null;
+    const dirty = layout.isDirty?.();
+    const id = layout.currentLayoutIdentity?.();
+    // Hide entirely when the user hasn't diverged from their last load.
+    if (!dirty && !id) return null;
+    const label = dirty
+      ? (id ? `Save "${id.name}"` : "Save layout")
+      : `layout: ${id.name}`;
+    const title = dirty
+      ? (id
+          ? `Current layout differs from "${id.name}" — click to save`
+          : "You have an unsaved layout — click to save")
+      : `Loaded ${id.kind} "${id.name}"`;
+    return html`
+      <button
+        class="layout-chip ${dirty ? "dirty" : ""}"
+        title=${title}
+        @click=${this._saveLayout}
+      >
+        ${label}
+      </button>
+    `;
+  }
+
+  _saveLayout = () => {
+    const layout = window.__foyer?.layout;
+    if (!layout) return;
+    const id = layout.currentLayoutIdentity?.();
+    // If the active baseline is a named layout, default to overwriting it.
+    // If it's a preset, suggest `<preset>-custom`. Otherwise freeform.
+    let suggestion;
+    if (id?.kind === "named") suggestion = id.name;
+    else if (id?.kind === "preset") suggestion = `${id.name}-custom`;
+    else suggestion = "my-layout";
+    const name = window.prompt("Save layout as:", suggestion);
+    if (!name) return;
+    layout.saveNamed(name);
+  };
 
   _toggleFullscreen() {
     if (this._fullscreen) {
@@ -136,6 +211,7 @@ export class StatusBar extends LitElement {
             ${this._peers.length} peer${this._peers.length === 1 ? "" : "s"}
           </span>`
         : null}
+      ${this._renderLayoutChip()}
       <span class="spacer"></span>
       ${this._fullscreen ? null : html`
         <button title="Enter fullscreen" @click=${this._toggleFullscreen}>

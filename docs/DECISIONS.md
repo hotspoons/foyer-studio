@@ -208,7 +208,52 @@ feature they don't use. The same tear-out mechanics power the tile
 header drag and the plugin-strip row drag, keeping the gesture
 vocabulary consistent.
 
-## 10. Decisions live in this file, not in the conversation
+## 10. FAB docking uses a shared registry on the layout store
+
+**Date:** 2026-04-19
+
+**Decision:** Any FAB (layout, agent, future ones) that wants to be
+dockable registers itself with `LayoutStore.registerFab(id, meta)` at
+connect time and exposes `openFromDock / closeFromDock / toggleFromDock`
+methods. The right-dock renders a rail icon per docked FAB by querying
+`layout.dockedFabs()` and dispatches clicks back through the registry.
+The FAB's own `render()` hides the floating button when `isFabDocked()`
+and re-anchors its panel next to the rail instead.
+
+**Alternatives:** Each FAB component independently listens for
+drop-on-rail events; a portal-based system that relocates the FAB DOM
+into the rail's shadow tree; requiring every FAB to extend
+`QuadrantFab` (blocks the agent which predates that base class).
+
+**Why:** Decouples the right-dock from every FAB's internal renderer
+— the rail just sees `{ id, meta: { label, icon, accent } }`.
+Non-`QuadrantFab` components (the agent) can opt in with a handful of
+methods without a full port. Matches the pattern we'd want for plugin
+authors adding their own FABs later.
+
+## 11. Drop-zone hit-testing is band-priority, not smallest-area
+
+**Date:** 2026-04-19
+
+**Decision:** The floating-tile drop overlay divides the viewport
+vertically into three bands: top 25%, middle 50%, bottom 25%. Each
+band surfaces a different set of drop targets: top/bottom bands
+prefer quadrants + half rows; the middle band surfaces only
+full-height thirds and halves. Hit-test within each band walks the
+target list in priority order and takes the first containing target.
+
+**Alternatives:** Smallest-area wins (original; meant quadrants
+always beat thirds/halves even when dragging in the middle);
+require modifier keys to select one tier vs. another (undiscoverable).
+
+**Why:** Rich's exact report — dragging in the middle should show
+full-height thirds/halves, not top-left or bottom-right quadrants.
+Band-priority matches the mental model: "I'm near the top, so I
+probably want a top-rooted placement." Also unlocks 1/3 layouts that
+were technically present but practically unreachable under the
+smallest-area rule.
+
+## 12. Decisions live in this file, not in the conversation
 
 **Date:** 2026-04-19
 

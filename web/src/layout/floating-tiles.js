@@ -158,17 +158,21 @@ export class FloatingTiles extends LitElement {
     this._slotPickerFor = null;
     this._onChange = () => this._refresh();
     this._onResize = () => this._refresh();
+    // Plugin panels render live session data; re-render on snapshot arrival.
+    this._onDataChange = () => this.requestUpdate();
   }
 
   connectedCallback() {
     super.connectedCallback();
     this.store?.addEventListener("change", this._onChange);
     window.addEventListener("resize", this._onResize);
+    window.__foyer?.store?.addEventListener("change", this._onDataChange);
     this._refresh();
   }
   disconnectedCallback() {
     this.store?.removeEventListener("change", this._onChange);
     window.removeEventListener("resize", this._onResize);
+    window.__foyer?.store?.removeEventListener("change", this._onDataChange);
     super.disconnectedCallback();
   }
 
