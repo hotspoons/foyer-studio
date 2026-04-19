@@ -9,6 +9,8 @@ const NAMED_KEY = "foyer.layout.named.v1";
 const FOCUS_KEY = "foyer.layout.focus.v1";
 const FLOAT_KEY = "foyer.layout.floating.v1";
 const FAB_DOCK_KEY = "foyer.layout.dockedFabs.v1";
+const PLUGIN_FLOAT_KEY = "foyer.layout.pluginFloats.v1";
+const PLUGIN_VIS_KEY = "foyer.layout.pluginFloatsVisible.v1";
 
 let _floatId = 0;
 function mkFloatId() {
@@ -32,6 +34,18 @@ export class LayoutStore extends EventTarget {
     this._dockedFabs = (() => {
       try { return JSON.parse(localStorage.getItem(FAB_DOCK_KEY) || "{}") || {}; }
       catch { return {}; }
+    })();
+    // Plugin floats live in their own layer (see
+    // docs/DECISIONS.md #plugin-layer): separate from the tile grid and
+    // the generic floating-tiles, never snapping to slots, auto-placed by
+    // the packer. Array of { plugin_id, w, h }.
+    this._pluginFloats = (() => {
+      try { return JSON.parse(localStorage.getItem(PLUGIN_FLOAT_KEY) || "[]") || []; }
+      catch { return []; }
+    })();
+    this._pluginFloatsVisible = (() => {
+      try { return JSON.parse(localStorage.getItem(PLUGIN_VIS_KEY) || "true"); }
+      catch { return true; }
     })();
     // Registry of FAB metadata keyed by FAB id — NOT persisted. Populated at
     // runtime by each QuadrantFab instance so the right-dock knows how to
@@ -81,6 +95,8 @@ export class LayoutStore extends EventTarget {
       localStorage.setItem(NAMED_KEY, JSON.stringify(this.named));
       localStorage.setItem(FLOAT_KEY, JSON.stringify(this._floating));
       localStorage.setItem(FAB_DOCK_KEY, JSON.stringify(this._dockedFabs));
+      localStorage.setItem(PLUGIN_FLOAT_KEY, JSON.stringify(this._pluginFloats));
+      localStorage.setItem(PLUGIN_VIS_KEY, JSON.stringify(this._pluginFloatsVisible));
     } catch {}
   }
 
@@ -88,11 +104,15 @@ export class LayoutStore extends EventTarget {
 
   /**
    * Components (QuadrantFab instances) register themselves so the right-dock
-   * can render their rail icon + know who to wake up without a circular
-   * import. `meta` carries `{ label, icon, dockWidth, expandsRail, accent }`.
+   * can render their rail icon + call back into them without a circular
+   * import OR a `document.querySelector` that can't pierce shadow roots.
+   *
+   * - `meta` carries `{ label, icon, dockWidth, expandsRail, accent }`.
+   * - `instance` is the component element itself; used by right-dock to
+   *   call `toggleFromDock()` / `openFromDock()` / `closeFromDock()`.
    */
-  registerFab(id, meta) {
-    this._fabRegistry.set(id, meta || {});
+  registerFab(id, meta, instance) {
+    this._fabRegistry.set(id, { meta: meta || {}, instance: instance || null });
     this._emit();
   }
   unregisterFab(id) {
@@ -100,7 +120,10 @@ export class LayoutStore extends EventTarget {
     this._emit();
   }
   fabMeta(id) {
-    return this._fabRegistry.get(id) || {};
+    return this._fabRegistry.get(id)?.meta || {};
+  }
+  fabInstance(id) {
+    return this._fabRegistry.get(id)?.instance || null;
   }
 
   /** Is this FAB currently docked to the right rail? */
@@ -124,7 +147,60 @@ export class LayoutStore extends EventTarget {
   dockedFabs() {
     return Object.keys(this._dockedFabs)
       .filter((id) => this._fabRegistry.has(id))
-      .map((id) => ({ id, meta: this._fabRegistry.get(id) }));
+      .map((id) => ({ id, meta: this._fabRegistry.get(id).meta }));
+  }
+
+  // ── plugin floats ──────────────────────────────────────────────────────
+  //
+  // Plugin windows live on their own layer (see DECISIONS #12). They never
+  // participate in the slot grid; the packer auto-places them in unused
+  // workspace space. Global show/hide toggles every plugin window at once,
+  // preserving their set for "bring them all back" workflows.
+
+  pluginFloats() {
+    return this._pluginFloats.slice();
+  }
+  pluginFloatsVisible() {
+    return this._pluginFloatsVisible;
+  }
+
+  openPluginFloat(plugin_id, size) {
+    if (this._pluginFloats.some((p) => p.plugin_id === plugin_id)) {
+      // Already open — nop. A `raise` could bump ordering later.
+      return;
+    }
+    const w = Math.max(160, size?.w ?? 320);
+    const h = Math.max(120, size?.h ?? 360);
+    this._pluginFloats.push({ plugin_id, w, h });
+    this._emit();
+  }
+
+  closePluginFloat(plugin_id) {
+    const before = this._pluginFloats.length;
+    this._pluginFloats = this._pluginFloats.filter((p) => p.plugin_id !== plugin_id);
+    if (this._pluginFloats.length !== before) this._emit();
+  }
+
+  /** Let a plugin panel report its natural size after first render so the
+   *  packer can place it accurately on the next pass. */
+  setPluginFloatSize(plugin_id, w, h) {
+    const entry = this._pluginFloats.find((p) => p.plugin_id === plugin_id);
+    if (!entry) return;
+    const nw = Math.max(160, Math.round(w));
+    const nh = Math.max(120, Math.round(h));
+    if (entry.w === nw && entry.h === nh) return;
+    entry.w = nw;
+    entry.h = nh;
+    this._emit();
+  }
+
+  togglePluginFloats() {
+    this._pluginFloatsVisible = !this._pluginFloatsVisible;
+    this._emit();
+  }
+  setPluginFloatsVisible(on) {
+    this._pluginFloatsVisible = !!on;
+    this._emit();
   }
 
   // ── floating windows ───────────────────────────────────────────────────
@@ -220,11 +296,10 @@ export class LayoutStore extends EventTarget {
     }
   }
 
-  /** Compute a rect from a placement specifier against the current viewport. */
+  /** Compute a rect from a placement specifier against the current workspace. */
   _placementRect(placement) {
     const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
     const vh = typeof window !== "undefined" ? window.innerHeight : 720;
-    const pad = 24;
     if (placement && typeof placement === "object") {
       if ("x" in placement) {
         return {
@@ -235,15 +310,20 @@ export class LayoutStore extends EventTarget {
         };
       }
       if (placement.slot) {
-        const r = slotBounds(placement.slot, vw, vh, pad);
+        // pad=0: docked windows sit flush against workspace edges.
+        const r = slotBounds(placement.slot);
         if (r) return r;
       }
     }
-    // Default cascade.
+    // Default cascade — open near the top-left of the workspace.
+    const ws =
+      typeof window !== "undefined" && window.__foyer?.workspaceRect
+        ? window.__foyer.workspaceRect()
+        : { top: 0, left: 0, right: vw, bottom: vh };
     const n = this._floating.length;
     return {
-      x: Math.min(vw - 560, 120 + n * 32),
-      y: Math.min(vh - 380, 120 + n * 32),
+      x: Math.min((ws.right ?? vw) - 560, (ws.left ?? 0) + 120 + n * 32),
+      y: Math.min((ws.bottom ?? vh) - 380, (ws.top ?? 0) + 120 + n * 32),
       w: 540,
       h: 360,
     };
@@ -302,14 +382,43 @@ export class LayoutStore extends EventTarget {
     this._emit();
   }
 
-  closeFocused() {
+  closeFocused(opts = {}) {
     if (!this.focusId) return;
     const next = Tree.removeNode(this.tree, this.focusId);
     if (next) {
       this.tree = next;
       this.focusId = Tree.leaves(next)[0]?.id || null;
+    } else if (opts.keepAlive) {
+      // Opt-in backfill when the caller specifically wants to guarantee
+      // a non-empty workspace. Default is to let the tree go empty and
+      // let the tile-container placeholder ("Workspace is empty — use
+      // the New menu") do its job.
+      this.tree = Tree.defaultTree();
+      this.focusId = Tree.leaves(this.tree)[0]?.id || null;
     } else {
-      // Never allow an empty tree — fall back to a fresh mixer.
+      this.tree = null;
+      this.focusId = null;
+    }
+    this._emit();
+  }
+
+  /**
+   * Low-level remove that mirrors `closeFocused({ allowEmpty: true })`
+   * without assuming the current focus — used by the tear-out pipeline
+   * which needs to remove an explicit leaf id and always permit emptiness.
+   */
+  removeLeaf(leafId, opts = { allowEmpty: true }) {
+    if (!leafId) return;
+    const next = Tree.removeNode(this.tree, leafId);
+    if (next) {
+      this.tree = next;
+      if (!Tree.leaves(next).some((l) => l.id === this.focusId)) {
+        this.focusId = Tree.leaves(next)[0]?.id || null;
+      }
+    } else if (opts.allowEmpty) {
+      this.tree = null;
+      this.focusId = null;
+    } else {
       this.tree = Tree.defaultTree();
       this.focusId = Tree.leaves(this.tree)[0]?.id || null;
     }

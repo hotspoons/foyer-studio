@@ -2,6 +2,8 @@ import { LitElement, html, css } from "lit";
 
 import { icon } from "../icons.js";
 import { cycleTheme, getTheme, onThemeChange, THEME_META } from "../theme.js";
+import { promptText } from "./prompt-modal.js";
+import "./main-menu.js";
 
 export class StatusBar extends LitElement {
   static properties = {
@@ -15,13 +17,24 @@ export class StatusBar extends LitElement {
   static styles = css`
     :host {
       display: flex;
-      align-items: center;
+      align-items: stretch;
       gap: 10px;
-      padding: 6px 14px;
+      padding: 0 14px;
       font-size: 11px;
       color: var(--color-text-muted);
       background: var(--color-surface);
       border-bottom: 1px solid var(--color-border);
+      position: relative;
+      /* Above floating tiles AND transport bar so the embedded
+       * <foyer-main-menu>'s dropdowns paint over everything below. */
+      z-index: 1300;
+      min-height: 34px;
+    }
+    .pad { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+    foyer-main-menu {
+      align-self: stretch;
+      /* Dropdowns inside main-menu use position:absolute relative to their
+       * own row and inherit our z-index stacking context. */
     }
     .brand {
       font-family: var(--font-sans);
@@ -172,17 +185,31 @@ export class StatusBar extends LitElement {
     `;
   }
 
-  _saveLayout = () => {
+  _saveLayout = async () => {
     const layout = window.__foyer?.layout;
     if (!layout) return;
     const id = layout.currentLayoutIdentity?.();
     // If the active baseline is a named layout, default to overwriting it.
     // If it's a preset, suggest `<preset>-custom`. Otherwise freeform.
     let suggestion;
-    if (id?.kind === "named") suggestion = id.name;
-    else if (id?.kind === "preset") suggestion = `${id.name}-custom`;
-    else suggestion = "my-layout";
-    const name = window.prompt("Save layout as:", suggestion);
+    let message;
+    if (id?.kind === "named") {
+      suggestion = id.name;
+      message = `Press Save to overwrite "${id.name}", or give it a new name to create a copy.`;
+    } else if (id?.kind === "preset") {
+      suggestion = `${id.name}-custom`;
+      message = `You've modified the "${id.name}" preset. Save as a new named layout:`;
+    } else {
+      suggestion = "my-layout";
+      message = "Name your current tile arrangement so you can recall it from the layout FAB.";
+    }
+    const name = (await promptText({
+      title: "Save layout",
+      message,
+      placeholder: "layout name…",
+      defaultValue: suggestion,
+      confirmLabel: "Save",
+    }))?.trim();
     if (!name) return;
     layout.saveNamed(name);
   };
@@ -199,30 +226,38 @@ export class StatusBar extends LitElement {
     const s = this.status || "idle";
     const meta = THEME_META[this._theme] || THEME_META.dim;
     return html`
-      <span class="brand">FOYER</span>
-      <span class="dot ${s}"></span>
-      <span class="label">${s}</span>
-      ${this._peers.length
-        ? html`<span
-            class="peers"
-            title=${this._peers.map((p) => p.origin).join(", ")}
-          >
-            <span class="peer-dot"></span>
-            ${this._peers.length} peer${this._peers.length === 1 ? "" : "s"}
-          </span>`
-        : null}
-      ${this._renderLayoutChip()}
-      <span class="spacer"></span>
-      ${this._fullscreen ? null : html`
-        <button title="Enter fullscreen" @click=${this._toggleFullscreen}>
-          ${icon("arrow-expand", 14)}
-          <span>Full</span>
+      <div class="pad">
+        <span class="brand">FOYER</span>
+        <span class="dot ${s}"></span>
+        <span class="label">${s}</span>
+        ${this._peers.length
+          ? html`<span
+              class="peers"
+              title=${this._peers.map((p) => p.origin).join(", ")}
+            >
+              <span class="peer-dot"></span>
+              ${this._peers.length} peer${this._peers.length === 1 ? "" : "s"}
+            </span>`
+          : null}
+        ${this._renderLayoutChip()}
+      </div>
+      <!-- DAW application menus (Session / Edit / Transport / Track / Plugin /
+           Settings) and the "New view" launcher share this row so we don't
+           burn a second row of chrome on a handful of buttons. -->
+      <foyer-main-menu></foyer-main-menu>
+      <div class="pad" style="margin-left:auto">
+        <button
+          title=${this._fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+          @click=${this._toggleFullscreen}
+        >
+          ${icon(this._fullscreen ? "arrow-collapse" : "arrow-expand", 14)}
+          <span>${this._fullscreen ? "Restore" : "Full"}</span>
         </button>
-      `}
-      <button title="Theme: ${meta.label}" @click=${this._toggleTheme}>
-        ${icon(meta.icon, 14)}
-        <span>${meta.label}</span>
-      </button>
+        <button title="Theme: ${meta.label}" @click=${this._toggleTheme}>
+          ${icon(meta.icon, 14)}
+          <span>${meta.label}</span>
+        </button>
+      </div>
     `;
   }
 }

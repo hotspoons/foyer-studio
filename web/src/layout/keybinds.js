@@ -41,10 +41,46 @@ export class Keybinds {
   }
 
   _onKey(e) {
-    if (!this._mod(e)) return;
-    // Ignore when typing into an input.
+    // Ignore when typing into an input. These checks gate BOTH the global
+    // transport keys below and the tiling chord set.
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+
+    // Global plugin-layer toggle: Ctrl+Shift+P hides/shows every plugin
+    // window at once. Lives outside the Ctrl+Alt chord family so it doesn't
+    // collide with the tiling keys.
+    if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey
+        && (e.key === "P" || e.key === "p")) {
+      e.preventDefault();
+      this.store.togglePluginFloats?.();
+      return;
+    }
+
+    // Global transport shortcuts:
+    //   Space      → toggle play/pause (DAW convention)
+    //   Ctrl+Space → toggle record
+    //
+    // These run OUTSIDE the Ctrl+Alt chord family so they work regardless of
+    // focus.
+    if ((e.key === " " || e.code === "Space") && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      const ws = window.__foyer?.ws;
+      if (!ws) return;
+      if (e.ctrlKey) {
+        ws.send({ type: "invoke_action", id: "transport.record" });
+      } else {
+        // Toggle playing: if currently playing, stop; else play.
+        const st = window.__foyer?.store?.state?.controls;
+        const playing = !!(st && st.get("transport.playing"));
+        ws.send({
+          type: "invoke_action",
+          id: playing ? "transport.stop" : "transport.play",
+        });
+      }
+      return;
+    }
+
+    if (!this._mod(e)) return;
     const k = e.key.toLowerCase();
     const mv = (dir) => {
       e.preventDefault();

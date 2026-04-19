@@ -149,6 +149,12 @@ pub enum Event {
     RegionUpdated {
         region: Region,
     },
+    /// A region was removed from the session. Clients should drop it from
+    /// their per-track region list.
+    RegionRemoved {
+        track_id: EntityId,
+        region_id: EntityId,
+    },
     /// Reply to `Command::ListWaveform` with pre-decimated peak data.
     WaveformData {
         peaks: WaveformPeaks,
@@ -229,6 +235,10 @@ pub enum Command {
     UpdateRegion {
         id: EntityId,
         patch: RegionPatch,
+    },
+    /// Remove a region from its track. Emits `RegionRemoved` on success.
+    DeleteRegion {
+        id: EntityId,
     },
     /// Ask for decimated peaks for `region_id` at the given resolution. The
     /// sidecar rounds the request to the nearest cached tier.

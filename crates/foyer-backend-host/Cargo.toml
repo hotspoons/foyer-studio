@@ -15,11 +15,12 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ne
 futures.workspace = true
 async-stream = "0.3"
 rmp-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 tempfile = "3"
-serde_json.workspace = true
 futures.workspace = true

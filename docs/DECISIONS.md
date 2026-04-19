@@ -253,7 +253,103 @@ probably want a top-rooted placement." Also unlocks 1/3 layouts that
 were technically present but practically unreachable under the
 smallest-area rule.
 
-## 12. Decisions live in this file, not in the conversation
+## 12. Plugin windows live on their own layer, not in floating-tiles
+
+**Date:** 2026-04-19
+
+**Decision:** Plugin parameter panels do **not** share the tile grid
+or the generic floating-window surface. They render on a dedicated
+[`<foyer-plugin-layer>`](/workspaces/foyer-studio/web/src/layout/plugin-layer.js)
+below the generic floating-tiles layer, with their own store state
+(`layout.pluginFloats()`, `layout.openPluginFloat()` etc.), their own
+auto-layout algorithm (shelf packing, see
+[`plugin-packer.js`](/workspaces/foyer-studio/web/src/layout/plugin-packer.js)),
+and a single global visibility toggle (Ctrl+Shift+P). Plugin floats
+never snap to slot presets — position is owned by the packer and
+computed fresh on every render. Users resize a plugin window's
+dimensions; (x,y) comes from the packer.
+
+**Alternatives considered:**
+- Plugin panels as another view type inside `floating-tiles`
+  (previous state — windows fought for space with mixer/timeline,
+  had to be slotted manually, and there was no single "hide all
+  plugins" gesture).
+- Plugin panels as docked-into-tiles content (too invasive to the
+  main workflow; mix view gets cluttered).
+- Plugin panels in the right-dock (one at a time, too cramped for
+  many-band EQs).
+
+**Why:** Every major DAW distinguishes plugin GUIs from core UI —
+Pro Tools' Plug-In Window Menu, Reaper's FX windows, Ableton's
+device view. The set of open plugin windows is part of the
+"working setup" separate from the workspace. Hiding all plugins to
+A/B a mix is a common gesture that needed a dedicated toggle, not
+N clicks. And auto-placement beats manual slotting for something
+the user opens dozens of times a session — Rich's framing: "like a
+3D slicer's auto-fill."
+
+**Implications:**
+- Saved layouts should record the set of open plugin IDs (not
+  positions) so layout-load restores the same working set. (TODO
+  — tracked in TODO.md.)
+- `floating-tiles` retains the old `plugin_panel` view type as a
+  dormant branch so users with legacy `floating[]` entries in
+  localStorage still render until they close and reopen.
+- Plugin windows have compact default sizes (320×360, tuned larger
+  for dense plugins) because "fit to content" is the expected UX —
+  they should never open at half the screen.
+
+## 13. Floating windows carry first-class relative/absolute semantics
+
+**Date:** 2026-04-19
+
+**Decision:** Every floating window has a `slot` field that is either
+a named slot id ("left-half", "tl", "center-third", …) or `null`. A
+non-null `slot` means the window's position and size are **relative**
+to the current workspace rect — whenever the workspace changes
+(dock opens, window resizes, screen rotates), `_reflowSlots()` recomputes
+the window's bounds from the slot's canonical function. A `null` slot
+means **absolute** — the window carries a fixed `(x, y, w, h)` that
+ignores workspace changes.
+
+Transitions between the two modes:
+
+- **Open from slot-picker / drop-zone / tear-out snap** → `slot = <id>`
+  (relative).
+- **Drag / resize within tolerance of a slot's canonical bounds** →
+  snap to that slot's bounds and keep `slot = <id>` (relative). The
+  tolerance is ~4% of workspace's shorter dimension, clamped 16–64 px.
+- **Drag / resize past every slot's tolerance** → `slot = null`
+  (absolute); the window now carries a literal rect.
+- **Explicit slot change via slot-picker / re-slot menu** → overrides
+  to the picked slot (relative).
+
+**Alternatives:** always absolute (every drag commits a literal rect —
+what we started with); always relative (user can never free-place a
+window); a mode toggle per window (hidden, high cognitive cost).
+
+**Why:** The user's mental model is binary — "this window is left-half
+(follows me around)" vs "this window is at (x,y) with (w,h)". Making
+the binary first-class means a dock-panel-open → right-half shrinks,
+a workspace resize → everything reflows, and dragging a window to
+left-two-thirds → it stays two-thirds. The tolerance-based transition
+means users don't need to understand a "mode toggle" — small drags
+keep the pin, big drags commit to absolute. This lines up with how
+Rectangle / Magnet / fancyWM work but applies to in-app windows, not
+OS windows.
+
+**Implementation notes:**
+- [`slotForRect(rect)`](/workspaces/foyer-studio/web/src/layout/slots.js)
+  resolves a rect back to the best matching slot id (or null).
+- [`floating-tiles.js`](/workspaces/foyer-studio/web/src/layout/floating-tiles.js)
+  calls it in the resize-move handler (per-frame, so you see live snap
+  to slot bounds during a compatible drag) and in the move-release
+  handler (one-shot, after the drop-zone check).
+- [`foyer:dock-resized`](/workspaces/foyer-studio/web/src/components/right-dock.js)
+  event fires on any right-dock width change; `_reflowSlots()` listens
+  and re-applies every slot-pinned window's bounds.
+
+## 14. Decisions live in this file, not in the conversation
 
 **Date:** 2026-04-19
 

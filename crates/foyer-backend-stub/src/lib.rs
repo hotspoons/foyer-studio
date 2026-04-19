@@ -262,6 +262,16 @@ impl Backend for StubBackend {
         Ok((meta, regions))
     }
 
+    async fn delete_region(&self, id: EntityId) -> Result<EntityId, BackendError> {
+        let track_id = {
+            let mut store = self.regions.lock().await;
+            store.delete(&id)
+        }
+        .ok_or_else(|| BackendError::Other(format!("unknown region {id}")))?;
+        self.waveforms.lock().await.clear_region(&id);
+        Ok(track_id)
+    }
+
     async fn update_region(
         &self,
         id: EntityId,

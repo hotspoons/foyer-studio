@@ -211,7 +211,7 @@ export class QuadrantFab extends LitElement {
     window.addEventListener("resize", this._onWindowResize);
     this._layoutHandler = () => this.requestUpdate();
     window.__foyer?.layout?.addEventListener("change", this._layoutHandler);
-    window.__foyer?.layout?.registerFab(this.storageKey, this._dockMeta());
+    window.__foyer?.layout?.registerFab(this.storageKey, this._dockMeta(), this);
     this._clamp();
   }
   disconnectedCallback() {
@@ -229,7 +229,7 @@ export class QuadrantFab extends LitElement {
   }
 
   _isOverRail(x, y) {
-    const rd = document.querySelector("foyer-right-dock");
+    const rd = window.__foyer?.rightDock;
     const r = rd?.railRect?.();
     return !!(r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
   }
@@ -308,7 +308,7 @@ export class QuadrantFab extends LitElement {
 
   /** Rendered as a pop-out sheet anchored to the right-dock rail when docked. */
   _renderDockedPanel() {
-    const rd = document.querySelector("foyer-right-dock");
+    const rd = window.__foyer?.rightDock;
     const rail = rd?.railRect?.();
     const right = rail ? window.innerWidth - rail.left + 8 : 60;
     const top = Math.max(16, this._dockIconTop || 120);
@@ -317,10 +317,33 @@ export class QuadrantFab extends LitElement {
     const style = `right:${right}px;top:${top}px;width:${w}px;height:${h}px`;
     return html`
       <div class="panel" style=${style} @click=${(e) => e.stopPropagation()}>
-        <header class="grip" style="cursor:default">${this._fabTitle}</header>
+        <header class="grip" style="cursor:default;display:flex;align-items:center;gap:8px">
+          <span style="flex:1">${this._fabTitle}</span>
+          <button
+            title="Undock — return to floating FAB"
+            @click=${() => this._undock()}
+            style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:10px;padding:2px 8px;cursor:pointer;font-family:var(--font-sans);letter-spacing:0.06em;text-transform:uppercase"
+          >Undock</button>
+          <button
+            title="Close"
+            @click=${() => this.closeFromDock()}
+            style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--color-text-muted);padding:2px 6px;cursor:pointer;font-size:14px;line-height:1"
+          >×</button>
+        </header>
         <div class="body">${this._renderPanelContent()}</div>
       </div>
     `;
+  }
+
+  /** Pop this FAB out of the rail and restore it to its last floating
+   *  position. Used by the Undock button in the docked-panel header. */
+  _undock() {
+    const layout = window.__foyer?.layout;
+    if (!layout) return;
+    layout.undockFab(this.storageKey);
+    this._open = false;
+    this._persist();
+    this.requestUpdate();
   }
 
   /** Called by the right-dock when the user clicks this FAB's rail icon. */
@@ -399,7 +422,7 @@ export class QuadrantFab extends LitElement {
       this._fabBottom = Math.max(0, Math.min(vh - FAB_SIZE, ds.origBottom - dy));
       // Rail hover highlight so the user can see the drop target.
       const over = this._isOverRail(ev.clientX, ev.clientY);
-      document.querySelector("foyer-right-dock")?.setDropHighlight?.(over);
+      window.__foyer?.rightDock?.setDropHighlight?.(over);
       this.requestUpdate();
     } else if (this._resizeState) {
       const rs = this._resizeState;
@@ -424,11 +447,11 @@ export class QuadrantFab extends LitElement {
         this._toggle();
       } else if (ev && this._isOverRail(ev.clientX, ev.clientY)) {
         // Drop over the right-dock rail → dock.
-        document.querySelector("foyer-right-dock")?.setDropHighlight?.(false);
+        window.__foyer?.rightDock?.setDropHighlight?.(false);
         window.__foyer?.layout?.dockFab(this.storageKey);
         this._open = false;
       } else {
-        document.querySelector("foyer-right-dock")?.setDropHighlight?.(false);
+        window.__foyer?.rightDock?.setDropHighlight?.(false);
       }
       this._persist();
       this.requestUpdate();

@@ -49,6 +49,18 @@ impl RegionStore {
         }
         None
     }
+
+    /// Remove the region with the given id. Returns the track id it was on
+    /// if found; `None` otherwise.
+    pub fn delete(&mut self, id: &EntityId) -> Option<EntityId> {
+        for (track_key, list) in self.by_track.iter_mut() {
+            if let Some(pos) = list.iter().position(|r| r.id == *id) {
+                list.remove(pos);
+                return Some(EntityId::new(track_key.clone()));
+            }
+        }
+        None
+    }
 }
 
 fn synthesize_for(track_id: &EntityId) -> Vec<Region> {

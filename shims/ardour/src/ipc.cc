@@ -5,17 +5,95 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "ardour/session.h"
 #include "pbd/error.h"
 
 #include "surface.h"
 
 namespace ArdourSurface {
+
+namespace {
+
+/// Ensure `dir` exists (mkdir -p style, single level). No-op if it already
+/// exists. Returns true on success.
+bool
+ensure_dir (const std::string& dir)
+{
+	struct stat st {};
+	if (::stat (dir.c_str (), &st) == 0) {
+		return S_ISDIR (st.st_mode);
+	}
+	if (::mkdir (dir.c_str (), 0700) == 0) return true;
+	return errno == EEXIST;
+}
+
+/// Compute the discovery directory + per-pid socket filename per the header's
+/// resolution rules. Returns `{ socket_path, advert_path }`.
+std::pair<std::string, std::string>
+default_paths ()
+{
+	std::string dir;
+	if (const char* xdg = std::getenv ("XDG_RUNTIME_DIR"); xdg && *xdg) {
+		dir = std::string (xdg) + "/foyer";
+	} else {
+		dir = "/tmp/foyer";
+	}
+	ensure_dir (dir);
+	const pid_t pid = ::getpid ();
+	std::ostringstream sp, ap;
+	sp << dir << "/ardour-" << pid << ".sock";
+	ap << dir << "/ardour-" << pid << ".json";
+	return { sp.str (), ap.str () };
+}
+
+std::string
+iso8601_now ()
+{
+	using namespace std::chrono;
+	auto t = system_clock::to_time_t (system_clock::now ());
+	char buf[32];
+	std::strftime (buf, sizeof (buf), "%Y-%m-%dT%H:%M:%SZ", gmtime (&t));
+	return buf;
+}
+
+std::string
+json_escape (const std::string& s)
+{
+	std::string out;
+	out.reserve (s.size () + 2);
+	for (char c : s) {
+		switch (c) {
+			case '"':  out += "\\\""; break;
+			case '\\': out += "\\\\"; break;
+			case '\n': out += "\\n";  break;
+			case '\r': out += "\\r";  break;
+			case '\t': out += "\\t";  break;
+			default:
+				if (static_cast<unsigned char> (c) < 0x20) {
+					char esc[8];
+					std::snprintf (esc, sizeof (esc), "\\u%04x", (unsigned int) c);
+					out += esc;
+				} else {
+					out += c;
+				}
+		}
+	}
+	return out;
+}
+
+} // namespace
 
 IpcServer::IpcServer (FoyerShim& s)
     : _shim (s)
@@ -32,6 +110,19 @@ IpcServer::start ()
 {
 	if (_running.exchange (true)) {
 		return;
+	}
+
+	// Resolve the path per the header contract:
+	//   explicit > env > $XDG_RUNTIME_DIR/foyer/ardour-<pid>.sock
+	if (!_explicit_path) {
+		if (const char* env = std::getenv ("FOYER_SOCK_PATH"); env && *env) {
+			_socket_path = env;
+			_advert_path.clear ();
+		} else {
+			auto [sp, ap] = default_paths ();
+			_socket_path = sp;
+			_advert_path = ap;
+		}
 	}
 
 	// Remove any stale socket file.
@@ -61,6 +152,23 @@ IpcServer::start ()
 		return;
 	}
 	_fd_listen = fd;
+
+	// Write the advertisement file so sidecars can discover us by scanning
+	// the directory. Best-effort — a failure here is not fatal.
+	if (!_advert_path.empty ()) {
+		std::string session_name;
+		try { session_name = _shim.session ().snap_name (); } catch (...) {}
+		std::ofstream out (_advert_path);
+		if (out) {
+			out << "{\n"
+			    << "  \"socket\":  \"" << json_escape (_socket_path) << "\",\n"
+			    << "  \"pid\":     " << ::getpid () << ",\n"
+			    << "  \"session\": \"" << json_escape (session_name) << "\",\n"
+			    << "  \"started\": \"" << iso8601_now () << "\"\n"
+			    << "}\n";
+		}
+	}
+
 	_io_thread = std::thread ([this] { io_loop (); });
 }
 
@@ -78,6 +186,7 @@ IpcServer::stop ()
 		_io_thread.join ();
 	}
 	::unlink (_socket_path.c_str ());
+	if (!_advert_path.empty ()) ::unlink (_advert_path.c_str ());
 }
 
 bool

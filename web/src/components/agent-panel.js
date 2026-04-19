@@ -13,6 +13,7 @@
 import { LitElement, html, css, nothing } from "lit";
 import { icon } from "../icons.js";
 import "./agent-settings-modal.js";
+import { scrollbarStyles } from "../shared-styles.js";
 
 const FAB_SIZE = 48;
 const GAP = 8;
@@ -54,6 +55,7 @@ export class AgentPanel extends LitElement {
   };
 
   static styles = css`
+    ${scrollbarStyles}
     :host { display: contents; }
 
     /* FAB — gradient accent, always on top, draggable. */
@@ -281,13 +283,17 @@ export class AgentPanel extends LitElement {
     // room for conversation turns.
     this._onLayoutChange = () => this.requestUpdate();
     window.__foyer?.layout?.addEventListener("change", this._onLayoutChange);
-    window.__foyer?.layout?.registerFab(this.storageKey, {
-      label: "Agent",
-      icon: "sparkles",
-      accent: "accent",
-      expandsRail: true,
-      dockWidth: 400,
-    });
+    window.__foyer?.layout?.registerFab(
+      this.storageKey,
+      {
+        label: "Agent",
+        icon: "sparkles",
+        accent: "accent",
+        expandsRail: true,
+        dockWidth: 400,
+      },
+      this,
+    );
   }
   disconnectedCallback() {
     window.removeEventListener("pointermove", this._onWindowPointerMove);
@@ -304,7 +310,7 @@ export class AgentPanel extends LitElement {
   }
 
   _isOverRail(x, y) {
-    const rd = document.querySelector("foyer-right-dock");
+    const rd = window.__foyer?.rightDock;
     const r = rd?.railRect?.();
     return !!(r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
   }
@@ -361,7 +367,7 @@ export class AgentPanel extends LitElement {
       this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
       this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
       // Hint the dock that a drop here would dock the agent.
-      document.querySelector("foyer-right-dock")
+      window.__foyer?.rightDock
         ?.setDropHighlight?.(this._isOverRail(ev.clientX, ev.clientY));
       this.requestUpdate();
     } else if (this._dragState?.kind === "panel-header") {
@@ -390,7 +396,7 @@ export class AgentPanel extends LitElement {
       const ds = this._dragState;
       const wasMoved = ds.moved;
       this._dragState = null;
-      document.querySelector("foyer-right-dock")?.setDropHighlight?.(false);
+      window.__foyer?.rightDock?.setDropHighlight?.(false);
       if (!wasMoved) {
         this._toggle();
       } else if (ev && this._isOverRail(ev.clientX, ev.clientY)) {
@@ -562,7 +568,7 @@ export class AgentPanel extends LitElement {
    * turns get readable line length.
    */
   _renderDockedPanel() {
-    const rd = document.querySelector("foyer-right-dock");
+    const rd = window.__foyer?.rightDock;
     const rail = rd?.railRect?.();
     const right = rail ? window.innerWidth - rail.left + 8 : 60;
     const top = Math.max(16, this._dockIconTop || 120);

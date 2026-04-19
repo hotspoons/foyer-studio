@@ -3,6 +3,7 @@
 // populates its menus into actions shows up here.
 
 import { LitElement, html, css } from "lit";
+import { icon } from "../icons.js";
 
 // Category → menu label + order. Categories not listed are skipped.
 const MENU_ORDER = [
@@ -13,6 +14,16 @@ const MENU_ORDER = [
   { cat: "track",     label: "Track"     },
   { cat: "plugin",    label: "Plugin"    },
   { cat: "settings",  label: "Settings"  },
+];
+
+// A built-in "Launch" menu that spawns views into the workspace. Lives in
+// the top menu bar (always reachable — can't be covered by a floating window
+// because the top chrome has a higher z-index than floating tiles).
+const LAUNCH_VIEWS = [
+  { view: "mixer",    label: "Mixer",    icon: "adjustments-horizontal" },
+  { view: "timeline", label: "Timeline", icon: "list-bullet" },
+  { view: "plugins",  label: "Plugins",  icon: "puzzle-piece" },
+  { view: "session",  label: "Session",  icon: "folder-open" },
 ];
 
 export class MainMenu extends LitElement {
@@ -28,7 +39,12 @@ export class MainMenu extends LitElement {
       background: var(--color-surface);
       border-bottom: 1px solid var(--color-border);
       position: relative;
-      z-index: 500;
+      /* Above floating tiles (z-index:900+) AND above the transport bar
+       * (z-index:1200) so dropdowns from Session/Edit/etc. hang down OVER
+       * the transport instead of getting clipped behind it. Siblings in
+       * the top chrome at the same z-index were losing the tie to the
+       * later-rendered transport bar. */
+      z-index: 1300;
     }
     .btn {
       background: transparent;
@@ -75,6 +91,42 @@ export class MainMenu extends LitElement {
     }
     .item:hover .shortcut { color: rgba(255,255,255,0.85); }
     .item.disabled { opacity: 0.4; cursor: default; }
+
+    .btn.launch {
+      display: inline-flex; align-items: center;
+      color: var(--color-accent-3);
+      font-weight: 600;
+    }
+    .btn.launch:hover, .btn.launch.open {
+      background: color-mix(in oklab, var(--color-accent) 12%, transparent);
+      color: #fff;
+    }
+    .dropdown.launch-drop { min-width: 260px; }
+    .menu-heading {
+      padding: 6px 10px 2px;
+      font-size: 9px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+    }
+    .launch-item .icon-chip {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px;
+      border-radius: 6px;
+      background: color-mix(in oklab, var(--color-accent) 15%, transparent);
+      color: var(--color-accent-3);
+      flex: 0 0 auto;
+    }
+    .launch-item .hint {
+      font-size: 9px;
+      color: var(--color-text-muted);
+      opacity: 0.6;
+    }
+    .launch-item:hover .icon-chip {
+      background: rgba(255,255,255,0.18);
+      color: #fff;
+    }
+    .launch-item:hover .hint { color: rgba(255,255,255,0.8); opacity: 1; }
   `;
 
   constructor() {
@@ -83,7 +135,15 @@ export class MainMenu extends LitElement {
     this._openMenu = "";
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
     this._onDocDown = (e) => {
-      if (!this.renderRoot.host.contains(e.target)) this._openMenu = "";
+      if (!this._openMenu) return;
+      // We live inside foyer-app's shadow root; at document level `ev.target`
+      // retargets past OUR shadow boundary and lands on <foyer-app>, which
+      // isn't a descendant of this element. `composedPath()` still contains
+      // every real node between target and document — if *we* are on the
+      // path, the click was inside our menu and we should stay open.
+      const path = e.composedPath ? e.composedPath() : [];
+      if (path.includes(this)) return;
+      this._openMenu = "";
     };
   }
 
@@ -121,12 +181,74 @@ export class MainMenu extends LitElement {
 
   render() {
     return html`
+      ${this._renderLaunchMenu()}
       ${MENU_ORDER.map(({ cat, label }) => {
         const items = this._byCategory(cat);
         if (!items.length) return null;
         return this._renderMenu(cat, label, items);
       })}
     `;
+  }
+
+  /**
+   * Built-in "Launch" menu. Always present, never obscured by floating
+   * windows — the answer to "where's the button to make a new tile when the
+   * one that spawned this window is covered?"
+   *
+   * Click an item: open that view as a floating window at the user's sticky
+   * slot (or center if no sticky). Shift-click: open as a tile split below
+   * the currently focused tile. Drag an item out to tear it into a floating
+   * window at the cursor.
+   */
+  _renderLaunchMenu() {
+    const open = this._openMenu === "__launch__";
+    return html`
+      <button class="btn launch ${open ? 'open' : ''}"
+              title="Launch a view — click to open, shift-click to tile"
+              @click=${() => { this._openMenu = open ? "" : "__launch__"; }}>
+        ${icon("plus", 12)}
+        <span style="margin-left:4px">New</span>
+      </button>
+      ${open ? html`
+        <div class="dropdown launch-drop" style="left:0">
+          <div class="menu-heading">Launch view</div>
+          ${LAUNCH_VIEWS.map(v => html`
+            <div class="item launch-item"
+                 @click=${(ev) => this._launchView(v.view, ev)}
+                 @contextmenu=${(ev) => this._launchWithPicker(v.view, ev)}>
+              <span class="icon-chip">${icon(v.icon, 12)}</span>
+              <span class="label">${v.label}</span>
+              <span class="hint">click · shift-click tiles · right-click picks slot</span>
+            </div>
+          `)}
+        </div>
+      ` : null}
+    `;
+  }
+
+  _launchView(view, ev) {
+    this._openMenu = "";
+    const layout = window.__foyer?.layout;
+    if (!layout) return;
+    if (ev?.shiftKey) {
+      // Shift-click → split the focused tile below with this view.
+      layout.split("column", view);
+      return;
+    }
+    // Default → float at the view's sticky slot, or center if none.
+    layout.openFloating(view);
+  }
+
+  _launchWithPicker(view, ev) {
+    ev.preventDefault();
+    this._openMenu = "";
+    const layout = window.__foyer?.layout;
+    if (!layout) return;
+    const id = layout.openFloating(view);
+    setTimeout(() => {
+      const ft = window.__foyer?.floatingTiles;
+      if (ft) ft._slotPickerFor = id;
+    }, 0);
   }
 
   _renderMenu(cat, label, items) {

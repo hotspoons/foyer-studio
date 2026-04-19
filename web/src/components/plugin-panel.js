@@ -14,6 +14,7 @@ import { LitElement, html, css } from "lit";
 
 import "./param-control.js";
 import { icon } from "../icons.js";
+import { scrollbarStyles } from "../shared-styles.js";
 
 export class PluginPanel extends LitElement {
   static properties = {
@@ -26,6 +27,7 @@ export class PluginPanel extends LitElement {
   };
 
   static styles = css`
+    ${scrollbarStyles}
     :host {
       display: flex;
       flex-direction: column;

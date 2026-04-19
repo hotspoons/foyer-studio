@@ -1,0 +1,274 @@
+// Plugin-float layer — a dedicated window surface for plugin parameter panels.
+//
+// Per DECISIONS.md #12: plugin windows are architecturally separate from the
+// tile grid and from generic floating-tiles. They don't participate in slot
+// snapping; they auto-place themselves via the packer. A global show/hide
+// toggle hides every plugin window at once — useful for A/Bing a mix
+// without closing every plugin by hand.
+//
+// Position model: plugin floats carry only `{ plugin_id, w, h }` in the
+// store. Actual (x,y) is computed fresh on every render via `packShelves`
+// so a layout save→load reproduces positions deterministically without
+// having to serialize them.
+//
+// Drag to resize: each window has corner handles that update its `w`/`h`
+// through `layout.setPluginFloatSize()`. Dragging to MOVE is intentionally
+// disabled — moving breaks the packer's tidy fill. If you want a plugin
+// window somewhere specific, the right gesture is to rearrange open
+// plugins (future: drag-to-reorder their shelf position).
+
+import { LitElement, html, css } from "lit";
+import { icon } from "../icons.js";
+import { showContextMenu } from "../components/context-menu.js";
+import { scrollbarStyles } from "../shared-styles.js";
+
+import "../components/plugin-panel.js";
+
+import { packShelves, heuristicSize } from "./plugin-packer.js";
+
+export class PluginLayer extends LitElement {
+  static properties = {
+    store: { type: Object },
+    _entries: { state: true, type: Array },
+    _visible: { state: true, type: Boolean },
+    _placed: { state: true, type: Array },
+  };
+
+  static styles = css`
+    ${scrollbarStyles}
+    :host {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      /* Just below the generic floating-tiles layer (900) so system
+       * windows (mixer, timeline, session) float ABOVE plugin windows
+       * when present — matches every other DAW's layering. */
+      z-index: 850;
+    }
+    :host([hidden]) { display: none; }
+
+    .pwin {
+      position: absolute;
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-panel);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      pointer-events: auto;
+      transition: left 0.18s ease, top 0.18s ease, width 0.12s ease, height 0.12s ease;
+    }
+    .pwin:hover {
+      border-color: color-mix(in oklab, var(--color-accent) 40%, var(--color-border));
+    }
+    header {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 8px;
+      background: var(--color-surface-elevated);
+      border-bottom: 1px solid var(--color-border);
+      user-select: none;
+      cursor: default;
+    }
+    header .label {
+      flex: 1; min-width: 0;
+      font-family: var(--font-sans);
+      font-size: 10px; font-weight: 600;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--color-text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    header button {
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      color: var(--color-text-muted);
+      padding: 2px 5px;
+      font-size: 10px;
+      cursor: pointer;
+      height: 20px;
+      display: inline-flex; align-items: center;
+    }
+    header button:hover { color: var(--color-text); border-color: var(--color-border); }
+
+    .body { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
+
+    .h.se {
+      position: absolute;
+      right: 0; bottom: 0;
+      width: 14px; height: 14px;
+      cursor: nwse-resize;
+      z-index: 2;
+    }
+    .h.se::after {
+      content: "";
+      position: absolute; right: 2px; bottom: 2px;
+      width: 8px; height: 8px;
+      border-right: 2px solid var(--color-text-muted);
+      border-bottom: 2px solid var(--color-text-muted);
+      border-bottom-right-radius: 2px;
+    }
+  `;
+
+  constructor() {
+    super();
+    this._entries = [];
+    this._placed = [];
+    this._visible = true;
+    this._onChange = () => this._refresh();
+    this._onResize = () => this._repack();
+    this._onDataChange = () => this.requestUpdate();
+    this._onDockResized = () => this._repack();
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this.store?.addEventListener("change", this._onChange);
+    window.addEventListener("resize", this._onResize);
+    window.addEventListener("foyer:dock-resized", this._onDockResized);
+    window.__foyer?.store?.addEventListener("change", this._onDataChange);
+    this._refresh();
+  }
+  disconnectedCallback() {
+    this.store?.removeEventListener("change", this._onChange);
+    window.removeEventListener("resize", this._onResize);
+    window.removeEventListener("foyer:dock-resized", this._onDockResized);
+    window.__foyer?.store?.removeEventListener("change", this._onDataChange);
+    super.disconnectedCallback();
+  }
+
+  _refresh() {
+    this._entries = this.store?.pluginFloats?.() || [];
+    this._visible = this.store?.pluginFloatsVisible?.() ?? true;
+    this._repack();
+  }
+
+  _repack() {
+    const ws = window.__foyer?.workspaceRect?.() || {
+      top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight,
+      width: window.innerWidth, height: window.innerHeight,
+    };
+    // Reserve a little margin on each side so plugin windows don't sit flush
+    // against docked system windows.
+    const pad = 8;
+    this._placed = packShelves(
+      this._entries.map((e) => ({ id: e.plugin_id, w: e.w, h: e.h })),
+      { x: ws.left + pad, y: ws.top + pad, w: Math.max(0, ws.width - 2 * pad), h: Math.max(0, ws.height - 2 * pad) },
+      { gap: 8 },
+    );
+  }
+
+  render() {
+    if (!this._visible) {
+      this.setAttribute("hidden", "");
+      return html``;
+    }
+    this.removeAttribute("hidden");
+    return html`
+      ${this._placed.map((p) => this._renderWindow(p))}
+    `;
+  }
+
+  _renderWindow(p) {
+    const info = this._locatePlugin(p.id);
+    const label = info ? `${info.trackName} · ${info.plugin.name}` : "Plugin";
+    const style = `left:${p.x}px;top:${p.y}px;width:${p.w}px;height:${p.h}px`;
+    return html`
+      <div class="pwin"
+           style=${style}
+           @contextmenu=${(ev) => this._contextMenu(ev, p.id)}>
+        <header>
+          <span class="label">${label}</span>
+          <button title="Close plugin window"
+                  @click=${() => this.store.closePluginFloat(p.id)}>
+            ${icon("x-mark", 12)}
+          </button>
+        </header>
+        <div class="body">
+          ${info
+            ? html`<foyer-plugin-panel
+                .plugin=${info.plugin}
+                .trackName=${info.trackName}
+              ></foyer-plugin-panel>`
+            : html`<div style="padding:20px;color:var(--color-text-muted)">
+                Plugin no longer in session.
+              </div>`}
+        </div>
+        <div class="h se"
+             @pointerdown=${(ev) => this._startResize(ev, p)}></div>
+      </div>
+    `;
+  }
+
+  _locatePlugin(pluginId) {
+    const session = window.__foyer?.store?.state?.session;
+    if (!session) return null;
+    for (const t of session.tracks || []) {
+      for (const pi of t.plugins || []) {
+        if (pi.id === pluginId) return { plugin: pi, trackName: t.name };
+      }
+    }
+    return null;
+  }
+
+  _contextMenu(ev, plugin_id) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    showContextMenu(ev, [
+      { heading: this._locatePlugin(plugin_id)?.plugin?.name ?? "Plugin" },
+      {
+        label: this._visible ? "Hide all plugin windows" : "Show all plugin windows",
+        icon: this._visible ? "eye-slash" : "eye",
+        shortcut: "Ctrl+Shift+P",
+        action: () => this.store.togglePluginFloats(),
+      },
+      {
+        label: "Re-pack windows",
+        icon: "arrow-path",
+        action: () => this._repack(),
+      },
+      { separator: true },
+      {
+        label: "Close plugin window",
+        icon: "x-mark",
+        tone: "danger",
+        action: () => this.store.closePluginFloat(plugin_id),
+      },
+    ]);
+  }
+
+  _startResize(ev, placed) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const entry = this._entries.find((e) => e.plugin_id === placed.id);
+    if (!entry) return;
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const startW = entry.w;
+    const startH = entry.h;
+    const move = (e) => {
+      const nw = Math.max(180, startW + (e.clientX - startX));
+      const nh = Math.max(160, startH + (e.clientY - startY));
+      this.store.setPluginFloatSize(placed.id, nw, nh);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+}
+customElements.define("foyer-plugin-layer", PluginLayer);
+
+/**
+ * Helper used by outside code (plugin-strip, command palette) to open a
+ * plugin float using the layer's auto-sizing heuristic. Handles the
+ * "already open — just raise / do nothing" case.
+ */
+export function openPluginFloat(pluginInstance) {
+  const layout = window.__foyer?.layout;
+  if (!layout || !pluginInstance?.id) return;
+  if (!layout.pluginFloatsVisible()) layout.setPluginFloatsVisible(true);
+  const size = heuristicSize(pluginInstance);
+  layout.openPluginFloat(pluginInstance.id, size);
+}

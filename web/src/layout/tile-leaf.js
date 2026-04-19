@@ -6,6 +6,7 @@ import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 
 import { VIEWS } from "../components/nav-bar.js";
+import { showContextMenu } from "../components/context-menu.js";
 
 // Import every view that can live inside a tile.
 import "../components/mixer.js";
@@ -234,8 +235,11 @@ export class TileLeaf extends LitElement {
 
   _close(ev) {
     ev.stopPropagation();
-    this.store?.focus(this.leaf.id);
-    this.store?.closeFocused();
+    // Removing the last tile should leave the workspace empty — the
+    // "Workspace is empty · use New menu" placeholder renders then.
+    // Without allowEmpty the store backfills with a fresh mixer, which
+    // is indistinguishable to the user from "close didn't work."
+    this.store?.removeLeaf(this.leaf.id, { allowEmpty: true });
   }
 
   /** Apply the selected view to whatever action the menu was opened for. */
@@ -264,6 +268,56 @@ export class TileLeaf extends LitElement {
   }
 
   /**
+   * Right-click anywhere in the tile (header or body) pops a rescue menu.
+   * Essential when the title-bar buttons are hard to hit, and the
+   * desktop-environment framing means native right-click should never
+   * surface browser chrome.
+   */
+  _onContextMenu(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    this.store?.focus(this.leaf.id);
+    const items = [
+      { heading: VIEW_CATALOG.get(this.leaf.view)?.label || this.leaf.view },
+      {
+        label: "Change view…",
+        icon: "adjustments-horizontal",
+        action: () => { this._menuMode = "swap"; this.requestUpdate(); },
+      },
+      { separator: true },
+      {
+        label: "Split right as…",
+        icon: "split-right",
+        action: () => { this._menuMode = "split-row"; this.requestUpdate(); },
+      },
+      {
+        label: "Split below as…",
+        icon: "split-below",
+        action: () => { this._menuMode = "split-column"; this.requestUpdate(); },
+      },
+      { separator: true },
+      {
+        label: "Float (detach)",
+        icon: "arrow-top-right-on-square",
+        action: () => this._float(),
+      },
+      {
+        label: "Dock to slot…",
+        icon: "squares-2x2",
+        action: () => this._dockTarget(),
+      },
+      { separator: true },
+      {
+        label: "Close tile",
+        icon: "x-mark",
+        tone: "danger",
+        action: () => this.store?.closeFocused(),
+      },
+    ];
+    showContextMenu(ev, items);
+  }
+
+  /**
    * Dock-target: detach the tile to a floating window and immediately open
    * the slot picker so the user can pick where it lands. Two-click flow —
    * click the dock icon, then click the slot.
@@ -277,7 +331,7 @@ export class TileLeaf extends LitElement {
     if (!id) return;
     // Defer one tick so the floating window mounts, then prompt for the slot.
     setTimeout(() => {
-      const ft = document.querySelector("foyer-floating-tiles");
+      const ft = window.__foyer?.floatingTiles;
       if (ft) ft._slotPickerFor = id;
     }, 0);
   }
@@ -331,8 +385,10 @@ export class TileLeaf extends LitElement {
       w,
       h,
     };
-    this.store?.focus(this.leaf.id);
-    this.store?.closeFocused();
+    // Tear-out path: remove the leaf and ALLOW the tree to be empty. The
+    // default backfill-with-mixer used to kick in here, which looked like
+    // "the window I dragged duplicated itself in place."
+    this.store?.removeLeaf(this.leaf.id, { allowEmpty: true });
     const id = this.store?.openFloating(view, props, placement);
     if (!id) return;
 
@@ -357,7 +413,7 @@ export class TileLeaf extends LitElement {
       const snap = zones.currentSlot();
       zones.hide();
       if (snap) {
-        const rect = slotBounds(snap, window.innerWidth, window.innerHeight, 24);
+        const rect = slotBounds(snap);
         if (rect) {
           this.store.floatSet(id, { ...rect, slot: snap });
           try {
@@ -376,6 +432,7 @@ export class TileLeaf extends LitElement {
       <header
         @click=${() => this._focus()}
         @pointerdown=${(e) => this._headerDown(e)}
+        @contextmenu=${(e) => this._onContextMenu(e)}
       >
         <button @click=${(e) => this._openMenu("swap", e)}
                 title="Change view">
@@ -401,7 +458,9 @@ export class TileLeaf extends LitElement {
         <span class="spacer"></span>
         <button @click=${this._close} title="Close tile">${icon("close", 12)}</button>
       </header>
-      <div class="body" @pointerdown=${() => this._focus()}>
+      <div class="body"
+           @pointerdown=${() => this._focus()}
+           @contextmenu=${(e) => this._onContextMenu(e)}>
         ${this._renderBody(meta)}
       </div>
       ${this._menuMode ? this._renderMenu() : null}
@@ -506,7 +565,7 @@ export class TileLeaf extends LitElement {
       const snap = zones.currentSlot();
       zones.hide();
       if (snap) {
-        const rect = slotBounds(snap, window.innerWidth, window.innerHeight, 24);
+        const rect = slotBounds(snap);
         if (rect) {
           this.store.floatSet(id, { ...rect, slot: snap });
           try { localStorage.setItem(`foyer.layout.sticky.${view}`, snap); } catch {}

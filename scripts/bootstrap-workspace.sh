@@ -10,7 +10,23 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FOYER_REPO="https://github.com/foyer-studio/foyer-studio.git"
-ARDOUR_REPO="https://github.com/Ardour/ardour.git"
+# Ardour lives on a fork with two small patches on top of upstream that the
+# Foyer shim needs at build time (see the foyer-studio-integration branch).
+# Upstream remains at https://github.com/Ardour/ardour.git — we keep that as
+# a secondary remote named `upstream` for pulling new work.
+ARDOUR_REPO="https://github.com/hotspoons/zzz-forks-ardour.git"
+ARDOUR_BRANCH="foyer-studio-integration"
+ARDOUR_UPSTREAM="https://github.com/Ardour/ardour.git"
+
+# Clone ardour into $1 on the $ARDOUR_BRANCH branch, with upstream wired up.
+clone_ardour() {
+    local dest="$1"
+    git clone --branch "$ARDOUR_BRANCH" "$ARDOUR_REPO" "$dest"
+    git -C "$dest" remote add upstream "$ARDOUR_UPSTREAM" 2>/dev/null || true
+    echo "  ardour branch:   $(git -C "$dest" rev-parse --abbrev-ref HEAD)"
+    echo "  ardour origin:   $(git -C "$dest" remote get-url origin)"
+    echo "  ardour upstream: $(git -C "$dest" remote get-url upstream)"
+}
 
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║     Foyer Studio - Workspace Bootstrap                         ║"
@@ -44,10 +60,15 @@ if [ -f "$SCRIPT_DIR/../foyer-studio.code-workspace" ]; then
 
     if [ -d "$ARDOUR_DIR" ]; then
         echo "✅ ardour already exists at: $ARDOUR_DIR"
+        current_branch="$(git -C "$ARDOUR_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+        if [ "$current_branch" != "$ARDOUR_BRANCH" ]; then
+            echo "   (on branch '$current_branch' — foyer builds expect '$ARDOUR_BRANCH';"
+            echo "    switch manually when ready: cd $ARDOUR_DIR && git checkout $ARDOUR_BRANCH)"
+        fi
     else
         echo "ardour not found at: $ARDOUR_DIR"
-        echo ">>> Cloning ardour as a sibling..."
-        git clone "$ARDOUR_REPO" "$ARDOUR_DIR"
+        echo ">>> Cloning ardour fork + checking out $ARDOUR_BRANCH..."
+        clone_ardour "$ARDOUR_DIR"
         echo "✅ ardour cloned"
     fi
 
@@ -100,8 +121,8 @@ if [ -d "$WORKSPACE_DIR" ]; then
     fi
 
     if [ "$FOYER_EXISTS" = true ] && [ "$ARDOUR_EXISTS" = false ]; then
-        echo ">>> Cloning ardour..."
-        git clone "$ARDOUR_REPO" "$WORKSPACE_DIR/ardour"
+        echo ">>> Cloning ardour fork on $ARDOUR_BRANCH..."
+        clone_ardour "$WORKSPACE_DIR/ardour"
     elif [ "$FOYER_EXISTS" = false ] && [ "$ARDOUR_EXISTS" = true ]; then
         echo ">>> Cloning foyer-studio..."
         git clone "$FOYER_REPO" "$WORKSPACE_DIR/foyer-studio"
@@ -124,8 +145,8 @@ if [ ! -d "$WORKSPACE_DIR" ]; then
     echo ">>> Cloning foyer-studio"
     git clone "$FOYER_REPO" "$WORKSPACE_DIR/foyer-studio"
 
-    echo ">>> Cloning ardour"
-    git clone "$ARDOUR_REPO" "$WORKSPACE_DIR/ardour"
+    echo ">>> Cloning ardour fork on $ARDOUR_BRANCH"
+    clone_ardour "$WORKSPACE_DIR/ardour"
 fi
 
 echo ""

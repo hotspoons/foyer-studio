@@ -104,7 +104,15 @@ export class ContextMenu extends LitElement {
     this._submenu = -1;
     this._onDoc = (ev) => {
       if (!this._open) return;
-      if (!this.renderRoot.querySelector(".menu")?.contains(ev.target)) this.hide();
+      // We live in a shadow root, so the top-level `ev.target` is the host —
+      // `.menu.contains(host)` is always false which would make us dismiss
+      // on every click including our own items. Use composedPath() so shadow-
+      // DOM nodes on the way to the target are visible.
+      const menu = this.renderRoot?.querySelector(".menu");
+      if (!menu) return;
+      const path = ev.composedPath ? ev.composedPath() : [];
+      if (path.includes(menu)) return;
+      this.hide();
     };
     this._onKey = (ev) => {
       if (!this._open) return;

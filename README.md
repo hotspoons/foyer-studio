@@ -91,18 +91,38 @@ just shim-e2e                    # headless hardour + shim + foyer-cli
 
 ### Keyboard quick reference
 
+Global tiling bindings (modifier is `Ctrl+Alt`; Mac users can swap to
+`Cmd+Alt` by setting `foyer.keymap.mod = "meta-alt"` in localStorage):
+
 | Keys | Action |
 |---|---|
-| `Ctrl+Alt H/J/K/L` | Focus tile left / down / up / right |
-| `Ctrl+Alt |` · `Ctrl+Alt -` | Split focused tile right / below (pops view picker) |
-| `Ctrl+Alt W` | Close focused tile |
-| `Ctrl+Alt [` · `Ctrl+Alt ]` | Shrink / grow focused tile |
-| `Ctrl+Alt A` | Toggle automation panel |
-| `Ctrl/Cmd K` | Command palette |
-| *(your chords)* | Assigned via right-click → "Assign keybind" in the layout FAB |
+| `Ctrl+Alt` + `H` / `J` / `K` / `L` | Focus tile left / down / up / right (arrow keys also work) |
+| `Ctrl+Alt` + `\|` or `\` | Split focused tile to the right (duplicates current view) |
+| `Ctrl+Alt` + `-` or `_` | Split focused tile below (duplicates current view) |
+| `Ctrl+Alt` + `W` | Close focused tile |
+| `Ctrl+Alt` + `[` / `]` | Shrink / grow focused pane by 5% |
+| `Ctrl+Alt` + `A` | Toggle automation panel |
+| `Ctrl/Cmd` + `K` | Command palette |
+| *(your chords)* | Per-layout, assigned via right-click → "Assign keybind…" in the layouts FAB |
 
-Wheel over the timeline scrolls temporal zoom; Alt- or Ctrl-wheel
-changes the lane height of the track under the pointer.
+Keyboard splits duplicate the focused view; mouse-clicking the split
+icons in the tile header pops a view picker so you can choose what
+goes in the new pane. Two UIs, one data model.
+
+Inside the automation panel:
+
+| Keys | Action |
+|---|---|
+| `Ctrl/Cmd` + `S` | Save and apply the current script |
+| `Escape` | Close panel (unsaved buffer is kept) |
+
+Mouse / gesture:
+
+- Wheel over the timeline scrolls temporal zoom (anchored at the pointer).
+- `Alt` or `Ctrl` + wheel over a timeline lane changes that lane's height.
+- Drag a tile header past 8 px to tear it into a floating window.
+- Drag a floating window's header over the right rail to dock it as an icon.
+- Right-click anything in the layouts FAB for assign-keybind / hide / delete.
 
 ## Project layout
 

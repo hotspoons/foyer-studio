@@ -8,6 +8,7 @@
 import { LitElement, html, css } from "lit";
 import "./track-strip.js";
 import { DENSITIES, loadMixerSettings, saveMixerSettings } from "../mixer-density.js";
+import { scrollbarStyles } from "../shared-styles.js";
 
 export class Mixer extends LitElement {
   static properties = {
@@ -18,6 +19,7 @@ export class Mixer extends LitElement {
   };
 
   static styles = css`
+    ${scrollbarStyles}
     :host { display: flex; flex: 1 1 auto; flex-direction: column; overflow: hidden; background: var(--color-surface); }
     .toolbar {
       display: flex; align-items: center; gap: 8px;

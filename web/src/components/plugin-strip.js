@@ -9,6 +9,7 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
+import { openPluginFloat } from "../layout/plugin-layer.js";
 
 export class PluginStrip extends LitElement {
   static properties = {
@@ -152,22 +153,17 @@ export class PluginStrip extends LitElement {
   }
 
   _openPanel(p) {
-    const layout = window.__foyer?.layout;
-    if (!layout) return;
-    layout.openFloating("plugin_panel", { plugin_id: p.id });
+    // Plugin windows live on their own auto-layout layer — they are NOT
+    // floating-tiles. See docs/DECISIONS.md #12.
+    openPluginFloat(p);
   }
 
   _onContextMenu(ev, p) {
     ev.preventDefault();
-    // Right-click opens the panel and immediately prompts for a slot.
-    const layout = window.__foyer?.layout;
-    if (!layout) return;
-    const id = layout.openFloating("plugin_panel", { plugin_id: p.id });
-    // Defer one tick so the floating window exists, then open the slot picker.
-    setTimeout(() => {
-      const ft = document.querySelector("foyer-floating-tiles");
-      if (ft) ft._slotPickerFor = id;
-    }, 0);
+    // Right-click still just opens (no slot picker — plugin layer doesn't
+    // use slots). Future: show close/minimize/hide-all in a context menu
+    // when the plugin is already open.
+    openPluginFloat(p);
   }
 
   _addSlot() {

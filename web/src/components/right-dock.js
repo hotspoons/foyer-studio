@@ -4,6 +4,7 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
+import { scrollbarStyles } from "../shared-styles.js";
 
 const KEY = "foyer.rightdock.v1";
 
@@ -34,6 +35,7 @@ export class RightDock extends LitElement {
   };
 
   static styles = css`
+    ${scrollbarStyles}
     :host {
       display: flex;
       height: 100%;
@@ -152,12 +154,17 @@ export class RightDock extends LitElement {
     }
     window.__foyer?.store?.addEventListener("change", this._storeHandler);
     window.__foyer?.layout?.addEventListener("change", this._layoutHandler);
+    // Expose self on the global so shadow-DOM-hidden siblings (FABs,
+    // tile-leaf tear-outs) can call methods on us without trying to
+    // querySelector past a shadow root boundary.
+    if (window.__foyer) window.__foyer.rightDock = this;
     this._refreshMinimized();
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     window.__foyer?.store?.removeEventListener("change", this._storeHandler);
     window.__foyer?.layout?.removeEventListener("change", this._layoutHandler);
+    if (window.__foyer?.rightDock === this) window.__foyer.rightDock = null;
     super.disconnectedCallback();
   }
 
@@ -170,6 +177,16 @@ export class RightDock extends LitElement {
   railRect() {
     const rail = this.renderRoot?.querySelector(".rail");
     return rail ? rail.getBoundingClientRect() : null;
+  }
+
+  /**
+   * Rect of the ENTIRE right-dock surface, rail + expanded panel +
+   * anything else we render. The workspace uses this to compute the
+   * usable area — when the dock's panel opens, the workspace shrinks,
+   * and docked floats re-flow to match.
+   */
+  outerRect() {
+    return this.getBoundingClientRect();
   }
 
   setDropHighlight(on) {
@@ -197,6 +214,16 @@ export class RightDock extends LitElement {
     save({ open: this._open, width: this._width, panel: this._panel });
   }
 
+  /** Fire after any change that affects how much horizontal space the
+   *  dock consumes, so layouts that reserve the workspace rect can
+   *  reflow on this tick. */
+  _announceDockChanged() {
+    this.dispatchEvent(
+      new CustomEvent("resize", { bubbles: true, composed: true })
+    );
+    window.dispatchEvent(new CustomEvent("foyer:dock-resized"));
+  }
+
   _toggle(panel) {
     if (this._open && this._panel === panel) {
       this._open = false;
@@ -206,7 +233,7 @@ export class RightDock extends LitElement {
     }
     this._updateAttrs();
     this._persist();
-    this.dispatchEvent(new CustomEvent("resize", { bubbles: true, composed: true }));
+    this._announceDockChanged();
   }
 
   _startResize(ev) {
@@ -216,12 +243,15 @@ export class RightDock extends LitElement {
     const move = (e) => {
       const dx = startX - e.clientX;
       this._width = Math.max(200, Math.min(600, startW + dx));
+      // Announce mid-drag so slot-clamped floats ride the resize live
+      // instead of only snapping into the new size on release.
+      this._announceDockChanged();
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       this._persist();
-      this.dispatchEvent(new CustomEvent("resize", { bubbles: true, composed: true }));
+      this._announceDockChanged();
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -272,8 +302,8 @@ export class RightDock extends LitElement {
         ({ id, meta }) => html`
           <button
             class="dock-icon fab-dock"
-            title="${meta.label || id} — click to open · right-click to undock"
-            @click=${(ev) => this._onFabIconClick(ev, id)}
+            title="${meta.label || id} — click to open · drag off rail to undock · right-click menu"
+            @pointerdown=${(ev) => this._onFabIconPointerDown(ev, id)}
             @contextmenu=${(ev) => this._onFabIconContext(ev, id)}
           >
             ${icon(meta.icon || "squares-2x2", 16)}
@@ -283,30 +313,79 @@ export class RightDock extends LitElement {
     `;
   }
 
-  _onFabIconClick(ev, id) {
-    const top = ev.currentTarget.getBoundingClientRect().top;
-    // Find the FAB component that registered this id.
-    const fab = this._findFabInstance(id);
-    fab?.toggleFromDock?.(top);
+  /**
+   * Unified pointer handler: a small drag is a click (open panel); a
+   * big drag off the rail tears the FAB out as a floating button again.
+   */
+  _onFabIconPointerDown(ev, id) {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const iconTop = ev.currentTarget.getBoundingClientRect().top;
+    const TEAR_THRESHOLD = 18;
+    let tore = false;
+
+    const move = (e) => {
+      if (tore) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      // Drag left off the rail (dx < -threshold) or any distance past
+      // threshold squared → tear out.
+      if (dx < -TEAR_THRESHOLD || dx * dx + dy * dy > TEAR_THRESHOLD * TEAR_THRESHOLD) {
+        tore = true;
+        cleanup();
+        this._tearFabFromRail(id, e.clientX, e.clientY);
+      }
+    };
+    const up = () => {
+      if (!tore) {
+        // It was a tap — open the FAB's panel just like before.
+        const fab = window.__foyer?.layout?.fabInstance?.(id);
+        fab?.toggleFromDock?.(iconTop);
+      }
+      cleanup();
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  /**
+   * Undock a rail FAB and position it at the cursor, ready for the user to
+   * continue dragging via the FAB's own pointer flow. Kept simple: undock,
+   * set the FAB's position near the cursor, restore visible FAB state.
+   */
+  _tearFabFromRail(id, x, y) {
+    const layout = window.__foyer?.layout;
+    if (!layout) return;
+    const fab = layout.fabInstance?.(id);
+    layout.undockFab(id);
+    if (!fab) return;
+    // Place the FAB approximately under the cursor. Its internal state
+    // uses (right, bottom) anchors so translate from (x, y).
+    const size = 48;
+    const right = Math.max(8, window.innerWidth - x - size / 2);
+    const bottom = Math.max(8, window.innerHeight - y - size / 2);
+    fab._fabRight = right;
+    fab._fabBottom = bottom;
+    fab._open = false;
+    fab._persist?.();
+    fab.requestUpdate?.();
   }
 
   _onFabIconContext(ev, id) {
     ev.preventDefault();
-    // Right-click undocks, popping the FAB back to its last free position.
+    // Right-click undocks and closes the popup. Same as drag-off but via
+    // keyboard-friendly gesture.
     window.__foyer?.layout?.undockFab(id);
-    const fab = this._findFabInstance(id);
+    const fab = window.__foyer?.layout?.fabInstance?.(id);
     fab?.closeFromDock?.();
-  }
-
-  _findFabInstance(storageKey) {
-    // Scan custom elements that extend QuadrantFab by their `storageKey`.
-    const candidates = document.querySelectorAll("*");
-    for (const el of candidates) {
-      if (el.storageKey === storageKey && typeof el.toggleFromDock === "function") {
-        return el;
-      }
-    }
-    return null;
   }
 
   _labelFor(e) {

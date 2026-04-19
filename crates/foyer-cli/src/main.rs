@@ -6,9 +6,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use foyer_backend_host::HostBackend;
+use foyer_backend_host::{discovery, HostBackend};
 use foyer_backend_stub::StubBackend;
 use foyer_server::{Config, Server};
 
@@ -31,9 +31,17 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:3838")]
         listen: SocketAddr,
 
-        /// Path to the shim's Unix domain socket (required for `--backend=host`).
-        #[arg(long, default_value = "/tmp/foyer.sock")]
-        socket: PathBuf,
+        /// Path to the shim's Unix domain socket. If omitted with
+        /// `--backend=host`, we scan `$XDG_RUNTIME_DIR/foyer/` (or
+        /// `/tmp/foyer/`) for advertised shims and pick the single live one.
+        /// Use `--list-shims` to see what's discovered without connecting.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+
+        /// Print discovered shims and exit without starting the server.
+        /// Useful when multiple Ardour instances are running.
+        #[arg(long, default_value_t = false)]
+        list_shims: bool,
 
         /// Directory of static web assets. Defaults to `./web` if it exists.
         #[arg(long)]
@@ -67,16 +75,41 @@ async fn main() -> Result<()> {
             backend,
             listen,
             socket,
+            list_shims,
             web_root,
             jail,
-        } => serve(backend, listen, socket, web_root, jail).await,
+        } => {
+            if list_shims {
+                return list_available_shims();
+            }
+            serve(backend, listen, socket, web_root, jail).await
+        }
     }
+}
+
+fn list_available_shims() -> Result<()> {
+    let shims = discovery::scan();
+    if shims.is_empty() {
+        println!("no live shims found in {}", discovery::discovery_dir().display());
+        return Ok(());
+    }
+    println!("Available shims (most recent first):");
+    for s in shims {
+        println!(
+            "  {}  pid={} session={:?} started={}",
+            s.socket.display(),
+            s.pid,
+            s.session,
+            s.started,
+        );
+    }
+    Ok(())
 }
 
 async fn serve(
     backend: Backend,
     listen: SocketAddr,
-    socket: PathBuf,
+    socket: Option<PathBuf>,
     web_root: Option<PathBuf>,
     jail: Option<PathBuf>,
 ) -> Result<()> {
@@ -100,9 +133,17 @@ async fn serve(
             server.run(config).await?;
         }
         Backend::Host => {
-            let backend = HostBackend::connect(socket.clone())
+            let resolved = match socket {
+                Some(p) => p,
+                None => discovery::pick_single()
+                    .map_err(|e| anyhow!(e))
+                    .with_context(|| "no --socket given and discovery failed")?
+                    .socket,
+            };
+            let backend = HostBackend::connect(resolved.clone())
                 .await
-                .with_context(|| format!("connect to shim at {}", socket.display()))?;
+                .with_context(|| format!("connect to shim at {}", resolved.display()))?;
+            tracing::info!("connected to shim at {}", resolved.display());
             let server = Server::new(backend);
             server.run(config).await?;
         }

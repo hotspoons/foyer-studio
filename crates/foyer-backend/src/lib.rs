@@ -106,6 +106,11 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Region, BackendError> {
         Err(BackendError::Other("update_region not supported".into()))
     }
+    /// Remove a region from its track. Returns the track id the region was
+    /// on (so the server can emit `RegionRemoved { track_id, region_id }`).
+    async fn delete_region(&self, _id: EntityId) -> Result<EntityId, BackendError> {
+        Err(BackendError::Other("delete_region not supported".into()))
+    }
     async fn load_waveform(
         &self,
         _region_id: EntityId,

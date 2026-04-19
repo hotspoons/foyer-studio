@@ -269,6 +269,28 @@ async fn dispatch_command(
                 .await;
             }
         },
+        Command::DeleteRegion { id } => {
+            let region_id = id.clone();
+            match state.backend.delete_region(id).await {
+                Ok(track_id) => {
+                    broadcast_event(
+                        state,
+                        Event::RegionRemoved { track_id, region_id },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "delete_region_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
         Command::ListWaveform { region_id, samples_per_peak } => {
             match state.backend.load_waveform(region_id, samples_per_peak).await {
                 Ok(peaks) => broadcast_event(state, Event::WaveformData { peaks }).await,

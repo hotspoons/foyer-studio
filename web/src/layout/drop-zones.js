@@ -16,23 +16,37 @@
 
 import { SLOT_PRESETS, slotBounds } from "./slots.js";
 
-// Drop targets organized by band. Hit-testing picks from the band that
-// matches the pointer's vertical position, so dragging in the middle of the
-// viewport surfaces full-height thirds/columns instead of quadrants.
+// Drop targets organized by (vertical band × horizontal band). The pointer's
+// position picks which cluster is live; inside each cluster we walk in
+// priority order and take the first containing target.
 //
-// - `top`    : pointer is in the top 25% → quadrants + top-half
-// - `middle` : pointer is in the middle 50% → full-height columns
-// - `bottom` : pointer is in the bottom 25% → quadrants + bottom-half
+// Vertical bands:
+//   · `top`    : pointer in top 25%    → quadrants + top-half
+//   · `bottom` : pointer in bottom 25% → quadrants + bottom-half
+//   · `middle` : pointer in middle 50% → full-height columns
 //
-// The `full` target is always available as a final fallback.
-const BAND_TARGETS = {
-  top:    ["tl", "tr", "top-half", "left-half", "right-half", "full"],
-  middle: ["left-third", "center-third", "right-third", "left-half", "right-half", "full"],
-  bottom: ["bl", "br", "bottom-half", "left-half", "right-half", "full"],
+// Horizontal bands (only consulted in the `middle` vertical band, where
+// left/right halves and thirds compete for the same pixel space):
+//   · `left-edge`  : x in outer 20% on the left   → left-half
+//   · `right-edge` : x in outer 20% on the right  → right-half
+//   · `center`     : everything else              → thirds
+//
+// `full` is the final fallback everywhere.
+const TOP_TARGETS = ["tl", "tr", "top-half", "left-half", "right-half", "full"];
+const BOTTOM_TARGETS = ["bl", "br", "bottom-half", "left-half", "right-half", "full"];
+
+const MIDDLE_TARGETS = {
+  "left-edge":  ["left-half", "left-third", "full"],
+  "right-edge": ["right-half", "right-third", "full"],
+  "center":     ["left-third", "center-third", "right-third", "full"],
 };
 
 /** Union of everything we might render. */
-const ALL_TARGETS = Array.from(new Set(Object.values(BAND_TARGETS).flat()));
+const ALL_TARGETS = Array.from(new Set([
+  ...TOP_TARGETS,
+  ...BOTTOM_TARGETS,
+  ...Object.values(MIDDLE_TARGETS).flat(),
+]));
 
 class DropZonesOverlay {
   constructor() {
@@ -53,11 +67,8 @@ class DropZonesOverlay {
       display: "none",
     });
 
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const pad = 24;
     for (const id of ALL_TARGETS) {
-      const b = slotBounds(id, vw, vh, pad);
+      const b = slotBounds(id);
       if (!b) continue;
       const cell = document.createElement("div");
       const meta = SLOT_PRESETS.find((x) => x.id === id);
@@ -109,11 +120,8 @@ class DropZonesOverlay {
 
   /** Rebuild positions if the viewport changed. */
   _relayout() {
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const pad = 24;
     for (const [id, cell] of this.highlights) {
-      const b = slotBounds(id, vw, vh, pad);
+      const b = slotBounds(id);
       if (!b) continue;
       cell.style.left = b.x + "px";
       cell.style.top = b.y + "px";
@@ -124,16 +132,30 @@ class DropZonesOverlay {
 
   /** Drive from pointermove — returns the currently-highlighted slot id (or null). */
   update(x, y) {
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const pad = 24;
+    const ws = typeof window !== "undefined" && window.__foyer?.workspaceRect
+      ? window.__foyer.workspaceRect()
+      : { top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight,
+          width: window.innerWidth, height: window.innerHeight };
 
-    // Which band is the pointer in? Top/bottom 25% → quadrant-style;
-    // middle 50% → full-height columns.
-    const topEdge = vh * 0.25;
-    const bottomEdge = vh * 0.75;
-    const band = y < topEdge ? "top" : y > bottomEdge ? "bottom" : "middle";
-    const priorities = BAND_TARGETS[band];
+    // Vertical band within the WORKSPACE (not the full viewport) — so the
+    // top chrome isn't mistaken for the bottom half of the drop area.
+    const topEdge = ws.top + ws.height * 0.25;
+    const bottomEdge = ws.top + ws.height * 0.75;
+    let priorities;
+    if (y < topEdge) {
+      priorities = TOP_TARGETS;
+    } else if (y > bottomEdge) {
+      priorities = BOTTOM_TARGETS;
+    } else {
+      // Middle band — horizontal sub-band decides half-vs-third.
+      const leftHalfEdge = ws.left + ws.width * 0.2;
+      const rightHalfEdge = ws.left + ws.width * 0.8;
+      const hBand =
+        x < leftHalfEdge ? "left-edge" :
+        x > rightHalfEdge ? "right-edge" :
+        "center";
+      priorities = MIDDLE_TARGETS[hBand];
+    }
 
     // Dim everything that's not in this band so the user sees only the
     // relevant options.
@@ -155,7 +177,7 @@ class DropZonesOverlay {
     // First in priority order that contains (x,y).
     let best = null;
     for (const id of priorities) {
-      const b = slotBounds(id, vw, vh, pad);
+      const b = slotBounds(id);
       if (!b) continue;
       if (x < b.x || x > b.x + b.w) continue;
       if (y < b.y || y > b.y + b.h) continue;

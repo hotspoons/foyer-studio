@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 mod client;
+pub mod discovery;
 
 use std::path::PathBuf;
 use std::sync::Arc;

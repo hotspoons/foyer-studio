@@ -11,6 +11,7 @@ import { Keybinds } from "./layout/keybinds.js";
 import "./layout/tile-container.js";
 import "./layout/tile-leaf.js";
 import "./layout/floating-tiles.js";
+import "./layout/plugin-layer.js";
 
 import "./components/status-bar.js";
 import "./components/transport-bar.js";
@@ -102,6 +103,47 @@ export class FoyerApp extends LitElement {
       ws: this.ws,
       store: this.store,
       layout: this.layout,
+      // Usable area for docking/slot placement: below the top chrome and to
+      // the left of the right-dock. Called by slots.js + drop-zones.js so
+      // docked windows never overlap the top bars or the right rail.
+      workspaceRect: () => this._workspaceRect(),
+    };
+  }
+
+  /**
+   * Returns the rectangle inside which floating windows should live when
+   * docked to a slot. Fallbacks to the full viewport if the DOM isn't
+   * ready yet (pre-first-paint).
+   */
+  _workspaceRect() {
+    const main = this.renderRoot?.querySelector(".main");
+    if (main) {
+      const r = main.getBoundingClientRect();
+      // Reserve the FULL right-dock width — rail + any expanded panel +
+      // any docked-FAB pop-out that's currently visible. The right-dock is
+      // "hallowed ground" (per Rich's framing): a window clamped to
+      // left-half must shrink if the right-dock grows. Using the dock's
+      // host bounding rect captures rail-only, rail+panel, rail+panel+
+      // docked-FAB-sheet — whatever is open at the moment.
+      const rd = window.__foyer?.rightDock;
+      const dockRect = rd?.outerRect ? rd.outerRect() : null;
+      const rightEdge = dockRect ? dockRect.left : r.right;
+      return {
+        top: r.top,
+        left: r.left,
+        right: rightEdge,
+        bottom: r.bottom,
+        width: rightEdge - r.left,
+        height: r.bottom - r.top,
+      };
+    }
+    return {
+      top: 0,
+      left: 0,
+      right: window.innerWidth,
+      bottom: window.innerHeight,
+      width: window.innerWidth,
+      height: window.innerHeight,
     };
   }
 
@@ -134,7 +176,6 @@ export class FoyerApp extends LitElement {
   render() {
     return html`
       <foyer-status-bar .status=${this._status}></foyer-status-bar>
-      <foyer-main-menu></foyer-main-menu>
       <foyer-transport-bar></foyer-transport-bar>
       <div class="main">
         <div class="workspace">
@@ -145,6 +186,7 @@ export class FoyerApp extends LitElement {
         </div>
         <foyer-right-dock @resize=${() => this.requestUpdate()}></foyer-right-dock>
       </div>
+      <foyer-plugin-layer .store=${this.layout}></foyer-plugin-layer>
       <foyer-floating-tiles .store=${this.layout}></foyer-floating-tiles>
       <foyer-agent-panel></foyer-agent-panel>
       <foyer-layout-fab .store=${this.layout}></foyer-layout-fab>

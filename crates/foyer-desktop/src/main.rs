@@ -44,9 +44,11 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Backend::Stub)]
         backend: Backend,
 
-        /// Shim UDS path (only meaningful for `--backend=host`).
-        #[arg(long, default_value = "/tmp/foyer.sock")]
-        socket: PathBuf,
+        /// Shim UDS path (only meaningful for `--backend=host`). If omitted,
+        /// discovery scans `$XDG_RUNTIME_DIR/foyer/` and picks the single
+        /// live shim.
+        #[arg(long)]
+        socket: Option<PathBuf>,
 
         /// Address to bind the embedded server to. Default loopback-only;
         /// pass `0.0.0.0:<port>` to also accept browser/remote-client connections.
@@ -94,7 +96,12 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_host(backend: Backend, socket: PathBuf, listen: SocketAddr, fullscreen: bool) -> Result<()> {
+fn run_host(
+    backend: Backend,
+    socket: Option<PathBuf>,
+    listen: SocketAddr,
+    fullscreen: bool,
+) -> Result<()> {
     // Spin up a Tokio runtime for the server; bind and grab the real port before
     // starting the WebView so we can tell it where to connect.
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -123,13 +130,24 @@ fn run_host(backend: Backend, socket: PathBuf, listen: SocketAddr, fullscreen: b
                 server.run(config).await
             }
             Backend::Host => {
-                let b = match HostBackend::connect(socket.clone()).await {
+                let resolved = match socket {
+                    Some(p) => p,
+                    None => match foyer_backend_host::discovery::pick_single() {
+                        Ok(ad) => ad.socket,
+                        Err(e) => {
+                            tracing::error!("shim discovery failed: {e}");
+                            return;
+                        }
+                    },
+                };
+                let b = match HostBackend::connect(resolved.clone()).await {
                     Ok(b) => b,
                     Err(e) => {
-                        tracing::error!("connect to shim at {}: {e}", socket.display());
+                        tracing::error!("connect to shim at {}: {e}", resolved.display());
                         return;
                     }
                 };
+                tracing::info!("connected to shim at {}", resolved.display());
                 let server = Server::new(b);
                 server.run(config).await
             }

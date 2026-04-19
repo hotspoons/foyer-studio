@@ -39,8 +39,21 @@ namespace foyer_ipc {
 /// AbstractUI request queue).
 using IpcFrameHandler = std::function<void(foyer_ipc::FrameKind, const std::vector<std::uint8_t>&)>;
 
-/// Single-connection UDS server. Listens on `_socket_path`, accepts exactly one
-/// sidecar at a time (re-accepts if the current client disconnects).
+/// Single-connection UDS server. Listens on `_socket_path`, accepts exactly
+/// one sidecar at a time (re-accepts if the current client disconnects).
+///
+/// Default path is per-session / per-process so multiple Ardour instances
+/// can run concurrently without colliding. Resolution order on `start()`:
+///
+///   1. `set_socket_path()` if the caller provided one explicitly.
+///   2. `$FOYER_SOCK_PATH` env var.
+///   3. `$XDG_RUNTIME_DIR/foyer/ardour-<pid>.sock`  (preferred).
+///   4. `/tmp/foyer/ardour-<pid>.sock`              (fallback when no XDG).
+///
+/// Alongside the socket we write a small advertisement file at
+///   `<dir>/ardour-<pid>.json`
+/// with `{ "socket": "...", "pid": N, "session": "...", "started": "..." }`
+/// so sidecars can discover running shims by scanning the directory.
 class IpcServer
 {
 public:
@@ -50,8 +63,17 @@ public:
 	void start ();
 	void stop ();
 
-	/// Override the socket path. Must be called before `start()`.
-	void set_socket_path (const std::string& p) { _socket_path = p; }
+	/// Override the socket path. Must be called before `start()`; beats env
+	/// vars and defaults. Pass an empty string to re-enable auto-resolution.
+	void set_socket_path (const std::string& p)
+	{
+		_socket_path = p;
+		_explicit_path = !p.empty ();
+	}
+
+	/// The path the server is actually listening on. Only meaningful after
+	/// `start()` has resolved the default path.
+	std::string resolved_path () const { return _socket_path; }
 
 	/// Register the frame handler. Overwrites any existing handler.
 	void on_frame (IpcFrameHandler h) { _handler = std::move (h); }
@@ -70,7 +92,9 @@ public:
 
 private:
 	FoyerShim& _shim;
-	std::string _socket_path { "/tmp/foyer.sock" };
+	std::string _socket_path;       ///< resolved on start(); see header doc.
+	std::string _advert_path;       ///< `<dir>/ardour-<pid>.json`, removed on stop.
+	bool        _explicit_path { false };
 
 	std::atomic<bool> _running { false };
 	std::atomic<int>  _fd_listen { -1 };

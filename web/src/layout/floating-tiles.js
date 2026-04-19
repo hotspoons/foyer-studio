@@ -11,6 +11,7 @@
 // Minimized floats show as square FABs on the right edge.
 
 import { LitElement, html, css } from "lit";
+import { repeat } from "lit/directives/repeat.js";
 import { icon } from "../icons.js";
 
 // Stub for rendering the same views the tile-leaf knows how to render.
@@ -22,8 +23,39 @@ import "../components/plugin-panel.js";
 import "./text-preview.js";
 import "./slot-picker.js";
 
-import { slotBounds } from "./slots.js";
+import { slotBounds, slotForRect, SLOT_PRESETS, SLOT_SHORTCUTS } from "./slots.js";
 import { dropZones } from "./drop-zones.js";
+import { showContextMenu } from "../components/context-menu.js";
+
+/** Usable workspace rect — below top chrome, left of right-dock. */
+function workspaceRect() {
+  const fn = window.__foyer?.workspaceRect;
+  if (typeof fn === "function") {
+    const r = fn();
+    if (r && r.width > 0 && r.height > 0) return r;
+  }
+  return {
+    top: 0, left: 0,
+    right: window.innerWidth, bottom: window.innerHeight,
+    width: window.innerWidth, height: window.innerHeight,
+  };
+}
+
+/**
+ * Clamp a window so at least the header strip and a thumb-width of body
+ * stay reachable inside the workspace. Prevents the "window is off-screen
+ * and I can't click its close button" trap.
+ */
+function clampToWorkspace(rect) {
+  const ws = workspaceRect();
+  const headerStrip = 28;
+  const minVisibleX = 40;
+  const w = Math.min(rect.w, ws.width);
+  const h = Math.min(rect.h, ws.height);
+  const x = Math.max(ws.left - (w - minVisibleX), Math.min(ws.right - minVisibleX, rect.x));
+  const y = Math.max(ws.top, Math.min(ws.bottom - headerStrip, rect.y));
+  return { x, y, w, h };
+}
 
 const VIEW_LABELS = {
   mixer: "Mixer",
@@ -80,13 +112,21 @@ export class FloatingTiles extends LitElement {
       color: var(--color-text);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    header .slot-tag {
+    header .slot-tag-btn {
       font-size: 9px;
       font-family: var(--font-mono);
       padding: 1px 6px;
       border: 1px solid var(--color-border);
       border-radius: var(--radius-sm);
       color: var(--color-text-muted);
+      background: transparent;
+      cursor: pointer;
+      height: 20px;
+    }
+    header .slot-tag-btn:hover {
+      color: var(--color-text);
+      border-color: var(--color-accent);
+      background: color-mix(in oklab, var(--color-accent) 12%, transparent);
     }
     header button {
       background: transparent;
@@ -157,9 +197,49 @@ export class FloatingTiles extends LitElement {
     this._entries = [];
     this._slotPickerFor = null;
     this._onChange = () => this._refresh();
-    this._onResize = () => this._refresh();
+    this._onResize = () => {
+      // Browser viewport changed (half-screen ↔ full-screen on an
+      // ultrawide, window resize, rotate). Re-flow every slot-pinned
+      // window AND clamp every absolute window back inside the new
+      // workspace so nothing lands off-screen.
+      this._reflowSlots();
+      this._clampAllFloats();
+      this._refresh();
+    };
     // Plugin panels render live session data; re-render on snapshot arrival.
     this._onDataChange = () => this.requestUpdate();
+    // Right-dock width changed → any window pinned to a slot should
+    // re-compute its bounds against the new workspace rect.
+    this._onDockResized = () => this._reflowSlots();
+
+    // Click-to-raise. Inline `@pointerdown` on `.window` works most of the
+    // time but fails when a deeply-nested child (fader, track strip,
+    // etc.) lives in its own shadow root and the pointerdown gets absorbed
+    // before the outer `.window` sees it. This document-level capture
+    // listener walks the composed event path looking for a `.window`
+    // element from our shadow root, and raises whichever window's entry
+    // it belongs to. Guaranteed to fire before child handlers.
+    this._onDocPointerDown = (ev) => this._handleRaise(ev);
+  }
+
+  /**
+   * Find the `.window` element on the event's composed path that belongs
+   * to THIS floating-tiles shadow root, and raise the corresponding
+   * floating entry to the top of the z-stack.
+   */
+  _handleRaise(ev) {
+    if (ev.button !== 0) return;
+    const path = ev.composedPath ? ev.composedPath() : [];
+    const myMenu = this.renderRoot;
+    for (const n of path) {
+      if (!n || !n.classList) continue;
+      if (n.classList.contains("window") && myMenu?.contains(n)) {
+        // data-float-id set in the render; fallback to DOM order if missing.
+        const fid = n.getAttribute("data-float-id");
+        if (fid) this.store?.raiseFloat(fid);
+        return;
+      }
+    }
   }
 
   connectedCallback() {
@@ -167,13 +247,54 @@ export class FloatingTiles extends LitElement {
     this.store?.addEventListener("change", this._onChange);
     window.addEventListener("resize", this._onResize);
     window.__foyer?.store?.addEventListener("change", this._onDataChange);
+    // Click-to-raise listener — document-level capture beats whatever
+    // child absorbs the pointerdown before it reaches our .window handler.
+    document.addEventListener("pointerdown", this._onDocPointerDown, true);
+    window.addEventListener("foyer:dock-resized", this._onDockResized);
+    // Expose on the global so shadow-DOM-hidden components can call
+    // us without document.querySelector piercing.
+    if (window.__foyer) window.__foyer.floatingTiles = this;
     this._refresh();
   }
   disconnectedCallback() {
     this.store?.removeEventListener("change", this._onChange);
     window.removeEventListener("resize", this._onResize);
     window.__foyer?.store?.removeEventListener("change", this._onDataChange);
+    document.removeEventListener("pointerdown", this._onDocPointerDown, true);
+    window.removeEventListener("foyer:dock-resized", this._onDockResized);
+    if (window.__foyer?.floatingTiles === this) window.__foyer.floatingTiles = null;
     super.disconnectedCallback();
+  }
+
+  /**
+   * Re-apply any window's slot to the current workspace rect. Called when
+   * the right-dock's width changes OR the viewport resizes — a window
+   * pinned to "left-half" must shrink if the dock panel opens, and grow
+   * back when it closes; both should also follow a browser resize from
+   * half-screen to full-screen on an ultrawide.
+   */
+  _reflowSlots() {
+    const entries = this.store?.floating?.() || [];
+    for (const e of entries) {
+      if (!e.slot) continue;
+      const rect = slotBounds(e.slot);
+      if (rect) this.store.floatSet(e.id, { ...rect });
+    }
+  }
+
+  /** Clamp every floating window back inside the current workspace rect.
+   *  For absolute windows, preserves their size if it fits and nudges x/y
+   *  back on-screen. Keeps slot-pinned windows alone — `_reflowSlots()`
+   *  already handled those. */
+  _clampAllFloats() {
+    const entries = this.store?.floating?.() || [];
+    for (const e of entries) {
+      if (e.slot) continue;
+      const r = clampToWorkspace({ x: e.x, y: e.y, w: e.w, h: e.h });
+      if (r.x !== e.x || r.y !== e.y || r.w !== e.w || r.h !== e.h) {
+        this.store.floatSet(e.id, r);
+      }
+    }
   }
 
   _refresh() {
@@ -188,7 +309,11 @@ export class FloatingTiles extends LitElement {
     const minimized = this._entries.filter((e) => e.minimized);
     const topId = shown.length ? shown[shown.length - 1].id : null;
     return html`
-      ${shown.map((e) => this._renderWindow(e, e.id === topId))}
+      ${repeat(
+        shown,
+        (e) => e.id,
+        (e) => this._renderWindow(e, e.id === topId),
+      )}
       ${minimized.length
         ? html`
             <div class="dock">
@@ -216,6 +341,94 @@ export class FloatingTiles extends LitElement {
     `;
   }
 
+  /**
+   * Right-click anywhere on a floating window pops a rescue/utility menu.
+   * Especially useful when the header controls have been dragged off-screen —
+   * the entire body is always a valid right-click target, so the user can
+   * always recover.
+   */
+  _windowContextMenu(ev, e) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const items = [
+      { heading: this._titleFor(e) },
+      {
+        label: "Bring back on-screen",
+        icon: "arrows-pointing-in",
+        action: () => {
+          const r = clampToWorkspace({ x: e.x, y: e.y, w: e.w, h: e.h });
+          this.store.floatSet(e.id, { ...r, slot: null });
+          this.store.raiseFloat(e.id);
+        },
+      },
+      {
+        label: "Bring to front",
+        icon: "arrow-top-right-on-square",
+        action: () => this.store.raiseFloat(e.id),
+      },
+      { separator: true },
+      { heading: "Snap to slot" },
+      ...SLOT_PRESETS.slice(0, 9).map((s) => ({
+        label: s.label,
+        icon: "squares-2x2",
+        shortcut: SLOT_SHORTCUTS[s.id] || "",
+        action: () => {
+          const rect = slotBounds(s.id);
+          if (rect) this.store.floatSet(e.id, { ...rect, slot: s.id });
+        },
+      })),
+      { separator: true },
+      {
+        label: e.minimized ? "Restore" : "Minimize to dock",
+        icon: e.minimized ? "arrow-top-right-on-square" : "minus",
+        action: () => this.store.floatSet(e.id, { minimized: !e.minimized }),
+      },
+      {
+        label: "Dock back into tiles",
+        icon: "arrow-down-left-on-square",
+        action: () => this.store.dockFloat(e.id),
+      },
+      {
+        label: "Close",
+        icon: "x-mark",
+        tone: "danger",
+        action: () => this.store.removeFloat(e.id),
+      },
+    ];
+    showContextMenu(ev, items);
+  }
+
+  /**
+   * Clickable slot-tag in the window header: pops a menu of every slot with
+   * its keyboard shortcut annotated. Rich's ask — "if you click on the
+   * position (like tl or center-third) it should show a little menu with
+   * highlighted keyboard shortcuts to place the window."
+   */
+  _slotTagMenu(ev, entry) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const items = [
+      { heading: `${this._titleFor(entry)} · slot` },
+      ...SLOT_PRESETS.map((s) => ({
+        label: s.label,
+        icon: entry.slot === s.id ? "check" : "squares-2x2",
+        shortcut: SLOT_SHORTCUTS[s.id] || "",
+        action: () => {
+          const rect = slotBounds(s.id);
+          if (rect) this.store.floatSet(entry.id, { ...rect, slot: s.id });
+        },
+      })),
+      { separator: true },
+      {
+        label: "Unslot (go absolute)",
+        icon: "x-mark",
+        action: () => this.store.floatSet(entry.id, { slot: null }),
+        disabled: !entry.slot,
+      },
+    ];
+    showContextMenu(ev, items);
+  }
+
   _titleFor(e) {
     if (e.view === "plugin_panel") {
       const p = this._locatePlugin(e.props?.plugin_id);
@@ -232,11 +445,20 @@ export class FloatingTiles extends LitElement {
       <div
         class="window ${isTop ? "active" : ""}"
         style=${style}
+        data-float-id=${e.id}
         @pointerdown=${() => this.store.raiseFloat(e.id)}
+        @contextmenu=${(ev) => this._windowContextMenu(ev, e)}
       >
         <header @pointerdown=${(ev) => this._startMove(ev, e)}>
           <span class="label">${this._titleFor(e)}</span>
-          ${e.slot ? html`<span class="slot-tag" title="Current slot">${e.slot}</span>` : null}
+          <button
+            class="slot-tag-btn"
+            title="Re-slot — shows keyboard shortcuts"
+            @pointerdown=${(ev) => ev.stopPropagation()}
+            @click=${(ev) => this._slotTagMenu(ev, e)}
+          >
+            ${e.slot ?? "no slot"}
+          </button>
           <button
             title="Re-slot"
             @pointerdown=${(ev) => ev.stopPropagation()}
@@ -337,7 +559,7 @@ export class FloatingTiles extends LitElement {
     this.store.raiseFloat(entry.id);
     const zones = dropZones();
     zones.show();
-    const rightDock = document.querySelector("foyer-right-dock");
+    const rightDock = window.__foyer?.rightDock;
     let overRail = false;
     const isOverRail = (x, y) => {
       const r = rightDock?.railRect?.();
@@ -349,11 +571,13 @@ export class FloatingTiles extends LitElement {
         overRail = nowOverRail;
         rightDock?.setDropHighlight?.(overRail);
       }
-      this.store.floatSet(entry.id, {
-        x: Math.max(0, ox + (e.clientX - startX)),
-        y: Math.max(0, oy + (e.clientY - startY)),
-        slot: null,
+      const clamped = clampToWorkspace({
+        x: ox + (e.clientX - startX),
+        y: oy + (e.clientY - startY),
+        w: entry.w,
+        h: entry.h,
       });
+      this.store.floatSet(entry.id, { x: clamped.x, y: clamped.y, slot: null });
       zones.update(e.clientX, e.clientY);
     };
     const up = (e) => {
@@ -370,12 +594,26 @@ export class FloatingTiles extends LitElement {
         return;
       }
       if (snap) {
-        const rect = slotBounds(snap, window.innerWidth, window.innerHeight, 24);
+        const rect = slotBounds(snap);
         if (rect) {
           this.store.floatSet(entry.id, { ...rect, slot: snap });
           try {
             localStorage.setItem(`foyer.layout.sticky.${entry.view}`, snap);
           } catch {}
+        }
+        return;
+      }
+      // No explicit drop-zone target. If the release rect still matches a
+      // slot (within tolerance), re-adopt that slot — small nudges on a
+      // slot-pinned window stay relative. Otherwise the window is absolute.
+      const finalEntry = this.store.floating().find((x) => x.id === entry.id);
+      if (finalEntry) {
+        const match = slotForRect({
+          x: finalEntry.x, y: finalEntry.y,
+          w: finalEntry.w, h: finalEntry.h,
+        });
+        if (match) {
+          this.store.floatSet(entry.id, { ...match.bounds, slot: match.id });
         }
       }
     };
@@ -397,6 +635,13 @@ export class FloatingTiles extends LitElement {
 
     this.store.raiseFloat(entry.id);
 
+    // Resize model (per Rich): a slot-pinned window stays RELATIVE through
+    // the drag — as long as the resized rect still matches some slot (within
+    // tolerance) we keep it tagged with that slot so workspace reflows
+    // follow. Only if the drag pulls it off every slot mapping does it
+    // commit to an absolute rect (slot: null).
+    let lastSlot = null;
+
     const move = (e) => {
       let dx = e.clientX - startX;
       let dy = e.clientY - startY;
@@ -413,11 +658,21 @@ export class FloatingTiles extends LitElement {
         ny = oy + (oh - h);
         nh = h;
       }
-      this.store.floatSet(entry.id, { x: nx, y: ny, w: nw, h: nh, slot: null });
+      const match = slotForRect({ x: nx, y: ny, w: nw, h: nh });
+      if (match) {
+        // Snap to the slot's canonical bounds so the window crisply
+        // settles onto rails during a slot-compatible drag.
+        lastSlot = match.id;
+        this.store.floatSet(entry.id, { ...match.bounds, slot: match.id });
+      } else {
+        lastSlot = null;
+        this.store.floatSet(entry.id, { x: nx, y: ny, w: nw, h: nh, slot: null });
+      }
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      void lastSlot; // already committed per-move; kept for readability
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -427,7 +682,7 @@ export class FloatingTiles extends LitElement {
     const id = this._slotPickerFor;
     this._slotPickerFor = null;
     if (!id) return;
-    const rect = slotBounds(slotId, window.innerWidth, window.innerHeight, 24);
+    const rect = slotBounds(slotId);
     if (!rect) return;
     this.store.floatSet(id, { ...rect, slot: slotId });
     // Persist "sticky" for this view type so next open returns here.

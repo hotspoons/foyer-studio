@@ -13,6 +13,8 @@
 
 import { LitElement, html, css } from "lit";
 import { WaveformCache, drawPeaks } from "../layout/waveform-cache.js";
+import { scrollbarStyles } from "../shared-styles.js";
+import { showContextMenu } from "./context-menu.js";
 
 const LANE_HEIGHT_DEFAULT = 52;
 const LANE_HEIGHT_MIN = 28;
@@ -39,6 +41,7 @@ export class TimelineView extends LitElement {
   };
 
   static styles = css`
+    ${scrollbarStyles}
     :host { display: flex; flex-direction: column; flex: 1; overflow: hidden; background: var(--color-surface); }
     .toolbar {
       display: flex; align-items: center; gap: 10px;
@@ -249,6 +252,15 @@ export class TimelineView extends LitElement {
           this._regionsByTrack = { ...this._regionsByTrack, [r.track_id]: copy };
         }
       }
+    } else if (body.type === "region_removed") {
+      const { track_id, region_id } = body;
+      const list = this._regionsByTrack[track_id];
+      if (list) {
+        this._regionsByTrack = {
+          ...this._regionsByTrack,
+          [track_id]: list.filter((r) => r.id !== region_id),
+        };
+      }
     } else if (body.type === "control_update" && body.update?.id === "transport.position") {
       this._playheadSamples = Number(body.update.value) || 0;
     }
@@ -328,7 +340,8 @@ export class TimelineView extends LitElement {
           return html`
             <div class="region" data-id=${r.id}
                  style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px"
-                 @pointerdown=${(e) => this._startDrag(e, r, "move")}>
+                 @pointerdown=${(e) => this._startDrag(e, r, "move")}
+                 @contextmenu=${(e) => this._regionContextMenu(e, r)}>
               <canvas width=${Math.round(widthPx)} height=${h - 8}></canvas>
               <div class="name">${r.name}</div>
               <div class="edge left"  @pointerdown=${(e) => this._startDrag(e, r, "resize-left")}></div>
@@ -400,6 +413,30 @@ export class TimelineView extends LitElement {
     const lanes = this.renderRoot.querySelectorAll(".lane");
     const idx = Array.prototype.indexOf.call(lanes, laneEl);
     return idx >= 0 ? tracks[idx]?.id : null;
+  }
+
+  _regionContextMenu(ev, region) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    showContextMenu(ev, [
+      { heading: region.name || region.id },
+      {
+        label: region.muted ? "Unmute" : "Mute",
+        icon: region.muted ? "speaker-wave" : "speaker-x-mark",
+        action: () => window.__foyer?.ws?.send({
+          type: "update_region",
+          id: region.id,
+          patch: { muted: !region.muted },
+        }),
+      },
+      { separator: true },
+      {
+        label: "Delete region",
+        icon: "trash",
+        tone: "danger",
+        action: () => window.__foyer?.ws?.send({ type: "delete_region", id: region.id }),
+      },
+    ]);
   }
 
   _startLaneResize(ev, trackId) {

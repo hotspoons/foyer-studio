@@ -40,7 +40,28 @@ export class TileContainer extends LitElement {
 
   render() {
     const n = this.node;
-    if (!n) return html``;
+    if (!n) {
+      // Tree intentionally empty — every tile has been torn out / closed.
+      // Offer a friendly way back in without being pushy about it.
+      return html`
+        <div style="
+          flex: 1 1 auto;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-direction: column;
+          gap: 8px;
+          color: var(--color-text-muted);
+          font-family: var(--font-sans);
+          font-size: 12px;
+        ">
+          <div style="font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--color-accent-3)">
+            Workspace is empty
+          </div>
+          <div>Use the <b>New</b> menu at top-left to add a view.</div>
+        </div>
+      `;
+    }
     if (n.kind === "leaf") {
       return html`<foyer-tile-leaf .leaf=${n} .store=${this.store}></foyer-tile-leaf>`;
     }

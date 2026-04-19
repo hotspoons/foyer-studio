@@ -1,26 +1,76 @@
 // Named slot placements for floating windows.
 //
 // The slot-picker popover lets the user hand a new window a semantic location
-// instead of a raw (x,y,w,h). Each slot is computed fresh against the current
-// viewport so an ultrawide monitor vs. a laptop screen both feel right.
+// instead of a raw (x,y,w,h). Each slot is computed fresh against the
+// *workspace* rectangle (below the top chrome, to the left of the right-dock)
+// so docked windows never overlap the status bar, main menu, transport bar,
+// or the right rail.
 //
 // The slot id is also remembered per-view-type (localStorage) so the next time
 // you open the same view with no explicit slot, it returns to the same place.
 
+/** Default keyboard shortcut per slot — surfaced in the re-slot menu. */
+export const SLOT_SHORTCUTS = {
+  "left-half":       "Ctrl+Alt+1",
+  "right-half":      "Ctrl+Alt+2",
+  "top-half":        "Ctrl+Alt+3",
+  "bottom-half":     "Ctrl+Alt+4",
+  "left-third":      "Ctrl+Alt+Q",
+  "center-third":    "Ctrl+Alt+W",
+  "right-third":     "Ctrl+Alt+E",
+  "left-two-thirds": "Ctrl+Alt+A",
+  "right-two-thirds":"Ctrl+Alt+D",
+  "tl":              "Ctrl+Alt+U",
+  "tr":              "Ctrl+Alt+I",
+  "bl":              "Ctrl+Alt+J",
+  "br":              "Ctrl+Alt+K",
+  "center":          "Ctrl+Alt+5",
+  "full":            "Ctrl+Alt+F",
+};
+
+/**
+ * Resolve the usable workspace rect. The app shell registers
+ * `window.__foyer.workspaceRect()` at boot; before that's ready we fall
+ * back to the full viewport.
+ */
+function workspace() {
+  const fn = typeof window !== "undefined" ? window.__foyer?.workspaceRect : null;
+  if (typeof fn === "function") {
+    const r = fn();
+    if (r && r.width > 0 && r.height > 0) return r;
+  }
+  return {
+    top: 0,
+    left: 0,
+    right: typeof window !== "undefined" ? window.innerWidth : 1280,
+    bottom: typeof window !== "undefined" ? window.innerHeight : 720,
+    width: typeof window !== "undefined" ? window.innerWidth : 1280,
+    height: typeof window !== "undefined" ? window.innerHeight : 720,
+  };
+}
+
+function mkRect(x, y, w, h) {
+  return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+}
+
 /**
  * Every preset bundles a display-friendly grid for the slot picker and a
- * function that computes its rect for the current viewport.
+ * function that computes its rect for the current workspace.
  *
- * `row`/`col` are 1-based positions on a 4×3 grid the picker renders; `span`
- * determines how many cells the tile covers. This is rendering data only —
- * the `bounds(vw, vh, pad)` function is authoritative for placement.
+ * `row`/`col` are 1-based positions on a 4×3 grid the picker renders;
+ * `span` determines how many cells the tile covers.
+ *
+ * Pad defaults to 0 — docked windows fit flush to the workspace edges.
  */
 export const SLOT_PRESETS = [
   {
     id: "full",
     label: "Fullscreen",
     row: 1, col: 1, rowSpan: 3, colSpan: 4,
-    bounds: (vw, vh, p) => ({ x: p, y: p, w: vw - 2 * p, h: vh - 2 * p }),
+    bounds: (pad = 0) => {
+      const w = workspace();
+      return mkRect(w.left + pad, w.top + pad, w.width - 2 * pad, w.height - 2 * pad);
+    },
   },
 
   // ── halves ────────────────────────────────────────────────────────────
@@ -28,30 +78,40 @@ export const SLOT_PRESETS = [
     id: "left-half",
     label: "Left Half",
     row: 1, col: 1, rowSpan: 3, colSpan: 2,
-    bounds: (vw, vh, p) => ({ x: p, y: p, w: Math.floor((vw - 3 * p) / 2), h: vh - 2 * p }),
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const half = Math.floor((w.width - (pad > 0 ? 3 * pad : 0)) / 2);
+      return mkRect(w.left + pad, w.top + pad, half, w.height - 2 * pad);
+    },
   },
   {
     id: "right-half",
     label: "Right Half",
     row: 1, col: 3, rowSpan: 3, colSpan: 2,
-    bounds: (vw, vh, p) => {
-      const w = Math.floor((vw - 3 * p) / 2);
-      return { x: vw - w - p, y: p, w, h: vh - 2 * p };
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const half = Math.floor((w.width - (pad > 0 ? 3 * pad : 0)) / 2);
+      return mkRect(w.right - half - pad, w.top + pad, half, w.height - 2 * pad);
     },
   },
   {
     id: "top-half",
     label: "Top Half",
     row: 1, col: 1, rowSpan: 1, colSpan: 4,
-    bounds: (vw, vh, p) => ({ x: p, y: p, w: vw - 2 * p, h: Math.floor((vh - 3 * p) / 2) }),
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const half = Math.floor((w.height - (pad > 0 ? 3 * pad : 0)) / 2);
+      return mkRect(w.left + pad, w.top + pad, w.width - 2 * pad, half);
+    },
   },
   {
     id: "bottom-half",
     label: "Bottom Half",
     row: 3, col: 1, rowSpan: 1, colSpan: 4,
-    bounds: (vw, vh, p) => {
-      const h = Math.floor((vh - 3 * p) / 2);
-      return { x: p, y: vh - h - p, w: vw - 2 * p, h };
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const half = Math.floor((w.height - (pad > 0 ? 3 * pad : 0)) / 2);
+      return mkRect(w.left + pad, w.bottom - half - pad, w.width - 2 * pad, half);
     },
   },
 
@@ -60,43 +120,51 @@ export const SLOT_PRESETS = [
     id: "left-third",
     label: "Left Third",
     row: 1, col: 1, rowSpan: 3, colSpan: 1,
-    bounds: (vw, vh, p) => ({ x: p, y: p, w: Math.floor((vw - 4 * p) / 3), h: vh - 2 * p }),
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const third = Math.floor((w.width - (pad > 0 ? 4 * pad : 0)) / 3);
+      return mkRect(w.left + pad, w.top + pad, third, w.height - 2 * pad);
+    },
   },
   {
     id: "center-third",
     label: "Center Third",
     row: 1, col: 2, rowSpan: 3, colSpan: 1,
-    bounds: (vw, vh, p) => {
-      const w = Math.floor((vw - 4 * p) / 3);
-      return { x: Math.floor((vw - w) / 2), y: p, w, h: vh - 2 * p };
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const third = Math.floor((w.width - (pad > 0 ? 4 * pad : 0)) / 3);
+      return mkRect(w.left + Math.floor((w.width - third) / 2), w.top + pad, third, w.height - 2 * pad);
     },
   },
   {
     id: "right-third",
     label: "Right Third",
     row: 1, col: 4, rowSpan: 3, colSpan: 1,
-    bounds: (vw, vh, p) => {
-      const w = Math.floor((vw - 4 * p) / 3);
-      return { x: vw - w - p, y: p, w, h: vh - 2 * p };
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const third = Math.floor((w.width - (pad > 0 ? 4 * pad : 0)) / 3);
+      return mkRect(w.right - third - pad, w.top + pad, third, w.height - 2 * pad);
     },
   },
   {
     id: "left-two-thirds",
     label: "Left 2/3",
     row: 1, col: 1, rowSpan: 3, colSpan: 2,
-    bounds: (vw, vh, p) => {
-      const third = Math.floor((vw - 4 * p) / 3);
-      return { x: p, y: p, w: third * 2 + p, h: vh - 2 * p };
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const third = Math.floor((w.width - (pad > 0 ? 4 * pad : 0)) / 3);
+      return mkRect(w.left + pad, w.top + pad, third * 2 + (pad > 0 ? pad : 0), w.height - 2 * pad);
     },
   },
   {
     id: "right-two-thirds",
     label: "Right 2/3",
     row: 1, col: 3, rowSpan: 3, colSpan: 2,
-    bounds: (vw, vh, p) => {
-      const third = Math.floor((vw - 4 * p) / 3);
-      const w = third * 2 + p;
-      return { x: vw - w - p, y: p, w, h: vh - 2 * p };
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const third = Math.floor((w.width - (pad > 0 ? 4 * pad : 0)) / 3);
+      const width = third * 2 + (pad > 0 ? pad : 0);
+      return mkRect(w.right - width - pad, w.top + pad, width, w.height - 2 * pad);
     },
   },
 
@@ -105,40 +173,44 @@ export const SLOT_PRESETS = [
     id: "tl",
     label: "Top-Left",
     row: 1, col: 1, rowSpan: 1, colSpan: 2,
-    bounds: (vw, vh, p) => ({
-      x: p, y: p,
-      w: Math.floor((vw - 3 * p) / 2),
-      h: Math.floor((vh - 3 * p) / 2),
-    }),
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const halfW = Math.floor((w.width - (pad > 0 ? 3 * pad : 0)) / 2);
+      const halfH = Math.floor((w.height - (pad > 0 ? 3 * pad : 0)) / 2);
+      return mkRect(w.left + pad, w.top + pad, halfW, halfH);
+    },
   },
   {
     id: "tr",
     label: "Top-Right",
     row: 1, col: 3, rowSpan: 1, colSpan: 2,
-    bounds: (vw, vh, p) => {
-      const w = Math.floor((vw - 3 * p) / 2);
-      const h = Math.floor((vh - 3 * p) / 2);
-      return { x: vw - w - p, y: p, w, h };
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const halfW = Math.floor((w.width - (pad > 0 ? 3 * pad : 0)) / 2);
+      const halfH = Math.floor((w.height - (pad > 0 ? 3 * pad : 0)) / 2);
+      return mkRect(w.right - halfW - pad, w.top + pad, halfW, halfH);
     },
   },
   {
     id: "bl",
     label: "Bottom-Left",
     row: 3, col: 1, rowSpan: 1, colSpan: 2,
-    bounds: (vw, vh, p) => {
-      const w = Math.floor((vw - 3 * p) / 2);
-      const h = Math.floor((vh - 3 * p) / 2);
-      return { x: p, y: vh - h - p, w, h };
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const halfW = Math.floor((w.width - (pad > 0 ? 3 * pad : 0)) / 2);
+      const halfH = Math.floor((w.height - (pad > 0 ? 3 * pad : 0)) / 2);
+      return mkRect(w.left + pad, w.bottom - halfH - pad, halfW, halfH);
     },
   },
   {
     id: "br",
     label: "Bottom-Right",
     row: 3, col: 3, rowSpan: 1, colSpan: 2,
-    bounds: (vw, vh, p) => {
-      const w = Math.floor((vw - 3 * p) / 2);
-      const h = Math.floor((vh - 3 * p) / 2);
-      return { x: vw - w - p, y: vh - h - p, w, h };
+    bounds: (pad = 0) => {
+      const w = workspace();
+      const halfW = Math.floor((w.width - (pad > 0 ? 3 * pad : 0)) / 2);
+      const halfH = Math.floor((w.height - (pad > 0 ? 3 * pad : 0)) / 2);
+      return mkRect(w.right - halfW - pad, w.bottom - halfH - pad, halfW, halfH);
     },
   },
 
@@ -147,16 +219,63 @@ export const SLOT_PRESETS = [
     id: "center",
     label: "Center",
     row: 2, col: 2, rowSpan: 1, colSpan: 2,
-    bounds: (vw, vh, _p) => {
-      const w = Math.min(760, Math.floor(vw * 0.6));
-      const h = Math.min(520, Math.floor(vh * 0.6));
-      return { x: Math.floor((vw - w) / 2), y: Math.floor((vh - h) / 2), w, h };
+    bounds: (_pad = 0) => {
+      const w = workspace();
+      const ww = Math.min(760, Math.floor(w.width * 0.6));
+      const hh = Math.min(520, Math.floor(w.height * 0.6));
+      return mkRect(w.left + Math.floor((w.width - ww) / 2), w.top + Math.floor((w.height - hh) / 2), ww, hh);
     },
   },
 ];
 
-/** Rect for a named slot, or `null` if the name is unknown. */
-export function slotBounds(id, vw, vh, pad = 24) {
+/**
+ * Rect for a named slot, or `null` if the name is unknown.
+ *
+ * The legacy `(vw, vh, pad)` signature is accepted for back-compat with
+ * callers that pre-date the workspaceRect switchover; those args are
+ * ignored — `pad` is honored though, and defaults to 0 (flush docking).
+ */
+export function slotBounds(id, _vw, _vh, pad = 0) {
   const s = SLOT_PRESETS.find((x) => x.id === id);
-  return s ? s.bounds(vw, vh, pad) : null;
+  return s ? s.bounds(pad) : null;
+}
+
+/**
+ * Find a slot whose current bounds match `rect` within `tolerance` px on
+ * every edge. Returns `{ id, bounds }` for the best match, or `null` if
+ * no slot fits within the tolerance.
+ *
+ * Rich's framing: a window pinned to a relative slot (left-half / tl /
+ * center-third / etc.) stays relative while the user resizes it, as long
+ * as the resized rect still matches one of the slots. If the drag takes
+ * it off every slot mapping, we fall back to absolute (slot: null) so
+ * subsequent workspace resizes don't pull it around.
+ *
+ * Tolerance defaults to ~4% of the workspace's shorter dimension (min
+ * 16 px, max 64 px) which feels right for mouse dragging on a 4K display
+ * without being so loose that "close enough" overrides user intent.
+ */
+export function slotForRect(rect, tolerance) {
+  if (!rect) return null;
+  if (tolerance === undefined) {
+    const anyBounds = SLOT_PRESETS[0].bounds(0);
+    const base = Math.min(anyBounds?.w ?? 1280, anyBounds?.h ?? 720);
+    tolerance = Math.max(16, Math.min(64, Math.round(base * 0.04)));
+  }
+  let best = null;
+  let bestDelta = Infinity;
+  for (const s of SLOT_PRESETS) {
+    const b = s.bounds(0);
+    if (!b) continue;
+    const dx = Math.abs(rect.x - b.x);
+    const dy = Math.abs(rect.y - b.y);
+    const dw = Math.abs(rect.w - b.w);
+    const dh = Math.abs(rect.h - b.h);
+    const max = Math.max(dx, dy, dw, dh);
+    if (max <= tolerance && max < bestDelta) {
+      bestDelta = max;
+      best = { id: s.id, bounds: b };
+    }
+  }
+  return best;
 }
