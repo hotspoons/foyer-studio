@@ -63,6 +63,12 @@ export class TrackStrip extends LitElement {
     :host(:hover) {
       background: linear-gradient(180deg, var(--color-surface-muted), var(--color-surface-elevated));
     }
+    :host([selected]) {
+      background: linear-gradient(180deg,
+        color-mix(in oklab, var(--color-accent) 14%, var(--color-surface-elevated)),
+        color-mix(in oklab, var(--color-accent) 8%, var(--color-surface)));
+      box-shadow: inset 2px 0 0 var(--color-accent);
+    }
     .channel-resize {
       /* Stays INSIDE the strip's right edge so it doesn't trespass into
        * the floating-window edge-resize zone. A channel-resize floating
@@ -137,6 +143,42 @@ export class TrackStrip extends LitElement {
     this._recCtl = null;
     this._meterCtl = null;
   }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this._onSelection = () => this._syncSelected();
+    window.__foyer?.store?.addEventListener("selection", this._onSelection);
+    this._syncSelected();
+    this.addEventListener("click", this._onStripClick);
+  }
+  disconnectedCallback() {
+    window.__foyer?.store?.removeEventListener("selection", this._onSelection);
+    this.removeEventListener("click", this._onStripClick);
+    super.disconnectedCallback();
+  }
+  _syncSelected() {
+    if (!this.track) return;
+    const sel = !!window.__foyer?.store?.isTrackSelected?.(this.track.id);
+    if (sel) this.setAttribute("selected", "");
+    else this.removeAttribute("selected");
+  }
+  _onStripClick = (ev) => {
+    // Don't steal clicks from interactive children (fader/toggles/context
+    // menu on the name, etc). Only select when the user clicks on
+    // "empty" strip space.
+    const tag = (ev.target?.tagName || "").toLowerCase();
+    if (["foyer-fader", "foyer-toggle", "foyer-meter", "foyer-plugin-strip", "input", "button"].includes(tag)) {
+      return;
+    }
+    // Name div is interactive (rename/context-menu) — leave it alone.
+    const cls = ev.target?.classList;
+    if (cls && (cls.contains("name") || cls.contains("name-input") || cls.contains("channel-resize"))) return;
+    if (!this.track?.id) return;
+    let mode = "replace";
+    if (ev.shiftKey) mode = "extend";
+    else if (ev.ctrlKey || ev.metaKey) mode = "toggle";
+    window.__foyer?.store?.selectTrack(this.track.id, mode);
+  };
 
   willUpdate(changed) {
     if (changed.has("track") && this.track) {

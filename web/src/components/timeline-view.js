@@ -124,7 +124,17 @@ export class TimelineView extends LitElement {
       padding: 0 10px;
       background: var(--color-surface-elevated);
       border-right: 1px solid var(--color-border);
+      border-left: 3px solid transparent;
       gap: 3px;
+      cursor: pointer;
+      transition: background 0.1s ease, border-left-color 0.1s ease;
+    }
+    .lane-head:hover {
+      background: color-mix(in oklab, var(--color-accent) 6%, var(--color-surface-elevated));
+    }
+    .lane.selected .lane-head {
+      background: color-mix(in oklab, var(--color-accent) 14%, var(--color-surface-elevated));
+      border-left-color: var(--color-accent);
     }
     .lane-name { font-size: 11px; font-weight: 600; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .lane-kind { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-text-muted); }
@@ -291,13 +301,16 @@ export class TimelineView extends LitElement {
     // coarse but timelines aren't re-rendered frequently and we don't
     // want to spin up a ControlController per track.
     this._onStoreControl = () => this.requestUpdate();
+    this._onStoreSelection = () => this.requestUpdate();
     window.__foyer?.store?.addEventListener("control", this._onStoreControl);
+    window.__foyer?.store?.addEventListener("selection", this._onStoreSelection);
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     this._wfCache?.removeEventListener("update", this._onWfUpdate);
     this._wfCache?.dispose();
     window.__foyer?.store?.removeEventListener("control", this._onStoreControl);
+    window.__foyer?.store?.removeEventListener("selection", this._onStoreSelection);
     super.disconnectedCallback();
   }
 
@@ -340,18 +353,26 @@ export class TimelineView extends LitElement {
         };
       }
     } else if (body.type === "control_update" && body.update?.id === "transport.position") {
-      this._playheadSamples = Number(body.update.value) || 0;
+      this._playheadSamples = this._positionOrPin(Number(body.update.value) || 0);
     } else if (body.type === "meter_batch" && Array.isArray(body.values)) {
       // Shim's tick thread batches transport.position in with tempo /
       // playing / recording updates at ~30 Hz while rolling. Pick out
       // the position entry so the playhead animates.
       for (const u of body.values) {
         if (u?.id === "transport.position") {
-          this._playheadSamples = Number(u.value) || 0;
+          this._playheadSamples = this._positionOrPin(Number(u.value) || 0);
           break;
         }
       }
     }
+  }
+
+  /** Honor the front-end position lock when one is active (see
+   *  `transport-return.js`). Returns the pinned target instead of the
+   *  reported value while the user's return-on-stop is still settling. */
+  _positionOrPin(reported) {
+    const lock = window.__foyer?.store?.transportPositionLock?.();
+    return lock == null ? reported : lock;
   }
 
   _samplesPerPx() {
@@ -365,6 +386,15 @@ export class TimelineView extends LitElement {
     if (!ws) return;
     const cur = !!window.__foyer?.store?.state?.controls?.get(id);
     ws.controlSet(id, cur ? 0 : 1);
+  }
+
+  _onLaneHeadClick(ev, trackId) {
+    const store = window.__foyer?.store;
+    if (!store) return;
+    let mode = "replace";
+    if (ev.shiftKey) mode = "extend";
+    else if (ev.ctrlKey || ev.metaKey) mode = "toggle";
+    store.selectTrack(trackId, mode);
   }
 
   render() {
@@ -445,27 +475,30 @@ export class TimelineView extends LitElement {
     const regions = this._regionsByTrack[track.id] || [];
     const sr = this._timeline?.sample_rate || 48_000;
     const h = this._laneHeightFor(track.id);
-    const controls = window.__foyer?.store?.state?.controls;
+    const store = window.__foyer?.store;
+    const controls = store?.state?.controls;
     const muted = !!(controls && controls.get(track.mute?.id));
     const soloed = !!(controls && controls.get(track.solo?.id));
     const armed = !!(controls && track.record_arm && controls.get(track.record_arm.id));
     const canArm = !!track.record_arm;
+    const selected = !!store?.isTrackSelected?.(track.id);
     return html`
-      <div class="lane" style="height:${h}px">
-        <div class="lane-head" style="height:${h}px">
+      <div class="lane ${selected ? "selected" : ""}" style="height:${h}px">
+        <div class="lane-head" style="height:${h}px"
+             @click=${(e) => this._onLaneHeadClick(e, track.id)}>
           <div class="lane-name" title=${track.name}>${track.name}</div>
           <div class="lane-kind">${track.kind}</div>
           <div class="lane-controls">
             <div class="lane-ctl-btn mute ${muted ? "on" : ""}"
                  title="Mute (${muted ? "on" : "off"})"
-                 @click=${() => this._toggleTrackBool(track.mute?.id)}>M</div>
+                 @click=${(e) => { e.stopPropagation(); this._toggleTrackBool(track.mute?.id); }}>M</div>
             <div class="lane-ctl-btn solo ${soloed ? "on" : ""}"
                  title="Solo (${soloed ? "on" : "off"})"
-                 @click=${() => this._toggleTrackBool(track.solo?.id)}>S</div>
+                 @click=${(e) => { e.stopPropagation(); this._toggleTrackBool(track.solo?.id); }}>S</div>
             ${canArm ? html`
               <div class="lane-ctl-btn rec ${armed ? "on" : ""}"
                    title="Record arm (${armed ? "on" : "off"})"
-                   @click=${() => this._toggleTrackBool(track.record_arm?.id)}>R</div>
+                   @click=${(e) => { e.stopPropagation(); this._toggleTrackBool(track.record_arm?.id); }}>R</div>
             ` : null}
           </div>
         </div>
@@ -678,8 +711,11 @@ export class TimelineView extends LitElement {
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
       if (!moved) {
-        // Simple click — seek and clear any prior selection.
+        // Simple click — seek and clear any prior selection. If a
+        // return-on-stop lock is still running, cancel it so the user's
+        // explicit seek wins.
         this._selection = null;
+        window.__foyer?.store?.releaseTransportPositionLock?.();
         const samples = this._samplesAtX(e.clientX, target);
         this._playheadSamples = samples;
         window.__foyer?.ws?.controlSet("transport.position", samples);

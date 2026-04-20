@@ -182,28 +182,29 @@ export class TransportBar extends LitElement {
     this.requestUpdate();
   };
   _stop = () => this._set("transport.playing", false);
-  _gotoStart = () => window.__foyer?.ws?.controlSet("transport.position", 0);
+  // All of these are explicit user seeks — if the return-on-stop lock
+  // is still running we release it so the new target isn't swallowed.
+  _seek(samples) {
+    window.__foyer?.store?.releaseTransportPositionLock?.();
+    window.__foyer?.ws?.controlSet("transport.position", Math.max(0, samples));
+  }
+  _gotoStart = () => this._seek(0);
   _gotoEnd = () => {
-    const len = Number(window.__foyer?.store?.state?.session?.transport?.position_beats?.range?.[1]);
-    // TimelineMeta isn't carried through the transport struct — read the
-    // session's current end from meta if available, otherwise fall back
-    // to a reasonable default. Locate there, then stop so we don't play
-    // past end.
     const meta = window.__foyer?.store?.state?.session?.meta || {};
     const endSamples = Number(meta.length_samples || 48_000 * 60);
-    window.__foyer?.ws?.controlSet("transport.position", endSamples);
+    this._seek(endSamples);
   };
   // RW/FF jump by 5s. Full scrub-while-held comes later once we have a
   // shim-side transport.speed endpoint.
   _rewind = () => {
     const cur = Number(window.__foyer?.store?.state?.controls?.get("transport.position") || 0);
     const sr = Number(window.__foyer?.store?.state?.session?.meta?.sample_rate || 48_000);
-    window.__foyer?.ws?.controlSet("transport.position", Math.max(0, cur - 5 * sr));
+    this._seek(cur - 5 * sr);
   };
   _fastForward = () => {
     const cur = Number(window.__foyer?.store?.state?.controls?.get("transport.position") || 0);
     const sr = Number(window.__foyer?.store?.state?.session?.meta?.sample_rate || 48_000);
-    window.__foyer?.ws?.controlSet("transport.position", cur + 5 * sr);
+    this._seek(cur + 5 * sr);
   };
 
   _onTempo = (ev) => {

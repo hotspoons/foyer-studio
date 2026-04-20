@@ -71,25 +71,66 @@ export function installTransportReturn({ store, ws }) {
   let wasPlaying = false;
   let playStartSample = 0;
 
-  const handler = (ev) => {
+  // ── front-end position lock ─────────────────────────────────────────
+  //
+  // When the user hits stop with "zero" or "play_start" mode on, we
+  // need the playhead to land (and stay) at the requested sample. But
+  // Ardour's FSM is asynchronous — the shim's 30 Hz tick will keep
+  // broadcasting `session.transport_sample()`, which can race our
+  // locate and yank the UI back to whatever Ardour thinks is "live".
+  //
+  // Fix: a short front-end lock. While held:
+  //   - the store pins `transport.position` to `target` (see
+  //     `Store._applyControl`) so incoming backend position values are
+  //     ignored — we trust the front-end for this one UX.
+  //   - the lock auto-releases after `LOCK_MS`.
+  //   - if the user explicitly seeks elsewhere during the window, we
+  //     release immediately so their action isn't swallowed.
+  //
+  // This is intentional one-feature spoofing: DAW-agnostic return-on-
+  // stop UX is valuable enough to override backend truth briefly.
+  const LOCK_MS = 600;
+  let lock = null; // { target, expiresAt }
+
+  store.transportPositionLock = () => {
+    if (!lock) return null;
+    if (Date.now() > lock.expiresAt) { lock = null; return null; }
+    return lock.target;
+  };
+
+  /** Called by the transport-bar's seek buttons / ruler-click handlers
+   *  to release the lock early when the user explicitly moves elsewhere. */
+  store.releaseTransportPositionLock = () => { lock = null; };
+
+  function applyReturn(target) {
+    lock = { target, expiresAt: Date.now() + LOCK_MS };
+    ws.controlSet("transport.position", target);
+    // Pin visually: overwrite the store's cached value so the playhead
+    // snaps immediately without waiting for a round trip.
+    store.state.controls.set("transport.position", target);
+    store.dispatchEvent(
+      new CustomEvent("control", { detail: "transport.position" })
+    );
+  }
+
+  const controlHandler = (ev) => {
     if (ev.detail !== "transport.playing") return;
     const now = !!store.state.controls.get("transport.playing");
     if (now && !wasPlaying) {
-      // Record the position at which play began. Used by "play_start".
       const pos = Number(store.state.controls.get("transport.position") || 0);
       playStartSample = pos;
     } else if (!now && wasPlaying) {
       const mode = getReturnMode();
-      if (mode === "zero") {
-        ws.controlSet("transport.position", 0);
-      } else if (mode === "play_start") {
-        ws.controlSet("transport.position", playStartSample);
-      }
-      // "leave" → do nothing.
+      if (mode === "zero") applyReturn(0);
+      else if (mode === "play_start") applyReturn(playStartSample);
     }
     wasPlaying = now;
   };
 
-  store.addEventListener("control", handler);
-  return () => store.removeEventListener("control", handler);
+  store.addEventListener("control", controlHandler);
+  return () => {
+    store.removeEventListener("control", controlHandler);
+    delete store.transportPositionLock;
+    delete store.releaseTransportPositionLock;
+  };
 }

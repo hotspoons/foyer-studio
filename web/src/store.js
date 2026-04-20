@@ -23,11 +23,64 @@ export class Store extends EventTarget {
       selfOrigin,
       // Rolling map of peer origin → last-seen timestamp (ms since epoch).
       peers: new Map(),
+      // Track selection — shared across mixer + timeline. Operations
+      // like fade/delete/mute-range use this set to scope their effect.
+      selectedTrackIds: new Set(),
+      // Anchor used when shift-click extends a range selection. Null
+      // means no anchor (first click sets it).
+      _selectAnchor: null,
     };
     this._peerPruneInterval = null;
     if (typeof window !== "undefined") {
       this._peerPruneInterval = setInterval(() => this._prunePeers(), 3000);
     }
+  }
+
+  // ── track selection ────────────────────────────────────────────────
+  /**
+   * Update the set of selected track ids.
+   *   mode:
+   *     "replace" — this track only (default on plain click)
+   *     "toggle"  — flip membership (Ctrl/Cmd-click)
+   *     "extend"  — range from anchor to this track (Shift-click)
+   */
+  selectTrack(id, mode = "replace") {
+    if (!id) return;
+    const tracks = this.state.session?.tracks || [];
+    const cur = this.state.selectedTrackIds;
+    if (mode === "toggle") {
+      if (cur.has(id)) cur.delete(id);
+      else { cur.add(id); this.state._selectAnchor = id; }
+    } else if (mode === "extend") {
+      const anchor = this.state._selectAnchor || (cur.size ? Array.from(cur).pop() : id);
+      const ids = tracks.map((t) => t.id);
+      const a = ids.indexOf(anchor);
+      const b = ids.indexOf(id);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        cur.clear();
+        for (let i = lo; i <= hi; i++) cur.add(ids[i]);
+      } else {
+        cur.clear();
+        cur.add(id);
+      }
+    } else {
+      cur.clear();
+      cur.add(id);
+      this.state._selectAnchor = id;
+    }
+    this.dispatchEvent(new CustomEvent("selection"));
+  }
+
+  clearTrackSelection() {
+    if (this.state.selectedTrackIds.size === 0) return;
+    this.state.selectedTrackIds.clear();
+    this.state._selectAnchor = null;
+    this.dispatchEvent(new CustomEvent("selection"));
+  }
+
+  isTrackSelected(id) {
+    return this.state.selectedTrackIds.has(id);
   }
 
   /** Peers we've observed messages from in the last 10s (excludes self). */
@@ -117,15 +170,17 @@ export class Store extends EventTarget {
       }
       case "control_update": {
         if (body.update?.id) {
-          this.state.controls.set(body.update.id, body.update.value);
-          this._emitControl(body.update.id);
+          if (this._applyControl(body.update.id, body.update.value)) {
+            this._emitControl(body.update.id);
+          }
         }
         break;
       }
       case "meter_batch": {
         for (const u of body.values || []) {
-          this.state.controls.set(u.id, u.value);
-          this._emitControl(u.id);
+          if (this._applyControl(u.id, u.value)) {
+            this._emitControl(u.id);
+          }
         }
         break;
       }
@@ -165,6 +220,30 @@ export class Store extends EventTarget {
   }
   _emitControl(id) {
     this.dispatchEvent(new CustomEvent("control", { detail: id }));
+  }
+
+  /**
+   * Apply an incoming control value, honoring any active front-end lock.
+   * Returns `true` if the store actually changed and listeners should be
+   * notified. Right now only `transport.position` has a lock (installed
+   * by `transport-return.js`); the pattern is generic enough to reuse.
+   */
+  _applyControl(id, value) {
+    if (id === "transport.position") {
+      const pinned =
+        typeof this.transportPositionLock === "function"
+          ? this.transportPositionLock()
+          : null;
+      if (pinned != null) {
+        // Lock active — force the pinned target regardless of what
+        // the backend thinks. We still emit so UI listeners redraw
+        // to the pinned value (useful when the user just seeked).
+        this.state.controls.set(id, pinned);
+        return true;
+      }
+    }
+    this.state.controls.set(id, value);
+    return true;
   }
 }
 

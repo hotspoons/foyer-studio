@@ -361,3 +361,5 @@ sidecar rounds; no additional protocol work required.
 ## Rich new notes 
 
  - After selecting a region of time, we should have the main menu have a "zoom to selection" - when, if clicked will zoom exactly to the selection, maintaining the selection. We should store the previous timeline zoom and position and have a "zoom to previous" or something like that. With selections, we need standard DAW stuff like fade in, fade out, delete, mute, etc. and we need the ability to select one or more tracks to apply the change to
+
+- Master mix strip on the right for output - should also be in the main mixer window all the way to the right with a divider or empty space from the input mixes
