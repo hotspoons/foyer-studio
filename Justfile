@@ -116,6 +116,43 @@ shim-build: shim-link
 shim-unlink:
     rm -f "{{shim_link}}"
 
+# --- foyer shim (out-of-tree CMake build, no Ardour source edits) ---
+#
+# Builds `libfoyer_shim.so` against a sibling Ardour source tree
+# without touching any file in it. Matches the eventual shipping
+# story: third-party control-surface authors drop their .so into
+# `$ARDOUR_SURFACES_PATH` and Ardour picks it up at startup. See
+# [docs/PROPOSAL-surface-auto-discovery.md](docs/PROPOSAL-surface-auto-discovery.md).
+#
+# Requires the sibling Ardour tree to be configured + built at least
+# once (`just ardour-configure && just ardour-build`) — we link
+# against its in-tree libraries under build/libs/. When Ardour ships
+# a proper `ardour-surface.pc` upstream this will flip to
+# `find_package(Ardour)` and be even simpler.
+shim_cmake_build := shim_dir + "/cmake-build"
+
+shim-cmake-configure:
+    cmake -S {{shim_dir}} -B {{shim_cmake_build}} \
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+          -DFOYER_ARDOUR_SOURCE={{ardour_dir}}
+
+shim-cmake-build: shim-cmake-configure
+    cmake --build {{shim_cmake_build}} -j
+
+# Install the out-of-tree .so into a user-scoped Ardour surfaces dir.
+# Ardour's default `ARDOUR_SURFACES_PATH` already scans
+# `$HOME/.config/ardour<N>/surfaces/` so no env var tweak needed.
+# Override DEST to point elsewhere (system-wide, test dir, etc).
+shim-install DEST="$HOME/.config/ardour9": shim-cmake-build
+    mkdir -p "{{DEST}}/surfaces"
+    cp {{shim_cmake_build}}/libfoyer_shim.so "{{DEST}}/surfaces/"
+    echo "✓ Installed libfoyer_shim.so → {{DEST}}/surfaces/"
+    echo "  Ardour will pick it up from ARDOUR_SURFACES_PATH at next startup."
+
+# Clean the out-of-tree build.
+shim-cmake-clean:
+    rm -rf {{shim_cmake_build}}
+
 # --- end-to-end smoke (Ardour headless + foyer_shim + foyer-cli) ---
 # Create a throwaway session using Ardour's session_utils, with all env vars
 # set up so the dummy backend is found.

@@ -279,17 +279,36 @@ lands, switching between them should be a config toggle.
 
 Progress key: ✅ landed · 🚧 scaffolded · 📋 queued.
 
-- 📋 Can we also add a midi track view with an editor and a piano along the bottom like other DAWs? The midi editor should be a modal, but also can be a dockable view if desired?
+- ✅ MIDI track view + piano roll — `<foyer-midi-editor>` component
+  ([midi-editor.js](../web/src/components/midi-editor.js)); opens
+  from the region context menu on any MIDI region; shim emits
+  notes inline on the regions_list envelope via `MidiModel::notes()`
+  ([schema_map.cc](../shims/ardour/src/schema_map.cc) `describe_region`).
+  Dockable tile variant still TODO; note edits (drag, velocity scrub)
+  TODO.
 
-- 📋 I am thinking that the agent and layouts views also appear in the right panel slideout when the FABs are docked, and they only appear as floating windows when undocked
+- ✅ Agent + Layouts FABs appear in the right-panel slide-out when
+  docked — wired via `dockPanelContent()` on QuadrantFab /
+  AgentPanel; right-dock calls into it from `_renderPanel`.
 
-- 📋 We need a track editor UI when right clicking on track's label strip in the timeine and mixer so we can rename the track, set colors, set busses and groupings. Should also have the full mixer editor view in the track editor UI so you can manage the track's mixer settings from the timeline if you don't have the mixer open. Should be in a model or overlay, not a full window
+- ✅ Track editor UI (rename, color, comment, embedded mixer strip) —
+  right-click track label in mixer or timeline-lane head opens
+  [track-editor-modal.js](../web/src/components/track-editor-modal.js).
+  Bus / group / send controls TODO (separate bullet below).
 
-- 📋 busses and groups - need to support this!
+- 📋 busses and groups — schema doesn't carry them yet. Needs:
+  `Session.groups: Vec<Group>`, `Track.group_id: Option<EntityId>`,
+  `Track.sends: Vec<Send>`, shim population from `RouteGroup` +
+  `Send`, mixer UI (collapsible group rows + send strips under
+  the fader). Track editor modal will surface the binding once
+  the schema lands.
 
-- 📋 show unsaved session changes in main view — needs a `Session::DirtyChanged` hook in the Ardour shim; stub can emit a stand-in event meanwhile. UI dot goes in [status-bar.js](../web/src/components/status-bar.js) next to the conn chip.
+- ✅ Unsaved-session chip in status bar — shim wires
+  `Session::DirtyChanged`, emits `SessionDirtyChanged { dirty }`,
+  [status-bar.js](../web/src/components/status-bar.js)
+  (_renderSessionDirty) shows a dot + "Unsaved" label.
 
-- ✅ add undo and redo (ctrl/cmd z/ ctrl/cmd + shift z) capability with buttons (should apply on back end if possible) — keyboard chords wired in [keybinds.js](../web/src/layout/keybinds.js); they fire `edit.undo` / `edit.redo` which the host's action catalog handles. Dedicated buttons still TODO in transport-bar.
+- ✅ add undo and redo (ctrl/cmd z/ ctrl/cmd + shift z) capability with buttons — keyboard chords wired in [keybinds.js](../web/src/layout/keybinds.js); they fire `edit.undo` / `edit.redo` which the host's action catalog handles. Dedicated Undo / Redo / Save buttons on the transport bar as of 2026-04-21 ([transport-bar.js](../web/src/components/transport-bar.js)); Save button lights up when `session.dirty`.
 
 - ✅ add cut/copy/paste actions — Ctrl/Cmd+X/C/V bound in keybinds.js, fire `edit.cut/copy/paste`. Native editing in input fields is preserved (handler bails when focus is on an input/textarea).
 
@@ -360,11 +379,67 @@ sidecar rounds; no additional protocol work required.
 
 ## Rich new notes 
 
- - After selecting a region of time, we should have the main menu have a "zoom to selection" - when, if clicked will zoom exactly to the selection, maintaining the selection. We should store the previous timeline zoom and position and have a "zoom to previous" or something like that. With selections, we need standard DAW stuff like fade in, fade out, delete, mute, etc. and we need the ability to select one or more tracks to apply the change to
+ - ✅ Zoom-to-selection w/ backstack, fade/delete/mute across
+   time-range × tracks, multi-track selection — all landed. See
+   [timeline-view.js](../web/src/components/timeline-view.js)
+   `zoomToSelection` / `zoomPrevious` / `deleteSelection` /
+   `muteSelection`.
 
-- Master mix strip on the right for output - should also be in the main mixer window all the way to the right with a divider or empty space from the input mixes
+- ✅ Master mix strip pinned to the right of the mixer with
+   its own gutter — [mixer.js](../web/src/components/mixer.js)
+   splits inputs into a horizontally-scrolling column and master-
+   like strips (master + monitor) into a fixed right column.
 
-- Waveforms still look like ass zoomed in - we might need to serialize the underlying data for different zoom levels and create a front-end renderer that uses WebGL or a better renderer. It is like it is a raster image that gets stretched out - we need that vector goodness
+- ✅ Waveforms — fully vector now. Canvas2D port of Ardour's
+   `WaveView::draw_image` connected-line algorithm
+   ([waveform-gl.js](../web/src/viz/waveform-gl.js), cites source
+   inline), viewport-cropped canvas (only paints the visible
+   slice), 1-pixel lines with column-by-column decision logic.
+   Sharp at any zoom.
+
+## New 2026-04-21 surface (things that fell out this session)
+
+ - Dockable MIDI tile — today the piano roll only opens as a modal
+   from the region context menu. Registering `midi` as a first-class
+   view in the tile tree so it can live in a permanent dock slot is
+   ~50 LOC (tile-leaf, layout-store, tile-tree view registry).
+
+ - MIDI note edits — add `Command::UpdateMidiNote { id, patch }`
+   (`MidiNotePatch` already exists in schema). Shim side: acquire
+   the MidiModel write lock, apply the patch, emit `region_updated`
+   so other clients reconcile. UI side: drag-to-move, drag-edges to
+   resize, velocity-drag, delete.
+
+ - "Clear peak cache" button on the timeline ribbon is wired;
+   consider also adding a "rescan region source" shortcut to force
+   symphonia to re-decode the file if the user edits it externally.
+
+ - Export toast says "use Ardour's native dialog for now"; wire
+   `session.export` to a real exporter when ready. Ardour's
+   `Session::export_to_file` is the target API but needs a format
+   + range selector modal.
+
+ - Waveform renderer resamples peaks on every scroll event. At
+   100+ visible regions this gets non-trivial. rAF-debounce the
+   scroll handler inside waveform-gl.js.
+
+ - Errored plugin row detection is string-match ("does this error
+   message mention our track id"). That's brittle. The sidecar
+   should broadcast `Event::PluginError { track_id, plugin_uri,
+   reason }` instead.
+
+ - `session.save_as` prompts for a filename but there's no file
+   browser — advanced users can type a full path, everyone else
+   types just a filename and it lands next to the current session.
+   Proper folder picker integrated with the existing session-view
+   jail browser would be nicer.
+
+ - Bus / group plumbing (big — see "busses and groups" bullet
+   above).
+
+ - Session-opens-rolling regression — log shows no `ControlSet
+   recv` before transport transitions, so it's not UI-initiated.
+   Needs live trace.
 
 
 --- 

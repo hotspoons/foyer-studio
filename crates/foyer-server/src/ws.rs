@@ -571,9 +571,33 @@ async fn dispatch_command(
             format,
             transport: _transport,
         } => {
-            let rx = state
-                .audio_hub
-                .spawn_test_tone_source(format, std::time::Duration::from_secs(30));
+            // Try the real backend first. The host backend's
+            // `open_egress` forwards an `AudioStreamOpen` IPC command
+            // to the shim, which installs a MasterTap processor on the
+            // master route and returns a PcmRx that yields live
+            // samples (see shims/ardour/src/master_tap.cc). The stub
+            // backend's `open_egress` returns a synthetic sine.
+            //
+            // If the backend call fails (unsupported source, shim not
+            // advertising audio yet, etc.), fall back to the
+            // sidecar-side test tone so the "Listen" button still
+            // makes noise — important while M6a rolls out.
+            let rx_res = state
+                .backend()
+                .await
+                .open_egress(stream_id, source.clone(), format)
+                .await;
+            let rx = match rx_res {
+                Ok(be_rx) => be_rx,
+                Err(e) => {
+                    tracing::warn!(
+                        "open_egress failed ({e}); falling back to sidecar test tone"
+                    );
+                    state
+                        .audio_hub
+                        .spawn_test_tone_source(format, std::time::Duration::from_secs(30))
+                }
+            };
             match state
                 .audio_hub
                 .open_stream(stream_id, source.clone(), format, rx)
@@ -599,6 +623,13 @@ async fn dispatch_command(
             }
         }
         Command::AudioStreamClose { stream_id } => {
+            // Best-effort: tell the backend to tear the tap down, and
+            // close the sidecar-side fan-out regardless.
+            let _ = state
+                .backend()
+                .await
+                .close_egress(stream_id)
+                .await;
             state.audio_hub.close_stream(stream_id).await;
             broadcast_event(state, Event::AudioEgressStopped { stream_id }).await;
         }

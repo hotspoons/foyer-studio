@@ -33,6 +33,7 @@ pub fn default_daw_actions() -> Vec<Action> {
         mk("session.new", "New Session…", ActionCategory::Session, Some("document-plus"), Some("Cmd+N")),
         mk("session.open", "Open Session…", ActionCategory::Session, Some("folder-open"), Some("Cmd+O")),
         mk("session.save", "Save Session", ActionCategory::Session, Some("document-save"), Some("Cmd+S")),
+        mk("session.save_as", "Save Session As…", ActionCategory::Session, Some("document-duplicate"), Some("Cmd+Shift+S")),
         mk("session.export", "Export…", ActionCategory::Session, Some("arrow-down-tray"), None),
 
         // ── Edit ────────────────────────────────────────────────

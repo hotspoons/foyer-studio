@@ -118,6 +118,25 @@ export class PluginLayer extends LitElement {
     this._onResize = () => this._repack();
     this._onDataChange = () => this.requestUpdate();
     this._onDockResized = () => this._repack();
+    // Document-capture pointerdown so clicks deep inside a plugin's
+    // controls (knobs, dropdowns, nested shadow roots) still bubble
+    // the "raise this window" intent up to the layer. Matches what
+    // floating-tiles does for system windows.
+    this._onDocPointerDown = (ev) => this._handleRaise(ev);
+  }
+
+  _handleRaise(ev) {
+    if (ev.button !== 0) return;
+    const path = ev.composedPath ? ev.composedPath() : [];
+    const root = this.renderRoot;
+    for (const n of path) {
+      if (!n || !n.classList) continue;
+      if (n.classList.contains("pwin") && root?.contains(n)) {
+        const pid = n.getAttribute("data-plugin-id");
+        if (pid) this.store?.raisePluginFloat?.(pid);
+        return;
+      }
+    }
   }
 
   connectedCallback() {
@@ -126,6 +145,7 @@ export class PluginLayer extends LitElement {
     window.addEventListener("resize", this._onResize);
     window.addEventListener("foyer:dock-resized", this._onDockResized);
     window.__foyer?.store?.addEventListener("change", this._onDataChange);
+    document.addEventListener("pointerdown", this._onDocPointerDown, true);
     this._refresh();
   }
   disconnectedCallback() {
@@ -133,6 +153,7 @@ export class PluginLayer extends LitElement {
     window.removeEventListener("resize", this._onResize);
     window.removeEventListener("foyer:dock-resized", this._onDockResized);
     window.__foyer?.store?.removeEventListener("change", this._onDataChange);
+    document.removeEventListener("pointerdown", this._onDocPointerDown, true);
     super.disconnectedCallback();
   }
 

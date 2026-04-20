@@ -419,3 +419,239 @@ building.
   directory, its own license header, and its own build/recipe. Keep
   the wire format on the other side identical — that's the whole
   point.
+
+## 16. Waveform renderer is a JS port of Ardour's WaveView algorithm, not a derivation of the code
+
+**Context:** The first-pass waveform renderer was a GLSL fragment
+shader that sampled an `RG32F` peaks texture per pixel. It looked
+like a "stretched raster" at any real zoom — the bucket grid never
+aligned with the pixel grid, so every column was a bilinear blend of
+the two nearest min/max pairs, which read visually as blur. Users
+expect pro-DAW waveform rendering: razor-sharp, continuous, per-pixel
+accurate at any zoom including extreme.
+
+**Decision:** Port Ardour's `WaveView::draw_image` algorithm
+(libs/waveview/wave_view.cc, lines 684–702 as of Ardour 9.2) into
+JavaScript, rendered via Canvas2D path strokes. Per pixel column we
+decide between three draw cases:
+
+1. Current bucket's top is below the next bucket's bottom in pixel
+   Y → falling signal → draw a diagonal `bot → next.bot` connector.
+2. Current bucket's bot is above next bucket's top → rising signal
+   → draw a diagonal `top → next.top` connector.
+3. Ranges overlap (signal stayed loud) or we're at the last
+   column → vertical `top → bot` stroke.
+
+This is the technique the 2013 LAC paper calls "connected segments"
+(lac.linuxaudio.org/2013/papers/36.pdf, Fig. 3). A viewport-cropped
+canvas avoids the browser's `MAX_TEXTURE_SIZE` ceiling at extreme
+zoom — the component sizes its backing store to the visible slice
+of its host region.
+
+**Alternatives considered:**
+
+1. *Keep the shader, switch to NEAREST filtering.* Fixes the blur
+   but trades it for obvious pixel stair-step. Rejected because
+   at 4000 px/s the stair-step is bigger than one pixel anyway.
+2. *WebGL2 triangle-strip vertex geometry from the peaks array.*
+   Works, but silent buckets with min=max=0 produce zero-height
+   degenerate triangles and the strip visually breaks into lozenges
+   with gaps between audio "hits." Keeping the strip continuous
+   would require either a minimum-envelope fudge or the same
+   decision logic we ended up porting anyway. Rejected once the
+   Canvas2D path was proven.
+3. *SVG paths.* Clean vector model but layout cost of thousands of
+   `<path>` nodes blows out at extreme zoom. Rejected.
+
+**GPL boundary:** We port the *algorithm* (a described decision
+procedure, expressible in prose) from GPLv2+ code — not the code or
+headers themselves. The drawing loop lives in
+`web/src/viz/waveform-gl.js` alongside an explicit citation at the
+file header and inline at the loop. No Ardour code or headers are
+copied, imported, or linked. The waveform renderer is part of the
+web layer which sits above the IPC boundary per decision 15.
+
+Attribution citations are present for three reasons: (a) honest
+acknowledgment of prior art, (b) a breadcrumb for future
+contributors who want to understand *why* the decision logic looks
+the way it does, and (c) a clear record that the algorithmic idea
+pre-existed our implementation — useful context if the copyright
+boundary is ever revisited.
+
+**Why:** The "stretched raster" complaint was blocking the mental
+model of Foyer as a pro DAW. Ardour's algorithm is 20+ years of
+refinement for exactly this problem; reinventing it would be worse
+and take a lot longer. Canvas2D's path-stroke primitive is hardware
+accelerated on every modern browser (Chrome/Firefox via Skia), so
+"use the GPU" and "draw vector paths" aren't in tension.
+
+## 17. MIDI notes ship inline on the region envelope, not via a separate list
+
+**Context:** The MIDI piano roll component needs per-note data, and
+Ardour's `MidiModel` exposes it through `read_lock()` + `notes()`.
+Two wire-shape options:
+
+1. Emit notes inline on the `regions_list` / `region_updated`
+   envelope — one round-trip covers both the region lozenges and
+   the piano roll.
+2. Emit regions without notes, add a separate `list_notes(region_id)`
+   command, round-trip separately when the piano roll opens.
+
+**Decision:** Inline. `RegionDesc` grows an optional `notes:
+Vec<NoteDesc>` populated only for `MidiRegion`; the wire map sets
+`notes` only when non-empty (existing serde skip-if-empty attribute).
+Schema already had `Region.notes: Vec<MidiNote>` (introduced when
+the piano roll was scaffolded).
+
+**Alternatives considered:**
+
+1. *Separate `list_notes` command.* Cleaner message-boundary sense,
+   but doubles the round-trip cost for the 99% case where opening
+   a MIDI region implies wanting the notes immediately. Also
+   complicates coherence — notes that change between region and
+   notes list arriving.
+2. *Send notes only on explicit subscription.* Would defer the
+   cost until the piano roll opens. Rejected: MIDI note payloads
+   are small (~24 bytes per note, a typical region has < 1000),
+   inlining them is cheap enough that the simpler protocol wins.
+
+**Why:** The region envelope is the natural place to describe a
+region's contents. Audio regions carry their source path (for
+waveform peak extraction), MIDI regions carry their notes — same
+shape, both optional, both populated by the shim. The read_lock
+discipline keeps the shim read-safe; note edits are a separate
+command set scheduled after the render path is proven.
+
+## 18. Out-of-tree shim build is the shipping story; in-tree build stays for dev
+
+**Context:** The shim was originally a directory under Ardour's
+`libs/surfaces/` plus a one-line patch in `libs/surfaces/wscript` to
+register it. That works for active development (sibling clone of
+the Ardour repo, `just shim-build` recompiles everything) but is
+operationally painful for end users — they'd need to rebuild Ardour
+from source, or we'd need to distribute a patched Ardour binary.
+The latter conflicts with Paul Davis's commercial model for Ardour
+(the demo-timer on paid distributions funds ongoing development),
+which we want to preserve, not cannibalize.
+
+**Decision:** Add a CMake-based out-of-tree build as the **shipping**
+artifact, keep the in-tree waf build as a **dev convenience**.
+
+- [shims/ardour/CMakeLists.txt](../shims/ardour/CMakeLists.txt)
+  builds `libfoyer_shim.so` against a sibling Ardour source tree
+  (selectable via `-DFOYER_ARDOUR_SOURCE=…` or
+  `$FOYER_ARDOUR_BUILD_ROOT`). Zero edits to anything under Ardour's
+  `libs/`.
+- The resulting `.so` gets installed into
+  `~/.config/ardour9/surfaces/` (or any dir on
+  `ARDOUR_SURFACES_PATH`) and Ardour `dlopen`s it at startup,
+  identically to how Mackie / OSC / Generic MIDI load — Ardour's
+  control-surface dispatch already does this, no new plumbing.
+- Justfile recipes: `shim-cmake-build` for local compile,
+  `shim-install` for installation to a user-scoped directory.
+- The existing `shim-build` (waf, in-tree via symlink) recipe is
+  preserved for quick iteration in the dev container — same sources,
+  different build system.
+
+**Alternatives considered:**
+
+1. *Fork Ardour and maintain a downstream branch.* Rejected: fork
+   tax, commercial implications (redistributing an unmodified
+   Ardour fork would reset its demo timer, which would directly
+   reduce Paul's revenue and violate the spirit of his licensing
+   intent).
+2. *Ship a patched Ardour binary.* Same rejection.
+3. *Wait for Ardour to accept
+   [PROPOSAL-surface-auto-discovery.md](PROPOSAL-surface-auto-discovery.md)
+   upstream before building anything.* Rejected: we want to ship
+   now. The CMake build is forward-compatible — once the proposal
+   lands and Ardour ships `ardour-surface.pc`, we flip `FOYER_ARDOUR_SOURCE`
+   to `find_package(Ardour REQUIRED)` and stop needing a sibling
+   source tree.
+
+**Why:** Keeping the shim as a standalone, GPL-contained `.so`
+delivered separately from Ardour is the cleanest license + ecosystem
+posture we can take. It preserves Ardour's commercial model, limits
+our GPL surface to exactly the code that must link `libardour`, and
+matches how every other mature plugin ecosystem works (LV2, VST3,
+gstreamer, vim, VSCode).
+
+**Implementation notes:**
+- The CMake build uses `RPATH` pointing at the sibling tree's
+  `build/libs/*/` so the produced `.so` loads cleanly in direct
+  `dlopen` tests (independent of Ardour itself). When Ardour
+  loads it, the host process's own library resolution kicks in
+  first and the rpath is harmless.
+- Output location: `shims/ardour/cmake-build/libfoyer_shim.so`.
+  Install prefix convention: `${PREFIX}/surfaces/`, which matches
+  Ardour's default scan paths.
+- The in-tree wscript stays in `shims/ardour/wscript` and is used
+  by `just shim-build`. It symlinks the shim dir into
+  `/workspaces/ardour/libs/surfaces/foyer_shim`. Only touches the
+  sibling clone, never upstream Ardour's committed files.
+
+## 19. Master-bus audio tap lives in the shim as a Processor subclass, not a port insert
+
+**Context:** M6a needed a way to get master-bus audio out of Ardour
+and into the sidecar for WebRTC / WebSocket egress to browsers.
+Three APIs fit the shape:
+
+1. Subclass `ARDOUR::Processor`, insert on the master route via
+   `add_processor`, copy samples in the RT `run()` callback.
+2. Subclass `ARDOUR::PortInsert`, create a virtual port that Ardour
+   treats as a hardware send. Audio routes through the port,
+   visible in Ardour's own mixer UI.
+3. JACK port-connection tap — connect a client port to the master
+   output externally.
+
+**Decision:** Option 1. `MasterTap` is a minimal `Processor` that
+the shim installs via `master->add_processor(tap, PostFader, …)`
+when the sidecar asks for egress, and removes on close.
+
+- Audio path: `run()` copies interleaved samples from the
+  `BufferSet` into a `PBD::RingBuffer<float>` (~200 ms capacity at
+  48 kHz stereo). No allocations, no locks, no logging — RT budget
+  respected.
+- A non-RT drain thread wakes on a condvar every ~10 ms, reads
+  whatever's in the ring, packs `[stream_id u32 LE][f32 LE PCM]`
+  and calls `ipc().send(FrameKind::Audio, …)`. The sidecar's
+  HostBackend decodes back into `PcmFrame` and routes to the
+  existing `AudioHub` → Opus-or-RawF32 encoder → WebSocket
+  fan-out.
+
+**Alternatives considered:**
+
+1. *`PortInsert` (shows up in Ardour's UI).* Rejected: we don't
+   want the shim to introduce visible routing artifacts in Ardour's
+   own mixer. Also heavier — the PortInsert model assumes a full
+   send-return pair with latency compensation.
+2. *JACK port-connection tap.* Rejected: Linux-only, ties us to a
+   specific audio backend, breaks on ALSA / CoreAudio / WASAPI.
+3. *Poll `master_out()` from the event loop at 5 ms cadence.*
+   Rejected: master audio buffers are only valid inside the RT
+   callback. Reading them from outside is unsupported and
+   race-prone.
+
+**Why:** The `Processor` subclass is the canonical Ardour extension
+point for RT audio work — Mackie's meter readings, every plugin,
+Ardour's own Send/Return all use it. Adding one more processor on
+the master route is a well-understood operation the engine is
+designed for. Passing data RT → non-RT via a lock-free ring is the
+standard idiom (Ardour's own disk-thread does the same pattern in
+reverse for record).
+
+**Implementation notes:**
+- Only `source=master` is wired today. Per-track taps land
+  alongside the per-track preview feature — same pattern, just
+  find the target route from the track id and `add_processor`
+  there.
+- Stereo is assumed (`channels=2` default). If the master has
+  more / fewer channels we zero-pad up to 2, or truncate down.
+  Real 5.1 / Dolby Atmos support is a future polish pass.
+- The drain thread runs as a plain `std::thread`, not on the
+  shim's event loop, because the event loop is busy handling IPC
+  commands and we don't want audio to backpressure control.
+- Sidecar-side fallback: if the backend can't produce audio (stub
+  backend, or open_egress error), `ws.rs` falls back to the
+  in-sidecar test tone so the "Listen" button keeps working. Real
+  audio is an upgrade, not a prerequisite.

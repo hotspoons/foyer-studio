@@ -196,11 +196,11 @@ export class TimelineView extends LitElement {
       position: absolute;
       top: 2px; left: 6px; right: 6px;
       /* Clip + ellipsize so the region name never spills past the
-       * region container. Without `max-width`/overflow controls, a
-       * long take name on a narrow region renders past the right
-       * edge — and with our new absolutely-positioned viz children,
-       * that spillover was visually "poking over" adjacent track
-       * header strips. */
+       * region container. Without max-width and overflow controls,
+       * a long take name on a narrow region renders past the right
+       * edge — and with absolutely-positioned viz children, that
+       * spillover was visually poking over adjacent track header
+       * strips. */
       max-width: calc(100% - 12px);
       white-space: nowrap;
       overflow: hidden;
@@ -734,7 +734,10 @@ export class TimelineView extends LitElement {
   _regionContextMenu(ev, region) {
     ev.preventDefault();
     ev.stopPropagation();
-    showContextMenu(ev, [
+    // A MIDI region has `notes` (non-empty for regions the shim has
+    // populated). Expose "Open piano roll…" for those; the audio
+    // menu stays minimal.
+    const items = [
       { heading: region.name || region.id },
       {
         label: region.muted ? "Unmute" : "Mute",
@@ -745,14 +748,47 @@ export class TimelineView extends LitElement {
           patch: { muted: !region.muted },
         }),
       },
-      { separator: true },
-      {
-        label: "Delete region",
-        icon: "trash",
-        tone: "danger",
-        action: () => window.__foyer?.ws?.send({ type: "delete_region", id: region.id }),
-      },
-    ]);
+    ];
+    if (Array.isArray(region.notes)) {
+      items.push({
+        label: "Open piano roll…",
+        icon: "sparkles",
+        action: () => this._openMidiEditor(region),
+      });
+    }
+    items.push({ separator: true });
+    items.push({
+      label: "Delete region",
+      icon: "trash",
+      tone: "danger",
+      action: () => window.__foyer?.ws?.send({ type: "delete_region", id: region.id }),
+    });
+    showContextMenu(ev, items);
+  }
+
+  _openMidiEditor(region) {
+    import("./midi-editor.js").then(() => {
+      // A simple centered modal wrapper is overkill — reuse the project
+      // pattern of spawning a detached element and appending to body.
+      const wrap = document.createElement("div");
+      wrap.style.cssText = "position:fixed;inset:0;z-index:900;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center";
+      const card = document.createElement("div");
+      card.style.cssText = "background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-lg);width:min(960px,95vw);height:min(640px,90vh);display:flex;flex-direction:column;overflow:hidden";
+      const header = document.createElement("div");
+      header.style.cssText = "display:flex;align-items:center;padding:10px 14px;border-bottom:1px solid var(--color-border);font-family:var(--font-sans);font-size:13px;font-weight:600;color:var(--color-text)";
+      header.innerHTML = `<span style="flex:1">MIDI — ${region.name || region.id}</span><button style="background:transparent;border:1px solid var(--color-border);color:var(--color-text);border-radius:4px;padding:4px 10px;cursor:pointer">Close</button>`;
+      header.querySelector("button").addEventListener("click", () => wrap.remove());
+      card.appendChild(header);
+      const editor = document.createElement("foyer-midi-editor");
+      editor.notes = region.notes || [];
+      editor.regionName = region.name || "";
+      editor.style.flex = "1";
+      editor.style.minHeight = "0";
+      card.appendChild(editor);
+      wrap.appendChild(card);
+      wrap.addEventListener("click", (e) => { if (e.target === wrap) wrap.remove(); });
+      document.body.appendChild(wrap);
+    });
   }
 
   _startLaneResize(ev, trackId) {

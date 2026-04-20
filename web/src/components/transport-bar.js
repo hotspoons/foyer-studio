@@ -67,6 +67,13 @@ export class TransportBar extends LitElement {
       min-width: 52px;
       color: color-mix(in oklab, #a384ff 70%, var(--color-text-muted));
     }
+    .btn.edit    { color: color-mix(in oklab, #b3c0d8 70%, var(--color-text-muted)); }
+    .btn.save    { color: color-mix(in oklab, #7ac69a 70%, var(--color-text-muted)); }
+    .btn.save.dirty {
+      color: #b48adb;
+      background: color-mix(in oklab, #b48adb 18%, var(--color-surface));
+      border-color: color-mix(in oklab, #b48adb 40%, var(--color-border));
+    }
 
     /* "On" states: saturate fully + tinted background for that DAW
      * lit-button feel. */
@@ -111,6 +118,7 @@ export class TransportBar extends LitElement {
     this._recCtl = null;
     this._loopCtl = null;
     this._tempoCtl = null;
+    this._onStoreChange = () => this.requestUpdate();
   }
 
   connectedCallback() {
@@ -120,6 +128,13 @@ export class TransportBar extends LitElement {
     this._recCtl   = new ControlController(this, store, "transport.recording");
     this._loopCtl  = new ControlController(this, store, "transport.looping");
     this._tempoCtl = new ControlController(this, store, "transport.tempo");
+    // Repaint when the session.dirty flag flips — the Save button
+    // enables/disables off that.
+    store.addEventListener("change", this._onStoreChange);
+  }
+  disconnectedCallback() {
+    window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
+    super.disconnectedCallback();
   }
 
   render() {
@@ -149,6 +164,18 @@ export class TransportBar extends LitElement {
       <div class="btn return-mode"
            title=${RETURN_MODE_TITLES[returnMode] + " — click to cycle"}
            @click=${this._cycleReturnMode}>${RETURN_MODE_LABELS[returnMode]}</div>
+      <div class="sep"></div>
+      <div class="row">
+        <div class="btn edit"
+             title="Undo (${this._metaChord()}+Z)"
+             @click=${this._undo}>${icon("arrow-uturn-left", 14)}</div>
+        <div class="btn edit"
+             title="Redo (${this._metaChord()}+Shift+Z)"
+             @click=${this._redo}>${icon("arrow-uturn-right", 14)}</div>
+        <div class="btn save ${this._isDirty() ? "dirty" : ""}"
+             title="${this._isDirty() ? "Save session (unsaved changes)" : "Save session"}"
+             @click=${this._save}>${icon("document-save", 14)}</div>
+      </div>
       <div class="sep"></div>
       <foyer-number
         label="Tempo"
@@ -211,5 +238,21 @@ export class TransportBar extends LitElement {
     const v = Number(ev.detail?.value);
     if (Number.isFinite(v)) window.__foyer.ws.controlSet("transport.tempo", v);
   };
+
+  _metaChord() {
+    // Cosmetic: pick the chord symbol for the tooltip based on OS.
+    return /Mac|iPhone|iPad/.test(navigator.userAgent) ? "Cmd" : "Ctrl";
+  }
+
+  _isDirty() {
+    return !!window.__foyer?.store?.state?.session?.dirty;
+  }
+
+  _invoke(id) {
+    window.__foyer?.ws?.send({ type: "invoke_action", id });
+  }
+  _undo = () => this._invoke("edit.undo");
+  _redo = () => this._invoke("edit.redo");
+  _save = () => this._invoke("session.save");
 }
 customElements.define("foyer-transport-bar", TransportBar);

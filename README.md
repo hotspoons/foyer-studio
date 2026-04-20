@@ -57,25 +57,41 @@ boundary and can be licensed separately from any one shim. See
 | Ardour shim — real regions + source paths (playlist walk + Playlist signals) | Shipping |
 | Ardour shim — per-track plugin enumeration + parameter emission | Shipping |
 | Ardour shim — track rename/color (UpdateTrack → set_name / PresentationInfo::set_color) | Shipping |
-| Ardour shim — action dispatch (edit.undo/redo, session.save, track.add_audio/bus) | Shipping |
+| Ardour shim — action dispatch (edit.undo/redo, session.save, session.save_as, plugin.rescan, track.add_audio/bus) | Shipping |
 | Ardour shim — session dirty + signal bridge | Shipping |
+| Ardour shim — plugin parameter live updates (ParameterChangedExternally + ActiveChanged) | Shipping |
+| Ardour shim — MIDI note emission (MidiModel walk, inline on region list) | Shipping |
 | Symphonia-backed waveform peak decoder (WAV / FLAC / AIFF / OGG / Vorbis) | Shipping |
-| WebGL waveform renderer with AA, clip markers, swappable palettes + styles | Shipping |
+| Vector waveform renderer — port of Ardour's WaveView connected-line algorithm, viewport-cropped Canvas2D | Shipping |
 | Schema-driven plugin panels | Shipping — `<foyer-plugin-panel>` renders any `PluginInstance.params` |
-| Tile tree + floating windows + slot picker | Shipping |
+| Plugin picker modal + Add/Remove round-tripped through shim | Shipping |
+| Errored-plugin row in the track strip with localStorage-persisted dismiss | Shipping |
+| Track editor modal (right-click track label → rename/color/comment + embedded mixer strip) | Shipping |
+| Tile tree + floating windows + slot picker + paired-edge resize | Shipping |
 | Tear-out (tile header, plugin strip, menu items) + right-dock | Shipping |
+| Layouts + Agents FABs as right-dock slide-out panels | Shipping |
 | Layout presets + user-assigned chords | Shipping |
 | Keyboard-first WM + AHK-flavored automation | Shipping |
+| Transport bar with pulsing record, 3-mode return-on-stop, undo/redo/save cluster | Shipping |
 | Multi-track selection + zoom-to-selection w/ back-stack | Shipping |
 | Selection ops — delete / mute toggle across selection | Shipping |
-| Return-on-stop mode (stay / zero / play-start) with front-end position lock | Shipping |
-| Dev integration test harness (`/dev/run-tests` + diagnostics panel) | Shipping — 8 probes, all green against stub |
-| Plugin lifecycle — AddPlugin / RemovePlugin / MovePlugin in shim | Schema ready; shim dispatch pending |
+| Return-on-stop mode (stay / zero / play-start) with front-end position lock + mid-play seek tracking | Shipping |
+| MIDI piano roll component (modal via region right-click; reads shim-emitted notes) | Shipping |
+| Client-side settings modal (preferences, waveform style/palette, transport mode) | Shipping |
+| Session share modal with QR + URL copy | Shipping |
+| Dev integration test harness (`/dev/run-tests` + diagnostics panel) | Shipping — 9 probes, all green against stub |
+| Session save + save-as (shim-side `session.save_state(path)`) | Shipping |
 | Audio I/O schema (IoPort + WebRTC/WebSocket transport negotiation) | Shipping — wire types land; runtime stubs pending |
+| Audio egress test-tone path (sidecar synth → Opus / raw f32 → binary WS fan-out) | Shipping — listen button works against synth |
+| Audio egress real master tap (shim RT `Processor` + ring buffer + drain thread) | Shipping — real master-bus audio flows via host backend |
+| Out-of-tree shim build (CMake, no Ardour source edits, `ARDOUR_SURFACES_PATH`-installable) | Shipping — `just shim-cmake-build && just shim-install` |
+| WebRTC audio forwarding (M6b ingress, M6c latency probe) | Schema ready; runtime pending |
+| Busses / groups / sends (schema fields + mixer UI) | Not yet |
 | Region fade-in / fade-out / trim-to-selection ops | Not yet |
-| WebRTC audio forwarding (M6a egress, M6b ingress, M6c latency probe) | Schema ready; sidecar encoder + shim capture pending |
 | Standalone `.so` shim (drop-in for upstream Ardour) | Not yet |
-| MCP agent | Panel + settings stub; no round-trip |
+| MCP agent round-trip | Panel + settings stub; no tool runtime yet |
+| Voice chat between connected clients | Planned |
+| Multi-window pop-out via `?window=N` | Planned |
 
 ## Quick start
 
@@ -111,6 +127,21 @@ just shim-build
 ```
 
 After that, `just run` spawns Ardour via the shim as you pick projects.
+
+**Out-of-tree shim build** (no edits to Ardour's source):
+
+```bash
+just shim-cmake-build                    # build libfoyer_shim.so
+just shim-install                        # → ~/.config/ardour9/surfaces/
+```
+
+Ardour picks it up from `ARDOUR_SURFACES_PATH` at startup — same
+mechanism Mackie / OSC / Generic MIDI use. Requires a built Ardour
+sibling tree for headers + libs today; flips to `find_package(Ardour)`
+once [docs/PROPOSAL-surface-auto-discovery.md](docs/PROPOSAL-surface-auto-discovery.md)
+lands upstream. Keeps the GPL blast radius to the shim alone — the
+rest of Foyer sits above a documented IPC boundary and ships under
+non-GPL terms.
 
 **Integration probes** (dev only):
 

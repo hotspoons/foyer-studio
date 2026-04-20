@@ -7,6 +7,7 @@ import { icon } from "../icons.js";
 import { getTransportPref, toggleTransportPref } from "../transport-settings.js";
 import { showProjectPicker } from "./project-picker-modal.js";
 import { openSettings } from "./settings-modal.js";
+import { promptText } from "./prompt-modal.js";
 
 // Category → menu label + order. Categories not listed are skipped.
 const MENU_ORDER = [
@@ -224,6 +225,38 @@ export class MainMenu extends LitElement {
     // Preferences is a client-side settings modal — no round trip.
     if (a.id === "settings.preferences") {
       openSettings();
+      return;
+    }
+    // Save As → prompt for filename, emit the richer `save_session`
+    // command (carries the path). Plain Save falls through to the
+    // InvokeAction path below, where the shim's `session.save`
+    // handler calls `save_state("")` (save-in-place).
+    if (a.id === "session.save_as") {
+      (async () => {
+        const ws = window.__foyer?.ws;
+        if (!ws) return;
+        const name = await promptText({
+          title: "Save session as",
+          label: "Filename (relative to session dir, or absolute path)",
+          placeholder: "my-session.ardour",
+          confirmLabel: "Save As",
+        });
+        if (name == null) return;
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        ws.send({ type: "save_session", as_path: trimmed });
+      })();
+      return;
+    }
+    // Export: not wired end-to-end yet. Surface a short toast-style
+    // hint instead of silence so the user knows the verb is known
+    // but the pipeline is still TODO.
+    if (a.id === "session.export") {
+      const toast = document.createElement("div");
+      toast.textContent = "Export isn't wired yet — use Ardour's native Export dialog for now.";
+      toast.style.cssText = "position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--color-surface);border:1px solid var(--color-border);color:var(--color-text);padding:10px 16px;border-radius:6px;z-index:9999;font-family:var(--font-sans);font-size:12px;box-shadow:0 4px 18px rgba(0,0,0,.5)";
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3200);
       return;
     }
     window.__foyer?.ws?.send({ type: "invoke_action", id: a.id });

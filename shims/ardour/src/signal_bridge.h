@@ -45,6 +45,13 @@ private:
 	std::atomic<bool>            _tick_stop { false };
 	void tick_loop ();
 
+	// Edge-detector for 0→1 rolling transitions. Flagged via atomic
+	// so the signal handler (event-loop thread) and any future
+	// non-rt reader don't race. Seeded false; first TransportStateChange
+	// after load either confirms stopped or marks a start we can
+	// capture a stacktrace for.
+	std::atomic<bool>            _last_rolling { false };
+
 	void on_route_added (ARDOUR::RouteList&);
 	void on_transport_state_changed ();
 	void on_record_state_changed ();

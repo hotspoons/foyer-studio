@@ -27,6 +27,7 @@
 #include "temporal/timeline.h"
 
 #include "ipc.h"
+#include "master_tap.h"
 #include "msgpack_out.h"
 #include "schema_map.h"
 #include "surface.h"
@@ -187,7 +188,9 @@ struct DecodedCmd
 		Subscribe,
 		RequestSnapshot,
 		ControlSet,
-		Audio,
+		Audio,            // kept for back-compat; see audio-specific kinds below
+		AudioStreamOpen,  // Command::AudioStreamOpen { stream_id, source, format, transport }
+		AudioStreamClose, // Command::AudioStreamClose { stream_id }
 		Latency,
 		ListRegions,
 		UpdateRegion,
@@ -196,6 +199,7 @@ struct DecodedCmd
 		InvokeAction,
 		AddPlugin,
 		RemovePlugin,
+		SaveSession,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
@@ -203,6 +207,12 @@ struct DecodedCmd
 	std::string plugin_uri;   // Command::AddPlugin
 	std::string plugin_id;    // Command::RemovePlugin (= "plugin.<pid>")
 	double value = 0.0;
+
+	// Audio stream fields (AudioStreamOpen / Close).
+	std::uint32_t audio_stream_id  = 0;
+	std::string   audio_source;       // "master" | "track.<id>" | "monitor"
+	std::uint32_t audio_channels     = 2;
+	std::uint32_t audio_sample_rate  = 48000;
 
 	// RegionPatch fields — only read for UpdateRegion. All optional.
 	bool          has_patch_start   = false;
@@ -301,6 +311,68 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.plugin_uri)) return out;
 				} else if (k == "plugin_id") {
 					if (!in.read_str (out.plugin_id)) return out;
+				} else if (k == "stream_id") {
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.audio_stream_id = static_cast<std::uint32_t> (v);
+				} else if (k == "source") {
+					// foyer-schema::AudioSource is a serde-tagged enum
+					// (tag="kind", rename_all="snake_case") — so the
+					// on-the-wire shape is:
+					//
+					//   { "kind": "master" }
+					//   { "kind": "track",   "id":   "track.abc" }
+					//   { "kind": "monitor" }
+					//   { "kind": "port",    "id":   "port.x" }
+					//   { "kind": "virtual_input", "name": "foo" }
+					//
+					// We need the VALUE of "kind", not its key. Walk
+					// the map and pick up both `kind` + `id` so we can
+					// target a specific track when the time comes.
+					std::size_t inner = 0;
+					if (in.read_map_header (inner)) {
+						for (std::size_t q = 0; q < inner; ++q) {
+							std::string kk;
+							if (!in.read_str (kk)) return out;
+							if (kk == "kind") {
+								std::string v;
+								if (!in.read_str (v)) return out;
+								out.audio_source = v;
+							} else if (kk == "id") {
+								if (!in.read_str (out.track_id)) return out;
+							} else {
+								if (!in.skip_value ()) return out;
+							}
+						}
+					} else if (!in.read_str (out.audio_source)) {
+						return out;
+					}
+				} else if (k == "format") {
+					std::size_t nf = 0;
+					if (!in.read_map_header (nf)) return out;
+					for (std::size_t q = 0; q < nf; ++q) {
+						std::string kk;
+						if (!in.read_str (kk)) return out;
+						if (kk == "channels") {
+							std::uint64_t v = 0;
+							if (!in.read_u64 (v)) return out;
+							out.audio_channels = static_cast<std::uint32_t> (v);
+						} else if (kk == "sample_rate") {
+							std::uint64_t v = 0;
+							if (!in.read_u64 (v)) return out;
+							out.audio_sample_rate = static_cast<std::uint32_t> (v);
+						} else {
+							if (!in.skip_value ()) return out;
+						}
+					}
+				} else if (k == "as_path") {
+					// Command::SaveSession { as_path: Option<String> }
+					// — decoded into `out.id` since we already have a
+					// free string slot. MessagePack can carry nil or
+					// the string; we accept either.
+					std::string p;
+					if (!in.read_str (p)) return out;
+					out.id = p;
 				} else {
 					if (!in.skip_value ()) return out;
 				}
@@ -315,6 +387,11 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "invoke_action")      out.kind = DecodedCmd::Kind::InvokeAction;
 			else if (cmd_type == "add_plugin")         out.kind = DecodedCmd::Kind::AddPlugin;
 			else if (cmd_type == "remove_plugin")      out.kind = DecodedCmd::Kind::RemovePlugin;
+			else if (cmd_type == "save_session")       out.kind = DecodedCmd::Kind::SaveSession;
+			else if (cmd_type == "audio_stream_open"
+			    ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
+			else if (cmd_type == "audio_stream_close"
+			    ||   cmd_type == "audio_egress_stop")   out.kind = DecodedCmd::Kind::AudioStreamClose;
 			else if (cmd_type.rfind ("audio_", 0) == 0) out.kind = DecodedCmd::Kind::Audio;
 			else if (cmd_type == "latency_probe")      out.kind = DecodedCmd::Kind::Latency;
 		} else {
@@ -752,6 +829,87 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (!bytes.empty ()) {
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SaveSession: {
+			// `out.id` holds `as_path` (possibly empty = save in place).
+			std::string as_path = cmd.id;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, as_path] () {
+				PBD::warning << "foyer_shim: save_session as_path='" << as_path << "'" << endmsg;
+				shim->session ().save_state (as_path);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::AudioStreamOpen: {
+			// M6a: install a MasterTap processor on the master route
+			// so audio samples flow into our ring buffer. Today we
+			// only support `source="master"`; track-level taps land
+			// alongside the per-track preview feature.
+			if (cmd.audio_source != "master") {
+				PBD::warning << "foyer_shim: audio_stream_open: only source=master wired "
+				             << "today (got '" << cmd.audio_source << "') — ignoring"
+				             << endmsg;
+				break;
+			}
+			const std::uint32_t stream_id = cmd.audio_stream_id;
+			const std::uint32_t channels  = cmd.audio_channels;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, stream_id, channels] () {
+				auto master = shim->session ().master_out ();
+				if (!master) {
+					PBD::warning << "foyer_shim: audio_stream_open: no master route" << endmsg;
+					return;
+				}
+				auto tap = std::make_shared<MasterTap> (*shim, shim->session (), stream_id, channels);
+				if (master->add_processor (tap, ARDOUR::PostFader, nullptr, true /* activation */) != 0) {
+					PBD::warning << "foyer_shim: audio_stream_open: add_processor failed" << endmsg;
+					return;
+				}
+				tap->start_drain ();
+				{
+					std::lock_guard<std::mutex> g (self->_taps_mx);
+					self->_taps[stream_id] = tap;
+				}
+				PBD::warning << "foyer_shim: [audio] stream_id=" << stream_id
+				             << " attached master tap + drain" << endmsg;
+				// ACK so the sidecar's HostBackend::open_egress oneshot
+				// resolves; without this the Rust side times out.
+				auto ack = msgpack_out::encode_audio_egress_started (stream_id);
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::AudioStreamClose: {
+			const std::uint32_t stream_id = cmd.audio_stream_id;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, stream_id] () {
+				std::shared_ptr<MasterTap> tap;
+				{
+					std::lock_guard<std::mutex> g (self->_taps_mx);
+					auto it = self->_taps.find (stream_id);
+					if (it != self->_taps.end ()) {
+						tap = it->second;
+						self->_taps.erase (it);
+					}
+				}
+				if (!tap) {
+					PBD::warning << "foyer_shim: [audio] close: no tap for stream_id="
+					             << stream_id << endmsg;
+					return;
+				}
+				auto master = shim->session ().master_out ();
+				if (master) {
+					master->remove_processor (tap);
+				}
+				tap->stop_drain ();
+				PBD::warning << "foyer_shim: [audio] stream_id=" << stream_id
+				             << " tap removed" << endmsg;
+				auto ack = msgpack_out::encode_audio_egress_stopped (stream_id);
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
 			});
 			break;
 		}

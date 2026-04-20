@@ -104,6 +104,17 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn save_session(&self, as_path: Option<&str>) -> Result<(), BackendError> {
+        // Empty `as_path` means save-in-place (matches the shim's
+        // `session.save_state("")` convention).
+        self.client
+            .send_command(Command::SaveSession {
+                as_path: as_path.map(str::to_string),
+            })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn invoke_action(&self, id: EntityId) -> Result<(), BackendError> {
         // Forward the whole action id as-is to the shim. The shim's
         // InvokeAction dispatch handles transport.*, edit.*, session.*,
@@ -128,6 +139,18 @@ impl Backend for HostBackend {
             .open_egress(stream_id, source, format)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn close_egress(&self, stream_id: u32) -> Result<(), BackendError> {
+        // Fire-and-forget — the shim's audio_egress_stopped event
+        // will land via the event stream too, but we don't need to
+        // wait for it. If the send fails (pipe broken) we just
+        // swallow since the session's about to tear down anyway.
+        let _ = self
+            .client
+            .send_command(foyer_schema::Command::AudioEgressStop { stream_id })
+            .await;
+        Ok(())
     }
 
     async fn open_ingress(

@@ -9,11 +9,15 @@
 #define foyer_shim_dispatch_h
 
 #include <cstdint>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 namespace ArdourSurface {
 
 class FoyerShim;
+class MasterTap;
 
 class Dispatcher
 {
@@ -31,6 +35,14 @@ public:
 
 private:
 	FoyerShim& _shim;
+
+	// Active audio egress taps keyed by stream_id. The processor is
+	// owned by the route once `add_processor` succeeds — we keep a
+	// shared_ptr here so we can find it to remove on close. Guarded
+	// by `_taps_mx` because the IPC reader thread and the event-loop
+	// thread both touch it.
+	std::mutex _taps_mx;
+	std::map<std::uint32_t, std::shared_ptr<MasterTap>> _taps;
 };
 
 } // namespace ArdourSurface

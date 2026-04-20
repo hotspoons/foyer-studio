@@ -424,6 +424,31 @@ encode_session_dirty_changed (bool dirty)
 	});
 }
 
+// `Event::AudioEgressStarted { stream_id }` — M6a ack that the shim
+// has installed its master tap. The HostBackend's pending_egress
+// oneshot resolves on receipt so `open_egress` returns successfully.
+std::vector<std::uint8_t>
+encode_audio_egress_started (std::uint32_t stream_id)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");       o.str ("event");
+		o.str ("type");      o.str ("audio_egress_started");
+		o.str ("stream_id"); o.u (stream_id);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_audio_egress_stopped (std::uint32_t stream_id)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");       o.str ("event");
+		o.str ("type");      o.str ("audio_egress_stopped");
+		o.str ("stream_id"); o.u (stream_id);
+	});
+}
+
 namespace {
 
 // Emit a single `Region` struct map. The size is variable because three of
@@ -437,9 +462,11 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	const bool emit_color       = !r.color.empty ();
 	const bool emit_source_path = !r.source_path.empty ();
 	const bool emit_source_off  = r.has_source_offset && !r.source_path.empty ();
+	const bool emit_notes       = !r.notes.empty ();
 	if (emit_color)       ++n;
 	if (emit_source_path) ++n;
 	if (emit_source_off)  ++n;
+	if (emit_notes)       ++n;
 
 	o.map (n);
 	o.str ("id");             o.str (r.id);
@@ -451,6 +478,22 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	o.str ("muted"); o.b (r.muted);
 	if (emit_source_path) { o.str ("source_path"); o.str (r.source_path); }
 	if (emit_source_off)  { o.str ("source_offset_samples"); o.u (r.source_offset_samples); }
+	if (emit_notes) {
+		o.str ("notes");
+		o.array (r.notes.size ());
+		for (auto const& nd : r.notes) {
+			// Foyer schema: MidiNote { id, pitch, velocity, start_ticks,
+			// length_ticks, channel }. Keep the map in lockstep with
+			// crates/foyer-schema/src/midi.rs.
+			o.map (6);
+			o.str ("id");            o.str (nd.id);
+			o.str ("pitch");         o.u (nd.pitch);
+			o.str ("velocity");      o.u (nd.velocity);
+			o.str ("start_ticks");   o.u (nd.start_ticks);
+			o.str ("length_ticks");  o.u (nd.length_ticks);
+			o.str ("channel");       o.u (nd.channel);
+		}
+	}
 }
 
 } // namespace

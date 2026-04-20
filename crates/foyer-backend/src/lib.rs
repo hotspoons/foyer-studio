@@ -221,6 +221,14 @@ pub trait Backend: Send + Sync + 'static {
         format: AudioFormat,
     ) -> Result<PcmRx, BackendError>;
 
+    /// Tear down an egress stream opened with `open_egress`. Default:
+    /// no-op (the sidecar's AudioHub also closes its fan-out side);
+    /// the host backend forwards a shim command so the RT tap is
+    /// actually removed from the master route.
+    async fn close_egress(&self, _stream_id: u32) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     async fn open_ingress(
         &self,
         stream_id: u32,

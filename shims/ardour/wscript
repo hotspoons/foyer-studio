@@ -27,6 +27,7 @@ def build(bld):
         src/dispatch.cc
         src/schema_map.cc
         src/msgpack_out.cc
+        src/master_tap.cc
     '''
     obj.defines = ['PACKAGE="foyer_shim"', 'ARDOURSURFACE_DLL_EXPORTS']
     obj.includes = ['.', './src']

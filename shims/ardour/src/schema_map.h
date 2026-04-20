@@ -102,6 +102,17 @@ struct PluginDesc {
 /// so the generic client UI can render it like any other parameter.
 std::vector<PluginDesc> enumerate_plugins (std::shared_ptr<ARDOUR::Route> route);
 
+/// Per-note payload attached to a MIDI region. Ticks are at the
+/// project's PPQN (960 by default). Matches `foyer_schema::MidiNote`.
+struct NoteDesc {
+	std::string   id;              ///< "note.<region-pbd-id>.<n>"
+	std::uint8_t  pitch   = 0;     ///< 0..127
+	std::uint8_t  velocity = 0;    ///< 0..127
+	std::uint8_t  channel = 0;     ///< 0..15
+	std::uint64_t start_ticks  = 0;///< relative to region start
+	std::uint64_t length_ticks = 0;
+};
+
 /// Description of a single region on a track playlist, translated into
 /// Foyer's schema shape. Samples are at the session's sample rate.
 ///
@@ -119,6 +130,8 @@ struct RegionDesc {
 	std::string   source_path;            ///< "" if no file source
 	std::uint64_t source_offset_samples = 0;
 	bool          has_source_offset = false;
+	/// Populated for MIDI regions only. Empty for audio.
+	std::vector<NoteDesc> notes;
 };
 
 /// Enumerate regions on the playlist of the track identified by `track_id`

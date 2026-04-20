@@ -10,6 +10,9 @@
 #include <functional>
 #include <sstream>
 
+#include <cstdlib>
+#include <iostream>
+
 #include "ardour/playlist.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
@@ -20,6 +23,7 @@
 #include "ardour/track.h"
 #include "evoral/Parameter.h"
 #include "pbd/controllable.h"
+#include "pbd/stacktrace.h"
 
 #include "ipc.h"
 #include "msgpack_out.h"
@@ -104,10 +108,71 @@ SignalBridge::tick_loop ()
 	}
 }
 
+/// One-shot diagnostic dump of every session-wide knob that could
+/// plausibly cause transport to auto-start on session load. We log
+/// this on subscribe_all so the next time Rich reproduces the
+/// "transport starts rolling by itself" regression we have every
+/// relevant Ardour config value in daw.log without needing another
+/// build.
+static void
+dump_transport_diagnostics (ARDOUR::Session& s)
+{
+	PBD::warning << "foyer_shim: [DIAG] ── transport start-state dump ──" << endmsg;
+	PBD::warning << "foyer_shim: [DIAG]   sample="           << s.transport_sample ()
+	             << " rolling="                              << s.transport_rolling ()
+	             << " state_rolling="                        << s.transport_state_rolling ()
+	             << " stopped="                              << s.transport_stopped ()
+	             << " stopped_or_stopping="                  << s.transport_stopped_or_stopping () << endmsg;
+	PBD::warning << "foyer_shim: [DIAG]   speed="            << s.transport_speed ()
+	             << " actual_speed="                         << s.actual_speed ()
+	             << " default_play_speed="                   << s.default_play_speed ()
+	             << " get_play_loop="                        << s.get_play_loop ()
+	             << " get_play_range="                       << s.get_play_range () << endmsg;
+	PBD::warning << "foyer_shim: [DIAG]   synced_to_engine=" << s.synced_to_engine ()
+	             << " transport_master_is_external="         << s.transport_master_is_external () << endmsg;
+	PBD::warning << "foyer_shim: [DIAG]   config.get_external_sync=" << s.config.get_external_sync ()
+	             << " config.get_auto_play="                         << s.config.get_auto_play ()
+	             << " config.get_auto_return="                       << s.config.get_auto_return () << endmsg;
+	PBD::warning << "foyer_shim: [DIAG]   current_end_sample="  << s.current_end_sample ()
+	             << " session_range_is_free="                   << s.session_range_is_free ()
+	             << endmsg;
+	PBD::warning << "foyer_shim: [DIAG] ── end dump ──" << endmsg;
+}
+
 void
 SignalBridge::subscribe_all ()
 {
 	Session& session = _shim.session ();
+
+	dump_transport_diagnostics (session);
+
+	// Band-aid: Ardour's transport FSM sometimes flips Stopped→Rolling
+	// right after session load (root cause TBD — TransportStateChange
+	// fires without any caller-visible request_roll from our shim;
+	// config.auto_play is 0, transport master is internal + not
+	// external, and no ControlSet came through). Force the transport
+	// to a known-stopped state once, on the event loop, right after
+	// subscribe. Harmless if it's already stopped; fixes the
+	// "open session, hear audio playing" surprise. If this workaround
+	// ever suppresses a legitimate auto-roll request, remove it and
+	// chase the root cause via the [DIAG-STARTED] backtrace.
+	{
+		FoyerShim* shim = &_shim;
+		_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
+			auto& s = shim->session ();
+			if (s.transport_state_rolling ()) {
+				PBD::warning << "foyer_shim: [WORKAROUND] session opened with "
+				             << "transport rolling — calling transport_stop() "
+				             << "to restore sane default. Set env "
+				             << "FOYER_ALLOW_AUTO_ROLL=1 to disable."
+				             << endmsg;
+				const char* allow = std::getenv ("FOYER_ALLOW_AUTO_ROLL");
+				if (!allow || std::string (allow) == "0") {
+					shim->transport_stop ();
+				}
+			}
+		});
+	}
 
 	session.RouteAdded.connect (
 	    _connections, MISSING_INVALIDATOR,
@@ -273,12 +338,44 @@ void
 SignalBridge::on_transport_state_changed ()
 {
 	auto& s = _shim.session ();
+	// Track the last observed rolling state so we can tag 0→1
+	// transitions — those are the "transport started" events we
+	// care about for the auto-play regression.
+	const bool now_rolling = s.transport_state_rolling ();
+	const bool was_rolling = _last_rolling.exchange (now_rolling);
+	const bool started     = now_rolling && !was_rolling;
+
 	PBD::warning << "foyer_shim: SIGNAL TransportStateChange: "
 	             << "sample=" << s.transport_sample ()
 	             << " rolling=" << s.transport_rolling ()
-	             << " state_rolling=" << s.transport_state_rolling ()
+	             << " state_rolling=" << now_rolling
 	             << " stopped=" << s.transport_stopped ()
-	             << " rec_enabled=" << s.get_record_enabled () << endmsg;
+	             << " rec_enabled=" << s.get_record_enabled ()
+	             << " speed=" << s.transport_speed ()
+	             << " default_speed=" << s.default_play_speed ()
+	             << (started ? " **STARTED**" : "")
+	             << endmsg;
+
+	if (started) {
+		// Rolling just flipped 0→1. Log everything that could have
+		// caused it, plus a C-stack backtrace so we can see which
+		// Ardour code path drove us into Rolling state.
+		PBD::warning << "foyer_shim: [DIAG-STARTED] "
+		             << "sync_to_engine=" << s.synced_to_engine ()
+		             << " master_is_external=" << s.transport_master_is_external ()
+		             << " config.external_sync=" << s.config.get_external_sync ()
+		             << " config.auto_play=" << s.config.get_auto_play ()
+		             << " config.auto_return=" << s.config.get_auto_return ()
+		             << " get_play_loop=" << s.get_play_loop ()
+		             << " get_play_range=" << s.get_play_range ()
+		             << endmsg;
+		PBD::warning << "foyer_shim: [DIAG-STARTED] backtrace below — "
+		             << "look for `start_transport`, `request_roll`, "
+		             << "`transport_play`, or a MIDI-clock / JACK slave "
+		             << "entry point." << endmsg;
+		PBD::stacktrace (std::cerr, 24);
+	}
+
 	auto bytes = msgpack_out::encode_transport_state (s);
 	_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 }

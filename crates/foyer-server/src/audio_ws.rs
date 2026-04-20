@@ -32,9 +32,25 @@ pub async fn upgrade(
 }
 
 async fn handle(socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
-    let Some(mut rx) = state.audio_hub.subscribe(stream_id).await else {
-        tracing::warn!("/ws/audio/{stream_id} requested but hub has no such stream");
-        // Let the socket close with a polite code.
+    // Clients open the audio WS immediately after sending the
+    // `audio_stream_open` control command. The shim-side tap setup
+    // takes a moment (up to the open_egress timeout), so the stream
+    // may not yet be registered when this handler first runs. Poll
+    // the hub for a few seconds before giving up — matches the
+    // open_egress timeout so both paths time out in concert rather
+    // than the browser seeing a failure first.
+    let mut rx = None;
+    for _ in 0..60 {
+        if let Some(sub) = state.audio_hub.subscribe(stream_id).await {
+            rx = Some(sub);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let Some(mut rx) = rx else {
+        tracing::warn!(
+            "/ws/audio/{stream_id} requested but hub has no such stream after 6 s wait"
+        );
         let _ = socket
             .close_with(axum::extract::ws::CloseFrame {
                 code: 4404,

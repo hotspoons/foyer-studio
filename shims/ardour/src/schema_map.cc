@@ -7,6 +7,8 @@
 
 #include "ardour/audioregion.h"
 #include "ardour/file_source.h"
+#include "ardour/midi_model.h"
+#include "ardour/midi_region.h"
 #include "ardour/parameter_descriptor.h"
 #include "ardour/plug_insert_base.h"
 #include "ardour/playlist.h"
@@ -387,6 +389,35 @@ describe_region (const Region& r, const std::string& track_id)
 	d.source_path     = region_source_path (r);
 	d.source_offset_samples = static_cast<std::uint64_t> (std::max<samplecnt_t> (r.start_sample (), 0));
 	d.has_source_offset     = !d.source_path.empty ();
+
+	// MIDI regions: extract the note list so the web UI's piano roll
+	// has data to render. Done inline on the region emission so
+	// clients don't need a separate `list_notes` round-trip.
+	auto mr = dynamic_cast<const ARDOUR::MidiRegion*> (&r);
+	if (mr) {
+		auto model = const_cast<ARDOUR::MidiRegion*> (mr)->model ();
+		if (model) {
+			auto lock = model->read_lock ();
+			std::uint32_t idx = 0;
+			for (auto const& note : model->notes ()) {
+				if (!note) continue;
+				NoteDesc nd;
+				std::ostringstream nid;
+				nid << "note." << region_pbd_id_string (r) << "." << idx++;
+				nd.id       = nid.str ();
+				nd.pitch    = note->note ();
+				nd.velocity = note->velocity ();
+				nd.channel  = note->channel ();
+				// Evoral::Note<Temporal::Beats>: times are in musical
+				// beats. Convert to ticks (default 960 PPQN via
+				// Temporal::ticks_per_beat) for the wire schema.
+				nd.start_ticks  = static_cast<std::uint64_t> (note->time ().to_ticks ());
+				nd.length_ticks = static_cast<std::uint64_t> (note->length ().to_ticks ());
+				d.notes.push_back (nd);
+			}
+		}
+	}
+
 	return d;
 }
 

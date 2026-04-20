@@ -19,6 +19,178 @@ still apply:
   don't stop to ask.
 - **Speech-to-text artifacts:** "our door" = Ardour.
 
+## 2026-04-21 afternoon (most recent)
+
+Rich woke up thrilled with the morning push, then asked for three
+specific pieces of work before going back to bed:
+
+1. **Instrument the auto-play-on-open regression.** daw.log now
+   carries a full config dump at subscribe time (`[DIAG]`) plus a
+   `**STARTED**`-tagged log + C-stack backtrace on every
+   `Stopped → Rolling` edge (`[DIAG-STARTED]`). The backtrace we
+   caught shows the signal arrives via `AbstractUI::handle_ui_requests`
+   → our `on_transport_state_changed`, which confirms the state
+   change was emitted from *inside* Ardour (not from anything the
+   shim did). Config values ruled out: `auto_play=0`,
+   `auto_return=0`, `external_sync=0`, `synced_to_engine=0`,
+   `master_is_external=0`. Root cause unknown — parked with a
+   band-aid: after `subscribe_all` runs, a `call_slot` checks for
+   `transport_state_rolling()` and calls `transport_stop()` if true.
+   Disable via `FOYER_ALLOW_AUTO_ROLL=1` if it ever fires a false
+   positive.
+
+2. **Out-of-tree CMake build for the shim.** Rich explicitly wants
+   to ship Foyer without redistributing a modified Ardour binary —
+   honors Paul Davis's demo-timer commercial model and keeps the
+   GPL blast radius to a single `.so`. New
+   [shims/ardour/CMakeLists.txt](../shims/ardour/CMakeLists.txt)
+   builds against a sibling Ardour source tree (configurable via
+   `-DFOYER_ARDOUR_SOURCE=…` or `$FOYER_ARDOUR_BUILD_ROOT`) with no
+   edits to any file in Ardour's tree. Output: plain
+   `libfoyer_shim.so` that Ardour picks up from
+   `ARDOUR_SURFACES_PATH` exactly like Mackie / OSC / GenericMIDI.
+   New Justfile recipes: `shim-cmake-build`, `shim-install` (copies
+   into `~/.config/ardour9/surfaces/`). Confirmed: the built `.so`
+   exports `protocol_descriptor` and links successfully against
+   Ardour 9.2's shared libraries. When Ardour ships
+   `ardour-surface.pc` upstream (see
+   [docs/PROPOSAL-surface-auto-discovery.md](PROPOSAL-surface-auto-discovery.md))
+   this switches to `find_package(Ardour)` and drops the source-tree
+   assumption entirely.
+
+3. **M6a — shim RT master-bus audio tap.** Previously the "Listen"
+   button played a sidecar test-tone since the shim exposed no real
+   audio. Now:
+   - [shims/ardour/src/master_tap.cc](../shims/ardour/src/master_tap.cc)
+     implements `ARDOUR::Processor`-subclass `MasterTap`. The
+     audio-thread `run()` copies master-bus samples into a
+     `PBD::RingBuffer<float>` sized for ~200 ms — no allocations,
+     no locks, no logging. A non-RT drain thread wakes on condvar
+     every ~10 ms, reads whatever's in the ring, packs
+     `[stream_id u32 LE][f32 LE PCM]` and sends it via `FrameKind::Audio`.
+   - Shim dispatch decodes `audio_stream_open` /
+     `audio_egress_start` (both spellings honored), calls
+     `master->add_processor(tap, PostFader, …)` on the event loop,
+     spins the drain thread, and emits `Event::AudioEgressStarted`
+     so the HostBackend's oneshot resolves.
+   - Sidecar `ws.rs` flipped: `AudioStreamOpen` now calls
+     `backend().open_egress(...)` first — succeeds against the
+     host backend (real audio), falls back to `spawn_test_tone_source`
+     if the backend can't produce audio (stub or error). So the
+     "Listen" button keeps working against stub AND plays real
+     master-bus audio against Ardour.
+   - Backend trait gains a default `close_egress` method; host
+     backend overrides to send `AudioEgressStop`.
+   - Only `source=master` is wired today; per-track taps land
+     alongside the track preview feature.
+
+### Follow-ups this push created
+
+- M6b ingress (browser → DAW) still uses the trait default. That's
+  next once someone has a use case to exercise it.
+- Per-track audio taps — same Processor pattern, just needs the
+  dispatch handler to find the target track from
+  `source = Track(id)` and `add_processor` there.
+- `FOYER_ALLOW_AUTO_ROLL=1` is an escape hatch; would be nice to
+  pin the actual cause of the spurious `Stopped → Rolling`
+  transition. Candidates: `merge_event(TransportMasterStart)` from
+  some transport-master-init path, or session-state restore doing
+  `request_transport_speed(1.0)` on load.
+
+## 2026-04-21 overnight push (most recent)
+
+Second autonomous push — user's feedback after the previous one was
+*"It is finally starting to feel like a $2000 DAW console."* Scope
+was polish-plus-MIDI. Uncommitted changes on disk; review before
+merging.
+
+### UX polish that accumulated
+
+- **Vector waveform renderer** replaces the texture-sampled shader.
+  Three iterations landed in one session: (1) WebGL2 quad + RG32F
+  texture with LINEAR fallback to NEAREST + OES_texture_float_linear
+  probe, (2) WebGL2 triangle-strip vertex geometry, (3) Canvas2D
+  port of Ardour's `WaveView::draw_image` connected-line algorithm
+  (cite at [waveform-gl.js](../web/src/viz/waveform-gl.js) file
+  header). Final form: every pixel column is a 1-pixel line drawn
+  either as a vertical `top→bot` bar (overlapping ranges) or a
+  diagonal connector to the next column (smoothly rising/falling
+  signal). Sharp at any zoom, continuous, no raster stretch.
+- **Viewport cropping** for extreme zoom. At 4000 px/s a 30 s
+  region is 120k CSS px wide — past every browser's canvas cap.
+  The viz component now listens to its scroll parent and resizes
+  its own canvas to the visible slice, positioned via absolute CSS
+  `left` + `width`. Backing store stays under 8 k pixels.
+- **Click-to-raise** on plugin-layer windows (was only wired on
+  floating-tiles). Document-capture pointerdown mirrors what
+  floating-tiles does so clicks deep inside a plugin UI still raise
+  the window.
+- **Paired-edge resize.** Two floating tiles whose opposite edges
+  touch (within 8 px) become a draggable splitter — resizing one
+  shrinks the other in lockstep. Alt bypasses.
+- **Modal scrim theming** — every modal scrim is now `rgba(0, 0, 0,
+  0.55)` so opening a modal darkens the dark theme instead of
+  tinting it toward navy.
+- **Region name ellipsis** — long take names no longer spill past
+  the region's right edge and can't visually poke into adjacent
+  track header strips.
+- **Shim stability** — `ctrl->set_value()` now runs on the event
+  loop, not the IPC reader thread. Was crashing the shim after a
+  few rapid mute/solo clicks (PBD's per-thread pool FATAL).
+
+### Feature work
+
+- **Plugin picker modal** — real flow now. + slot on the plugin
+  strip opens a searchable filter-by-format/role catalog that
+  fires `add_plugin` with the track id and URI.
+- **Errored plugin row** — `add_plugin_failed` / `remove_plugin_failed`
+  events show as a dismissible row at the top of the plugin strip;
+  dismissals persist in `localStorage`.
+- **Plugin parameter live updates** — shim now subscribes to every
+  PluginInsert's automation controls + `ActiveChanged` so tweaks
+  in Ardour's native GUI round-trip back to the browser.
+- **Track editor modal** — right-click a lane head (timeline) or
+  strip name (mixer) → full-depth editor with name / color /
+  comment / embedded mixer strip.
+- **MIDI piano roll** — `<foyer-midi-editor>` component with piano
+  keyboard + notes-as-rectangles, velocity as alpha. Opens via
+  region context menu on MIDI regions.
+- **Shim MIDI note emission** — `encode_regions_list` iterates
+  `MidiModel::notes()` for any `MidiRegion` and inlines them on
+  the regions_list envelope. Ticks come from
+  `Temporal::Beats::to_ticks()`.
+- **Transport edit cluster** — undo/redo/save buttons on the
+  transport bar, save button lights up when `session.dirty` is
+  true. Keyboard chords were already bound; buttons round it out.
+- **Session save-as** — new action `session.save_as` intercepted
+  client-side to prompt for a path, sends `Command::SaveSession
+  { as_path }` that the shim now decodes → `save_state(path)`.
+  HostBackend's `save_session` forwards the command.
+- **`plugin.rescan`** wired to `PluginManager::refresh()`.
+- **Preferences modal** (`settings.preferences`) — transport mode,
+  waveform style, palette. Previously was a dead menu entry.
+- **Layouts + Agents FABs** — when docked to the right rail they
+  render their content inline in the slide-out dock panel, same
+  pattern as Actions / Session / Windows.
+
+### Deferred / noted blockers
+
+- **Shim RT audio tap (M6a)** — Ardour's session header has no
+  `attach_Process` signal. Legit options are (a) subclass
+  `Processor` and insert on the master route, (b) poll `meter()`
+  (not actually audio though), (c) JACK port-connection tap
+  (Linux only). Each is ~1 day of real work + testing. The
+  sidecar test-tone path still serves the "Listen" button so the
+  gap is invisible until a user hovers it.
+- **Session-opens-rolling regression** — no `ControlSet recv`
+  arrives in daw.log before transport transitions, so it's not a
+  UI-initiated play. Needs runtime tracing the next time the user
+  reproduces it.
+- **Viewport-cropped waveform** still resamples its visible slice
+  on every scroll event; cheap in JS but not free. If the
+  timeline ever shows 100+ visible regions, rAF-debounce the
+  scroll handler.
+
 ## 2026-04-20 overnight push
 
 Big session of autonomous work. Uncommitted changes on disk — review

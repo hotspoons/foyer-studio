@@ -16,3 +16,9 @@ vgcore.*
 # never land in git. Point foyer's launcher.jail at this dir (or its
 # parent) to have the project picker see them.
 /sessions/
+
+# Out-of-tree shim build artifacts — CMake puts everything under
+# cmake-build/. Never commit build outputs; use `just shim-cmake-build`
+# to regenerate.
+/shims/*/cmake-build/
+/shims/*/build/

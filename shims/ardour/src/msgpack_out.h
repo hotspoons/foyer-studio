@@ -60,6 +60,14 @@ std::vector<std::uint8_t> encode_track_updated (ARDOUR::Session&, const std::str
 /// Encode `Event::SessionDirtyChanged { dirty }`.
 std::vector<std::uint8_t> encode_session_dirty_changed (bool dirty);
 
+/// Encode `Event::AudioEgressStarted { stream_id }`. Sent after the
+/// shim has installed a master tap — the HostBackend awaits this
+/// ACK to resolve its `open_egress` oneshot.
+std::vector<std::uint8_t> encode_audio_egress_started (std::uint32_t stream_id);
+
+/// Encode `Event::AudioEgressStopped { stream_id }`.
+std::vector<std::uint8_t> encode_audio_egress_stopped (std::uint32_t stream_id);
+
 } // namespace ArdourSurface::msgpack_out
 
 #endif
