@@ -44,7 +44,7 @@ export class ProjectPickerModal extends LitElement {
     .scrim {
       position: absolute;
       inset: 0;
-      background: rgba(2, 6, 23, 0.55);
+      background: rgba(0, 0, 0, 0.55);
       backdrop-filter: blur(3px);
     }
     .modal {

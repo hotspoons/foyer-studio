@@ -56,6 +56,19 @@ export class Keybinds {
       return;
     }
 
+    // Delete key (no modifiers) → delete regions in the current
+    // selection. Route through the menu-action path so the intercept
+    // in main-menu.js does the walk. Only fires when no modifier is
+    // held so native delete in text inputs still works.
+    if ((e.key === "Delete" || e.key === "Backspace") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      const tl = document.querySelector("foyer-timeline-view");
+      if (tl?._selection) {
+        e.preventDefault();
+        tl.deleteSelection();
+        return;
+      }
+    }
+
     // Global transport shortcuts:
     //   Space      → toggle play/pause (DAW convention)
     //   Ctrl+Space → toggle record
@@ -93,6 +106,23 @@ export class Keybinds {
     if (cmdOrCtrl && !e.altKey) {
       const ws = window.__foyer?.ws;
       const key = e.key.toLowerCase();
+
+      // Ctrl+Shift+E  → zoom time-range selection to fill the viewport.
+      // Ctrl+Shift+Backspace → pop the zoom stack.
+      // Both operate locally on the timeline, no backend round-trip.
+      if (e.shiftKey && key === "e") {
+        e.preventDefault();
+        const tl = document.querySelector("foyer-timeline-view");
+        tl?.zoomToSelection?.();
+        return;
+      }
+      if (e.shiftKey && (key === "backspace" || key === "delete")) {
+        e.preventDefault();
+        const tl = document.querySelector("foyer-timeline-view");
+        tl?.zoomPrevious?.();
+        return;
+      }
+
       let action = null;
       if (key === "z" && !e.shiftKey)      action = "edit.undo";
       else if (key === "z" && e.shiftKey)  action = "edit.redo";

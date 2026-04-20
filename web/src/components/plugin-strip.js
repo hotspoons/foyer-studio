@@ -10,11 +10,14 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { openPluginFloat } from "../layout/plugin-layer.js";
+import { openPluginPicker } from "./plugin-picker-modal.js";
 
 export class PluginStrip extends LitElement {
   static properties = {
     plugins: { type: Array },
     maxLines: { type: Number },
+    trackId: { type: String, attribute: "track-id" },
+    trackName: { type: String, attribute: "track-name" },
   };
 
   static styles = css`
@@ -85,6 +88,58 @@ export class PluginStrip extends LitElement {
     super();
     this.plugins = [];
     this.maxLines = 3;
+    this._errors = [];
+    this._dismissed = this._loadDismissed();
+    this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    window.__foyer?.ws?.addEventListener("envelope", this._envelopeHandler);
+  }
+  disconnectedCallback() {
+    window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
+    super.disconnectedCallback();
+  }
+
+  /** Capture `add_plugin_failed` / `remove_plugin_failed` error
+   *  events broadcast by the sidecar. The server today sends a
+   *  generic `Event::Error` without a track id — we heuristically
+   *  attach the last pending add to this track if the error's
+   *  message mentions our track or plugin URI. */
+  _onEnvelope(env) {
+    const body = env?.body;
+    if (body?.type !== "error") return;
+    const code = body.code || "";
+    if (!code.startsWith("add_plugin") && !code.startsWith("remove_plugin")) return;
+    const msg = body.message || "";
+    // Only surface errors whose message mentions this track — prevents
+    // a failure from one track's insert showing in another.
+    if (this.trackId && !msg.includes(this.trackId)) return;
+    const key = `${this.trackId}|${msg}`;
+    if (this._dismissed.has(key)) return;
+    this._errors = [...this._errors, { code, message: msg, key }];
+    this.requestUpdate();
+  }
+
+  _loadDismissed() {
+    try {
+      const raw = localStorage.getItem("foyer.plugin.errors.dismissed") || "[]";
+      return new Set(JSON.parse(raw));
+    } catch {
+      return new Set();
+    }
+  }
+  _dismiss(key) {
+    this._dismissed.add(key);
+    try {
+      localStorage.setItem(
+        "foyer.plugin.errors.dismissed",
+        JSON.stringify([...this._dismissed]),
+      );
+    } catch {}
+    this._errors = this._errors.filter((e) => e.key !== key);
+    this.requestUpdate();
   }
 
   render() {
@@ -92,6 +147,15 @@ export class PluginStrip extends LitElement {
     const extra = Math.max(0, plugs.length - this.maxLines);
     const shown = plugs.slice(0, this.maxLines);
     return html`
+      ${this._errors.map((e) => html`
+        <div class="row"
+             style="background:color-mix(in oklab, var(--color-danger, #d04040) 24%, var(--color-surface-elevated));border-color:var(--color-danger, #d04040);color:#fff"
+             title="${e.message}">
+          <span class="name" style="color:#fff">${e.code}</span>
+          <button class="by" title="Dismiss"
+                  @click=${(ev) => { ev.stopPropagation(); this._dismiss(e.key); }}>×</button>
+        </div>
+      `)}
       ${shown.map(
         (p) => html`
           <div
@@ -167,7 +231,14 @@ export class PluginStrip extends LitElement {
   }
 
   _addSlot() {
-    location.hash = "plugins";
+    if (!this.trackId) {
+      // Fallback if the parent didn't pass a target track — land on the
+      // catalog view so the click isn't dead. Shouldn't happen in the
+      // normal mixer/timeline flow.
+      location.hash = "plugins";
+      return;
+    }
+    openPluginPicker({ trackId: this.trackId, trackName: this.trackName });
   }
 }
 customElements.define("foyer-plugin-strip", PluginStrip);

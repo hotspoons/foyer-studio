@@ -171,10 +171,18 @@ export class PluginLayer extends LitElement {
   _renderWindow(p) {
     const info = this._locatePlugin(p.id);
     const label = info ? `${info.trackName} · ${info.plugin.name}` : "Plugin";
-    const style = `left:${p.x}px;top:${p.y}px;width:${p.w}px;height:${p.h}px`;
+    // Pull the stored `z` for this plugin float (see `raisePluginFloat`).
+    // Plugins share a stacking context at host `z-index: 850`; inside
+    // that, we layer per-window z so click-to-raise lifts the clicked
+    // plugin above its peers. Offset of 10 keeps the resize handle's
+    // `z-index: 2` below the plugin body when rest.
+    const storedZ = this._entries.find((e) => e.plugin_id === p.id)?.z | 0;
+    const style = `left:${p.x}px;top:${p.y}px;width:${p.w}px;height:${p.h}px;z-index:${10 + storedZ}`;
     return html`
       <div class="pwin"
            style=${style}
+           data-plugin-id=${p.id}
+           @pointerdown=${() => this.store.raisePluginFloat(p.id)}
            @contextmenu=${(ev) => this._contextMenu(ev, p.id)}>
         <header>
           <span class="label">${label}</span>

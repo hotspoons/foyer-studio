@@ -20,50 +20,62 @@ primitives, and a keyboard-first command model.
     │
     ▼
  ┌────────────────────────┐   Unix socket, MessagePack framing
- │ C++ shim (libfoyer_    │  ───────────────────────────────┐
- │ shim.so, ~1.6k LOC)    │                                 │
- │  · GPL-contained       │                                 ▼
- │  · event translation   │                    ┌──────────────────────┐
- │    only — no UX logic  │                    │ Rust sidecar         │
- └────────────────────────┘                    │  · foyer-server      │
-                                               │  · foyer-backend-*   │
- ┌────────────────────────┐                    │  · foyer-schema      │
- │ Web UI (Lit + Tailwind)│ ◄── WS / HTTP ────►│  · foyer-ipc         │
- │  · zero build step     │                    │  · non-GPL           │
+ │ C++ shim               │  ───────────────────────────────┐
+ │  (libfoyer_shim.so)    │                                 │
+ │  · event translation   │                                 ▼
+ │    only — no UX logic  │                    ┌──────────────────────┐
+ └────────────────────────┘                    │ Rust sidecar         │
+                                               │  · foyer-server      │
+ ┌────────────────────────┐                    │  · foyer-backend-*   │
+ │ Web UI (Lit + Tailwind)│ ◄── WS / HTTP ────►│  · foyer-schema      │
+ │  · zero build step     │                    │  · foyer-ipc         │
  │  · vendored ES modules │                    └──────────────────────┘
- │  · non-GPL             │                                 │
- └────────────────────────┘                                 ▼
+ └────────────────────────┘                                 │
+                                                            ▼
                                                ┌──────────────────────┐
                                                │ Optional:            │
                                                │  foyer-desktop (wry) │
                                                └──────────────────────┘
 ```
 
-**Three boundaries, three licenses.** The C++ shim links `libardour`
-and is therefore GPL. Everything above the Unix-socket boundary is
-non-viral and Foyer's own license (TBD). See
-[docs/DECISIONS.md](docs/DECISIONS.md) entry 6 for the rationale.
+**The shim is a thin event translator.** It subscribes to libardour
+signals and forwards them as the DAW-agnostic `foyer-schema` vocabulary
+over a Unix socket — no UX logic, no policy, just translation. Keeping
+the shim narrow is what lets adding a second backend (Reaper, Bitwig,
+a custom engine) come down to "write another shim" rather than "rewrite
+Foyer." Each shim naturally inherits whatever license its host DAW
+requires for linking; the Rust sidecar and web UI sit above that
+boundary and can be licensed separately from any one shim. See
+[docs/DECISIONS.md](docs/DECISIONS.md) entry 15.
 
 ## Status at a glance
 
 | Capability | State |
 |---|---|
 | Stub backend (in-memory demo session) | Shipping — 6 tracks with realistic plugin params |
+| Ardour shim — transport (play/stop/rec/loop), control updates, 30 Hz playhead tick | Shipping |
+| Ardour shim — real regions + source paths (playlist walk + Playlist signals) | Shipping |
+| Ardour shim — per-track plugin enumeration + parameter emission | Shipping |
+| Ardour shim — track rename/color (UpdateTrack → set_name / PresentationInfo::set_color) | Shipping |
+| Ardour shim — action dispatch (edit.undo/redo, session.save, track.add_audio/bus) | Shipping |
+| Ardour shim — session dirty + signal bridge | Shipping |
+| Symphonia-backed waveform peak decoder (WAV / FLAC / AIFF / OGG / Vorbis) | Shipping |
+| WebGL waveform renderer with AA, clip markers, swappable palettes + styles | Shipping |
 | Schema-driven plugin panels | Shipping — `<foyer-plugin-panel>` renders any `PluginInstance.params` |
-| Ardour shim — transport + track controls | Shipping |
-| Ardour shim — plugin parameter emission | Shipping (`libfoyer_shim.so` builds clean; untested against live plugins) |
 | Tile tree + floating windows + slot picker | Shipping |
-| Tear-out (tile header, plugin strip, menu items) | Shipping |
-| Right-dock as unified dock area | Shipping |
-| Layout presets with user-assigned chords | Shipping |
-| Keyboard-first WM (Hyprland-style keybinds) | Shipping |
-| AHK-flavored automation | Shipping |
-| Generic context menu, non-native scrollbars, text-selection policy | Shipping |
-| Multi-monitor detection (`getScreenDetails`) | Wired; slot picker doesn't target yet |
-| MessagePack hot path (WS binary frames) | Not yet — deferred from the M3 plan |
-| Canvas-first timeline + mixer rendering | Not yet |
-| WebRTC audio forwarding (M6) | Schema types exist; no runtime |
-| MCP agent (M8) | Panel + settings exist; no real round-trip |
+| Tear-out (tile header, plugin strip, menu items) + right-dock | Shipping |
+| Layout presets + user-assigned chords | Shipping |
+| Keyboard-first WM + AHK-flavored automation | Shipping |
+| Multi-track selection + zoom-to-selection w/ back-stack | Shipping |
+| Selection ops — delete / mute toggle across selection | Shipping |
+| Return-on-stop mode (stay / zero / play-start) with front-end position lock | Shipping |
+| Dev integration test harness (`/dev/run-tests` + diagnostics panel) | Shipping — 8 probes, all green against stub |
+| Plugin lifecycle — AddPlugin / RemovePlugin / MovePlugin in shim | Schema ready; shim dispatch pending |
+| Audio I/O schema (IoPort + WebRTC/WebSocket transport negotiation) | Shipping — wire types land; runtime stubs pending |
+| Region fade-in / fade-out / trim-to-selection ops | Not yet |
+| WebRTC audio forwarding (M6a egress, M6b ingress, M6c latency probe) | Schema ready; sidecar encoder + shim capture pending |
+| Standalone `.so` shim (drop-in for upstream Ardour) | Not yet |
+| MCP agent | Panel + settings stub; no round-trip |
 
 ## Quick start
 
@@ -72,22 +84,44 @@ installed. From the repo root:
 
 ```bash
 just tw-build                    # one-shot Tailwind build
-just run-stub --listen=127.0.0.1:3838 \
-               --web-root=./web \
-               --jail=/tmp/foyer-jail
+just run                         # serves stub → picker → Ardour on project click
 ```
 
-Then open <http://127.0.0.1:3838>. You get the full UI backed by the
-in-memory stub — six tracks, realistic plugin params, synthesized
-regions and waveforms. Nothing needs Ardour to boot.
+Then open <http://127.0.0.1:3838>. On a fresh box the sidecar boots in
+"launcher" mode with an empty stub; pick a project folder in the
+Session view and Foyer spawns Ardour with the shim loaded, then
+atomically swaps the backend in place without dropping your browser
+connection.
 
-**Full Ardour path** (requires building Ardour 9; ~15 min cold):
+To boot straight into the standalone demo session (no Ardour), run:
+
+```bash
+just run -- --backend stub
+```
+
+Six tracks, realistic plugin params, synthesized regions and
+waveforms — useful for frontend work without the audio engine
+running.
+
+**Full Ardour path** (requires building Ardour 9 once, ~15 min cold):
 
 ```bash
 just ardour-configure && just ardour-build
 just shim-build
-just shim-e2e                    # headless hardour + shim + foyer-cli
 ```
+
+After that, `just run` spawns Ardour via the shim as you pick projects.
+
+**Integration probes** (dev only):
+
+```bash
+FOYER_DEV=1 just run &
+curl -s http://127.0.0.1:3838/dev/run-tests | jq
+```
+
+Returns pass/fail for each probe (snapshot shape, control echo, region
+list, waveform decode, track rename, transport round-trip, ...). The
+same probes are browsable in-UI via the **Diagnostics** view.
 
 ### Keyboard quick reference
 
@@ -175,9 +209,14 @@ and/or `~/.claude/.../memory/`.
   the only JS runtime. New JS dependencies are vendored as raw ES
   modules under [`web/vendor/`](web/vendor/) and committed. Tailwind
   uses the standalone CLI binary in [`./.bin/`](.bin/).
-- **No viral copyleft in Foyer's own code.** GPL is contained to the
-  C++ shim; everything else is permissively licensed (exact license
-  TBD). Don't include a GPL header anywhere outside `shims/ardour/`.
+- **Per-layer licensing discipline.** Each shim naturally inherits the
+  license terms of the host DAW it links against — `shims/ardour/`
+  statically links `libardour` and is GPLv2+ accordingly. The Rust
+  sidecar and web UI sit above the IPC boundary and are licensed
+  separately (exact license TBD); keep the per-layer headers consistent
+  so future shims (Reaper SDK, JUCE-based engines, whatever) can
+  ship under whatever terms their SDK requires without touching the
+  layers above.
 - **Rust primary, C++ minimized.** The shim's only job is translating
   Ardour events to Foyer's neutral schema. Anything above that — state
   management, protocol fan-out, auth, collaboration — is Rust.
@@ -217,7 +256,21 @@ smoke testing. Our rationale lives in the "no Node" memory.
 
 ## License
 
-TBD — permissive (not GPL). The C++ shim at
-[`shims/ardour/`](shims/ardour/) is GPLv2+ by necessity (links
-`libardour`); everything outside that directory is separately
-licensed. See [docs/DECISIONS.md](docs/DECISIONS.md) entry 6.
+Layer-scoped:
+
+- **`shims/ardour/`** — GPLv2+, because it statically links `libardour`.
+  Standard practice for anything that touches the Ardour internals.
+- **Rust sidecar + web UI** — TBD; sits above a documented IPC boundary
+  and isn't derivative of any single shim, so it's licensed separately
+  from whichever shim the user is running.
+
+Future shims for other engines (Reaper, JUCE-based hosts, commercial
+SDKs) will each carry their own license terms appropriate to how they
+link against their respective host. See
+[docs/DECISIONS.md](docs/DECISIONS.md) entry 15 for the long version.
+
+Foyer is an attempt to build a modern editing surface around Ardour's
+mature audio engine — not a replacement for it. Without Ardour's decades
+of work on real-time audio, a recording/mixing surface like this one
+wouldn't exist; the separation below is an engineering boundary, not a
+political one.

@@ -20,8 +20,8 @@ pub mod value;
 
 pub use action::{Action, ActionCategory};
 pub use audio::{
-    AudioFormat, AudioSource, AudioTransport, IceCandidate, LatencyReport, SampleFormat,
-    SdpPayload,
+    AudioCodec, AudioFormat, AudioSource, AudioTransport, IceCandidate, LatencyReport,
+    SampleFormat, SdpPayload,
 };
 pub use fs::{FsEntry, FsEntryKind, PathListing};
 pub use id::EntityId;

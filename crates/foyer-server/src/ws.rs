@@ -523,11 +523,89 @@ async fn dispatch_command(
                 }
             }
         }
+        // Plugin lifecycle — HostBackend forwards the Command::AddPlugin /
+        // RemovePlugin to the shim which runs it against `Route::add_processor`
+        // / `Route::remove_processor` on the event loop.
+        Command::AddPlugin {
+            track_id,
+            plugin_uri,
+            index,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .add_plugin(track_id, plugin_uri, index)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "add_plugin_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::RemovePlugin { plugin_id } => {
+            if let Err(e) = state.backend().await.remove_plugin(plugin_id).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "remove_plugin_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        // M6a audio egress: open + close land directly on the sidecar
+        // audio hub. For now we're sourcing PCM from a test-tone
+        // generator so the browser end can validate the Opus + binary
+        // WS path; when the shim's `Route::output()` tap lands, swap
+        // the source to `backend.open_egress(...)`'s receiver.
+        Command::AudioStreamOpen {
+            stream_id,
+            source,
+            format,
+            transport: _transport,
+        } => {
+            let rx = state
+                .audio_hub
+                .spawn_test_tone_source(format, std::time::Duration::from_secs(30));
+            match state
+                .audio_hub
+                .open_stream(stream_id, source.clone(), format, rx)
+                .await
+            {
+                Ok(_) => {
+                    broadcast_event(
+                        state,
+                        Event::AudioEgressStarted { stream_id },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "audio_stream_open_failed".into(),
+                            message: e,
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::AudioStreamClose { stream_id } => {
+            state.audio_hub.close_stream(stream_id).await;
+            broadcast_event(state, Event::AudioEgressStopped { stream_id }).await;
+        }
+
         Command::CreateGroup { .. }
         | Command::UpdateGroup { .. }
         | Command::DeleteGroup { .. }
-        | Command::AddPlugin { .. }
-        | Command::RemovePlugin { .. }
         | Command::MovePlugin { .. }
         | Command::ListPluginPresets { .. }
         | Command::LoadPluginPreset { .. }
@@ -538,8 +616,6 @@ async fn dispatch_command(
         | Command::UpdateNote { .. }
         | Command::DeleteNote { .. }
         | Command::Locate { .. }
-        | Command::AudioStreamOpen { .. }
-        | Command::AudioStreamClose { .. }
         | Command::AudioSdpAnswer { .. }
         | Command::AudioIceCandidate { .. } => {
             broadcast_event(

@@ -30,7 +30,12 @@ export class ShareModal extends LitElement {
     .scrim {
       position: absolute;
       inset: 0;
-      background: rgba(2, 6, 23, 0.55);
+      /* Pure black at 55% — matches the other modals and darkens the
+       * underlying theme rather than tinting it toward the scrim's own
+       * color. The old rgba(2, 6, 23, ...) navy was lighter than the
+       * app surface so it visibly shifted the dark theme toward blue
+       * when the modal opened. */
+      background: rgba(0, 0, 0, 0.55);
       backdrop-filter: blur(3px);
     }
     .modal {

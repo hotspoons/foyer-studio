@@ -79,6 +79,45 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn add_plugin(
+        &self,
+        track_id: EntityId,
+        plugin_uri: String,
+        index: Option<u32>,
+    ) -> Result<(), BackendError> {
+        // Shim applies on the event loop + emits a TrackUpdated event
+        // when the plugin lands on the route. Fire-and-forget.
+        self.client
+            .send_command(Command::AddPlugin {
+                track_id,
+                plugin_uri,
+                index,
+            })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn remove_plugin(&self, plugin_id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::RemovePlugin { plugin_id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn invoke_action(&self, id: EntityId) -> Result<(), BackendError> {
+        // Forward the whole action id as-is to the shim. The shim's
+        // InvokeAction dispatch handles transport.*, edit.*, session.*,
+        // track.add_* etc. directly and logs a warning for anything it
+        // doesn't recognize. We deliberately don't fall back to the
+        // trait-default `set_control` translation: that would race the
+        // shim's own transport handling (and a real DAW knows how to
+        // dispatch its own verbs better than we can by synthesis).
+        self.client
+            .send_command(Command::InvokeAction { id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn open_egress(
         &self,
         stream_id: u32,

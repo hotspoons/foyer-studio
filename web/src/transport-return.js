@@ -114,6 +114,23 @@ export function installTransportReturn({ store, ws }) {
   }
 
   const controlHandler = (ev) => {
+    // Keep `playStartSample` synced with any explicit seeks. If the
+    // user clicks/drags the ruler DURING playback, they expect a
+    // subsequent stop to snap back to the NEW position, not the
+    // original one they hit play from. `transportPositionLock` is
+    // set by our own applyReturn and by direct lock helpers in the
+    // store; a seek event outside that lock is user-initiated and
+    // overrides `playStartSample`.
+    if (ev.detail === "transport.position") {
+      const locked = typeof store.transportPositionLock === "function"
+        ? store.transportPositionLock()
+        : null;
+      if (locked == null) {
+        const pos = Number(store.state.controls.get("transport.position") || 0);
+        playStartSample = pos;
+      }
+      return;
+    }
     if (ev.detail !== "transport.playing") return;
     const now = !!store.state.controls.get("transport.playing");
     if (now && !wasPlaying) {

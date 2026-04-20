@@ -14,7 +14,10 @@
 #include <string>
 
 #include "ardour/playlist.h"
+#include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
+#include "ardour/plugin_manager.h"
+#include "ardour/presentation_info.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
@@ -190,10 +193,15 @@ struct DecodedCmd
 		UpdateRegion,
 		DeleteRegion,
 		UpdateTrack,
+		InvokeAction,
+		AddPlugin,
+		RemovePlugin,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
 	std::string track_id;
+	std::string plugin_uri;   // Command::AddPlugin
+	std::string plugin_id;    // Command::RemovePlugin (= "plugin.<pid>")
 	double value = 0.0;
 
 	// RegionPatch fields — only read for UpdateRegion. All optional.
@@ -289,6 +297,10 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_f64 (out.value)) return out;
 				} else if (k == "patch") {
 					if (!read_region_patch (in, out)) return out;
+				} else if (k == "plugin_uri") {
+					if (!in.read_str (out.plugin_uri)) return out;
+				} else if (k == "plugin_id") {
+					if (!in.read_str (out.plugin_id)) return out;
 				} else {
 					if (!in.skip_value ()) return out;
 				}
@@ -300,6 +312,9 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "update_region")      out.kind = DecodedCmd::Kind::UpdateRegion;
 			else if (cmd_type == "delete_region")      out.kind = DecodedCmd::Kind::DeleteRegion;
 			else if (cmd_type == "update_track")       out.kind = DecodedCmd::Kind::UpdateTrack;
+			else if (cmd_type == "invoke_action")      out.kind = DecodedCmd::Kind::InvokeAction;
+			else if (cmd_type == "add_plugin")         out.kind = DecodedCmd::Kind::AddPlugin;
+			else if (cmd_type == "remove_plugin")      out.kind = DecodedCmd::Kind::RemovePlugin;
 			else if (cmd_type.rfind ("audio_", 0) == 0) out.kind = DecodedCmd::Kind::Audio;
 			else if (cmd_type == "latency_probe")      out.kind = DecodedCmd::Kind::Latency;
 		} else {
@@ -430,14 +445,28 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				break;
 			}
 
-			auto ctrl = schema_map::resolve (_shim.session (), cmd.id);
-			if (!ctrl) {
-				PBD::warning << "foyer_shim: unknown control id: " << cmd.id << endmsg;
-				break;
-			}
-			ctrl->set_value (cmd.value, Controllable::UseGroup);
-			// No manual echo — the Controllable::Changed signal will fire and
-			// our SignalBridge will emit the corresponding `control.update`.
+			// Everything else (track mute/solo/gain/pan/rec, plugin params)
+			// resolves to an AutomationControl. `set_value` on those
+			// allocates a `SessionEvent` from the per-thread pool for
+			// some subclasses (notably MuteControllable/SoloControllable)
+			// — so the call MUST run on the event-loop thread where
+			// `thread_init` registered a pool. Running it on the IPC
+			// reader thread (which has no pool) crashed the shim with
+			// `programming error: no per-thread pool "" for thread`
+			// after a few rapid mute/solo toggles. Hop to call_slot.
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto ctrl = schema_map::resolve (shim->session (), snap.id);
+				if (!ctrl) {
+					PBD::warning << "foyer_shim: unknown control id: " << snap.id << endmsg;
+					return;
+				}
+				ctrl->set_value (snap.value, Controllable::UseGroup);
+				// No manual echo — the Controllable::Changed signal will
+				// fire and our SignalBridge will emit the corresponding
+				// `control.update`.
+			});
 			break;
 		}
 		case DecodedCmd::Kind::ListRegions: {
@@ -543,6 +572,183 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// is stable but wiring it belongs with the group commands.
 
 				auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.id);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::InvokeAction: {
+			if (cmd.id.empty ()) break;
+			// Action verbs live in the Session — they allocate SessionEvents
+			// and walk routes, so (like UpdateTrack) we post onto the shim
+			// event loop where PBD's per-thread pool is registered.
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto& session = shim->session ();
+				const std::string& id = snap.id;
+
+				// Transport verbs: delegate to the BasicUI helpers the
+				// ControlSet branch already uses so we get identical
+				// semantics whether the user clicks Play or triggers
+				// `transport.play` from the command palette.
+				if (id == "transport.play")        { shim->transport_play (false); }
+				else if (id == "transport.stop")   { shim->transport_stop (); }
+				else if (id == "transport.record") { shim->rec_enable_toggle (); }
+				else if (id == "transport.loop")   { shim->loop_toggle (); }
+				else if (id == "transport.goto_start") { session.request_locate (0); }
+				else if (id == "transport.goto_end")   { session.request_locate (session.current_end_sample ()); }
+
+				// Edit — Session has these directly, no GUI needed.
+				else if (id == "edit.undo")        { session.undo (1); }
+				else if (id == "edit.redo")        { session.redo (1); }
+				// cut/copy/paste live in the GUI `Editor` action
+				// manager and aren't reachable from headless hardour;
+				// surface that as a user-visible error so the toast
+				// tells them why the click did nothing.
+				else if (id == "edit.cut" || id == "edit.copy" || id == "edit.paste") {
+					PBD::warning << "foyer_shim: " << id << " only available in GUI Ardour (editor action manager)" << endmsg;
+				}
+
+				// Session — save goes through Session directly. Export
+				// normally goes through a dialog; for now surface as
+				// deferred.
+				else if (id == "session.save") {
+					session.save_state ("");
+				}
+				else if (id == "session.export") {
+					PBD::warning << "foyer_shim: session.export deferred (template-save not wired)" << endmsg;
+				}
+
+				// Track — session.new_audio_track / session.new_audio_route.
+				// Mono in, stereo out is the sane default most DAWs ship.
+				else if (id == "track.add_audio") {
+					session.new_audio_track (
+					    1, 2,                           // in/out channels
+					    std::shared_ptr<ARDOUR::RouteGroup> (),
+					    1,                              // how_many
+					    std::string (),                 // name_template (empty = default)
+					    ARDOUR::PresentationInfo::max_order);
+				}
+				else if (id == "track.add_bus") {
+					session.new_audio_route (
+					    2, 2,
+					    std::shared_ptr<ARDOUR::RouteGroup> (),
+					    1,
+					    std::string (),
+					    ARDOUR::PresentationInfo::AudioBus,
+					    ARDOUR::PresentationInfo::max_order);
+				}
+				else if (id == "track.freeze") {
+					PBD::warning << "foyer_shim: track.freeze not yet wired" << endmsg;
+				}
+
+				// Plugin: ask Ardour's PluginManager to rescan its
+				// search paths. The rescan runs on whatever thread
+				// PluginManager schedules; we just kick it off. Clients
+				// re-issue `list_plugins` after a short delay (the
+				// picker modal does this automatically).
+				else if (id == "plugin.rescan") {
+					ARDOUR::PluginManager::instance ().refresh ();
+				}
+
+				// Settings / view actions are client-side — log so the
+				// gap is visible if one leaks through.
+				else {
+					PBD::warning << "foyer_shim: invoke_action not handled: " << id << endmsg;
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::AddPlugin: {
+			if (cmd.track_id.empty () || cmd.plugin_uri.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				// Find the target track.
+				if (snap.track_id.rfind ("track.", 0) != 0) return;
+				const std::string sid = snap.track_id.substr (6);
+				std::shared_ptr<Route> route;
+				std::shared_ptr<RouteList const> routes = shim->session ().get_routes ();
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp;
+					tmp << r->id ();
+					if (tmp.str () == sid) { route = r; break; }
+				}
+				if (!route) {
+					PBD::warning << "foyer_shim: add_plugin: unknown track " << snap.track_id << endmsg;
+					return;
+				}
+
+				// Try each plugin type in turn. LV2 first (most common
+				// on Linux), then LADSPA, VST3, Lua. find_plugin does
+				// a straight unique_id match so it's cheap to miss.
+				static const ARDOUR::PluginType order[] = {
+					ARDOUR::LV2, ARDOUR::LADSPA, ARDOUR::VST3, ARDOUR::Lua,
+				};
+				std::shared_ptr<ARDOUR::Plugin> plug;
+				for (auto t : order) {
+					plug = ARDOUR::find_plugin (shim->session (), snap.plugin_uri, t);
+					if (plug) break;
+				}
+				if (!plug) {
+					PBD::warning << "foyer_shim: add_plugin: no plugin with unique_id '" << snap.plugin_uri << "'" << endmsg;
+					return;
+				}
+
+				auto pi = std::make_shared<ARDOUR::PluginInsert> (shim->session (), shim->session (), plug);
+				if (route->add_processor (pi, ARDOUR::PreFader, nullptr, true) != 0) {
+					PBD::warning << "foyer_shim: add_plugin: Route::add_processor failed for " << snap.plugin_uri << endmsg;
+					return;
+				}
+				// Success — ask the signal bridge to re-emit the route's
+				// snapshot so clients see the new plugin instance.
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::RemovePlugin: {
+			if (cmd.plugin_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				// plugin_id format is "plugin.<pbd-id>" — reuse the
+				// same resolution pattern ControlSet uses for the
+				// bypass toggle.
+				if (snap.plugin_id.rfind ("plugin.", 0) != 0) return;
+				const std::string pid = snap.plugin_id.substr (7);
+				std::shared_ptr<RouteList const> routes = shim->session ().get_routes ();
+				std::string affected_track;
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					for (uint32_t i = 0; ; ++i) {
+						auto proc = r->nth_plugin (i);
+						if (!proc) break;
+						auto pi = std::dynamic_pointer_cast<PluginInsert> (proc);
+						if (!pi) continue;
+						std::ostringstream os; os << pi->id ();
+						if (os.str () != pid) continue;
+						if (r->remove_processor (proc) == 0) {
+							std::ostringstream tid;
+							tid << r->id ();
+							affected_track = "track." + tid.str ();
+						} else {
+							PBD::warning << "foyer_shim: remove_plugin: Route::remove_processor failed" << endmsg;
+						}
+						break;
+					}
+					if (!affected_track.empty ()) break;
+				}
+				if (affected_track.empty ()) {
+					PBD::warning << "foyer_shim: remove_plugin: plugin_id not found: " << snap.plugin_id << endmsg;
+					return;
+				}
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), affected_track);
 				if (!bytes.empty ()) {
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 				}

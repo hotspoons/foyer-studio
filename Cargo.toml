@@ -51,6 +51,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # audio
 rubato      = "0.15"
+# Opus codec for the M6a egress path. Uses `audiopus` (libopus bindings)
+# — production-grade, standardized browser support via WebCodecs.
+audiopus    = "0.2"
 
 [profile.release]
 lto = "thin"

@@ -8,6 +8,7 @@ import "./meter.js";
 import "./plugin-strip.js";
 import { ControlController } from "../store.js";
 import { showContextMenu } from "./context-menu.js";
+import { openTrackEditor } from "./track-editor-modal.js";
 
 // Curated palette for the "Set color" submenu. Close to DAW defaults so
 // colors carry some semantic weight (reds for drums, blues for bass,
@@ -260,6 +261,8 @@ export class TrackStrip extends LitElement {
         <foyer-plugin-strip
           .plugins=${t.plugins || []}
           .maxLines=${d.pluginsLines}
+          .trackId=${t.id}
+          .trackName=${t.name}
         ></foyer-plugin-strip>
       ` : null}
       <div class="row">
@@ -359,6 +362,11 @@ export class TrackStrip extends LitElement {
           { separator: true },
           { label: "Clear", icon: "x-mark", action: () => this._updatePatch({ color: "" }) },
         ],
+      },
+      {
+        label: "Track editor…",
+        icon: "cog-6-tooth",
+        action: () => openTrackEditor(t.id),
       },
       { separator: true },
       { label: `ID: ${t.id}`, disabled: true },

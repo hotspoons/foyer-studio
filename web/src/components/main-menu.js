@@ -6,6 +6,7 @@ import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { getTransportPref, toggleTransportPref } from "../transport-settings.js";
 import { showProjectPicker } from "./project-picker-modal.js";
+import { openSettings } from "./settings-modal.js";
 
 // Category → menu label + order. Categories not listed are skipped.
 const MENU_ORDER = [
@@ -22,11 +23,12 @@ const MENU_ORDER = [
 // the top menu bar (always reachable — can't be covered by a floating window
 // because the top chrome has a higher z-index than floating tiles).
 const LAUNCH_VIEWS = [
-  { view: "mixer",    label: "Mixer",    icon: "adjustments-horizontal" },
-  { view: "timeline", label: "Timeline", icon: "list-bullet" },
-  { view: "plugins",  label: "Plugins",  icon: "puzzle-piece" },
-  { view: "session",  label: "Projects", icon: "folder-open" },
-  { view: "console",  label: "Console",  icon: "command-line" },
+  { view: "mixer",       label: "Mixer",       icon: "adjustments-horizontal" },
+  { view: "timeline",    label: "Timeline",    icon: "list-bullet" },
+  { view: "plugins",     label: "Plugins",     icon: "puzzle-piece" },
+  { view: "session",     label: "Projects",    icon: "folder-open" },
+  { view: "console",     label: "Console",     icon: "command-line" },
+  { view: "diagnostics", label: "Diagnostics", icon: "check-circle" },
 ];
 
 export class MainMenu extends LitElement {
@@ -197,6 +199,31 @@ export class MainMenu extends LitElement {
     }
     if (a.id === "session.new") {
       showProjectPicker("new");
+      return;
+    }
+    // Client-only view actions — the zoom stack + time-range selection
+    // live in the browser, so we handle these without a round trip.
+    if (a.id === "view.zoom_selection") {
+      document.querySelector("foyer-timeline-view")?.zoomToSelection?.();
+      return;
+    }
+    if (a.id === "view.zoom_previous") {
+      document.querySelector("foyer-timeline-view")?.zoomPrevious?.();
+      return;
+    }
+    // Client-orchestrated edit ops: walk the selection and fan out the
+    // right per-region commands.
+    if (a.id === "edit.delete_selection") {
+      document.querySelector("foyer-timeline-view")?.deleteSelection?.();
+      return;
+    }
+    if (a.id === "edit.mute_selection") {
+      document.querySelector("foyer-timeline-view")?.muteSelection?.();
+      return;
+    }
+    // Preferences is a client-side settings modal — no round trip.
+    if (a.id === "settings.preferences") {
+      openSettings();
       return;
     }
     window.__foyer?.ws?.send({ type: "invoke_action", id: a.id });

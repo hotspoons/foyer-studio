@@ -301,6 +301,20 @@ export class LayoutStore extends EventTarget {
     this._emit();
   }
 
+  /** Bring a plugin window to the front within the plugin layer. */
+  raisePluginFloat(plugin_id) {
+    const p = this._pluginFloats.find((x) => x.plugin_id === plugin_id);
+    if (!p) return;
+    p.z = this._nextPluginZ();
+    this._emit();
+  }
+
+  _nextPluginZ() {
+    let max = 0;
+    for (const p of this._pluginFloats) if ((p.z | 0) > max) max = p.z | 0;
+    return max + 1;
+  }
+
   _nextZ() {
     let max = 0;
     for (const f of this._floating) if ((f.z | 0) > max) max = f.z | 0;

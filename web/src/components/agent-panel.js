@@ -319,6 +319,48 @@ export class AgentPanel extends LitElement {
   closeFromDock()   { this._open = false; this._persist(); this.requestUpdate(); }
   toggleFromDock(t) { if (this._open) this.closeFromDock(); else this.openFromDock(t); }
 
+  /** Called by right-dock to render the agent chat inside its slide-out
+   *  panel area (when this FAB is docked). We can't reuse
+   *  `_renderPanel` here directly because it positions itself
+   *  absolutely (anchored near the FAB); inside the dock we want
+   *  regular flow layout that fills the dock panel. */
+  dockPanelContent() {
+    return html`
+      <div style="display:flex;flex-direction:column;height:100%;min-height:0;gap:6px;padding:4px 6px">
+        <div style="display:flex;align-items:center;gap:6px;padding:4px 2px">
+          <div style="font-weight:600;font-size:12px;color:var(--color-text)">Agent</div>
+          <div style="flex:1"></div>
+          <button style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:3px 6px;color:var(--color-text-muted);cursor:pointer;font:inherit;font-size:11px"
+                  @click=${() => { this._settingsOpen = true; }}>
+            ${icon("cog", 12)}
+          </button>
+          <button style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:3px 8px;color:var(--color-text-muted);cursor:pointer;font:inherit;font-size:11px"
+                  @click=${this._clear}>Clear</button>
+        </div>
+        <div style="flex:1;overflow-y:auto;padding:6px;background:var(--color-surface-elevated);border:1px solid var(--color-border);border-radius:var(--radius-sm);min-height:0">
+          ${this._transcript.length === 0
+            ? html`<div style="color:var(--color-text-muted);font-size:11px;text-align:center;padding:20px 10px"><strong>Foyer Agent</strong><br>Ask to move faders, arm tracks, or explain the mix.</div>`
+            : this._transcript.map((m) => html`<div class="msg ${m.role}" style="margin-bottom:6px;font-size:12px;color:var(--color-text);white-space:pre-wrap">${m.text}</div>`)}
+        </div>
+        <div style="display:flex;gap:4px">
+          <textarea
+            placeholder="Ask the agent…"
+            style="flex:1;background:var(--color-surface-elevated);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text);font:inherit;font-size:12px;padding:6px 8px;resize:none;min-height:60px"
+            .value=${this._input}
+            @input=${(e) => { this._input = e.target.value; }}
+            @keydown=${this._onInputKey}
+          ></textarea>
+        </div>
+      </div>
+    `;
+  }
+  /** Lazy-connect when the dock panel is first opened. */
+  onDockPanelOpen() {
+    // Agent panel already lazily wires its settings + WS on first
+    // render, so there is nothing to kick off here yet. Hook left in
+    // place so future changes (e.g. prefetching model list) slot in.
+  }
+
   _persist() {
     saveState({
       fabRight: this._fabRight,

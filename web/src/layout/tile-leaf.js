@@ -11,6 +11,7 @@ import { showContextMenu } from "../components/context-menu.js";
 // Import every view that can live inside a tile.
 import "../components/mixer.js";
 import "../components/timeline-view.js";
+import "../components/diagnostics.js";
 import "../components/plugins-view.js";
 import "../components/session-view.js";
 import "../components/console-view.js";
@@ -602,6 +603,7 @@ export class TileLeaf extends LitElement {
       case "session":  return html`<foyer-session-view></foyer-session-view>`;
       case "console":  return html`<foyer-console-view></foyer-console-view>`;
       case "preview":  return html`<foyer-text-preview .path=${this.leaf.props?.path || ""}></foyer-text-preview>`;
+      case "diagnostics": return html`<foyer-diagnostics></foyer-diagnostics>`;
       default:
         return html`<div style="padding:20px;color:var(--color-text-muted)">Unknown view: ${v}</div>`;
     }

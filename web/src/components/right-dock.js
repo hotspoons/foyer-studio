@@ -346,9 +346,21 @@ export class RightDock extends LitElement {
     };
     const up = () => {
       if (!tore) {
-        // It was a tap — open the FAB's panel just like before.
+        // It was a tap — open the FAB's content inside the right-dock
+        // panel, matching the Actions / Session / Windows pattern.
+        // Old behavior (floating popover anchored to the rail icon)
+        // is still reachable via the FAB's own `openFromDock` for
+        // FABs that opt out of dock-panel rendering.
+        this._toggle(`fab:${id}`);
+        // Let the FAB know it's been opened from the dock so any
+        // one-shot setup (layout presets fetch, agent connect, …)
+        // runs exactly once per show.
         const fab = window.__foyer?.layout?.fabInstance?.(id);
-        fab?.toggleFromDock?.(iconTop);
+        fab?.onDockPanelOpen?.();
+        // Best-effort close of the legacy floating panel if it was
+        // left open by a prior interaction.
+        if (fab?._open) fab.closeFromDock?.();
+        void iconTop;
       }
       cleanup();
     };
@@ -435,6 +447,28 @@ export class RightDock extends LitElement {
     if (this._panel === "actions") return this._renderActions();
     if (this._panel === "session") return this._renderSession();
     if (this._panel === "windows") return html`<foyer-window-list></foyer-window-list>`;
+    // Docked FABs render their content inline in the dock panel so
+    // clicking a docked "Layouts" or "Agent" icon behaves the same as
+    // Actions / Session / Windows — slide-out rather than floating
+    // popover anchored to the icon.
+    if (this._panel?.startsWith("fab:")) {
+      const id = this._panel.slice(4);
+      const fab = window.__foyer?.layout?.fabInstance?.(id);
+      const meta = window.__foyer?.layout?.fabMeta?.(id) || {};
+      if (!fab) return html`<header>${meta.label || id}</header>`;
+      // Prefer the dedicated `dockPanelContent()` method if the FAB
+      // exposes one; fall back to its normal `_renderPanelContent()`.
+      const content =
+        typeof fab.dockPanelContent === "function"
+          ? fab.dockPanelContent()
+          : typeof fab._renderPanelContent === "function"
+            ? fab._renderPanelContent()
+            : html``;
+      return html`
+        <header>${meta.label || id}</header>
+        <div class="content">${content}</div>
+      `;
+    }
     return null;
   }
 

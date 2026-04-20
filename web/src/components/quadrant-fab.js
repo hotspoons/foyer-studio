@@ -363,6 +363,18 @@ export class QuadrantFab extends LitElement {
     else this.openFromDock(iconTop);
   }
 
+  /** Public entry point the right-dock uses when it renders a docked
+   *  FAB's content inline inside its panel area (matching the slide-out
+   *  behavior of Actions / Session / Windows). Subclasses can override
+   *  for dock-panel-specific UI; default delegates to the existing
+   *  panel content. */
+  dockPanelContent() {
+    return this._renderPanelContent();
+  }
+  /** Called by the right-dock when a docked FAB's panel is opened.
+   *  Subclasses override to kick off lazy fetches. */
+  onDockPanelOpen() {}
+
   _renderResizeHandles(q) {
     // Place a single handle at the panel corner facing away from the FAB.
     const corner = `${q.isTop ? "b" : "t"}${q.isLeft ? "r" : "l"}`;

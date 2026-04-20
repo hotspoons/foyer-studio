@@ -24,6 +24,9 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 local-ip-address = "0.6"
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+# M6a audio egress pipeline: libopus bindings + rubato resampler.
+audiopus = { workspace = true }
+rubato = { workspace = true }
 
 [dev-dependencies]
 foyer-backend-stub.workspace = true

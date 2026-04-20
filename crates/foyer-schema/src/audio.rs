@@ -15,6 +15,20 @@ pub enum SampleFormat {
     F32Le,
 }
 
+/// Which compression the sidecar should apply before forwarding
+/// audio. `Opus` is the default for WAN-friendly monitoring;
+/// `RawF32Le` ships the PCM samples uncompressed for lossless
+/// tracking-grade monitoring on fast local links. Lossless roughly
+/// 6× the bandwidth of Opus 96 kbps — fine for gigabit, not fine
+/// for coffee-shop wifi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioCodec {
+    #[default]
+    Opus,
+    RawF32Le,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AudioFormat {
     pub sample_rate: u32,
@@ -23,6 +37,11 @@ pub struct AudioFormat {
     /// Samples per channel per frame (the "block size"). 128 matches Web Audio
     /// AudioWorklet; host DAWs typically use 64/128/256/512.
     pub frame_size: u32,
+    /// Compression applied by the sidecar. Clients that want lossless
+    /// (gigabit LAN, tracking sessions) ask for `RawF32Le`; everyone
+    /// else gets Opus 96 kbps and the same UX with 1/6 the bandwidth.
+    #[serde(default)]
+    pub codec: AudioCodec,
 }
 
 impl AudioFormat {
@@ -32,6 +51,22 @@ impl AudioFormat {
             channels,
             format: SampleFormat::F32Le,
             frame_size,
+            codec: AudioCodec::Opus,
+        }
+    }
+
+    pub const fn new_with_codec(
+        sample_rate: u32,
+        channels: u16,
+        frame_size: u32,
+        codec: AudioCodec,
+    ) -> Self {
+        Self {
+            sample_rate,
+            channels,
+            format: SampleFormat::F32Le,
+            frame_size,
+            codec,
         }
     }
 }

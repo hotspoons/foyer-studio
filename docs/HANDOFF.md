@@ -9,12 +9,169 @@ still apply:
 - **No Node tooling.** No `node`/`npm`/bundlers/linters. Browser is the
   only JS runtime. Vendor ESM under `web/vendor/` if you must.
   Tailwind uses the standalone binary at `.bin/tailwindcss`.
-- **Non-viral license everywhere except `shims/ardour/`.** The C++ shim
-  is GPL by construction; Rust + web are permissive.
+- **Layer-scoped licensing.** `shims/ardour/` is GPLv2+ because it
+  links `libardour` — standard Ardour-ecosystem practice. The Rust
+  sidecar and web UI are licensed separately and sit above a
+  documented IPC boundary, so they're not derivative of any one shim.
+  Future shims (Reaper, JUCE hosts) each carry their own terms.
 - **Ship-first, then log.** When a design tradeoff appears, pick the
   first sensible option and append an ADR entry in DECISIONS.md —
   don't stop to ask.
 - **Speech-to-text artifacts:** "our door" = Ardour.
+
+## 2026-04-20 overnight push
+
+Big session of autonomous work. Uncommitted changes on disk — review
+before merging. Summary of what's new since the last handoff:
+
+- **Transport finally works.** Play / Stop / Record / Loop / Locate
+  go through BasicUI helpers on the shim's event loop thread
+  (`transport_play` / `transport_stop` / `rec_enable_toggle` /
+  `loop_toggle`). Root cause of the earlier outage was an empty
+  `FoyerShim::do_request` override that silently swallowed every
+  `call_slot` post — fixed in [surface.h](../shims/ardour/src/surface.h).
+  Playhead animates at 30 Hz via a new ticker thread in
+  [signal_bridge.cc](../shims/ardour/src/signal_bridge.cc).
+- **Playing-predicate fix.** Was using `transport_rolling()` which
+  returns `true` on a freshly-loaded session; switched to
+  `transport_state_rolling()` (authoritative FSM state). Record
+  button uses `get_record_enabled()` (armed) not `actively_recording()`
+  (armed + rolling).
+- **3-mode return-on-stop** (Stay / → 0 / ↩ Start) with a front-end
+  position lock in [transport-return.js](../web/src/transport-return.js).
+  Swallows backend position updates for 600 ms after a user-triggered
+  return so the shim's 30 Hz tick doesn't race our locate. Released
+  early on explicit user seeks.
+- **Track rename + color** end-to-end. Right-click (or double-click)
+  a track name in the mixer / timeline; shim calls `Route::set_name` +
+  `PresentationInfo::set_color` on the event loop. PresentationInfo /
+  Route `PropertyChanged` signals push back so external renames made
+  inside Ardour propagate to Foyer.
+- **Session dirty chip** ("Unsaved") in the status bar, wired to
+  `Session::DirtyChanged`.
+- **Action dispatch in shim** — `edit.undo/redo`, `session.save`,
+  `track.add_audio/bus`, `transport.goto_start/end` all land on
+  `Session::*` methods via `Command::InvokeAction` in
+  [dispatch.cc](../shims/ardour/src/dispatch.cc). Cut/copy/paste
+  explicitly surfaced as "editor action manager only (headless
+  unsupported)" so the toast explains the gap.
+- **Multi-track selection** lifted into the Store — click a track
+  head / strip to select, Shift-click to extend, Ctrl/Cmd-click to
+  toggle. Both mixer strips and timeline lanes render a selected
+  state and subscribe to the same `selection` event.
+- **Time-range × track-selection ops.** `Edit → Delete Selection`
+  and `Edit → Mute / Unmute Selection` (also bound to the Delete
+  key) walk all regions overlapping the current time-range on
+  selected tracks (or every audio/midi track when none are
+  explicitly selected) and fan out per-region commands.
+- **Zoom-to-selection** + zoom back-stack. `Ctrl+Shift+E` to zoom
+  the current time-range into the viewport; `Ctrl+Shift+Backspace`
+  to pop. Menu entries under View.
+- **R button in the timeline + mixer track heads** — shim now emits
+  `record_arm` for any track with a `rec_enable_control`
+  ([msgpack_out.cc](../shims/ardour/src/msgpack_out.cc)).
+- **Integration test harness**. `FOYER_DEV=1 just run` mounts
+  `GET /dev/run-tests` + `GET /dev/list-tests`. 8 probes exercise
+  snapshot / list_actions / set_control / event broadcast /
+  list_regions / load_waveform / update_track / transport play+stop.
+  All passing against the stub. Matching web view:
+  [diagnostics.js](../web/src/components/diagnostics.js); launch via
+  the "+ New" menu → Diagnostics or via `curl`.
+- **Transport bar redesign** — proper DAW transport row
+  (⏮ ⏪ ⏹ ▶/⏸ ⏺ ↻ ⏩ ⏭), solid-filled Heroicons glyphs, color-coded
+  per action (record pulses red when armed), 3-mode return-on-stop
+  cycler at the end of the row.
+- **Master mix strip separation** — master + monitor routes render
+  in a pinned right column with a divider + gutter so the main bus
+  stays visible even as input strips scroll horizontally.
+- **`<foyer-viz>` library** — new `web/src/viz/` directory housing:
+  - [`waveform-gl.js`](../web/src/viz/waveform-gl.js) — WebGL2
+    fragment-shader waveform renderer with linear-filtered peaks
+    (no more stair-step blockiness at high zoom), AA envelope
+    edges, per-half clip markers, underrun overlay (wire ready),
+    and an "energy glow" effect.
+  - [`waveform-shader.js`](../web/src/viz/waveform-shader.js) — the
+    shader. Three styles: `mirrored` / `bar` / `ghost`. Clean-room
+    Heroicons-derived palette set (aurora / cyan / magma / sunset /
+    chlorophyll / graphite).
+  - [`viz-settings.js`](../web/src/viz/viz-settings.js) +
+    [`viz-picker.js`](../web/src/viz/viz-picker.js) — localStorage
+    prefs + a small toolbar popover for style / palette / glow /
+    clip-threshold.
+  - Canvas 2D fallback path lives in the same component for browsers
+    without WebGL2.
+- **Sample-detail zoom fix** — tier ladder now includes `[8, 16, 32]`
+  and the symphonia decoder's bucket cap is raised to 262 144 so
+  short regions decode to ~4 samples/peak.
+
+## 2026-04-20 late-session additions
+
+Beyond what's above, the overnight push also landed:
+
+- **`<foyer-viz>` component library** — [`web/src/viz/`](../web/src/viz/):
+  WebGL2 waveform renderer with anti-aliased envelope, per-half clip
+  markers, underrun overlay (data source pending), three styles
+  (`mirrored` / `bar` / `ghost`), six palettes, runtime settings via
+  a small picker chip on the timeline toolbar. Canvas 2D fallback
+  path lives in the same component. Replaces the old stair-step
+  Canvas peak rendering.
+- **M6a audio egress skeleton** — [`crates/foyer-server/src/audio.rs`](../crates/foyer-server/src/audio.rs)
+  + [`audio_opus.rs`](../crates/foyer-server/src/audio_opus.rs)
+  + [`audio_ws.rs`](../crates/foyer-server/src/audio_ws.rs).
+  Audio hub with per-stream Opus encoder, `/ws/audio/:stream_id`
+  binary route, `AudioCodec::{Opus, RawF32Le}` switch (lossless
+  for gigabit LAN), test-tone source for wire verification, a
+  "Listen" button on the mixer's master strip that opens an
+  egress and plays through WebCodecs → `AudioContext`. The only
+  missing piece is the shim's RT-thread audio tap — see
+  [docs/AUDIO_EGRESS.md](AUDIO_EGRESS.md).
+- **Plugin lifecycle — AddPlugin / RemovePlugin** — `Route::add_processor`
+  / `remove_processor` wired in [dispatch.cc](../shims/ardour/src/dispatch.cc)
+  with LV2 → LADSPA → VST3 → Lua fallback on `PluginManager::find_plugin`.
+  Host-side trait method added; fire-and-forget from the WS handler,
+  shim emits `TrackUpdated` on success.
+- **Master strip separation in the mixer** — master + monitor routes
+  pinned in a gradient-tinted right rail with gutter + divider so
+  they stay visible under horizontal input-strip scroll.
+- **Docs pass**: README tone review, new licensing ADR (`DECISIONS.md`
+  entry 15) with rationale for why the shim is GPLv2+ and the rest
+  sits above the IPC boundary. Stale status table rewritten.
+
+## Still to do
+
+1. **Shim RT audio tap** — hard blocker for real DAW audio through
+   the egress path. Needs a process callback attached to
+   `Session::attach_Process` or a `Route::output()` port buffer read.
+   Must be RT-safe (no allocation, no locking); writes to a ring
+   buffer that a non-RT reader drains into the IPC socket as
+   `FrameKind::Audio`. Full spec in [docs/AUDIO_EGRESS.md](AUDIO_EGRESS.md)
+   "Hard blocker" section. Until this lands, the `Listen` button
+   plays the synth test tone; all wire paths above it are verified.
+2. **MovePlugin / plugin presets / OpenPluginGui** — schema + ws
+   route need completion. `OpenPluginGui` will probably be a no-op
+   on headless hardour and shim-visible only with the GUI binary.
+3. **Region fade-in / fade-out / trim-to-selection** — new
+   `RegionPatch` fields (`fade_in_samples`, `fade_out_samples`,
+   `fade_in_shape`) + shim wiring to `AudioRegion::set_fade_in_length`.
+4. **Standalone `.so` shim** — CMake port so upstream Ardour can
+   load `libfoyer_shim.so` without linking it into the fork tree.
+5. **AudioWorklet jitter buffer** for the browser side. Current
+   listener schedules directly against `AudioContext` — fine for
+   the continuous test tone, likely glitchy on real session audio
+   that has natural gaps.
+6. **Group / send routing** — schema done, shim side not populated.
+7. **MIDI region notes + piano roll** — schema done; wire piano
+   roll component + shim region-notes emission.
+8. **WebRTC transport variant** — schema reserves it; plain WS is
+   enough for M6a.
+
+Everything above compiles clean + the dev test harness (`FOYER_DEV=1
+just run` → `curl /dev/run-tests`) reports **9/9 green** against the
+stub backend as of this handoff. Browser-side untouched where it
+didn't need to change (Lit components, layout, keybinds, store);
+everything in [web/src/viz/](../web/src/viz/) is new.
+
+## 2026-04-19 update — real regions + peaks landed
 
 ## 2026-04-19 update — real regions + peaks landed
 

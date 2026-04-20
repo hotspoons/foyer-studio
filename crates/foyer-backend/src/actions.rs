@@ -41,6 +41,13 @@ pub fn default_daw_actions() -> Vec<Action> {
         mk("edit.cut", "Cut", ActionCategory::Edit, Some("scissors"), Some("Cmd+X")),
         mk("edit.copy", "Copy", ActionCategory::Edit, Some("document-duplicate"), Some("Cmd+C")),
         mk("edit.paste", "Paste", ActionCategory::Edit, Some("clipboard"), Some("Cmd+V")),
+        // Selection-scoped ops on the timeline. Intercepted client-side
+        // so they walk the regions that overlap the current time-range
+        // + track selection and fan out DeleteRegion / UpdateRegion
+        // commands per hit. No backend support needed beyond what
+        // already exists.
+        mk("edit.delete_selection", "Delete Selection", ActionCategory::Edit, Some("trash"), Some("Delete")),
+        mk("edit.mute_selection", "Mute / Unmute Selection", ActionCategory::Edit, Some("speaker-x-mark"), Some("M")),
 
         // ── Track ───────────────────────────────────────────────
         mk("track.add_audio", "Add Audio Track", ActionCategory::Track, Some("plus"), None),
@@ -51,6 +58,10 @@ pub fn default_daw_actions() -> Vec<Action> {
         mk("view.mixer", "Mixer", ActionCategory::View, Some("adjustments-horizontal"), Some("F3")),
         mk("view.timeline", "Timeline", ActionCategory::View, Some("list-bullet"), Some("F4")),
         mk("view.plugins", "Plugins", ActionCategory::View, Some("puzzle-piece"), Some("F5")),
+        // Timeline-scoped view actions. Intercepted client-side (main-
+        // menu.js) since the zoom stack lives in the browser.
+        mk("view.zoom_selection", "Zoom to Selection", ActionCategory::View, Some("magnifying-glass"), Some("Ctrl+Shift+E")),
+        mk("view.zoom_previous", "Zoom Previous", ActionCategory::View, Some("arrow-uturn-left"), Some("Ctrl+Shift+Backspace")),
 
         // ── Plugin ──────────────────────────────────────────────
         mk("plugin.rescan", "Rescan Plugins", ActionCategory::Plugin, Some("arrow-path"), None),

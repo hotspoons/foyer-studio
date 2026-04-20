@@ -11,7 +11,12 @@ use std::collections::HashMap;
 use foyer_schema::{EntityId, Region, WaveformPeaks};
 
 const CHANNELS: u16 = 1; // stub = mono
-const TIERS: [u32; 8] = [64, 128, 256, 512, 1024, 2048, 4096, 8192];
+// Matches the client's TIERS ladder (web/src/layout/waveform-cache.js).
+// Finer tiers (≤32 sp/peak) are for extreme zoom where coarse peaks
+// look like a smeared envelope across many pixels.
+const TIERS: [u32; 13] = [
+    2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+];
 
 pub(crate) struct WaveformCache {
     entries: HashMap<(String, u32), WaveformPeaks>,

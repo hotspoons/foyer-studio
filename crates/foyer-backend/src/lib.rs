@@ -136,6 +136,17 @@ pub trait Backend: Send + Sync + 'static {
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {
         Ok(Vec::new())
     }
+    async fn add_plugin(
+        &self,
+        _track_id: EntityId,
+        _plugin_uri: String,
+        _index: Option<u32>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("add_plugin not supported".into()))
+    }
+    async fn remove_plugin(&self, _plugin_id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("remove_plugin not supported".into()))
+    }
     async fn browse_path(
         &self,
         _path: &str,

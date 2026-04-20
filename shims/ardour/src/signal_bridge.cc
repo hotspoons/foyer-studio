@@ -11,11 +11,14 @@
 #include <sstream>
 
 #include "ardour/playlist.h"
+#include "ardour/plugin.h"
+#include "ardour/plugin_insert.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
 #include "ardour/stripable.h"
 #include "ardour/track.h"
+#include "evoral/Parameter.h"
 #include "pbd/controllable.h"
 
 #include "ipc.h"
@@ -151,6 +154,43 @@ SignalBridge::subscribe_controls_on_route (Route& r)
 	wire (r.mute_control ());
 	wire (r.solo_control ());
 	if (auto rec = r.rec_enable_control ()) wire (rec);
+
+	// Plugin-param live updates. Without these subscriptions the web
+	// UI only sees the values it SET itself — Ardour's native GUI
+	// moving the same param wouldn't round-trip back to the browser.
+	// For each PluginInsert on the route, wire every automation
+	// control we surface in `schema_map` + the insert's own
+	// ActiveChanged (bypass toggle) signal.
+	std::ostringstream ridss;
+	ridss << r.id ();
+	const std::string track_id = "track." + ridss.str ();
+	for (uint32_t i = 0;; ++i) {
+		auto proc = r.nth_plugin (i);
+		if (!proc) break;
+		auto pi = std::dynamic_pointer_cast<ARDOUR::PluginInsert> (proc);
+		if (!pi) continue;
+		// ActiveChanged fires when the user bypasses/enables the
+		// plugin from Ardour's GUI. Re-emit a track_updated so the
+		// web UI's plugin strip reflects the new bypass state.
+		std::string tid = track_id;
+		pi->ActiveChanged.connect (
+		    _connections, MISSING_INVALIDATOR,
+		    [this, tid] () { on_route_presentation_changed (tid); },
+		    _shim.event_loop ());
+		// Wire every exposed automatable param so moves in Ardour's
+		// GUI round-trip back to the web UI. Iterating via the
+		// PluginInsert's automation_control list covers the "what we
+		// expose in the schema" set.
+		auto plug = pi->plugin ();
+		if (plug) {
+			for (uint32_t p = 0; p < plug->parameter_count (); ++p) {
+				if (!plug->parameter_is_control (p) || !plug->parameter_is_input (p)) continue;
+				auto pid = Evoral::Parameter (ARDOUR::PluginAutomation, 0, p);
+				auto ctrl = pi->automation_control (pid, false);
+				if (ctrl) wire (ctrl);
+			}
+		}
+	}
 }
 
 void

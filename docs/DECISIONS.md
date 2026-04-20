@@ -366,3 +366,56 @@ reasoning the next time someone revisits).
 **Why:** ADR-style decision logs are a well-proven pattern. The
 marginal cost per entry is five minutes; the compound benefit over a
 year is enormous.
+
+## 15. Layer-scoped licensing with the shim as the GPL boundary
+
+**Date:** 2026-04-20
+
+**Decision:** Each layer of Foyer is licensed according to what it
+actually links against:
+
+- **`shims/ardour/`** is GPLv2+. It statically links `libardour`;
+  Ardour is GPLv2; standard practice for anything inside the Ardour
+  ecosystem is to match the host's license. Patches we upstream to
+  Ardour itself are likewise GPLv2.
+- **Rust sidecar + web UI** sit above a documented Unix-socket IPC
+  protocol. They talk `foyer-schema` types, not `libardour` types,
+  and don't share address space with any specific engine. They're
+  licensed separately (exact terms TBD; permissive).
+- **Future shims** (Reaper SDK, JUCE-based engines, commercial DAW
+  bindings) each carry whatever license terms their SDK requires
+  for static linking.
+
+**Alternatives considered:**
+
+1. *Everything GPL* — would match the Ardour project's own preference
+   and remove the "is the sidecar a derivative work?" debate. Cost:
+   users and contributors (and future commercial-engine shims) can't
+   reuse Foyer's sidecar / web UI in permissively licensed projects,
+   which foreclosed partnerships we want to keep open.
+2. *Shim-is-permissive via LGPL-style shim* — requires dynamically
+   loading `libardour` and hoping no GPL'd types cross the boundary.
+   Practically impossible with how Ardour exposes its public API
+   (templates, shared_ptr of GPL'd classes everywhere). Rejected.
+3. *Hosted-only, never ship the shim binary* — avoids the question.
+   Rejected: we want Foyer to be installable locally.
+
+**Why:** The shim-as-boundary pattern is how every other
+audio-controller ecosystem (MCP control surfaces, OSC bridges,
+plugin wrappers) handles the same tradeoff. It keeps the per-engine
+translation code under its host's license while letting the editing
+surface above be reusable across engines. This is an engineering
+accommodation, not a political stance — without Ardour's decades of
+audio-engine work, nothing above the shim would exist or be worth
+building.
+
+**Implementation notes:**
+- `shims/ardour/**/*.cc` and `*.h` carry a GPLv2+ header, matching
+  Ardour's own files.
+- `crates/**/*` and `web/src/**/*` carry the Foyer project header
+  (once decided); no file outside `shims/` should include a GPL
+  header.
+- If we add a second shim (e.g. `shims/reaper/`), give it its own
+  directory, its own license header, and its own build/recipe. Keep
+  the wire format on the other side identical — that's the whole
+  point.

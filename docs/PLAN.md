@@ -609,12 +609,22 @@ assemble later and keeps the fork (if any) minimal and legible.
 
 ## 9. Licensing note
 
-Ardour is GPLv2. The Rust sidecar runs in a separate process communicating over a documented
-IPC protocol, so it's not a derivative work under the standard network-boundary argument
-(same position used by every DAW with an OSC controller). Any patches we contribute back to
-Ardour are GPLv2 by necessity — that's fine and expected. Commercial DAW shims (Reaper,
-Bitwig, Pro Tools) each carry their own SDK license; the separation of shim-per-DAW means
-those licenses stay localized to each shim and don't touch the sidecar or web app.
+Ardour is GPLv2. The `shims/ardour/` `.so` statically links `libardour`, so it's GPLv2+
+accordingly — standard practice for anything touching Ardour's internals, and in keeping
+with the ecosystem conventions Ardour's own developers have established. Patches we upstream
+to Ardour are likewise GPLv2 and we should expect to send more as the integration matures.
+
+The Rust sidecar runs in a separate process and talks to the shim over a documented IPC
+protocol, so it isn't a derivative work of `libardour` under the standard network-boundary
+argument (same position used by every DAW with an OSC or MCP controller). Future shims for
+other engines (Reaper's SDK, JUCE hosts, commercial DAWs) each carry their own license
+terms; keeping shim-per-DAW means those licenses stay localized and the sidecar / web
+layers remain portable.
+
+This layering is an engineering accommodation — we want a modern editing surface without
+being locked into any single engine's release cadence or toolkit — not a political stance.
+Ardour's decades of audio-engine work are what make the project viable; the boundary exists
+to keep the per-host translation thin, not to insulate Foyer from its upstream.
 
 ## 10. Open questions (resolve before M3)
 
@@ -645,6 +655,18 @@ those licenses stay localized to each shim and don't touch the sidecar or web ap
 - **Multi-performer ingress:** M6b supports one remote performer. Multi-performer is a
   scope decision for M8+ — each performer gets their own virtual input, independently
   calibrated, no attempt to align them with each other.
+
+## 12. Active push — 2026-04-20 overnight
+
+The running plan for this session's autonomous push is
+[PLAN-overnight-2026-04-20.md](PLAN-overnight-2026-04-20.md) — bug-bash
+first (including a transport-starts-rolling regression on session open
+and WebGL waveforms not rendering), then shim RT audio tap (Phase 2),
+then right-panel FABs (Phase 3), then track-editor modal, MIDI piano
+roll, plugin live-update signals, dirty indicator, voice chat,
+multi-window pop-out, and polish. Phase progression is linear but
+blockers get parked in a "Deferred" section rather than halting the
+push.
 
 ## 11. First coding-agent handoff
 

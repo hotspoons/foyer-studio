@@ -10,6 +10,10 @@
 
 #![forbid(unsafe_code)]
 
+mod audio;
+mod audio_opus;
+mod audio_ws;
+mod dev;
 mod files;
 mod jail;
 mod ring;
@@ -124,6 +128,10 @@ pub(crate) struct AppState {
     /// at `run()` time so the WS handler can include it in the client
     /// greeting for share-session URLs.
     pub(crate) listen_port: std::sync::atomic::AtomicU16,
+    /// M6a audio egress hub. Holds live encoder pipelines keyed by
+    /// `stream_id`; the `/ws/audio/:stream_id` route subscribes to
+    /// its broadcasts. Shared across all connections.
+    pub(crate) audio_hub: Arc<audio::AudioHub>,
 }
 
 impl AppState {
@@ -222,6 +230,7 @@ impl Server {
             pump_handle: Mutex::new(None),
             jail: None,
             listen_port: std::sync::atomic::AtomicU16::new(0),
+            audio_hub: Arc::new(audio::AudioHub::new()),
         });
         Self { state }
     }
@@ -260,9 +269,24 @@ impl Server {
 
         let mut router = Router::new()
             .route("/ws", get(ws::upgrade))
+            .route("/ws/audio/:stream_id", get(audio_ws::upgrade))
             .route("/files/*path", get(files::serve_file))
             .route("/console", get(console_tail))
-            .route("/qr", get(qr_svg))
+            .route("/qr", get(qr_svg));
+
+        // Dev-only integration probe harness. Gated on FOYER_DEV=1 so
+        // production runs don't expose a side-channel for backend
+        // mutation. Probes (see `dev.rs`) exercise the backend via
+        // the same paths the WS handler uses, plus event-broadcast
+        // observation where applicable.
+        if dev::enabled() {
+            tracing::info!("FOYER_DEV=1 — mounting /dev/run-tests + /dev/list-tests");
+            router = router
+                .route("/dev/run-tests", get(dev::run_tests))
+                .route("/dev/list-tests", get(dev::list_tests));
+        }
+
+        let mut router = router
             .with_state(self.state.clone())
             .layer(TraceLayer::new_for_http())
             .layer(CorsLayer::permissive());

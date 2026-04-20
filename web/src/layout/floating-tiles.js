@@ -20,6 +20,7 @@ import "../components/timeline-view.js";
 import "../components/plugins-view.js";
 import "../components/session-view.js";
 import "../components/console-view.js";
+import "../components/diagnostics.js";
 import "../components/plugin-panel.js";
 import "./text-preview.js";
 import "./slot-picker.js";
@@ -520,6 +521,8 @@ export class FloatingTiles extends LitElement {
         return html`<foyer-session-view></foyer-session-view>`;
       case "console":
         return html`<foyer-console-view></foyer-console-view>`;
+      case "diagnostics":
+        return html`<foyer-diagnostics></foyer-diagnostics>`;
       case "preview":
         return html`<foyer-text-preview .path=${e.props?.path || ""}></foyer-text-preview>`;
       case "plugin_panel": {
@@ -641,6 +644,41 @@ export class FloatingTiles extends LitElement {
     window.addEventListener("pointerup", up);
   }
 
+  /** Find visible floats whose opposite edge sits flush with `entry`'s
+   *  `dir` edge (within `tol` px). These are the "splitter partners":
+   *  when the user drags the shared edge, both sides move together so
+   *  a clean 50/50 split resizes like a Figma/Rectangle divider. */
+  _collectResizePartners(entry, dir, tol = 8) {
+    const partners = [];
+    const eN = entry.y;
+    const eS = entry.y + entry.h;
+    const eW = entry.x;
+    const eE = entry.x + entry.w;
+    for (const other of this._entries) {
+      if (!other || other.id === entry.id || other.minimized) continue;
+      const oN = other.y;
+      const oS = other.y + other.h;
+      const oW = other.x;
+      const oE = other.x + other.w;
+      // Share the east border of `entry` ↔ west border of `other`.
+      const overlapsV = Math.max(eN, oN) < Math.min(eS, oS) - 4;
+      const overlapsH = Math.max(eW, oW) < Math.min(eE, oE) - 4;
+      if (dir.includes("e") && overlapsV && Math.abs(eE - oW) <= tol) {
+        partners.push({ entry: other, edge: "w", ox: oW, ow: other.w });
+      }
+      if (dir.includes("w") && overlapsV && Math.abs(eW - oE) <= tol) {
+        partners.push({ entry: other, edge: "e", ox: oW, ow: other.w });
+      }
+      if (dir.includes("s") && overlapsH && Math.abs(eS - oN) <= tol) {
+        partners.push({ entry: other, edge: "n", oy: oN, oh: other.h });
+      }
+      if (dir.includes("n") && overlapsH && Math.abs(eN - oS) <= tol) {
+        partners.push({ entry: other, edge: "s", oy: oN, oh: other.h });
+      }
+    }
+    return partners;
+  }
+
   _startResize(ev, entry, dir) {
     ev.preventDefault();
     ev.stopPropagation();
@@ -659,7 +697,7 @@ export class FloatingTiles extends LitElement {
     // touches OUR resize edge (within 8px tolerance) grows or shrinks
     // opposite our drag. "Two adjacent windows sharing a border act like
     // a splitter." Holding Alt disables pairing.
-    const partners = this._collectResizePartners(entry, dir, 8);
+    const partners = ev.altKey ? [] : this._collectResizePartners(entry, dir, 8);
 
     // Resize model (per Rich): a slot-pinned window stays RELATIVE through
     // the drag — as long as the resized rect still matches some slot (within
@@ -697,6 +735,30 @@ export class FloatingTiles extends LitElement {
       } else {
         lastSlot = null;
         this.store.floatSet(entry.id, { x: nx, y: ny, w: nw, h: nh, slot: null });
+      }
+      // Move the partners. A dragged E edge pushes the partner's W
+      // edge by the same dx; the partner grows or shrinks to match.
+      // Symmetric for the other three edges. Slots break on the
+      // partner the moment its rect leaves its own slot (the
+      // splitter drag inherently "frees" the layout, per Rich).
+      if (!e.altKey && partners.length) {
+        for (const p of partners) {
+          if (p.edge === "w") {
+            const newX = p.ox + dx;
+            const newW = Math.max(minW, p.ow - dx);
+            this.store.floatSet(p.entry.id, { x: newX, w: newW, slot: null });
+          } else if (p.edge === "e") {
+            const newW = Math.max(minW, p.ow + dx);
+            this.store.floatSet(p.entry.id, { w: newW, slot: null });
+          } else if (p.edge === "n") {
+            const newY = p.oy + dy;
+            const newH = Math.max(minH, p.oh - dy);
+            this.store.floatSet(p.entry.id, { y: newY, h: newH, slot: null });
+          } else if (p.edge === "s") {
+            const newH = Math.max(minH, p.oh + dy);
+            this.store.floatSet(p.entry.id, { h: newH, slot: null });
+          }
+        }
       }
     };
     const up = () => {

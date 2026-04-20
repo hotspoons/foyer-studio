@@ -6,7 +6,14 @@
 // tier table). The client picks the nearest-tier ≤ requested so cache hits
 // line up across slight zoom wobbles.
 
-const TIERS = [64, 128, 256, 512, 1024, 2048, 4096, 8192];
+// Powers-of-two ladder of samples-per-peak. Tier 1 exposes individual
+// PCM samples; the shader's linear filter gives a smooth-line look
+// even across inter-sample gaps. Finer tiers only become a problem
+// when the *region* is long enough to exceed MAX_TEXTURE_SIZE buckets
+// — gl.js caps by CPU-side min/max aggregation which is a reasonable
+// floor but not as sharp as viewport-cropped fetching would be. See
+// PLAN-overnight-2026-04-20.md Phase 1.10.
+const TIERS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
 const BUCKET_WIDTH_PX = 1; // one bucket = one px column
 
 export function pickTier(samplesPerPeak) {

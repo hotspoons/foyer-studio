@@ -12,7 +12,9 @@
 // different sessions with different rates render correctly.
 
 import { LitElement, html, css } from "lit";
-import { WaveformCache, drawPeaks } from "../layout/waveform-cache.js";
+import { WaveformCache } from "../layout/waveform-cache.js";
+import "../viz/waveform-gl.js";
+import "../viz/viz-picker.js";
 import { scrollbarStyles } from "../shared-styles.js";
 import { showContextMenu } from "./context-menu.js";
 
@@ -192,7 +194,17 @@ export class TimelineView extends LitElement {
     .region:hover { filter: brightness(1.08); }
     .region .name {
       position: absolute;
-      top: 2px; left: 6px;
+      top: 2px; left: 6px; right: 6px;
+      /* Clip + ellipsize so the region name never spills past the
+       * region container. Without `max-width`/overflow controls, a
+       * long take name on a narrow region renders past the right
+       * edge — and with our new absolutely-positioned viz children,
+       * that spillover was visually "poking over" adjacent track
+       * header strips. */
+      max-width: calc(100% - 12px);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
       font-family: var(--font-sans);
       font-size: 10px;
       font-weight: 600;
@@ -204,6 +216,11 @@ export class TimelineView extends LitElement {
     .region canvas {
       position: absolute;
       left: 0; top: 0; width: 100%; height: 100%;
+      pointer-events: none;
+    }
+    .region .viz {
+      position: absolute;
+      left: 0; top: 0; right: 0; bottom: 0;
       pointer-events: none;
     }
     .region .edge {
@@ -270,6 +287,11 @@ export class TimelineView extends LitElement {
     this._laneHeights = this._loadLaneHeights();
     // { startSamples, endSamples } — null when nothing is selected.
     this._selection = null;
+    // Viewport back-stack: `zoomToSelection` pushes the prior {zoom,
+    // scrollLeft} here so the user can pop back with "Zoom Previous".
+    // Bounded so a trigger-happy user can't balloon memory.
+    this._zoomStack = [];
+    this._zoomStackMax = 32;
   }
 
   _loadLaneHeights() {
@@ -397,6 +419,130 @@ export class TimelineView extends LitElement {
     store.selectTrack(trackId, mode);
   }
 
+  _onLaneHeadContext(ev, track) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    // Import lazily to avoid pulling the modal into the initial bundle
+    // for sessions that never right-click a lane.
+    import("./track-editor-modal.js").then((m) => m.openTrackEditor(track.id));
+  }
+
+  // ── zoom stack ─────────────────────────────────────────────────────
+  /** Push current viewport, then zoom the time-range selection to fill
+   *  the scroll container (minus the sticky HEAD column). No-op if
+   *  nothing is selected. */
+  zoomToSelection() {
+    if (!this._selection) return false;
+    const sr = this._timeline?.sample_rate || 48_000;
+    const a = Math.min(this._selection.startSamples, this._selection.endSamples);
+    const b = Math.max(this._selection.startSamples, this._selection.endSamples);
+    const selSec = Math.max(0.01, (b - a) / sr);
+    const scroll = this.renderRoot.querySelector(".scroll");
+    if (!scroll) return false;
+    const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
+    // Leave ~6% padding on either side so the selection isn't flush.
+    const target = (visiblePx * 0.88) / selSec;
+    const nextZoom = Math.max(2, Math.min(4000, Math.round(target)));
+    this._pushZoomSnapshot(scroll);
+    this._zoom = nextZoom;
+    // Let Lit repaint at new zoom, then scroll so the selection start
+    // sits at ~6% from the left of the visible timeline area.
+    this.updateComplete.then(() => {
+      const sc = this.renderRoot.querySelector(".scroll");
+      if (!sc) return;
+      const startPx = (a / sr) * this._zoom;
+      sc.scrollLeft = Math.max(0, startPx - visiblePx * 0.06);
+    });
+    return true;
+  }
+
+  /** Pop the last snapshot off the zoom stack. No-op on empty stack. */
+  zoomPrevious() {
+    const snap = this._zoomStack.pop();
+    if (!snap) return false;
+    this._zoom = snap.zoom;
+    this.updateComplete.then(() => {
+      const sc = this.renderRoot.querySelector(".scroll");
+      if (sc) sc.scrollLeft = snap.scrollLeft;
+    });
+    return true;
+  }
+
+  _pushZoomSnapshot(scrollEl) {
+    this._zoomStack.push({
+      zoom: this._zoom,
+      scrollLeft: scrollEl?.scrollLeft || 0,
+    });
+    if (this._zoomStack.length > this._zoomStackMax) this._zoomStack.shift();
+  }
+
+  // ── selection ops ───────────────────────────────────────────────────
+  /**
+   * Regions that fall under the current selection. The "selection" is:
+   *   - tracks:  Store.selectedTrackIds (or ALL audio/midi tracks if empty)
+   *   - range:   `_selection` if set, else the full timeline (open-ended ops)
+   * Returns `[{region, track}]` tuples. Used by delete/mute/... menu items.
+   */
+  _regionsInSelection() {
+    const store = window.__foyer?.store;
+    const tracks = this.session?.tracks || [];
+    const selTracks = store?.state?.selectedTrackIds;
+    // If no tracks are explicitly selected, the op applies to every
+    // track that could host a region — matches the menu wording ("Delete
+    // selection") and mirrors what most DAWs do.
+    const activeTrackIds = selTracks && selTracks.size
+      ? new Set(selTracks)
+      : new Set(tracks.filter(t => t.kind === "audio" || t.kind === "midi").map(t => t.id));
+    // No time range = no ambiguity-free op. Bail so we don't nuke the
+    // entire session by accident.
+    if (!this._selection) return [];
+    const a = Math.min(this._selection.startSamples, this._selection.endSamples);
+    const b = Math.max(this._selection.startSamples, this._selection.endSamples);
+    const out = [];
+    for (const t of tracks) {
+      if (!activeTrackIds.has(t.id)) continue;
+      const rs = this._regionsByTrack[t.id] || [];
+      for (const r of rs) {
+        const rStart = Number(r.start_samples || 0);
+        const rEnd = rStart + Number(r.length_samples || 0);
+        // Include any region that overlaps the selection at all.
+        if (rEnd > a && rStart < b) out.push({ region: r, track: t });
+      }
+    }
+    return out;
+  }
+
+  /** Delete all regions overlapping the current selection on selected
+   *  tracks. Fire-and-forget per-region DeleteRegion commands — the
+   *  shim broadcasts RegionRemoved events which update the local state. */
+  deleteSelection() {
+    const hits = this._regionsInSelection();
+    if (!hits.length) return 0;
+    const ws = window.__foyer?.ws;
+    for (const { region } of hits) {
+      ws?.send({ type: "delete_region", id: region.id });
+    }
+    return hits.length;
+  }
+
+  /** Toggle mute on regions overlapping the selection. If the set has
+   *  any unmuted region, mute all. Otherwise unmute all. */
+  muteSelection() {
+    const hits = this._regionsInSelection();
+    if (!hits.length) return 0;
+    const anyUnmuted = hits.some((h) => !h.region.muted);
+    const target = anyUnmuted; // if any unmuted, set all to muted=true
+    const ws = window.__foyer?.ws;
+    for (const { region } of hits) {
+      ws?.send({
+        type: "update_region",
+        id: region.id,
+        patch: { muted: target },
+      });
+    }
+    return hits.length;
+  }
+
   render() {
     const tracks = this.session?.tracks ?? [];
     const sr = this._timeline?.sample_rate || 48_000;
@@ -423,6 +569,7 @@ export class TimelineView extends LitElement {
                }}>
         <span>${this._zoom} px/s · tier=${pickTier(this._samplesPerPx())}</span>
         <span style="flex:1"></span>
+        <foyer-viz-picker></foyer-viz-picker>
         <button @click=${this._clearCache} title="Drop all cached peak files">Clear peak cache</button>
         <span>${totalSec.toFixed(1)}s · ${sr} Hz · wheel to zoom · Alt-wheel for lane height</span>
       </div>
@@ -485,7 +632,8 @@ export class TimelineView extends LitElement {
     return html`
       <div class="lane ${selected ? "selected" : ""}" style="height:${h}px">
         <div class="lane-head" style="height:${h}px"
-             @click=${(e) => this._onLaneHeadClick(e, track.id)}>
+             @click=${(e) => this._onLaneHeadClick(e, track.id)}
+             @contextmenu=${(e) => this._onLaneHeadContext(e, track)}>
           <div class="lane-name" title=${track.name}>${track.name}</div>
           <div class="lane-kind">${track.kind}</div>
           <div class="lane-controls">
@@ -510,7 +658,7 @@ export class TimelineView extends LitElement {
                  style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px"
                  @pointerdown=${(e) => this._startDrag(e, r, "move")}
                  @contextmenu=${(e) => this._regionContextMenu(e, r)}>
-              <canvas width=${Math.round(widthPx)} height=${h - 8}></canvas>
+              <foyer-waveform-gl class="viz" data-id=${r.id}></foyer-waveform-gl>
               <div class="name">${r.name}</div>
               <div class="edge left"  @pointerdown=${(e) => this._startDrag(e, r, "resize-left")}></div>
               <div class="edge right" @pointerdown=${(e) => this._startDrag(e, r, "resize-right")}></div>
@@ -629,16 +777,25 @@ export class TimelineView extends LitElement {
   }
 
   _repaintWaveforms() {
-    const canvases = this.renderRoot.querySelectorAll(".region canvas");
+    // Push peaks into every `<foyer-waveform-gl>` for the currently
+    // rendered regions. The viz component owns its own GL state + AA
+    // + clip markers — we just keep its .peaks prop in sync with what
+    // the cache has at the current zoom tier.
+    //
+    // `setPeaks` is a dedicated setter on the component that forces a
+    // re-upload + redraw even when the object reference hasn't changed
+    // (Lit's default hasChanged would skip it — a cache hit returns
+    // the same object, and nothing would repaint).
+    const vizEls = this.renderRoot.querySelectorAll(".region foyer-waveform-gl");
     const spp = this._samplesPerPx();
-    for (const c of canvases) {
-      const regionEl = c.parentElement;
-      const id = regionEl?.dataset.id;
+    for (const el of vizEls) {
+      const id = el.dataset.id;
       if (!id) continue;
-      const rect = c.getBoundingClientRect();
-      if (rect.width > 0 && c.width !== Math.round(rect.width)) c.width = Math.round(rect.width);
       const peaks = this._wfCache?.ensure(id, spp);
-      drawPeaks(c, peaks, "#c4b5fd");
+      if (peaks) {
+        if (typeof el.setPeaks === "function") el.setPeaks(peaks);
+        else el.peaks = peaks;
+      }
     }
   }
 
