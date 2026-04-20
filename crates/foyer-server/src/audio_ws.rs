@@ -32,6 +32,7 @@ pub async fn upgrade(
 }
 
 async fn handle(socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
+    tracing::info!("/ws/audio/{stream_id} upgrade OK, waiting for hub registration");
     // Clients open the audio WS immediately after sending the
     // `audio_stream_open` control command. The shim-side tap setup
     // takes a moment (up to the open_egress timeout), so the stream
@@ -40,8 +41,12 @@ async fn handle(socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
     // open_egress timeout so both paths time out in concert rather
     // than the browser seeing a failure first.
     let mut rx = None;
-    for _ in 0..60 {
+    for i in 0..60 {
         if let Some(sub) = state.audio_hub.subscribe(stream_id).await {
+            tracing::info!(
+                "/ws/audio/{stream_id} subscribed after {} ms",
+                i * 100
+            );
             rx = Some(sub);
             break;
         }

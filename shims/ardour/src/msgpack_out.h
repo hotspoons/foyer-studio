@@ -60,6 +60,13 @@ std::vector<std::uint8_t> encode_track_updated (ARDOUR::Session&, const std::str
 /// Encode `Event::SessionDirtyChanged { dirty }`.
 std::vector<std::uint8_t> encode_session_dirty_changed (bool dirty);
 
+/// Encode a `meter_batch` event containing `track.<id>.meter`
+/// entries for every Track / Bus / Master in the session. Values
+/// are peak-level dBFS, sampled at call time via
+/// `Route::peak_meter()->meter_level(0, MeterPeak)`. Empty if the
+/// session has no routes.
+std::vector<std::uint8_t> encode_track_meters (ARDOUR::Session&);
+
 /// Encode `Event::AudioEgressStarted { stream_id }`. Sent after the
 /// shim has installed a master tap — the HostBackend awaits this
 /// ACK to resolve its `open_egress` oneshot.

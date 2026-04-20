@@ -171,10 +171,18 @@ impl Backend for StubBackend {
         format: AudioFormat,
     ) -> Result<PcmRx, BackendError> {
         let (tx, rx) = mpsc::channel::<PcmFrame>(64);
-        // Emit a 220 Hz sine at the negotiated rate until the receiver closes.
+        // Emit a 440 Hz sine at the negotiated rate until the receiver
+        // closes. Frequency + amplitude match the sidecar's
+        // `spawn_test_tone_source` in [audio.rs] so a listener can't
+        // tell "backend is the stub (launcher mode)" from "backend
+        // errored and fell back to the sidecar test tone" by ear —
+        // both produce the same reference signal. This saves half a
+        // day of debugging vs. the previous 220 Hz / 0.2 amp picks
+        // which looked EXACTLY like "Chrome's Opus decoder is
+        // halving the signal" and sent us on a long goose chase.
         tokio::spawn(async move {
             let mut phase: f32 = 0.0;
-            let dphase = TAU * 220.0 / format.sample_rate as f32;
+            let dphase = TAU * 440.0 / format.sample_rate as f32;
             let frame_period = Duration::from_micros(
                 (format.frame_size as u64 * 1_000_000) / format.sample_rate as u64,
             );

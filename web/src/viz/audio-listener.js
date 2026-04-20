@@ -4,19 +4,21 @@
 //
 //   /ws/audio/:stream_id  ──►  per-packet parser  ──►  AudioDecoder
 //                                                        │
+//                                                        ▼  deinterleave
+//                                                postMessage(transfer)
+//                                                        │
 //                                                        ▼
-//                                               AudioWorklet (future)
-//                                               or AudioContext (current)
+//                                          AudioWorkletProcessor ring
+//                                          (see ./audio-worklet.js)
+//                                                        │
+//                                                        ▼
+//                                             AudioContext destination
 //
-// Current implementation: decode with WebCodecs `AudioDecoder`, queue
-// into a scheduled-buffer playback (simple but works). Swap for an
-// AudioWorklet-based jitter buffer once we have real shim audio to
-// smoothe out — the synthetic test tone is continuous so the simple
-// path holds up fine.
-//
-// If the browser lacks WebCodecs or we're asked for a `raw_f32_le`
-// stream, the listener falls through to a trivially-parsing path that
-// pushes raw f32 samples into the same AudioContext.
+// The worklet owns the jitter buffer. Main thread's only job is to
+// decode and transfer; no scheduling math lives here anymore. If
+// the browser lacks WebCodecs or we're asked for a `raw_f32_le`
+// stream, packets are deinterleaved inline and fed to the same
+// worklet via `_sendToWorklet`.
 
 const FRAME_HEADER_BYTES = 12;
 
@@ -49,8 +51,30 @@ export class AudioListener {
     this.audioWs = null;
     /** @type {AudioDecoder | null} */
     this.decoder = null;
-    this.nextPlayhead = 0;
+    /** @type {AudioWorkletNode | null} */
+    this.workletNode = null;
     this._running = false;
+
+    // ─── Jitter buffer lives in the AudioWorklet ─────────────────
+    //
+    // Previous design: main-thread `setInterval(5 ms)` dequeued
+    // decoded AudioBuffers into `BufferSource.start(nextPlayhead)`
+    // and chased a 200 ms playhead-lead target. That scheduler was
+    // driven by `setTimeout`-class timers, which get coarsened by
+    // GC, layout, and (especially) background-tab throttling. Any
+    // 5–20 ms timer jitter looked like scheduler drift and — once
+    // the underrun threshold was low enough to not fire on harmless
+    // dips — still produced audible pops and pitch-shift artifacts
+    // on shaky connections.
+    //
+    // Current design: decoded PCM is `postMessage`d (with transfer)
+    // to an `AudioWorkletProcessor` that owns a 2-second ring
+    // buffer and writes 128-sample quanta straight into its output
+    // on each `process()` call. `process()` is driven by the audio
+    // thread's own render clock — immune to main-thread stalls —
+    // so scheduler drift as a failure mode is gone. Priming,
+    // overrun/underrun bookkeeping, and stats all live in the
+    // worklet (see `audio-worklet.js`).
   }
 
   async start() {
@@ -72,7 +96,31 @@ export class AudioListener {
       `baseLatency=${this.ctx.baseLatency?.toFixed?.(3)} ` +
       `outputLatency=${this.ctx.outputLatency?.toFixed?.(3)}`,
     );
-    this.nextPlayhead = this.ctx.currentTime + 0.15; // 150 ms warm-up cushion
+
+    // Load + instantiate the audio-thread ring buffer. `new URL(...,
+    // import.meta.url)` resolves the worklet file relative to THIS
+    // module's served URL — the worklet is sibling in /src/viz/.
+    // Must complete before any `postMessage` is issued, else the
+    // transfer lands on a port with no onmessage handler yet.
+    const workletUrl = new URL("./audio-worklet.js", import.meta.url);
+    await this.ctx.audioWorklet.addModule(workletUrl);
+    this.workletNode = new AudioWorkletNode(this.ctx, "foyer-pcm", {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [this.format.channels],
+    });
+    this.workletNode.port.onmessage = (ev) => {
+      const m = ev.data;
+      if (m && m.kind === "stats") {
+        // One-per-second line — cheap enough to always log.
+        console.info(
+          `[audio-listener] worklet stats — buffered=${m.buffered} ` +
+          `written=${m.written} read=${m.read} ` +
+          `underruns=${m.underruns} overruns=${m.overruns}`,
+        );
+      }
+    };
+    this.workletNode.connect(this.ctx.destination);
 
     if (this.codec === "opus") {
       if (!("AudioDecoder" in window)) {
@@ -119,13 +167,52 @@ export class AudioListener {
   async stop() {
     if (!this._running) return;
     this._running = false;
+    // Teardown order matters. Previously the symptom of a sloppy
+    // shutdown was "each Listen restart hears more pops than the
+    // last" — stale decoders kept firing output callbacks into
+    // an AudioContext being closed. Same rules apply with the
+    // worklet in the mix:
+    //   1. Tell the sidecar to close the stream (sidecar drops
+    //      the tap + broadcast). Fire-and-forget.
+    //   2. Close the binary WS so no more packets arrive.
+    //   3. Detach decoder callbacks BEFORE closing the decoder —
+    //      otherwise queued frames can call _playDecoded after we
+    //      null out `workletNode`.
+    //   4. Disconnect + null the worklet node.
+    //   5. Close the AudioContext last.
     try { this.ws.send({ type: "audio_stream_close", stream_id: this.streamId }); } catch {}
-    try { this.audioWs?.close(); } catch {}
-    try { this.decoder?.close?.(); } catch {}
-    try { await this.ctx?.close?.(); } catch {}
+    if (this.audioWs) {
+      try { this.audioWs.onmessage = null; } catch {}
+      try { this.audioWs.onerror   = null; } catch {}
+      try { this.audioWs.onclose   = null; } catch {}
+      try { this.audioWs.close(); } catch {}
+    }
+    if (this.decoder) {
+      try { this.decoder.output = () => {}; } catch {}
+      try { this.decoder.error  = () => {}; } catch {}
+      try { this.decoder.reset?.(); } catch {}
+      try { this.decoder.close?.(); } catch {}
+    }
+    if (this.workletNode) {
+      try { this.workletNode.port.onmessage = null; } catch {}
+      try { this.workletNode.port.close?.(); } catch {}
+      try { this.workletNode.disconnect(); } catch {}
+    }
+    if (this.ctx && this.ctx.state !== "closed") {
+      try { await this.ctx.close(); } catch {}
+    }
     this.audioWs = null;
     this.decoder = null;
+    this.workletNode = null;
     this.ctx = null;
+    // Reset per-session diagnostic counters so a subsequent Listen
+    // starts fresh — no carryover Opus timestamps, no stale packet
+    // counter misleading the dump triggers.
+    this._opusTs = 0;
+    this._pktCount = 0;
+    this._decodedLogged = false;
+    this._packetsSeen = 0;
+    this._ilScratch = null;
   }
 
   _onPacket(buf) {
@@ -148,11 +235,28 @@ export class AudioListener {
 
     if (this.codec === "opus" && this.decoder) {
       try {
+        // Opus uses overlap-add windowing between frames (CELT
+        // layer). The decoder needs CUMULATIVE, monotonic
+        // timestamps that increase by exactly one frame per chunk
+        // — if we feed `performance.now()` instead, each chunk
+        // looks like a fresh start and we get audible pops at
+        // every frame boundary (Rich: "pops only happen after a
+        // second or two", i.e. after the decoder's initial
+        // warmup where pops are hidden by onset transients).
+        //
+        // 20 ms frame × 1_000_000 µs/s ÷ 48000 Hz → the exact
+        // increment per Opus chunk. Using `frame_size` so the
+        // math stays right if sample_rate ever changes.
+        if (this._opusTs === undefined) this._opusTs = 0;
+        const frameUs = Math.round(
+          (this.format.frame_size / this.format.sample_rate) * 1_000_000,
+        );
         const chunk = new EncodedAudioChunk({
           type: "key",
-          timestamp: Math.round((performance.now() * 1000)),
+          timestamp: this._opusTs,
           data: new Uint8Array(payload),
         });
+        this._opusTs += frameUs;
         this.decoder.decode(chunk);
       } catch (e) {
         console.warn("[audio-listener] decode failed:", e);
@@ -166,61 +270,142 @@ export class AudioListener {
 
   _playDecoded(audioData) {
     if (!this.ctx) return;
-    // AudioData → AudioBuffer → BufferSource scheduled at nextPlayhead.
-    //
-    // WebCodecs `AudioData.copyTo()` validates destination size
-    // against the **source** sample format unless we ask it to
-    // convert. Opus decodes to `f32-planar` per spec, but Chrome
-    // sometimes hands back `s16` or `f32` (interleaved) and silently
-    // fails the copy with "destination is not large enough" if the
-    // destination's implicit format doesn't match. Force
-    // `f32-planar` on every copy — the browser handles the
-    // conversion, and our `Float32Array` channel buffer is the
-    // exact right size for that format.
+    if (!this._decodedLogged) {
+      this._decodedLogged = true;
+      // Also ask the decoder for its allocation sizes per plane.
+      // For an "f32" interleaved format we expect
+      //   allocationSize({planeIndex: 0}) === numberOfFrames * numberOfChannels * 4
+      // i.e. 960 × 2 × 4 = 7680 bytes. If Chrome reports half that
+      // (3840) the format metadata lies and we're actually getting
+      // 480-frame buffers mislabeled as 960 — that's what would
+      // play an octave down.
+      let allocBytes = null;
+      try {
+        allocBytes = audioData.allocationSize({
+          planeIndex: 0,
+          format: audioData.format,
+        });
+      } catch {}
+      console.info(
+        `[audio-listener] first decoded AudioData — ` +
+        `sampleRate=${audioData.sampleRate} ` +
+        `numberOfFrames=${audioData.numberOfFrames} ` +
+        `numberOfChannels=${audioData.numberOfChannels} ` +
+        `format=${audioData.format} ` +
+        `duration_us=${audioData.duration} ` +
+        `allocationSize(plane0)=${allocBytes} ` +
+        `(ctx sr=${this.ctx.sampleRate}, format.frame_size=${this.format.frame_size})`,
+      );
+    }
     const n = audioData.numberOfFrames;
     const ch = audioData.numberOfChannels;
-    const ab = this.ctx.createBuffer(ch, n, audioData.sampleRate);
-    for (let c = 0; c < ch; c++) {
-      const out = ab.getChannelData(c);
+
+    // Two transferable per-channel Float32Arrays — we pay one copy
+    // (planar deinterleave), then hand ownership to the worklet.
+    // Reallocating each packet avoids holding references back on
+    // the main thread that the worklet has already consumed.
+    const ch0 = new Float32Array(n);
+    const ch1 = ch > 1 ? new Float32Array(n) : null;
+
+    const fmt = audioData.format || "";
+    if (fmt.endsWith("-planar")) {
       try {
-        audioData.copyTo(out, { planeIndex: c, format: "f32-planar" });
+        audioData.copyTo(ch0, { planeIndex: 0 });
+        if (ch1) audioData.copyTo(ch1, { planeIndex: 1 });
       } catch (e) {
-        // Last-resort fallback: some browsers reject the format hint
-        // for already-f32 AudioData. Try without the hint.
-        try {
-          audioData.copyTo(out, { planeIndex: c });
-        } catch (e2) {
-          console.warn(
-            `[audio-listener] copyTo failed for ch=${c} n=${n} ` +
-            `(numberOfChannels=${ch} sampleRate=${audioData.sampleRate} ` +
-            `format=${audioData.format}):`, e2,
-          );
-          return;
+        console.warn(`[audio-listener] planar copyTo failed n=${n} ch=${ch}:`, e);
+        audioData.close();
+        return;
+      }
+    } else {
+      // Interleaved source. Copy into scratch, then deinterleave
+      // into ch0/ch1.
+      if (!this._ilScratch || this._ilScratch.length < n * ch) {
+        this._ilScratch = new Float32Array(n * ch);
+      }
+      try {
+        audioData.copyTo(this._ilScratch.subarray(0, n * ch), { planeIndex: 0 });
+      } catch (e) {
+        console.warn(`[audio-listener] interleaved copyTo failed n=${n} ch=${ch}:`, e);
+        audioData.close();
+        return;
+      }
+      const src = this._ilScratch;
+      for (let i = 0; i < n; i++) {
+        ch0[i] = src[i * ch];
+        if (ch1) ch1[i] = src[i * ch + 1];
+      }
+      // Diagnostics (pkt #3 sparse + raw scratch; every 50 peak +
+      // zero-crossing) — retain until the half-freq/half-amp bug
+      // is nailed down; cheap to keep running once fixed.
+      this._packetsSeen = (this._packetsSeen || 0) + 1;
+      if (this._packetsSeen === 3) {
+        const dump = [0, 10, 27, 54, 81, 100, 200, 500, 800, 959]
+          .map((i) => `[${i}]=${ch0[i]?.toFixed?.(4) ?? "?"}`)
+          .join(" ");
+        console.info(`[audio-listener] ch0 sparse dump (pkt #3): ${dump}`);
+        const head = Array.from(src.slice(0, 12)).map((x) => x.toFixed(4)).join(",");
+        const mid  = Array.from(src.slice(956, 968)).map((x) => x.toFixed(4)).join(",");
+        const tail = Array.from(src.slice(1908, 1920)).map((x) => x.toFixed(4)).join(",");
+        console.info(
+          `[audio-listener] raw scratch pkt #3 layout\n` +
+          `  head[0..11]    = ${head}\n` +
+          `  mid [956..967] = ${mid}\n` +
+          `  tail[1908..19] = ${tail}\n` +
+          `  scratch.length = ${src.length}`,
+        );
+      }
+      if (this._packetsSeen % 50 === 0) {
+        let peak = 0;
+        let zc = 0;
+        let prev = ch0[0];
+        for (let i = 1; i < ch0.length; i++) {
+          const v = ch0[i];
+          const a = Math.abs(v);
+          if (a > peak) peak = a;
+          if ((prev >= 0 && v < 0) || (prev < 0 && v >= 0)) zc++;
+          prev = v;
         }
+        console.info(
+          `[audio-listener] pkt #${this._packetsSeen} peak=${peak.toFixed(4)} ` +
+          `zeroXings=${zc} (expect ≈18 for 440 Hz, ≈9 if half-speed)`,
+        );
       }
     }
-    this._scheduleAndPlay(ab);
+    this._sendToWorklet(ch0, ch1);
     audioData.close();
   }
 
   _playFloat32(interleaved) {
-    if (!this.ctx) return;
+    if (!this.workletNode) return;
     const ch = this.format.channels;
     const n = Math.floor(interleaved.length / ch);
-    const ab = this.ctx.createBuffer(ch, n, this.format.sample_rate);
-    for (let c = 0; c < ch; c++) {
-      const out = ab.getChannelData(c);
-      for (let i = 0; i < n; i++) out[i] = interleaved[i * ch + c];
+    const ch0 = new Float32Array(n);
+    const ch1 = ch > 1 ? new Float32Array(n) : null;
+    for (let i = 0; i < n; i++) {
+      ch0[i] = interleaved[i * ch];
+      if (ch1) ch1[i] = interleaved[i * ch + 1];
     }
-    this._scheduleAndPlay(ab);
+    this._sendToWorklet(ch0, ch1);
   }
 
-  _scheduleAndPlay(ab) {
-    const src = this.ctx.createBufferSource();
-    src.buffer = ab;
-    src.connect(this.ctx.destination);
-    const when = Math.max(this.ctx.currentTime + 0.01, this.nextPlayhead);
-    src.start(when);
-    this.nextPlayhead = when + ab.duration;
+  /** Transfer two planar channel buffers to the worklet's ring.
+   *  Uses the transferable-buffer variant of postMessage so the
+   *  underlying ArrayBuffers move without copy; after this call
+   *  ch0 / ch1 are detached on the main thread. */
+  _sendToWorklet(ch0, ch1) {
+    if (!this.workletNode) return;
+    const transfer = [ch0.buffer];
+    const payload = { ch0 };
+    if (ch1) {
+      payload.ch1 = ch1;
+      transfer.push(ch1.buffer);
+    } else {
+      // Worklet expects stereo; duplicate mono into both channels.
+      const copy = new Float32Array(ch0);
+      payload.ch1 = copy;
+      transfer.push(copy.buffer);
+    }
+    this.workletNode.port.postMessage(payload, transfer);
   }
 }

@@ -92,9 +92,21 @@ SignalBridge::tick_loop ()
 			             << " (last_emitted_sample=" << last_logged_sample << ")" << endmsg;
 		}
 
-		// Skip most idle ticks to keep the wire quiet when nothing is
-		// moving. We still emit every ~6th idle tick (≈200 ms) so any
-		// drift between shim and client reconciles.
+		// Per-tick peak-meter readout runs unconditionally at ~30 Hz
+		// — unlike the transport-state emission below, we want meters
+		// live even with transport stopped (e.g. input monitoring,
+		// plugin noise bleed, hit-test sanity). Cheap: each
+		// `meter_level()` is an atomic read from PeakMeter's
+		// precomputed vector.
+		auto mbytes = msgpack_out::encode_track_meters (session);
+		if (!mbytes.empty ()) {
+			_shim.ipc ().send (foyer_ipc::FrameKind::Control, mbytes);
+		}
+
+		// Skip most idle ticks for the TRANSPORT event to keep the
+		// wire quiet when nothing is moving. We still emit every
+		// ~6th idle tick (≈200 ms) so any drift between shim and
+		// client reconciles.
 		if (!playing) {
 			if (++idle_counter < 6) continue;
 			idle_counter = 0;

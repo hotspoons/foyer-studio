@@ -24,14 +24,18 @@
 #include <string>
 #include <vector>
 
+#include <sstream>
+
 #include "ardour/automation_control.h"
 #include "ardour/file_source.h"
+#include "ardour/meter.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
 #include "ardour/source.h"
 #include "ardour/stripable.h"
 #include "ardour/track.h"
+#include "ardour/types.h"
 #include "pbd/controllable.h"
 #include "temporal/tempo.h"
 #include "temporal/timeline.h"
@@ -367,11 +371,12 @@ encode_session_snapshot (Session& session)
 				rec_ctl = it->second->rec_enable_control ();
 			}
 
-			// Base track shape is 8 fields (id, name, kind, color, gain,
-			// pan, mute, solo). `record_arm` and `plugins` are both
-			// skip-when-missing in the schema, so we only bump the map
-			// size for the ones actually present.
-			std::size_t track_fields = 8;
+			// Base track shape is 9 fields (id, name, kind, color,
+			// gain, pan, mute, solo, peak_meter). `record_arm` and
+			// `plugins` are both skip-when-missing in the schema,
+			// so we only bump the map size for the ones actually
+			// present.
+			std::size_t track_fields = 9;
 			if (rec_ctl) ++track_fields;
 			if (!plugins.empty ()) ++track_fields;
 
@@ -384,6 +389,13 @@ encode_session_snapshot (Session& session)
 			o.str ("pan");  emit_param_num  ((s.self_id + ".pan").c_str (),  "Pan",  "continuous", 0.0);
 			o.str ("mute"); emit_param_bool ((s.self_id + ".mute").c_str (), "Mute", false);
 			o.str ("solo"); emit_param_bool ((s.self_id + ".solo").c_str (), "Solo", false);
+			// `peak_meter` is an EntityId string — the client
+			// subscribes to it via ControlController in track-strip.js
+			// and renders the value that arrives in meter_batch events.
+			// Without this, `track.peak_meter` is None on the client
+			// and no subscription ever happens, so the meter sits at
+			// -60 dB forever even if meter_batch events arrive.
+			o.str ("peak_meter"); o.str (s.self_id + ".meter");
 			if (rec_ctl) {
 				o.str ("record_arm");
 				emit_param_bool ((s.self_id + ".rec").c_str (), "Rec", rec_ctl->get_value () >= 0.5);
@@ -421,6 +433,61 @@ encode_session_dirty_changed (bool dirty)
 		o.str ("dir");   o.str ("event");
 		o.str ("type");  o.str ("session_dirty_changed");
 		o.str ("dirty"); o.b (dirty);
+	});
+}
+
+// Per-route peak-meter readout. Emitted as a `meter_batch` event
+// containing one `control.update` per route's `.meter` parameter.
+// Ardour's `Route::peak_meter()->meter_level(ch, MeterPeak)`
+// returns the current dBFS peak (with normal falloff) for the
+// given channel; we summarize to a single value per track by
+// taking the channel max. Called from the shim's tick thread at
+// ~30 Hz. Keeping this in the existing `meter_batch` shape means
+// no schema or client-side changes: the store already routes
+// `control.update` events keyed by `track.<id>.meter` into the
+// `<foyer-meter>` bindings.
+std::vector<std::uint8_t>
+encode_track_meters (Session& session)
+{
+	std::shared_ptr<RouteList const> routes = session.get_routes ();
+	std::vector<std::pair<std::string, double>> snap;
+	snap.reserve (routes ? routes->size () : 0);
+	if (routes) {
+		for (auto const& r : *routes) {
+			if (!r) continue;
+			auto pm = r->peak_meter ();
+			if (!pm) continue;
+			// Take the maximum across all channels so stereo/mono
+			// routes render the same way — one bar per track.
+			// `MeterPeak` is Ardour's standard peak-with-falloff
+			// reading; `meter_level` returns dBFS directly.
+			float peak_db = -120.0f;
+			const ChanCount cc = pm->input_streams ();
+			const uint32_t n = cc.n_audio ();
+			for (uint32_t ch = 0; ch < n; ++ch) {
+				const float v = pm->meter_level (ch, ARDOUR::MeterPeak);
+				if (v > peak_db) peak_db = v;
+			}
+			if (n == 0) peak_db = -60.0f; // no audio channels — show floor
+			std::ostringstream idss;
+			idss << "track." << r->id () << ".meter";
+			snap.emplace_back (idss.str (), static_cast<double> (peak_db));
+		}
+	}
+
+	if (snap.empty ()) return {};
+
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");    o.str ("event");
+		o.str ("type");   o.str ("meter_batch");
+		o.str ("values");
+		o.array (snap.size ());
+		for (auto const& [id, db] : snap) {
+			o.map (2);
+			o.str ("id");    o.str (id);
+			o.str ("value"); o.f64 (db);
+		}
 	});
 }
 
@@ -628,7 +695,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 		o.str ("type");  o.str ("track_updated");
 		o.str ("track");
 
-		std::size_t track_fields = 8;
+		std::size_t track_fields = 9; // +1 for peak_meter
 		if (rec_ctl) ++track_fields;
 		if (!plugins.empty ()) ++track_fields;
 
@@ -644,6 +711,9 @@ encode_track_updated (Session& session, const std::string& track_id)
 		o.str ("pan");  emit_named_param (o, matched.self_id + ".pan",  "Pan",  "continuous", false, route->pan_azimuth_control () ? route->pan_azimuth_control ()->get_value () : 0.0, false);
 		o.str ("mute"); emit_named_param (o, matched.self_id + ".mute", "Mute", "trigger", true, 0.0, route->mute_control () && route->mute_control ()->get_value () >= 0.5);
 		o.str ("solo"); emit_named_param (o, matched.self_id + ".solo", "Solo", "trigger", true, 0.0, route->solo_control () && route->solo_control ()->get_value () >= 0.5);
+		// Must match the snapshot's peak_meter id so the client's
+		// ControlController keeps listening after a TrackUpdated.
+		o.str ("peak_meter"); o.str (matched.self_id + ".meter");
 		if (rec_ctl) {
 			o.str ("record_arm");
 			emit_named_param (o, matched.self_id + ".rec", "Rec", "trigger", true, 0.0, rec_ctl->get_value () >= 0.5);

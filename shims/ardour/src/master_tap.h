@@ -49,6 +49,15 @@ public:
 	bool display_to_user () const override     { return false; }
 	bool does_routing () const override        { return false; }
 
+	// Force "always on" — Ardour's process loop checks `active()` /
+	// `enabled()` on each processor per cycle; a false return means
+	// skip run() and treat the processor as if it weren't there.
+	// The base Processor starts with `_pending_active = false`
+	// until `activate()` is called, so without these overrides our
+	// tap sits in the chain but never actually executes. Overriding
+	// ensures we're always invoked regardless of chain state.
+	bool enabled () const override     { return true; }
+
 	bool can_support_io_configuration (const ARDOUR::ChanCount& in, ARDOUR::ChanCount& out) override;
 
 	/// RT path. Copy samples into the ring. No allocations. No locks.
@@ -58,6 +67,14 @@ public:
 	          double speed,
 	          ARDOUR::pframes_t nframes,
 	          bool result_required) override;
+
+	/// Called by Ardour on RT cycles where the route's mix is
+	/// silent (transport stopped + no monitoring). Still emit
+	/// zero-samples into the ring so the listener's WebSocket
+	/// keeps receiving packets — otherwise the stream starves
+	/// and the browser's decoder shuts down. Same RT discipline
+	/// as run(): no allocations, no locks.
+	void silence (ARDOUR::samplecnt_t nframes, ARDOUR::samplepos_t start_sample) override;
 
 	/// Start the non-RT drain thread. Idempotent.
 	void start_drain ();
@@ -83,6 +100,14 @@ private:
 	std::atomic<bool>   _drain_stop { false };
 	std::mutex          _wake_mx;
 	std::condition_variable _wake_cv;
+
+	// Diagnostic counters — incremented from the RT callbacks,
+	// read from the drain loop for periodic logging. Confirms
+	// whether Ardour is calling our processor at all.
+	std::atomic<std::uint64_t> _run_calls      { 0 };
+	std::atomic<std::uint64_t> _silence_calls  { 0 };
+	std::atomic<std::uint64_t> _samples_written { 0 };
+	std::atomic<std::uint64_t> _samples_sent    { 0 };
 
 	void drain_loop ();
 };

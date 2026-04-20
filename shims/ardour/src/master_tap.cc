@@ -61,6 +61,17 @@ MasterTap::run (BufferSet& bufs,
 	// level, or take any system call heavier than memcpy-equivalent.
 	// The audio thread has a hard deadline; anything non-trivial here
 	// costs dropouts.
+	const std::uint64_t n = _run_calls.fetch_add (1, std::memory_order_relaxed);
+	// First-call diagnostic ONLY — tells us whether Ardour's
+	// process chain is even invoking our run() method. Gated to
+	// one emission because PBD::warning allocates + locks and
+	// must not run on the RT thread in the steady state.
+	if (n == 0) {
+		PBD::warning << "foyer_shim: [audio] stream_id=" << _stream_id
+		             << " FIRST run() fire — nframes=" << nframes
+		             << " bufs.audio=" << bufs.count ().n_audio ()
+		             << endmsg;
+	}
 	if (!_ring || nframes == 0) return;
 
 	const std::uint32_t cc = _channels;
@@ -103,6 +114,7 @@ MasterTap::run (BufferSet& bufs,
 		const std::size_t space = _ring->write_space ();
 		if (n <= space) {
 			_ring->write (scratch, n);
+			_samples_written.fetch_add (n, std::memory_order_relaxed);
 		}
 		written += this_block;
 	}
@@ -110,6 +122,45 @@ MasterTap::run (BufferSet& bufs,
 	// Nudge the drain thread. Condvar wake is allocation-free; the
 	// lock contention is brief. If this ever shows up on an RT
 	// profile, swap to an eventfd or atomic counter.
+	_wake_cv.notify_one ();
+}
+
+void
+MasterTap::silence (samplecnt_t nframes, samplepos_t /*start_sample*/)
+{
+	// RT THREAD. Same constraints as run(): memcpy-only, no locks,
+	// no logging. Ardour dispatches into silence() instead of run()
+	// whenever the upstream mix has no signal — transport stopped,
+	// no monitoring, no audio sources playing. Emit zero-samples so
+	// the listener's WebSocket keeps receiving packets. Without
+	// this, the drain thread starves for the whole silent period
+	// and the browser's opus decoder + AudioContext fall out of
+	// sync (or the WS server side times out on lag).
+	const std::uint64_t n = _silence_calls.fetch_add (1, std::memory_order_relaxed);
+	if (n == 0) {
+		PBD::warning << "foyer_shim: [audio] stream_id=" << _stream_id
+		             << " FIRST silence() fire — nframes=" << nframes << endmsg;
+	}
+	if (!_ring || nframes == 0) return;
+
+	const std::uint32_t cc = _channels;
+	const std::size_t total = static_cast<std::size_t> (nframes) * cc;
+
+	// Zero-fill a small scratch buffer in blocks (same upper-bound
+	// logic as run(), same reason: avoid overflowing the stack for
+	// unusually big process cycles).
+	constexpr std::size_t SCRATCH = 8192;
+	float scratch[SCRATCH] = {0.0f};
+
+	std::size_t written = 0;
+	while (written < total) {
+		const std::size_t n = std::min<std::size_t> (total - written, SCRATCH);
+		if (_ring->write_space () >= n) {
+			_ring->write (scratch, n);
+			_samples_written.fetch_add (n, std::memory_order_relaxed);
+		}
+		written += n;
+	}
 	_wake_cv.notify_one ();
 }
 
@@ -142,6 +193,8 @@ MasterTap::drain_loop ()
 	std::vector<float> scratch;
 	scratch.reserve (RING_SAMPLES);
 
+	auto last_log = std::chrono::steady_clock::now ();
+
 	while (!_drain_stop.load ()) {
 		{
 			std::unique_lock<std::mutex> lk (_wake_mx);
@@ -149,6 +202,34 @@ MasterTap::drain_loop ()
 		}
 		if (_drain_stop.load ()) break;
 		if (!_ring) break;
+
+		// Periodic diagnostic. Tells us whether run() / silence() is
+		// actually firing and whether samples are flowing end-to-end.
+		// If Rich hears nothing, compare:
+		//   · run_calls high, silence_calls ~zero → master bus is
+		//     processing real audio. Samples_written should track.
+		//   · silence_calls high, run_calls zero → Ardour is calling
+		//     our silent path; zero-samples ship but no music.
+		//   · both zero → tap is attached but the processor chain
+		//     isn't invoking us (feature-flag or config issue).
+		//   · samples_written > samples_sent by a lot → drain is
+		//     falling behind (IPC throughput or the ring is full).
+		const auto now = std::chrono::steady_clock::now ();
+		if (now - last_log >= std::chrono::seconds (2)) {
+			last_log = now;
+			const auto r = _run_calls.load ();
+			const auto s = _silence_calls.load ();
+			const auto w = _samples_written.load ();
+			const auto t = _samples_sent.load ();
+			PBD::warning << "foyer_shim: [audio] stream_id=" << _stream_id
+			             << " run=" << r
+			             << " silence=" << s
+			             << " written=" << w
+			             << " sent=" << t
+			             << " ring_read=" << _ring->read_space ()
+			             << " ring_write_space=" << _ring->write_space ()
+			             << endmsg;
+		}
 
 		const std::size_t avail = _ring->read_space ();
 		if (avail == 0) continue;
@@ -169,6 +250,7 @@ MasterTap::drain_loop ()
 		std::memcpy (payload.data () + 4, scratch.data (), pcm_bytes);
 
 		_shim.ipc ().send (foyer_ipc::FrameKind::Audio, payload);
+		_samples_sent.fetch_add (got, std::memory_order_relaxed);
 	}
 }
 

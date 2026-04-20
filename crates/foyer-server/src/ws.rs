@@ -571,6 +571,12 @@ async fn dispatch_command(
             format,
             transport: _transport,
         } => {
+            tracing::info!(
+                "AudioStreamOpen stream_id={stream_id} source={source:?} \
+                 format=({} ch, {} Hz)",
+                format.channels,
+                format.sample_rate,
+            );
             // Try the real backend first. The host backend's
             // `open_egress` forwards an `AudioStreamOpen` IPC command
             // to the shim, which installs a MasterTap processor on the
@@ -588,14 +594,24 @@ async fn dispatch_command(
                 .open_egress(stream_id, source.clone(), format)
                 .await;
             let rx = match rx_res {
-                Ok(be_rx) => be_rx,
+                Ok(be_rx) => {
+                    tracing::info!(
+                        "open_egress stream_id={stream_id} → real backend (shim master tap)"
+                    );
+                    be_rx
+                }
                 Err(e) => {
                     tracing::warn!(
                         "open_egress failed ({e}); falling back to sidecar test tone"
                     );
+                    // 1-hour cap is a liveness guard, not a UX
+                    // timer — the tone exits immediately when the
+                    // subscriber drops (stream close), so in
+                    // practice it plays as long as Rich is
+                    // listening.
                     state
                         .audio_hub
-                        .spawn_test_tone_source(format, std::time::Duration::from_secs(30))
+                        .spawn_test_tone_source(format, std::time::Duration::from_secs(3600))
                 }
             };
             match state

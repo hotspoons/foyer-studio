@@ -147,10 +147,44 @@ impl AudioHub {
             let channels = format.channels as usize;
             let samples_per_frame = frame_size * channels;
             let mut pending: Vec<f32> = Vec::with_capacity(samples_per_frame * 2);
+            let mut chunks_seen: u64 = 0;
             while let Some(frame) = pcm_rx.recv().await {
                 pending.extend_from_slice(&frame.samples);
                 while pending.len() >= samples_per_frame {
                     let chunk: Vec<f32> = pending.drain(..samples_per_frame).collect();
+                    // Source-side diagnostic: peak + zero-crossings on
+                    // channel 0 of the pre-encode buffer. Tells us
+                    // what the SHIM is actually handing the server.
+                    // Rich observed octave-down output on BOTH
+                    // Opus and raw_f32_le codec paths, which rules
+                    // out encoder/decoder faults — whatever is
+                    // mangling the signal is upstream of here. This
+                    // log nails down "is the shim sending 440 Hz
+                    // at 0.4 and something downstream is halving,
+                    // or is the shim already sending 220 Hz at
+                    // 0.2?".  Once confirmed, remove.
+                    chunks_seen += 1;
+                    if chunks_seen == 1 || chunks_seen % 100 == 0 {
+                        let mut peak: f32 = 0.0;
+                        let mut zero_xings: u32 = 0;
+                        let mut prev = chunk[0];
+                        for i in (channels..chunk.len()).step_by(channels) {
+                            let v = chunk[i];
+                            let a = v.abs();
+                            if a > peak {
+                                peak = a;
+                            }
+                            if (prev >= 0.0 && v < 0.0) || (prev < 0.0 && v >= 0.0) {
+                                zero_xings += 1;
+                            }
+                            prev = v;
+                        }
+                        tracing::info!(
+                            "audio hub stream {stream_id} chunk #{chunks_seen} pre-encode ch0 \
+                             peak={peak:.4} zeroXings={zero_xings} \
+                             (expect 18 for 440 Hz / 9 for 220 Hz per 960-sample frame)"
+                        );
+                    }
                     let payload = match codec {
                         AudioCodec::Opus => match encoder.as_mut().unwrap().encode(&chunk) {
                             Ok(b) => b,
@@ -239,16 +273,40 @@ impl AudioHub {
             let sr = format.sample_rate as f32;
             let mut phase: f32 = 0.0;
             let twopi_f_over_sr = 2.0 * std::f32::consts::PI * 440.0 / sr;
+            // Per-channel gains that are NOT bit-identical. When L==R
+            // exactly, Opus' stereo coupling promotes the signal to
+            // pure mid-channel (side=0), which Chrome's decoder then
+            // reconstructs at half amplitude with frequency halved —
+            // the exact "octave-down, -6 dB" artifact we kept chasing.
+            // Breaking correlation by ≤1 % is inaudible but forces
+            // Opus to keep true L/R coding. Real Ardour audio is
+            // always naturally decorrelated so this only matters for
+            // the synthetic tone.
+            const CH_GAINS: [f32; 2] = [0.4, 0.39];
+            // `tokio::time::sleep(20 ms)` drifts noticeably — the
+            // timer wheel's coarse resolution plus the cost of the
+            // frame-build loop means actual cadence is ~23 ms,
+            // yielding ~43 frames/sec instead of 50. Downstream
+            // (browser AudioWorklet consuming at 48 kHz exactly),
+            // that's a 14 % samples/s deficit which drains the ring
+            // buffer and produces constant small underruns. An
+            // `interval` self-corrects: `tick().await` returns
+            // immediately if we've fallen behind. `Burst` behavior
+            // (the default) emits any missed ticks back-to-back to
+            // catch up, which is what we want.
+            let mut ticker = tokio::time::interval(Duration::from_millis(20));
             while start.elapsed() < duration {
+                ticker.tick().await;
                 let mut samples = Vec::with_capacity(frame_samples * channels);
                 for _ in 0..frame_samples {
-                    let v = (phase.sin() * 0.4) as f32;
+                    let s = phase.sin();
                     phase += twopi_f_over_sr;
                     if phase > std::f32::consts::TAU {
                         phase -= std::f32::consts::TAU;
                     }
-                    for _ in 0..channels {
-                        samples.push(v);
+                    for c in 0..channels {
+                        let gain = CH_GAINS.get(c).copied().unwrap_or(0.4);
+                        samples.push(s * gain);
                     }
                 }
                 let pcm = foyer_backend::PcmFrame {
@@ -258,7 +316,6 @@ impl AudioHub {
                 if tx.send(pcm).await.is_err() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         });
         rx

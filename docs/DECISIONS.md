@@ -655,3 +655,76 @@ reverse for record).
   backend, or open_egress error), `ws.rs` falls back to the
   in-sidecar test tone so the "Listen" button keeps working. Real
   audio is an upgrade, not a prerequisite.
+
+## 20. Opus encoder forces discrete stereo coding
+
+**Date:** 2026-04-20
+**Decision:** In `OpusFrameEncoder::new`, we pin `set_force_channels(Stereo)`
+on every 2-channel stream. Default `Channels::Auto` is NOT acceptable for
+the egress path.
+
+**Superseded by 21** — `set_force_channels` only governs mono-vs-stereo
+packet framing, not the MS/intensity coding that actually triggers the
+decoder bug. Real fix is in Decision 21.
+
+**Alternatives:**
+1. *Leave as default* (`Channels::Auto`, libopus' stereo coupler
+   enabled). Rejected: on perfectly-correlated L/R input (center-
+   panned mono sources; a test sine; any mastered track with a
+   strong mono element) Chrome's Opus decoder mis-reconstructs the
+   intensity/MS-coded frame — output arrives one octave low at
+   half amplitude. Verified empirically: peak drops from 0.4 to
+   0.2, zero-crossings per 20 ms frame drop from ~18 to ~9.
+   Other stereo masters played back cleanly, which is what made
+   the bug hard to find — symptom looked intermittent.
+2. *Slightly-decorrelate on the encoder input* (L×0.4, R×0.39).
+   Rejected: band-aid. Production audio passes through unchanged,
+   so any real track whose L/R are momentarily bit-identical
+   trips the same decoder bug.
+3. *Downgrade to mono on the server and up-mix on the client.*
+   Rejected: the egress format is part of the wire contract; mono
+   would also lose actual stereo separation for anything that has
+   it, which is most of the content we care about.
+
+**Why:** The bug lives in Chrome's decoder, not in our code path.
+We can't fix the decoder, but forcing the encoder to emit two
+genuinely-independent channels bypasses the broken path entirely.
+Bitrate cost is negligible (we're already VBR and correlated
+channels compress well even in discrete mode).
+
+## 21. Opus encoder is CELT-only via `Application::LowDelay`
+
+**Date:** 2026-04-20
+**Decision:** Construct `OpusEncoder` with `Application::LowDelay`, which
+disables SILK entirely. The encoder is CELT-only regardless of signal
+content.
+
+**Alternatives:**
+1. *`Application::Audio` + `Signal::Music`.* Rejected: `Signal` is a
+   hint, not a hard pin — the classifier still picks SILK for
+   low-complexity / tonal / strongly-correlated input in early
+   frames before VBR ramps up. Symptom observed: ~5 % of
+   Listen sessions produce correct 440 Hz output, ~95 % produce
+   octave-down half-amplitude output, with the same binary and
+   same input. The lottery is which mode the classifier picks in
+   the first few frames.
+2. *`set_force_channels(Stereo)` on top of `Application::Audio`.*
+   Tried, logged as Decision 20 — does NOT fix the bug. That CTL
+   only affects mono-vs-stereo PACKET framing, not the stereo
+   coupling that drives the decoder into its broken path.
+3. *Different codec entirely (PCM, FLAC, AAC).* Rejected for now:
+   Opus is the only widely-supported codec with sub-20 ms decode
+   latency across WebCodecs implementations. Revisit if LowDelay
+   introduces artifacts we can't live with.
+
+**Why:** The symptom was specifically SILK-mode decoder behavior
+in Chrome (SILK internally resamples to 8 / 12 / 16 kHz and the
+upsampler mis-handles bit-identical L/R on some paths). Removing
+SILK from the encoder removes the entire broken code path. We
+stream mastered 48 kHz music; SILK's bitrate efficiency for
+speech-like signals is irrelevant here.
+
+**Tradeoff:** CELT-only has slightly worse compression for
+speech-like content than Hybrid/SILK — we pay maybe 10-20 % more
+bitrate on spoken-voice tracks. For an interactive monitoring
+stream on a LAN that's a non-issue.

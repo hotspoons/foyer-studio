@@ -153,6 +153,53 @@ shim-install DEST="$HOME/.config/ardour9": shim-cmake-build
 shim-cmake-clean:
     rm -rf {{shim_cmake_build}}
 
+# --- cleanup ---
+# Kill any stale DAW + sidecar processes and their IPC detritus.
+# Useful after a crash, a stuck `foyer serve` that's holding
+# target/debug/foyer (preventing `cargo build` from updating the
+# binary), or a series of Listen clicks that left orphan hardour
+# processes (Ardour doesn't always exit cleanly when its parent
+# terminates).
+#
+# Kills — by exact name match:
+#   · hardour-9.2.583, ardour, ardour-9.2  (the DAW)
+#   · foyer                                (the sidecar)
+#
+# Plus removes Unix sockets in /tmp/foyer/ so the next `just run`
+# doesn't hit "advertised shim at /tmp/foyer/ardour-<pid>.sock is
+# stale (connect: Connection refused)". Safe at any time; won't
+# touch anything outside those specific process names.
+kill-daws:
+    #!/usr/bin/env bash
+    set -u
+    killed=0
+    for name in hardour-9.2.583 ardour ardour-9.2 foyer; do
+        pids=$(pgrep -x "$name" || true)
+        if [ -n "$pids" ]; then
+            echo "Killing $name: $pids"
+            kill -TERM $pids 2>/dev/null || true
+            killed=$((killed + $(echo "$pids" | wc -w)))
+        fi
+    done
+    # Give SIGTERM a moment, then SIGKILL anything still breathing.
+    sleep 1
+    for name in hardour-9.2.583 ardour ardour-9.2 foyer; do
+        pids=$(pgrep -x "$name" || true)
+        if [ -n "$pids" ]; then
+            echo "SIGKILL $name: $pids"
+            kill -KILL $pids 2>/dev/null || true
+        fi
+    done
+    # Clear shim advertisement files + stale Unix sockets so the next
+    # `just run` starts from a clean slate.
+    rm -f /tmp/foyer.sock /tmp/foyer/ardour-*.sock /tmp/foyer/ardour-*.json 2>/dev/null || true
+    remaining=$(ps -eo pid,comm | awk '$2 ~ /^h?ardour/ {print $1}' | head)
+    if [ -z "$remaining" ]; then
+        echo "✓ clean — no DAW processes and no stale sockets"
+    else
+        echo "⚠ still running: $remaining"
+    fi
+
 # --- end-to-end smoke (Ardour headless + foyer_shim + foyer-cli) ---
 # Create a throwaway session using Ardour's session_utils, with all env vars
 # set up so the dummy backend is found.

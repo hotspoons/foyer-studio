@@ -864,10 +864,46 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					return;
 				}
 				auto tap = std::make_shared<MasterTap> (*shim, shim->session (), stream_id, channels);
+				// Log the master's pre-insert processor names so we
+				// can correlate with whether our tap actually lands
+				// in the chain after `add_processor`.
+				{
+					std::ostringstream pre;
+					master->foreach_processor (
+					    [&pre] (std::weak_ptr<ARDOUR::Processor> wp) {
+					        auto p = wp.lock ();
+					        if (p) pre << " [" << p->display_name () << " active=" << p->active () << "]";
+					    });
+					PBD::warning << "foyer_shim: [audio] master BEFORE add:" << pre.str ()
+					             << " n_inputs.audio=" << master->n_inputs ().n_audio ()
+					             << " n_outputs.audio=" << master->n_outputs ().n_audio ()
+					             << endmsg;
+				}
 				if (master->add_processor (tap, ARDOUR::PostFader, nullptr, true /* activation */) != 0) {
 					PBD::warning << "foyer_shim: audio_stream_open: add_processor failed" << endmsg;
 					return;
 				}
+				{
+					std::ostringstream post;
+					master->foreach_processor (
+					    [&post] (std::weak_ptr<ARDOUR::Processor> wp) {
+					        auto p = wp.lock ();
+					        if (p) post << " [" << p->display_name () << " active=" << p->active () << "]";
+					    });
+					PBD::warning << "foyer_shim: [audio] master AFTER add:" << post.str () << endmsg;
+				}
+				// `add_processor` allows activation but doesn't
+				// itself flip the active flag — the base Processor
+				// starts `_pending_active = false`, so without this
+				// call Ardour's process loop skips our `run()`
+				// entirely (observed live: `run=0 silence=0` in the
+				// drain-loop diagnostic). Calling `activate()` both
+				// sets `_pending_active = true` AND fires the
+				// `ActiveChanged` signal the process thread watches.
+				tap->activate ();
+				PBD::warning << "foyer_shim: [audio] stream_id=" << stream_id
+				             << " post-activate: active=" << tap->active ()
+				             << " enabled=" << tap->enabled () << endmsg;
 				tap->start_drain ();
 				{
 					std::lock_guard<std::mutex> g (self->_taps_mx);

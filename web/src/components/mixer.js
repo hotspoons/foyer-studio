@@ -196,12 +196,19 @@ export class Mixer extends LitElement {
     if (!ws) return;
     const baseUrl = location.origin.replace(/^http/, "ws");
     try {
+      // Codec override via URL: `?audio_codec=raw_f32_le` bypasses
+      // Opus entirely so we can A/B the decoder against the raw
+      // PCM path. Useful when debugging decoder-specific issues
+      // like the half-pitch symptom we hit on 2026-04-20.
+      const params = new URLSearchParams(location.search);
+      const codec = params.get("audio_codec") || "opus";
       this._listener = new AudioListener({
         ws,
         baseUrl,
         sourceKind: "master",
-        codec: "opus",
+        codec,
       });
+      console.info(`[mixer] Listen starting with codec=${codec}`);
       await this._listener.start();
       this._listening = true;
     } catch (e) {

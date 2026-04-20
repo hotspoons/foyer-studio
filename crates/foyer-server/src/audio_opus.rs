@@ -7,7 +7,7 @@
 //! at 96 kbps is the right knob for interactive monitoring without
 //! blowing LAN budgets.
 
-use audiopus::{coder::Encoder as OpusEncoder, Application, Channels, SampleRate};
+use audiopus::{coder::Encoder as OpusEncoder, Application, Channels, SampleRate, Signal};
 
 /// Wraps an `audiopus::Encoder` configured for our fixed frame shape.
 pub struct OpusFrameEncoder {
@@ -35,8 +35,33 @@ impl OpusFrameEncoder {
             2 => Channels::Stereo,
             n => return Err(format!("opus only supports mono/stereo, got {n}")),
         };
-        let enc = OpusEncoder::new(sr, ch, Application::Audio)
+        // `Application::LowDelay` disables SILK entirely — the
+        // encoder is CELT-only regardless of signal content. This
+        // is the actual fix for the "~5 % chance of 440 Hz, ~95 %
+        // chance of 220 Hz" flakiness: Opus' SILK mode internally
+        // resamples to 8 / 12 / 16 kHz and hits a Chrome decoder
+        // bug on strongly-correlated or tonal input that halves
+        // pitch AND amplitude. With the default `Application::Audio`
+        // libopus freely picks SILK or Hybrid mode for the early
+        // frames before its VBR classifier commits to CELT — that's
+        // the rare-success pattern Rich observed. `LowDelay` takes
+        // that choice away.
+        //
+        // Previous attempts that did NOT work (documented so we
+        // don't retry them):
+        //   · `Signal::Music` — just a HINT to the classifier, not
+        //     a hard pin.
+        //   · `set_force_channels(Stereo)` — only controls whether
+        //     packet emits mono-vs-stereo framing; doesn't disable
+        //     MS coding within a stereo stream.
+        //   · Decorrelating test-tone L/R (0.4 vs 0.39) — worked
+        //     for the test tone but real Ardour master audio
+        //     routinely has bit-identical channels (center-panned
+        //     mono sources) so the decoder bug stayed.
+        let mut enc = OpusEncoder::new(sr, ch, Application::LowDelay)
             .map_err(|e| format!("opus encoder init: {e:?}"))?;
+        enc.set_signal(Signal::Music)
+            .map_err(|e| format!("opus set_signal(Music): {e:?}"))?;
         Ok(Self {
             inner: enc,
             frame_size,
