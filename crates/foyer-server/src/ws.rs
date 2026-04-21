@@ -777,7 +777,13 @@ async fn dispatch_command(
             // length) are derived. Every connected client sees the
             // same notes because they all reconcile off the same
             // `RegionUpdated` echo from the shim.
-            let notes = foyer_schema::expand_sequencer_layout(&layout, 960);
+            // PPQN MUST match what Ardour uses internally
+            // (`Temporal::ticks_per_beat = 1920`). Earlier code
+            // passed 960 here and the shim's resize math also used
+            // 960 — both wrong by a factor of 2 vs Ardour's actual
+            // tick scale, so notes played at double-time and the
+            // region length came out half the intended duration.
+            let notes = foyer_schema::expand_sequencer_layout(&layout, 1920);
             // Region length = arrangement extent in ticks → samples
             // at the session's sample rate. We don't know the SR
             // here for sure (each backend may answer differently);
@@ -787,7 +793,7 @@ async fn dispatch_command(
             // we let the shim handle the conversion since it knows
             // the session's tempo map. Pass the tick count through
             // a special-cased RegionPatch the shim interprets.
-            let length_ticks = foyer_schema::sequencer_layout_length_ticks(&layout, 960);
+            let length_ticks = foyer_schema::sequencer_layout_length_ticks(&layout, 1920);
             if let Err(e) = state.backend().await.set_sequencer_layout(region_id.clone(), layout).await {
                 broadcast_event(
                     state,
@@ -910,6 +916,30 @@ async fn dispatch_command(
             }
         }
 
+        // Transport seek — translate to a `transport.position`
+        // ControlSet so backends that already wire that control
+        // (the Ardour shim does) get a seek without needing a
+        // separate Locate trait method. The beat sequencer's seek
+        // bar uses this; previously fell through the
+        // command_unimplemented arm and surfaced as a startup-toast
+        // for every click on the timeline.
+        Command::Locate { samples } => {
+            use foyer_schema::{ControlValue, EntityId};
+            if let Err(e) = state.backend().await
+                .set_control(EntityId::new("transport.position"), ControlValue::Float(samples as f64))
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "locate_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
         Command::CreateGroup { .. }
         | Command::UpdateGroup { .. }
         | Command::DeleteGroup { .. }
@@ -917,7 +947,6 @@ async fn dispatch_command(
         | Command::SavePluginPreset { .. }
         | Command::OpenPluginGui { .. }
         | Command::ClosePluginGui { .. }
-        | Command::Locate { .. }
         | Command::AudioSdpAnswer { .. }
         | Command::AudioIceCandidate { .. } => {
             broadcast_event(

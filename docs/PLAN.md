@@ -213,3 +213,4 @@ Browser→DAW ingress: the shim command now rejects cleanly instead of hanging. 
 
 - More polish on the beats
 - Add region in midi channel context menu (should add region at point where right clicked)
+- Alt drag for adhoc placement of beats and notes in quantized grid

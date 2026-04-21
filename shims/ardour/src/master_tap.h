@@ -71,6 +71,27 @@ public:
 
 	bool can_support_io_configuration (const ARDOUR::ChanCount& in, ARDOUR::ChanCount& out) override;
 
+	/// Override Processor::state() to mark our XML node as `type="capture"`.
+	///
+	/// MUST persist this opt-out: the base Processor::state() emits
+	/// the node WITHOUT a `type` attribute, and Ardour's
+	/// `Route::set_processor_state` (route.cc:3478-3550) does
+	/// `prop->value()` on that nullptr property → SIGSEGV during
+	/// session load. Symptom: session save by us, then any reopen
+	/// of that .ardour file silently kills Ardour during early
+	/// init (no SNAPSHOT, no on_session_loaded, no error message,
+	/// no "caught signal" — just plugin scan output then nothing).
+	///
+	/// The `capture` type maps to a switch case Ardour explicitly
+	/// skips ("CapturingProcessor should never be restored, it's
+	/// always added explicitly when needed" — route.cc:3531-3533).
+	/// Our master tap fits the same shape exactly: a runtime helper
+	/// that the surface re-installs on every audio_stream_open, so
+	/// it should never be restored from session state. Reusing
+	/// `capture` lets stock Ardour load Foyer-saved sessions
+	/// without knowing anything about our shim.
+	XMLNode& state () const override;
+
 	/// RT path. Copy samples into the ring. No allocations. No locks.
 	void run (ARDOUR::BufferSet& bufs,
 	          ARDOUR::samplepos_t start_sample,

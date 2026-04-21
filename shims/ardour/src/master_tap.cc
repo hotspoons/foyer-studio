@@ -12,6 +12,7 @@
 #include "ardour/chan_count.h"
 #include "ardour/data_type.h"
 #include "pbd/error.h"
+#include "pbd/xml++.h"
 
 #include "ipc.h"
 #include "surface.h"
@@ -38,6 +39,18 @@ MasterTap::MasterTap (FoyerShim& shim, Session& s, std::uint32_t stream_id, std:
 MasterTap::~MasterTap ()
 {
 	stop_drain ();
+}
+
+XMLNode&
+MasterTap::state () const
+{
+	// Build the standard Processor node, then tag it `type="capture"`
+	// so Ardour's session loader routes it through the "skip — must
+	// be re-added explicitly" branch (route.cc:3531-3533) instead of
+	// segfaulting on a missing type. See the comment in master_tap.h.
+	XMLNode& node = Processor::state ();
+	node.set_property ("type", "capture");
+	return node;
 }
 
 bool

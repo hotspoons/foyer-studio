@@ -634,7 +634,17 @@ bool
 set_sequencer_layout (Session& session, const std::string& region_id, const SequencerLayoutDesc& layout)
 {
 	auto hit = find_region (session, region_id);
-	if (!hit.region) return false;
+	if (!hit.region) {
+		PBD::warning << "foyer_shim: set_sequencer_layout: unknown region "
+		             << region_id << endmsg;
+		return false;
+	}
+	PBD::warning << "foyer_shim: set_sequencer_layout region=" << region_id
+	             << " patterns=" << layout.patterns.size ()
+	             << " arrangement=" << layout.arrangement.size ()
+	             << " resolution=" << layout.resolution
+	             << " pattern_steps=" << layout.pattern_steps
+	             << endmsg;
 	// IMPORTANT: `add_extra_xml` internally calls
 	// `_extra_xml->add_child_nocopy(node)` which stores the raw
 	// pointer in Ardour's XML tree — Ardour takes ownership. We
@@ -661,13 +671,27 @@ set_sequencer_layout (Session& session, const std::string& region_id, const Sequ
 	if (last_bar_plus_one > 0) {
 		const std::uint32_t res = std::max<std::uint32_t> (layout.resolution, 1);
 		const std::uint32_t pat_steps = std::max<std::uint32_t> (layout.pattern_steps, 1);
-		const std::int64_t step_ticks = 960 / static_cast<std::int64_t> (res);
+		// Ardour's Temporal::Beats uses PPQN=1920 internally
+		// (`libs/temporal/temporal/types.h:66`). Earlier code
+		// hardcoded 960 here — half the right scale — which made
+		// the region length come out at half the intended duration
+		// AND notes from the server's matching expand call land at
+		// half-time positions. Use Ardour's PPQN explicitly so
+		// shim-side and server-side ticks agree.
+		const std::int64_t step_ticks = static_cast<std::int64_t> (Temporal::ticks_per_beat) / static_cast<std::int64_t> (res);
 		const std::int64_t bar_ticks  = static_cast<std::int64_t> (pat_steps) * step_ticks;
 		const std::int64_t total_ticks = static_cast<std::int64_t> (last_bar_plus_one) * bar_ticks;
 		auto length = Temporal::timecnt_t (
 		    Temporal::Beats::ticks (total_ticks),
 		    hit.region->position ());
-		hit.region->set_length (length);
+		// Don't shrink the region below its current length — that
+		// can clip out source notes that were authored before the
+		// arrangement extent shrank, and forces the source to
+		// reload. Only grow.
+		const Temporal::timecnt_t cur_length = hit.region->length ();
+		if (length.distance () > cur_length.distance ()) {
+			hit.region->set_length (length);
+		}
 	}
 
 	// `add_extra_xml` doesn't run through the PropertyChange

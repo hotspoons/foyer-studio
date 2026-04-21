@@ -576,10 +576,11 @@ export class BeatSequencer extends LitElement {
     const rect = ev.currentTarget.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
     const sampleTarget = Math.round(ratio * this._sessionLengthSamples());
-    const ws = window.__foyer?.ws;
-    if (!ws) return;
-    ws.send({ type: "locate", samples: sampleTarget });
-    ws.controlSet?.("transport.position", sampleTarget);
+    // Locate routes through the server's transport.position
+    // ControlSet, so we don't need to also fire a controlSet from
+    // here (was firing both, hence multiple "Locate accepted but
+    // not wired" toasts per click).
+    window.__foyer?.ws?.send({ type: "locate", samples: sampleTarget });
   }
 
   // ── pattern-cell interaction ─────────────────────────────────────
