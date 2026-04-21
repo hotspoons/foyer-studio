@@ -53,6 +53,7 @@ mod tests {
             schema: SCHEMA_VERSION,
             seq,
             origin: None,
+            session_id: None,
             body: Event::ControlUpdate {
                 update: ControlUpdate {
                     id: EntityId::new("x"),

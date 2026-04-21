@@ -301,3 +301,9 @@ export function showProjectPicker(mode = "open") {
   document.body.appendChild(el);
   return el;
 }
+
+/** Alias — friendlier name used by the welcome screen + session
+ *  switcher. Always opens in "open" mode. */
+export function openProjectPicker() {
+  return showProjectPicker("open");
+}

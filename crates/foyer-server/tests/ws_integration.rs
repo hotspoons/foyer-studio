@@ -65,6 +65,7 @@ async fn snapshot_then_control_set_round_trip() {
         schema: SCHEMA_VERSION,
         seq: 0,
         origin: Some("alice".into()),
+        session_id: None,
         body: Command::Subscribe,
     };
     ws.send(Message::Text(serde_json::to_string(&cmd).unwrap()))
@@ -97,6 +98,7 @@ async fn snapshot_then_control_set_round_trip() {
         schema: SCHEMA_VERSION,
         seq: 0,
         origin: Some("alice".into()),
+        session_id: None,
         body: Command::ControlSet {
             id: EntityId::new("transport.tempo"),
             value: ControlValue::Float(144.0),
@@ -138,6 +140,7 @@ async fn second_client_gets_cached_snapshot_without_request() {
             schema: SCHEMA_VERSION,
             seq: 0,
             origin: None,
+            session_id: None,
             body: Command::Subscribe,
         })
         .unwrap(),

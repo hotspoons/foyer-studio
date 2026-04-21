@@ -29,6 +29,15 @@ pub struct Envelope<T> {
     /// presence displays and to let clients ignore echoes of their own changes.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub origin: Option<String>,
+    /// Which session this envelope belongs to. Outbound events carry
+    /// the source session's id so multi-session clients can filter by
+    /// their currently-viewed session. Inbound commands either carry
+    /// an explicit target or fall back to the WS connection's
+    /// currently-selected session (set via `Command::SelectSession`).
+    /// `None` on either direction means "global" — control-plane
+    /// messages that aren't tied to a specific session.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_id: Option<EntityId>,
     pub body: T,
 }
 
@@ -280,6 +289,35 @@ pub enum Event {
         dirty: bool,
     },
 
+    // ───── multi-session lifecycle ──────────────────────────────────────
+    /// Snapshot of every session currently held by the sidecar. Emitted
+    /// in response to `Command::ListSessions`, on the initial client
+    /// greeting, and after any open/close so clients can refresh their
+    /// session switcher without polling.
+    SessionList {
+        sessions: Vec<SessionInfo>,
+    },
+    /// A new session has been opened (or attached). Appended to the
+    /// client's session list.
+    SessionOpened {
+        session: SessionInfo,
+    },
+    /// A session has been closed (shim process shut down cleanly or
+    /// `CloseSession` fired). Client should remove it from the
+    /// switcher and, if it was the one currently being viewed, either
+    /// fall through to another open session or back to the welcome
+    /// screen.
+    SessionClosed {
+        session_id: EntityId,
+    },
+    /// Sidecar found orphan session registry entries on startup — shim
+    /// processes still running but not attached, or crashed shims
+    /// with leftover registry/crash data. The UI offers reattach or
+    /// reopen (or dismiss / delete the registry entry).
+    OrphansDetected {
+        orphans: Vec<OrphanInfo>,
+    },
+
     // ───── audio streaming negotiation ──────────────────────────────────
     /// WebRTC SDP offer/answer from the shim. Client replies with
     /// `Command::AudioSdpAnswer` carrying its own SDP.
@@ -300,6 +338,52 @@ pub enum Event {
 fn is_zero_u16(n: &u16) -> bool { *n == 0 }
 
 fn default_region_kind() -> String { "midi".to_string() }
+
+/// One currently-open session as tracked by the sidecar. Multi-session
+/// clients render this in the session switcher chip and in the
+/// Session → Recent menu.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// UUID, stable across Foyer restarts — stored inside the .ardour
+    /// file as `<Foyer><Session id="..."/></Foyer>`, so opening the
+    /// same project from different machines still resolves to the
+    /// same id.
+    pub id: EntityId,
+    /// Backend adapter id ("ardour", "stub", etc).
+    pub backend_id: String,
+    /// Absolute canonical path to the session file / directory. Empty
+    /// for stub / scratch sessions.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// Display name. Usually the project's basename; falls back to
+    /// the host's reported session name.
+    pub name: String,
+    /// Unix epoch seconds when this session was opened (or attached).
+    pub opened_at: u64,
+    /// Whether the session has unsaved changes. Mirrors
+    /// `Event::SessionDirtyChanged` for convenience in the UI.
+    #[serde(default)]
+    pub dirty: bool,
+}
+
+/// An orphaned session discovered on sidecar startup. Either the shim
+/// is still running but Foyer lost track of it (can reattach), or the
+/// shim's pid is dead and we have leftover registry/crash data to
+/// offer as a reopen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrphanInfo {
+    pub id: EntityId,
+    pub backend_id: String,
+    pub path: String,
+    pub name: String,
+    /// "running" → shim process still alive, socket reachable
+    ///     (offer Reattach). "crashed" → shim pid dead (offer Reopen).
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<String>,
+}
 
 /// Metadata for a single backend entry in the sidecar's config — what
 /// the picker UI needs to render a "pick a DAW" dropdown.
@@ -441,6 +525,41 @@ pub enum Command {
         backend_id: String,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         project_path: Option<String>,
+    },
+
+    // ───── multi-session control plane ──────────────────────────────────
+    /// Ask the sidecar for its current session list. Answered with
+    /// `Event::SessionList`. Usually used on reconnect to resync after
+    /// a network hiccup — the initial client greeting already includes
+    /// the list so first-load doesn't need this.
+    ListSessions,
+    /// Set which session this WS connection is currently viewing.
+    /// Commands that arrive without an explicit `session_id` on the
+    /// envelope route to this session. Events keep their own
+    /// `session_id` tag; clients filter on the receiving side.
+    SelectSession {
+        session_id: EntityId,
+    },
+    /// Close an open session — shuts down the shim + backend and
+    /// removes it from the sidecar's session map. If the closed
+    /// session was the WS connection's selected session, the sidecar
+    /// picks the next open session as the new current (or `None` if
+    /// this was the last one). Emits `Event::SessionClosed`.
+    CloseSession {
+        session_id: EntityId,
+    },
+    /// Reattach to an orphaned running shim. Sidecar builds a fresh
+    /// backend against the orphan's socket and promotes it to a full
+    /// session (as if it had been opened normally). Emits
+    /// `Event::SessionOpened`.
+    ReattachOrphan {
+        orphan_id: EntityId,
+    },
+    /// Remove an orphan's registry entry without reattaching. Used by
+    /// the crash-recovery dialog's "Dismiss" button when the user
+    /// doesn't want to restore a crashed session.
+    DismissOrphan {
+        orphan_id: EntityId,
     },
 
     // ───── track / group / plugin lifecycle ─────────────────────────────
@@ -646,6 +765,7 @@ mod tests {
             schema: crate::SCHEMA_VERSION,
             seq: 42,
             origin: Some("user:alice".into()),
+            session_id: None,
             body: Command::ControlSet {
                 id: EntityId::new("transport.tempo"),
                 value: ControlValue::Float(128.0),

@@ -282,26 +282,33 @@ jack-status:
     @pgrep -x jackd > /dev/null && echo "jackd running (pid $(pgrep -x jackd))" || echo "jackd not running"
 
 # --- cleanup ---
-# Kill any stale DAW + sidecar processes and their IPC detritus.
-# Useful after a crash, a stuck `foyer serve` that's holding
-# target/debug/foyer (preventing `cargo build` from updating the
-# binary), or a series of Listen clicks that left orphan hardour
-# processes (Ardour doesn't always exit cleanly when its parent
-# terminates).
+# Kill DAW processes only — NOT the Foyer sidecar. Use this when a
+# Listen click left an orphan hardour behind or when Ardour's exit
+# didn't stick; the sidecar keeps running so the next `just run` is
+# a no-op and your browser tab doesn't even need a reload.
 #
 # Kills — by exact name match:
 #   · hardour-9.2.583, ardour, ardour-9.2  (the DAW)
-#   · foyer                                (the sidecar)
 #
-# Plus removes Unix sockets in /tmp/foyer/ so the next `just run`
-# doesn't hit "advertised shim at /tmp/foyer/ardour-<pid>.sock is
-# stale (connect: Connection refused)". Safe at any time; won't
-# touch anything outside those specific process names.
+# Used to also kill the `foyer` CLI itself (the sidecar binary is
+# literally named `foyer`). That was a foot-gun — Rich hit it on
+# 2026-04-22: running kill-daws to clean up a stuck Ardour took out
+# foyer-server too and forced a full re-launch. Split the "nuke
+# everything including the sidecar" story into `just kill-all`.
+#
+# Plus removes stale shim socket + advertisement files under
+# /tmp/foyer/ so a subsequent Ardour launch doesn't hit "advertised
+# shim at /tmp/foyer/ardour-<pid>.sock is stale (connect: Connection
+# refused)". Also sweeps leftover registry entries under
+# ~/.local/share/foyer/sessions/ whose pids are now dead — Foyer's
+# orphan detection handles those gracefully, but a clean sweep
+# after a hard kill keeps the welcome screen from showing ghost
+# "crashed" sessions forever.
 kill-daws:
     #!/usr/bin/env bash
     set -u
     killed=0
-    for name in hardour-9.2.583 ardour ardour-9.2 foyer; do
+    for name in hardour-9.2.583 ardour ardour-9.2; do
         pids=$(pgrep -x "$name" || true)
         if [ -n "$pids" ]; then
             echo "Killing $name: $pids"
@@ -311,7 +318,7 @@ kill-daws:
     done
     # Give SIGTERM a moment, then SIGKILL anything still breathing.
     sleep 1
-    for name in hardour-9.2.583 ardour ardour-9.2 foyer; do
+    for name in hardour-9.2.583 ardour ardour-9.2; do
         pids=$(pgrep -x "$name" || true)
         if [ -n "$pids" ]; then
             echo "SIGKILL $name: $pids"
@@ -319,14 +326,57 @@ kill-daws:
         fi
     done
     # Clear shim advertisement files + stale Unix sockets so the next
-    # `just run` starts from a clean slate.
+    # Ardour launch starts from a clean slate.
     rm -f /tmp/foyer.sock /tmp/foyer/ardour-*.sock /tmp/foyer/ardour-*.json 2>/dev/null || true
+    # Sweep session registry entries whose pids are dead. The sidecar
+    # would otherwise keep them around as "crashed" orphans until the
+    # user dismissed each one from the welcome screen — fine in
+    # theory, noisy after a hard kill.
+    reg="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/sessions"
+    if [ -d "$reg" ]; then
+        for f in "$reg"/*.json; do
+            [ -e "$f" ] || continue
+            pid=$(grep -oE '"pid":[[:space:]]*[0-9]+' "$f" | head -1 | grep -oE '[0-9]+' || echo 0)
+            if [ "${pid:-0}" -gt 0 ] && [ ! -d "/proc/$pid" ]; then
+                rm -f "$f"
+            fi
+        done
+    fi
     remaining=$(ps -eo pid,comm | awk '$2 ~ /^h?ardour/ {print $1}' | head)
     if [ -z "$remaining" ]; then
         echo "✓ clean — no DAW processes and no stale sockets"
     else
         echo "⚠ still running: $remaining"
     fi
+
+# --- nuke everything, including the Foyer sidecar ---
+# Use when you want a completely cold restart: DAWs + sidecar + all
+# sockets + all registry entries. Your browser tab WILL need a
+# reload after this since foyer-server itself is going away.
+kill-all: kill-daws
+    #!/usr/bin/env bash
+    set -u
+    for name in foyer; do
+        pids=$(pgrep -x "$name" || true)
+        if [ -n "$pids" ]; then
+            echo "Killing $name: $pids"
+            kill -TERM $pids 2>/dev/null || true
+        fi
+    done
+    sleep 1
+    for name in foyer; do
+        pids=$(pgrep -x "$name" || true)
+        if [ -n "$pids" ]; then
+            echo "SIGKILL $name: $pids"
+            kill -KILL $pids 2>/dev/null || true
+        fi
+    done
+    # Sidecar gone → wipe the whole session registry; anything left
+    # is definitionally orphaned and there's no sidecar around to
+    # surface it anyway.
+    reg="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/sessions"
+    [ -d "$reg" ] && rm -f "$reg"/*.json 2>/dev/null || true
+    echo "✓ full reset — reload your browser tab"
 
 # --- end-to-end smoke (Ardour headless + foyer_shim + foyer-cli) ---
 # Create a throwaway session using Ardour's session_utils, with all env vars

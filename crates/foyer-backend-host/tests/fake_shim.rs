@@ -174,6 +174,7 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                         schema: SCHEMA_VERSION,
                         seq: next_seq,
                         origin: Some("shim".into()),
+                        session_id: None,
                         body: Control::Event(Event::SessionSnapshot {
                             session: Box::new(session),
                         }),
@@ -195,6 +196,7 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                         schema: SCHEMA_VERSION,
                         seq: next_seq,
                         origin: Some("shim".into()),
+                        session_id: None,
                         body: Control::Event(Event::ControlUpdate {
                             update: ControlUpdate { id, value },
                         }),
@@ -217,6 +219,7 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                         schema: SCHEMA_VERSION,
                         seq: next_seq,
                         origin: Some("shim".into()),
+                        session_id: None,
                         body: Control::Event(Event::AudioEgressStarted { stream_id }),
                     };
                     next_seq += 1;
@@ -253,6 +256,7 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                         schema: SCHEMA_VERSION,
                         seq: next_seq,
                         origin: Some("shim".into()),
+                        session_id: None,
                         body: Control::Event(Event::AudioIngressOpened {
                             stream_id,
                             source,
@@ -281,6 +285,7 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                         schema: SCHEMA_VERSION,
                         seq: next_seq,
                         origin: Some("shim".into()),
+                        session_id: None,
                         body: Control::Event(Event::LatencyReport { stream_id, report }),
                     };
                     next_seq += 1;

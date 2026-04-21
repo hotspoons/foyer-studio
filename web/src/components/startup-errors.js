@@ -21,11 +21,12 @@ export class StartupErrors extends LitElement {
   static properties = {
     _errors:   { state: true, type: Array },
     _dismissed:{ state: true, type: Boolean },
-    // BackendLost is rarer and more severe than Error — when set, the
-    // banner switches to a dedicated CRASH presentation that survives
-    // the per-session dismiss + shows retry guidance. Cleared on the
-    // next `backend_swapped` (i.e. the user successfully reattached).
-    _backendLost: { state: true, type: Object },
+    // `backend_lost` events used to render as an inline crash card
+    // here. They now own their own blocking modal
+    // (backend-lost-modal.js) so they can offer recover/main-menu/
+    // ignore actions instead of just "X this away" — disconnects
+    // are almost always actionable. This component keeps handling
+    // bulk startup errors only.
   };
 
   static styles = css`
@@ -145,23 +146,13 @@ export class StartupErrors extends LitElement {
     const body = env?.body;
     if (!body) return;
     if (body.type === "backend_swapped") {
-      // Fresh session loading — collect its errors too, and clear
-      // any lingering crash state (successful reattach).
+      // Fresh session loading — collect its errors too.
       this._errors = [];
-      this._backendLost = null;
       this._openCaptureWindow();
       return;
     }
     if (body.type === "backend_lost") {
-      // DAW crashed / shim disconnected. Override any pending error
-      // display — this is more important to see. Not auto-dismissed
-      // by the capture-window expiry; user must acknowledge OR a
-      // successful `backend_swapped` must clear it.
-      this._backendLost = {
-        backendId: body.backend_id || "unknown",
-        reason: body.reason || "backend disconnected",
-      };
-      this._dismissed = false;
+      // Handled by backend-lost-modal.js — skip here.
       return;
     }
     if (body.type !== "error") return;
@@ -178,29 +169,6 @@ export class StartupErrors extends LitElement {
 
   render() {
     if (this._dismissed) return null;
-    // Crash state dominates — more critical than accumulated errors.
-    if (this._backendLost) {
-      return html`
-        <div class="card crash">
-          <header>
-            ${icon("exclamation-triangle", 14)}
-            <span class="title">DAW disconnected</span>
-            <button title="Dismiss" @click=${this._dismiss}>${icon("x-mark", 12)}</button>
-          </header>
-          <div class="list">
-            <div class="row">
-              <span class="code">backend_lost</span>
-              <span class="msg">${this._backendLost.backendId}: ${this._backendLost.reason}</span>
-            </div>
-          </div>
-          <footer>
-            Audio, metering, and control commands won't work until you reopen
-            the project from the picker. Transport events after this point
-            are stale — don't trust them.
-          </footer>
-        </div>
-      `;
-    }
     if (this._errors.length === 0) return null;
     return html`
       <div class="card">

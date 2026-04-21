@@ -151,6 +151,7 @@ add_library(foyer_shim SHARED
   src/schema_map.cc
   src/msgpack_out.cc
   src/master_tap.cc
+  src/session_uuid.cc
 )
 
 # Match the wscript: PACKAGE macro + DLL-export define for portability

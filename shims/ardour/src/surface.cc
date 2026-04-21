@@ -11,6 +11,7 @@
 
 #include "dispatch.h"
 #include "ipc.h"
+#include "session_uuid.h"
 #include "signal_bridge.h"
 
 using namespace ARDOUR;
@@ -59,9 +60,37 @@ FoyerShim::set_active (bool yn)
 	if (yn) {
 		_ipc->start ();
 		_bridge->start ();
+		// Resolve / assign the persistent session UUID and write a
+		// registry entry so the sidecar can find this shim on
+		// next startup (or via reattach if Foyer died without
+		// cleanly closing). The UUID lives in the session's
+		// extra_xml under <Foyer><Session id="…"/> so it persists
+		// across save/load across machines.
+		try {
+			_session_uuid = session_uuid::ensure_uuid (session ());
+			std::string project_path;
+			std::string project_name;
+			try { project_path = session ().path (); } catch (...) {}
+			try { project_name = session ().snap_name (); } catch (...) {}
+			session_uuid::write_registry_entry (
+			    _session_uuid,
+			    project_path,
+			    project_name,
+			    _ipc->resolved_path (),
+			    "ardour");
+		} catch (...) {
+			PBD::warning << "foyer_shim: session_uuid bootstrap failed (non-fatal)" << endmsg;
+		}
 	} else {
 		_bridge->stop ();
 		_ipc->stop ();
+		// Clean shutdown — remove our registry entry so the
+		// sidecar doesn't misclassify us as a crashed orphan
+		// on its next startup.
+		if (!_session_uuid.empty ()) {
+			session_uuid::remove_registry_entry (_session_uuid);
+			_session_uuid.clear ();
+		}
 	}
 	ControlProtocol::set_active (yn);
 	return 0;

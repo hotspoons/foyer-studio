@@ -185,6 +185,7 @@ impl HostClient {
             schema: SCHEMA_VERSION,
             seq: self.next_seq(),
             origin: Some("sidecar".into()),
+            session_id: None,
             body: Control::Command(cmd),
         };
         self.shared

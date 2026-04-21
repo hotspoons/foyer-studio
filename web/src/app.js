@@ -23,6 +23,8 @@ import "./components/command-palette.js";
 import "./components/layout-fab.js";
 import "./components/automation-panel.js";
 import "./components/startup-errors.js";
+import "./components/backend-lost-modal.js";
+import "./components/welcome-screen.js";
 import { bootAutomation } from "./components/automation-panel.js";
 import { installBindingsRuntime } from "./layout/layout-bindings.js";
 import { installSlotKeybinds } from "./layout/slot-keybinds.js";
@@ -51,6 +53,7 @@ export class FoyerApp extends LitElement {
   static properties = {
     _status:  { state: true },
     _session: { state: true },
+    _sessions: { state: true },
   };
 
   static styles = css`
@@ -81,6 +84,7 @@ export class FoyerApp extends LitElement {
     super();
     this._status = "idle";
     this._session = null;
+    this._sessions = [];
 
     const wsUrl = this._resolveWsUrl();
     // Window index: today Foyer runs in a single browser window so the
@@ -102,9 +106,14 @@ export class FoyerApp extends LitElement {
     this.store.addEventListener("change", () => {
       this._status = this.store.state.status;
       this._session = this.store.state.session;
+      this._sessions = this.store.state.sessions;
       // Re-render tile leaves (they read session from window.__foyer.store).
       const root = this.renderRoot.querySelector("foyer-tile-container");
       root?.requestUpdate();
+    });
+    this.store.addEventListener("sessions", () => {
+      this._sessions = this.store.state.sessions;
+      this.requestUpdate();
     });
 
     this.layout = new LayoutStore();
@@ -217,15 +226,28 @@ export class FoyerApp extends LitElement {
   }
 
   render() {
+    // Welcome screen replaces the tile workspace whenever no real
+    // session is attached. We check `sessions.length` (the
+    // authoritative multi-session list from the sidecar) rather than
+    // `this._session` because the launcher-mode stub backend emits
+    // an empty SessionSnapshot that would otherwise look like a
+    // valid session. Any orphans + recents still render inside the
+    // welcome screen so the user can resolve them without leaving
+    // this view.
+    const hasSessions = (this._sessions || []).length > 0;
     return html`
       <foyer-status-bar .status=${this._status}></foyer-status-bar>
       <foyer-transport-bar></foyer-transport-bar>
       <div class="main">
         <div class="workspace">
-          <foyer-tile-container
-            .node=${this.layout.tree}
-            .store=${this.layout}
-          ></foyer-tile-container>
+          ${hasSessions ? html`
+            <foyer-tile-container
+              .node=${this.layout.tree}
+              .store=${this.layout}
+            ></foyer-tile-container>
+          ` : html`
+            <foyer-welcome-screen></foyer-welcome-screen>
+          `}
         </div>
         <foyer-right-dock @resize=${() => this.requestUpdate()}></foyer-right-dock>
       </div>
@@ -236,6 +258,7 @@ export class FoyerApp extends LitElement {
       <foyer-command-palette></foyer-command-palette>
       <foyer-automation-panel></foyer-automation-panel>
       <foyer-startup-errors></foyer-startup-errors>
+      <foyer-backend-lost-modal></foyer-backend-lost-modal>
     `;
   }
 }

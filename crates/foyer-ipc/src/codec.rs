@@ -89,6 +89,7 @@ mod tests {
             schema: SCHEMA_VERSION,
             seq: 7,
             origin: Some("test".into()),
+            session_id: None,
             body: Control::Command(Command::ControlSet {
                 id: EntityId::new("track.abc.gain"),
                 value: ControlValue::Float(-6.0),

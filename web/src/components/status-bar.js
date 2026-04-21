@@ -5,6 +5,7 @@ import { cycleTheme, getTheme, onThemeChange, THEME_META } from "../theme.js";
 import { promptText } from "./prompt-modal.js";
 import { showShareModal } from "./share-modal.js";
 import "./main-menu.js";
+import "./session-switcher.js";
 
 export class StatusBar extends LitElement {
   static properties = {
@@ -336,6 +337,7 @@ export class StatusBar extends LitElement {
             </span>`
           : null}
         ${this._renderConnChip()}
+        <foyer-session-switcher></foyer-session-switcher>
         ${this._renderSessionDirty()}
         ${this._renderLayoutChip()}
       </div>

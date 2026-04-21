@@ -29,6 +29,20 @@ export class Store extends EventTarget {
       // Anchor used when shift-click extends a range selection. Null
       // means no anchor (first click sets it).
       _selectAnchor: null,
+      // ── multi-session ────────────────────────────────────────────
+      // List of every currently-open session the sidecar knows about.
+      // Populated from `SessionList` + per-op `SessionOpened` /
+      // `SessionClosed` events. The switcher chip + welcome screen
+      // both render from this.
+      sessions: [],
+      // Which session this browser tab is currently "looking at".
+      // Tracks the sidecar's notion of focus for outbound commands.
+      // `null` means no session is currently viewed (welcome state).
+      currentSessionId: null,
+      // Orphans detected at sidecar startup — running shims we can
+      // reattach to, or crashed shims the user can dismiss / reopen.
+      // One-shot list (cleared as the user resolves each).
+      orphans: [],
     };
     this._peerPruneInterval = null;
     if (typeof window !== "undefined") {
@@ -110,6 +124,43 @@ export class Store extends EventTarget {
   /** Current value for a control ID, or undefined if unknown. */
   get(id) {
     return this.state.controls.get(id);
+  }
+
+  // ── multi-session helpers ───────────────────────────────────────
+  /** Resolve the SessionInfo for the session this tab is currently
+   *  viewing, or `null` if none. */
+  currentSession() {
+    const id = this.state.currentSessionId;
+    if (!id) return null;
+    return this.state.sessions.find((s) => s.id === id) || null;
+  }
+  /** Switch which session the UI focuses on. Doesn't touch the
+   *  sidecar's live backend — that's a SelectSession on the WS. */
+  setCurrentSession(id) {
+    if (this.state.currentSessionId === id) return;
+    this.state.currentSessionId = id;
+    // Dropped the snapshot so views re-render their loading state
+    // while the next SessionSnapshot arrives from the selected
+    // session's pump.
+    this.state.session = null;
+    this.dispatchEvent(new CustomEvent("sessions"));
+    this._emit();
+    if (this._ws) {
+      try { this._ws.send({ type: "select_session", session_id: id }); } catch {}
+      try { this._ws.requestSnapshot?.(); } catch {}
+    }
+  }
+  /** Drop an orphan from local state after the user dismissed /
+   *  reattached it. The sidecar broadcasts its own updated list on
+   *  action but keeping the optimistic removal makes the UI feel
+   *  instant. */
+  forgetOrphan(id) {
+    const before = this.state.orphans.length;
+    this.state.orphans = this.state.orphans.filter((o) => o.id !== id);
+    if (this.state.orphans.length !== before) {
+      this.dispatchEvent(new CustomEvent("orphans"));
+      this._emit();
+    }
   }
 
   /**
@@ -226,8 +277,83 @@ export class Store extends EventTarget {
       case "session_dirty_changed": {
         if (this.state.session) {
           this.state.session.dirty = !!body.dirty;
+        }
+        // Also mirror the flag onto the matching SessionInfo in the
+        // sessions array so the switcher chip's "•" indicator
+        // repaints without waiting for the next SessionList.
+        const sid = env.session_id;
+        if (sid) {
+          const info = this.state.sessions.find((s) => s.id === sid);
+          if (info) info.dirty = !!body.dirty;
+        }
+        this._emit();
+        break;
+      }
+      // ── multi-session lifecycle ──────────────────────────────
+      case "session_list": {
+        this.state.sessions = Array.isArray(body.sessions) ? body.sessions : [];
+        // If the currently-viewed session is gone (closed remotely,
+        // crashed, etc), fall through to the next available one.
+        if (this.state.currentSessionId
+            && !this.state.sessions.some((s) => s.id === this.state.currentSessionId)) {
+          this.state.currentSessionId =
+            this.state.sessions[this.state.sessions.length - 1]?.id || null;
+        } else if (!this.state.currentSessionId && this.state.sessions.length > 0) {
+          // Auto-focus the first (or most recently opened) session.
+          this.state.currentSessionId =
+            this.state.sessions[this.state.sessions.length - 1]?.id || null;
+        }
+        this.dispatchEvent(new CustomEvent("sessions"));
+        this._emit();
+        break;
+      }
+      case "session_opened": {
+        const info = body.session;
+        if (info && info.id) {
+          const idx = this.state.sessions.findIndex((s) => s.id === info.id);
+          if (idx >= 0) this.state.sessions[idx] = info;
+          else this.state.sessions.push(info);
+          // Auto-switch the browser to the freshly-opened session —
+          // matches user intent for "I just clicked Open Project"
+          // and keeps the background-leave case handled explicitly
+          // via the switcher (which sets currentSessionId without
+          // triggering a new Open).
+          this.state.currentSessionId = info.id;
+          // Lazily touch the browser-local recents list so the next
+          // welcome screen visit sees this path at the top. Import
+          // inline to avoid a hard dependency cycle at module load.
+          if (info.path) {
+            import("./recents.js").then((m) => {
+              m.touch({
+                path: info.path,
+                name: info.name,
+                backend_id: info.backend_id,
+              });
+            }).catch(() => {});
+          }
+          this.dispatchEvent(new CustomEvent("sessions"));
           this._emit();
         }
+        break;
+      }
+      case "session_closed": {
+        const id = body.session_id;
+        this.state.sessions = this.state.sessions.filter((s) => s.id !== id);
+        if (this.state.currentSessionId === id) {
+          this.state.currentSessionId =
+            this.state.sessions[this.state.sessions.length - 1]?.id || null;
+          // Drop the stale snapshot so the UI repaints to welcome
+          // (or the next session's snapshot once it arrives).
+          if (!this.state.currentSessionId) this.state.session = null;
+        }
+        this.dispatchEvent(new CustomEvent("sessions"));
+        this._emit();
+        break;
+      }
+      case "orphans_detected": {
+        this.state.orphans = Array.isArray(body.orphans) ? body.orphans : [];
+        this.dispatchEvent(new CustomEvent("orphans"));
+        this._emit();
         break;
       }
       default:

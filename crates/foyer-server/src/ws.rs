@@ -120,6 +120,7 @@ async fn handle(
             schema: SCHEMA_VERSION,
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
+            session_id: None,
             body: Event::ClientGreeting {
                 remote_addr: peer.to_string(),
                 is_local,
@@ -129,6 +130,33 @@ async fn handle(
             },
         };
         let _ = send_env(&mut tx_ws, &greeting).await;
+    }
+
+    // Initial session roll-up: send the current list of open sessions
+    // and any orphans discovered at sidecar startup, so the client's
+    // welcome screen / switcher can paint immediately instead of
+    // waiting for the first ListSessions round-trip.
+    {
+        let sessions = state.sessions.list().await;
+        let sess_env = Envelope {
+            schema: SCHEMA_VERSION,
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            session_id: None,
+            body: Event::SessionList { sessions },
+        };
+        let _ = send_env(&mut tx_ws, &sess_env).await;
+        let orphans = state.orphans.read().await.clone();
+        if !orphans.is_empty() {
+            let orph_env = Envelope {
+                schema: SCHEMA_VERSION,
+                seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+                origin: Some("server".into()),
+                session_id: None,
+                body: Event::OrphansDetected { orphans },
+            };
+            let _ = send_env(&mut tx_ws, &orph_env).await;
+        }
     }
 
     // Initial catch-up: either replay from ring or send snapshot.
@@ -228,6 +256,7 @@ async fn dispatch_command(
                 schema: SCHEMA_VERSION,
                 seq,
                 origin: Some("backend".to_string()),
+                session_id: None,
                 body: Event::SessionSnapshot {
                     session: Box::new(snapshot),
                 },
@@ -246,6 +275,7 @@ async fn dispatch_command(
                 schema: SCHEMA_VERSION,
                 seq,
                 origin: origin.map(str::to_string),
+                session_id: None,
                 body: Event::ControlUpdate {
                     update: ControlUpdate { id, value },
                 },
@@ -475,11 +505,20 @@ async fn dispatch_command(
                 .map(std::path::Path::new);
             match spawner.launch(&backend_id, path).await {
                 Ok(new_backend) => {
-                    // Swap atomically. `swap_backend` aborts the old
-                    // pump, spawns a new one for `new_backend`, drops
-                    // the cached snapshot, and emits `BackendSwapped`.
+                    // swap_backend synthesizes a session UUID when
+                    // the caller doesn't supply one. Once the
+                    // shim-side UUID plumbing lands (reading from
+                    // the .ardour file's extra_xml on hello), the
+                    // CLI spawner will set it on the backend before
+                    // returning and we can pass it through here.
                     state
-                        .swap_backend(backend_id, project_path, new_backend)
+                        .swap_backend(
+                            backend_id,
+                            project_path,
+                            new_backend,
+                            None,
+                            None,
+                        )
                         .await;
                 }
                 Err(e) => {
@@ -968,6 +1007,114 @@ async fn dispatch_command(
             }
         }
 
+        // ─── multi-session control plane ────────────────────────────
+        Command::ListSessions => {
+            let sessions = state.sessions.list().await;
+            broadcast_event(state, Event::SessionList { sessions }).await;
+            let orphans = state.orphans.read().await.clone();
+            if !orphans.is_empty() {
+                broadcast_event(state, Event::OrphansDetected { orphans }).await;
+            }
+        }
+        Command::SelectSession { session_id } => {
+            // Single-focus: update the sidecar-wide focused session
+            // so subsequent commands without explicit session_id route
+            // to this one's backend. A per-connection override could
+            // layer on later for multi-browser-window scenarios.
+            *state.focus_session_id.write().await = Some(session_id.clone());
+            // Immediately re-snapshot against the newly-focused
+            // backend so the browser sees the switched-to session's
+            // tracks/regions.
+            if let Ok(snap) = state.backend().await.snapshot().await {
+                let out = Envelope {
+                    schema: SCHEMA_VERSION,
+                    seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+                    origin: Some("backend".into()),
+                    session_id: Some(session_id),
+                    body: Event::SessionSnapshot {
+                        session: Box::new(snap),
+                    },
+                };
+                *state.cached_snapshot.write().await = Some(out.clone());
+                state.ring.write().await.push(out.clone());
+                let _ = state.tx.send(out);
+            }
+        }
+        Command::CloseSession { session_id } => {
+            match state.sessions.close(&session_id).await {
+                Some(_info) => {
+                    // If we just closed the focused session, fall
+                    // through to the next-most-recent one (or clear
+                    // focus when there's nothing left). Also mirror
+                    // the backend pointer so plain commands still
+                    // land on a live backend.
+                    {
+                        let mut focus = state.focus_session_id.write().await;
+                        if focus.as_ref() == Some(&session_id) { *focus = None; }
+                    }
+                    if let Some(fallback_id) = state.sessions.most_recent_id().await {
+                        if let Some(be) = state.sessions.backend(&fallback_id).await {
+                            *state.backend.write().await = be;
+                            *state.focus_session_id.write().await = Some(fallback_id);
+                        }
+                    }
+                }
+                None => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "session_not_found".into(),
+                            message: format!("no open session with id {session_id:?}"),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::ReattachOrphan { orphan_id } => {
+            let mut orphans = state.orphans.write().await;
+            if let Some(pos) = orphans.iter().position(|o| o.id == orphan_id) {
+                let info = orphans.remove(pos);
+                drop(orphans);
+                // Stub for now: without the spawner's "attach to
+                // existing socket" path we can't reach the orphan.
+                // Emit the error + clear it from the registry so the
+                // user can at least dismiss.
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "reattach_unimplemented".into(),
+                        message: format!(
+                            "reattach to orphan {} at {} is not yet wired; you can dismiss it for now",
+                            info.name, info.socket.as_deref().unwrap_or("?"),
+                        ),
+                    },
+                )
+                .await;
+            } else {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "orphan_not_found".into(),
+                        message: format!("no orphan with id {orphan_id:?}"),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::DismissOrphan { orphan_id } => {
+            let mut orphans = state.orphans.write().await;
+            if let Some(pos) = orphans.iter().position(|o| o.id == orphan_id) {
+                let info = orphans.remove(pos);
+                drop(orphans);
+                let _ = crate::orphans::remove_entry(info.id.as_str()).await;
+                // Send an updated orphan list so UIs can tear down
+                // the "dismiss" chip.
+                let remaining = state.orphans.read().await.clone();
+                broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
+            }
+        }
+
         Command::CreateGroup { .. }
         | Command::UpdateGroup { .. }
         | Command::DeleteGroup { .. }
@@ -1002,6 +1149,7 @@ async fn broadcast_event(state: &AppState, event: Event) {
         schema: SCHEMA_VERSION,
         seq,
         origin: Some("backend".to_string()),
+        session_id: None,
         body: event,
     };
     if is_snapshot {

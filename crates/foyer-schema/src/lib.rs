@@ -26,7 +26,9 @@ pub use audio::{
 pub use fs::{FsEntry, FsEntryKind, PathListing};
 pub use id::EntityId;
 pub use io::{IoDirection, IoPort};
-pub use message::{BackendInfo, Command, ControlUpdate, Envelope, Event, Patch, Seq};
+pub use message::{
+    BackendInfo, Command, ControlUpdate, Envelope, Event, OrphanInfo, Patch, Seq, SessionInfo,
+};
 pub use midi::{
     default_gm_drum_rows, expand_sequencer_layout, sequencer_layout_length_ticks,
     ArrangementSlot, MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, SequencerCell,

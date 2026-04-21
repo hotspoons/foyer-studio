@@ -1,0 +1,412 @@
+// Welcome screen — replaces the workspace when no real session is open.
+//
+// Three call-to-actions:
+//   1. Recent projects — browser-local list (see recents.js). Click to
+//      reopen via `launch_project`.
+//   2. Browse projects… — opens the project picker modal for ad-hoc
+//      project discovery under the sidecar's jail.
+//   3. New session… — not yet wired (lacks a "create-blank-project"
+//      command); renders as disabled with a tooltip explaining. Slot is
+//      in place so that landing patch is a one-file edit.
+//
+// Also renders any orphans from `store.state.orphans` as a banner at
+// the top — the user can reattach (stub for now), reopen (same as
+// clicking recents with a crashed entry's path), or dismiss.
+
+import { LitElement, html, css } from "lit";
+import { icon } from "../icons.js";
+import { load as loadRecents, touch as touchRecent, forget as forgetRecent, clearAll } from "../recents.js";
+
+export class WelcomeScreen extends LitElement {
+  static properties = {
+    _recents: { state: true },
+    _orphans: { state: true },
+    _sessions: { state: true },
+  };
+
+  static styles = css`
+    :host {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 60px 32px;
+      width: 100%;
+      height: 100%;
+      overflow: auto;
+      background: linear-gradient(180deg,
+        color-mix(in oklab, var(--color-accent) 6%, var(--color-surface)),
+        var(--color-surface));
+      color: var(--color-text);
+      font-family: var(--font-sans);
+      box-sizing: border-box;
+    }
+    .panel {
+      width: 100%; max-width: 880px;
+      display: flex; flex-direction: column; gap: 22px;
+    }
+    header {
+      display: flex; align-items: flex-end; gap: 14px;
+      margin-bottom: 8px;
+    }
+    header .brand {
+      font-size: 28px; font-weight: 700;
+      letter-spacing: 0.02em;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      -webkit-background-clip: text; background-clip: text;
+      color: transparent;
+    }
+    header .sub {
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+    }
+    .cta {
+      display: flex; align-items: flex-start; gap: 12px;
+      padding: 16px;
+      border-radius: 10px;
+      border: 1px solid var(--color-border);
+      background: var(--color-surface-elevated);
+      cursor: pointer;
+      text-align: left;
+      font: inherit;
+      color: inherit;
+      transition: all 0.12s ease;
+    }
+    .cta:hover {
+      border-color: var(--color-accent);
+      background: color-mix(in oklab, var(--color-accent) 8%, var(--color-surface-elevated));
+      transform: translateY(-1px);
+    }
+    .cta[disabled] {
+      opacity: 0.5; cursor: not-allowed;
+      transform: none;
+    }
+    .cta .icon {
+      flex: 0 0 28px;
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      color: #fff;
+    }
+    .cta .title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+    .cta .desc { color: var(--color-text-muted); font-size: 11px; line-height: 1.4; }
+
+    section.recents h3, section.orphans h3, section.open h3 {
+      margin: 0 0 8px;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      color: var(--color-text-muted);
+    }
+    .recent-list, .orphan-list, .open-list {
+      display: flex; flex-direction: column;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      background: var(--color-surface-elevated);
+      overflow: hidden;
+    }
+    .recent-row, .orphan-row, .open-row {
+      display: grid;
+      grid-template-columns: 28px 1fr auto auto;
+      gap: 10px; align-items: center;
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      cursor: pointer;
+      transition: background 0.1s ease;
+    }
+    .recent-row:last-child, .orphan-row:last-child, .open-row:last-child { border-bottom: 0; }
+    .recent-row:hover, .open-row:hover { background: color-mix(in oklab, var(--color-accent) 6%, transparent); }
+    .recent-row .icon, .orphan-row .icon, .open-row .icon { color: var(--color-text-muted); }
+    .recent-row .name, .orphan-row .name, .open-row .name {
+      font-weight: 600; font-size: 13px; color: var(--color-text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .recent-row .path, .orphan-row .path, .open-row .path {
+      grid-column: 2 / 3;
+      grid-row: 2;
+      font-size: 10px; color: var(--color-text-muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-family: var(--font-mono);
+    }
+    .recent-row .when, .orphan-row .tag, .open-row .tag {
+      font-size: 10px; color: var(--color-text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .recent-row .x, .orphan-row .x, .open-row .x {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--color-text-muted);
+      padding: 3px 8px; border-radius: 4px;
+      font: inherit; font-size: 10px;
+      cursor: pointer;
+    }
+    .recent-row .x:hover, .orphan-row .x:hover, .open-row .x:hover {
+      border-color: var(--color-border);
+      color: var(--color-text);
+    }
+
+    section.orphans {
+      border-radius: 10px;
+      padding: 14px;
+      border: 1px solid color-mix(in oklab, #fbbf24 40%, var(--color-border));
+      background: color-mix(in oklab, #fbbf24 10%, var(--color-surface-elevated));
+    }
+    section.orphans h3 { color: #fbbf24; }
+    .orphan-row .reattach {
+      background: #fbbf24; color: #000;
+      border: 1px solid #fbbf24;
+      font-weight: 600; font-size: 10px;
+      padding: 3px 8px; border-radius: 4px;
+      cursor: pointer;
+    }
+    .orphan-row .reattach:hover { filter: brightness(1.08); }
+
+    .empty {
+      padding: 24px;
+      color: var(--color-text-muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .recents-footer {
+      display: flex; justify-content: flex-end;
+      padding: 6px 8px 0;
+    }
+    .recents-footer button {
+      background: transparent;
+      border: 0;
+      color: var(--color-text-muted);
+      font: inherit; font-size: 10px;
+      cursor: pointer;
+      padding: 2px 6px;
+    }
+    .recents-footer button:hover { color: var(--color-danger, #ef4444); }
+  `;
+
+  constructor() {
+    super();
+    this._recents = loadRecents();
+    this._orphans = [];
+    this._sessions = [];
+    this._onStore = () => this._refresh();
+    this._onOrphans = () => this._refresh();
+    this._onSessions = () => this._refresh();
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    const store = window.__foyer?.store;
+    store?.addEventListener("change", this._onStore);
+    store?.addEventListener("orphans", this._onOrphans);
+    store?.addEventListener("sessions", this._onSessions);
+    this._refresh();
+  }
+  disconnectedCallback() {
+    const store = window.__foyer?.store;
+    store?.removeEventListener("change", this._onStore);
+    store?.removeEventListener("orphans", this._onOrphans);
+    store?.removeEventListener("sessions", this._onSessions);
+    super.disconnectedCallback();
+  }
+
+  _refresh() {
+    this._recents = loadRecents();
+    this._orphans = window.__foyer?.store?.state?.orphans || [];
+    this._sessions = window.__foyer?.store?.state?.sessions || [];
+  }
+
+  _openRecent(entry) {
+    if (!entry?.path) return;
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    // Touch first so even if the launch fails the user sees their
+    // click promote the entry.
+    touchRecent(entry);
+    ws.send({
+      type: "launch_project",
+      backend_id: entry.backend_id || "ardour",
+      project_path: entry.path,
+    });
+  }
+
+  _forget(path, ev) {
+    ev.stopPropagation();
+    forgetRecent(path);
+    this._refresh();
+  }
+
+  _clearAll() {
+    clearAll();
+    this._refresh();
+  }
+
+  _browse() {
+    // Dynamic import so the welcome-screen module isn't forced to
+    // pull in the whole project picker bundle on first paint.
+    import("./project-picker-modal.js").then((m) => {
+      if (typeof m.openProjectPicker === "function") m.openProjectPicker();
+      else window.dispatchEvent(new CustomEvent("foyer:open-project-picker"));
+    });
+  }
+
+  _newSession() {
+    // Create-new-project has no backend command yet. The "new MIDI
+    // track" track.add_midi action ships an empty session via the
+    // stub-backend path, but creating a fresh on-disk .ardour file
+    // needs a Session::new() call in the shim that we haven't wired.
+    // For now show a tooltip via the [disabled] attribute; the CTA
+    // slot stays so the landing patch is a one-file change.
+  }
+
+  _reattach(orphan) {
+    const ws = window.__foyer?.ws;
+    if (!ws || !orphan) return;
+    if (orphan.kind === "running") {
+      ws.send({ type: "reattach_orphan", orphan_id: orphan.id });
+    } else {
+      // Crashed — attempt to reopen the project (same as clicking a
+      // recents entry). The orphan registry entry gets cleared once
+      // the sidecar re-launches against that path and succeeds.
+      ws.send({
+        type: "launch_project",
+        backend_id: orphan.backend_id || "ardour",
+        project_path: orphan.path,
+      });
+      ws.send({ type: "dismiss_orphan", orphan_id: orphan.id });
+    }
+    window.__foyer?.store?.forgetOrphan(orphan.id);
+  }
+
+  _dismiss(orphan) {
+    const ws = window.__foyer?.ws;
+    if (ws && orphan?.id) {
+      ws.send({ type: "dismiss_orphan", orphan_id: orphan.id });
+    }
+    window.__foyer?.store?.forgetOrphan(orphan?.id);
+  }
+
+  _switchToOpen(info) {
+    if (!info?.id) return;
+    window.__foyer?.store?.setCurrentSession(info.id);
+  }
+
+  render() {
+    const recents = this._recents || [];
+    const orphans = this._orphans || [];
+    const openSessions = this._sessions || [];
+    return html`
+      <div class="panel">
+        <header>
+          <span class="brand">Foyer Studio</span>
+          <span class="sub">Open a project to start mixing, or pick up where you left off.</span>
+        </header>
+
+        ${orphans.length > 0 ? html`
+          <section class="orphans">
+            <h3>⚠ Unfinished sessions found</h3>
+            <div class="orphan-list">
+              ${orphans.map((o) => html`
+                <div class="orphan-row" title="Session registry entry at ${o.socket || "(no socket)"}">
+                  <span class="icon">${icon("archive-box", 18)}</span>
+                  <div>
+                    <div class="name">${o.name || "(unnamed)"}</div>
+                    <div class="path">${o.path || ""}</div>
+                  </div>
+                  <span class="tag">${o.kind === "running" ? "Still running" : "Crashed"}</span>
+                  <div>
+                    <button class="reattach" @click=${() => this._reattach(o)}>
+                      ${o.kind === "running" ? "Reattach" : "Reopen"}
+                    </button>
+                    <button class="x" @click=${() => this._dismiss(o)}>Dismiss</button>
+                  </div>
+                </div>
+              `)}
+            </div>
+          </section>
+        ` : null}
+
+        <div class="actions">
+          <button class="cta" @click=${() => this._browse()}>
+            <span class="icon">${icon("folder-open", 18)}</span>
+            <div>
+              <div class="title">Browse projects…</div>
+              <div class="desc">Navigate the sidecar's project directory to find an Ardour session.</div>
+            </div>
+          </button>
+          <button class="cta" disabled title="Coming soon — needs a Session::new() command in the shim.">
+            <span class="icon">${icon("plus-circle", 18)}</span>
+            <div>
+              <div class="title">New session…</div>
+              <div class="desc">Start from scratch. Pick a template and a destination folder.</div>
+            </div>
+          </button>
+        </div>
+
+        ${openSessions.length > 0 ? html`
+          <section class="open">
+            <h3>Open sessions</h3>
+            <div class="open-list">
+              ${openSessions.map((s) => html`
+                <div class="open-row" @click=${() => this._switchToOpen(s)}>
+                  <span class="icon">${icon("musical-note", 18)}</span>
+                  <div>
+                    <div class="name">${s.name || "(unnamed)"}${s.dirty ? " •" : ""}</div>
+                    <div class="path">${s.path || "(no path)"}</div>
+                  </div>
+                  <span class="tag">${s.backend_id}</span>
+                  <span></span>
+                </div>
+              `)}
+            </div>
+          </section>
+        ` : null}
+
+        <section class="recents">
+          <h3>Recent projects</h3>
+          ${recents.length === 0 ? html`
+            <div class="recent-list">
+              <div class="empty">No recent projects yet. Browse to open your first one.</div>
+            </div>
+          ` : html`
+            <div class="recent-list">
+              ${recents.map((r) => html`
+                <div class="recent-row" @click=${() => this._openRecent(r)}>
+                  <span class="icon">${icon("clock", 18)}</span>
+                  <div>
+                    <div class="name">${r.name || "(unnamed)"}</div>
+                    <div class="path">${r.path}</div>
+                  </div>
+                  <span class="when">${formatWhen(r.opened_at)}</span>
+                  <button class="x" @click=${(e) => this._forget(r.path, e)}>Forget</button>
+                </div>
+              `)}
+            </div>
+            <div class="recents-footer">
+              <button @click=${() => this._clearAll()}>Clear all</button>
+            </div>
+          `}
+        </section>
+      </div>
+    `;
+  }
+}
+
+function formatWhen(unixSec) {
+  if (!unixSec) return "";
+  const d = new Date(unixSec * 1000);
+  const now = Date.now() / 1000;
+  const delta = Math.max(0, now - unixSec);
+  if (delta < 60) return "just now";
+  if (delta < 3600) return `${Math.round(delta / 60)} min ago`;
+  if (delta < 86400) return `${Math.round(delta / 3600)} h ago`;
+  if (delta < 7 * 86400) return `${Math.round(delta / 86400)} d ago`;
+  return d.toLocaleDateString();
+}
+
+customElements.define("foyer-welcome-screen", WelcomeScreen);

@@ -5,6 +5,15 @@ import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { showPreview } from "./preview-modal.js";
 
+/** Parent of a jail-relative path. `""` and `"/"` return `""`. */
+function parentPath(p) {
+  if (!p) return "";
+  const trimmed = p.replace(/\/+$/, "");
+  const idx = trimmed.lastIndexOf("/");
+  if (idx <= 0) return "";
+  return trimmed.slice(0, idx);
+}
+
 export class SessionView extends LitElement {
   static properties = {
     _listing:           { state: true, type: Object },
@@ -26,6 +35,21 @@ export class SessionView extends LitElement {
       font-size: 11px;
       color: var(--color-text-muted);
     }
+    .navbtn {
+      background: transparent;
+      border: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+      border-radius: var(--radius-sm);
+      padding: 2px 6px;
+      cursor: pointer;
+      display: inline-flex; align-items: center;
+    }
+    .navbtn:hover:not([disabled]) {
+      color: var(--color-text);
+      border-color: var(--color-accent);
+      background: var(--color-surface-elevated);
+    }
+    .navbtn[disabled] { opacity: 0.35; cursor: default; }
     .crumbs {
       display: flex; align-items: center; gap: 4px;
       flex-wrap: wrap;
@@ -210,56 +234,144 @@ export class SessionView extends LitElement {
     this._selectedBackendId = null;
     this._showHidden = false;
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
+
+    // Internal browser history for file navigation. Replaces the old
+    // `location.hash`-based approach (2026-04-22 rework): hash routes
+    // were cluttering the URL and couldn't distinguish "I went up a
+    // level" from "I followed a link to a path". We keep a plain
+    // array + cursor here, remember the last visited path in
+    // localStorage, and bind mouse 3/4 + Alt+←/Alt+→ for back/forward.
+    this._history = [];      // stack of visited paths, oldest → newest
+    this._histCursor = -1;   // index into _history; -1 = uninitialized
+    this._keyHandler = (e) => this._onKey(e);
+    this._mouseHandler = (e) => this._onMouseButton(e);
   }
 
   connectedCallback() {
     super.connectedCallback();
+    // Tab into the keydown handler so Alt+← / Alt+→ work as
+    // soon as the user clicks anywhere inside the picker.
+    this.tabIndex = 0;
     const ws = window.__foyer?.ws;
     if (ws) {
       ws.addEventListener("envelope", this._envelopeHandler);
       ws.send({ type: "list_backends" });
     }
-    // Hash-route the picker path so browser back/forward buttons walk the
-    // file-tree history. Format: `#projects=<url-encoded path>`. Empty or
-    // non-matching hashes resolve to the jail root. Multiple projects
-    // tiles stay in sync because they all read the same hash.
-    this._hashHandler = () => this._sendBrowse(this._pathFromHash());
-    window.addEventListener("hashchange", this._hashHandler);
-    this._sendBrowse(this._pathFromHash());
+    // Start at the user's last-visited folder (remembered across
+    // sessions in localStorage). First-run falls through to the jail
+    // root. The path is dispatched immediately so the initial listing
+    // shows up without needing to pick an item first.
+    const last = this._loadLastPath();
+    this._pushHistory(last);
+    this._sendBrowse(last);
+
+    // Keyboard + mouse back/forward. Bound on the element so we only
+    // consume the events while the picker is visible; mouse button
+    // 3/4 bubble through normally when the user isn't over us.
+    this.addEventListener("keydown", this._keyHandler);
+    this.addEventListener("mousedown", this._mouseHandler);
+    // Focus once the element is in the DOM so keyboard shortcuts
+    // fire without an explicit click first.
+    requestAnimationFrame(() => { try { this.focus?.(); } catch {} });
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
-    window.removeEventListener("hashchange", this._hashHandler);
+    this.removeEventListener("keydown", this._keyHandler);
+    this.removeEventListener("mousedown", this._mouseHandler);
     super.disconnectedCallback();
   }
 
-  /**
-   * Parse the current jail-relative path out of `location.hash`. Any hash
-   * we don't own (e.g. legacy `#mixer`) maps to the jail root so we never
-   * error on an unrelated fragment.
-   */
-  _pathFromHash() {
-    const m = /^#projects=(.*)$/.exec(location.hash || "");
-    if (!m) return "";
-    try { return decodeURIComponent(m[1]); } catch { return ""; }
+  // ── Navigation history ────────────────────────────────────────────
+  _loadLastPath() {
+    try {
+      return localStorage.getItem("foyer.picker.last-path") || "";
+    } catch {
+      return "";
+    }
+  }
+  _saveLastPath(path) {
+    try { localStorage.setItem("foyer.picker.last-path", path || ""); }
+    catch { /* quota / disabled storage — nav still works, no persistence */ }
+  }
+
+  /** Append a path to history, dropping any forward entries past
+   *  the current cursor (standard browser semantics). */
+  _pushHistory(path) {
+    // Truncate forward entries so a new nav kills the redo stack.
+    if (this._histCursor >= 0) {
+      this._history = this._history.slice(0, this._histCursor + 1);
+    }
+    // Collapse consecutive duplicates.
+    if (this._history[this._history.length - 1] !== path) {
+      this._history.push(path);
+    }
+    this._histCursor = this._history.length - 1;
+    this._saveLastPath(path);
+  }
+
+  _navBack() {
+    if (this._histCursor <= 0) return;
+    this._histCursor -= 1;
+    const p = this._history[this._histCursor];
+    this._sendBrowse(p);
+    this._saveLastPath(p);
+  }
+  _navForward() {
+    if (this._histCursor >= this._history.length - 1) return;
+    this._histCursor += 1;
+    const p = this._history[this._histCursor];
+    this._sendBrowse(p);
+    this._saveLastPath(p);
+  }
+
+  _onMouseButton(ev) {
+    // Mouse "back" button (4) / "forward" button (5). Different
+    // browsers number these differently; MouseEvent.button gives 3
+    // and 4 on most gaming mice + trackballs on Linux/Chromium.
+    if (ev.button === 3 || ev.button === 4) {
+      ev.preventDefault();
+      if (ev.button === 3) this._navBack();
+      else this._navForward();
+    }
+  }
+
+  _onKey(ev) {
+    // Alt+← / Alt+→ for back/forward (matches the browser's global
+    // shortcut — we swallow it while focused inside the picker so
+    // users don't accidentally navigate the tab). Backspace also
+    // acts as "up one level" if we're not inside a text input.
+    const tag = (ev.target?.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    if (ev.altKey && ev.key === "ArrowLeft") {
+      ev.preventDefault();
+      this._navBack();
+      return;
+    }
+    if (ev.altKey && ev.key === "ArrowRight") {
+      ev.preventDefault();
+      this._navForward();
+      return;
+    }
+    if (ev.key === "Backspace") {
+      ev.preventDefault();
+      const parent = parentPath(this._listing?.path || "");
+      this._navigate(parent);
+    }
   }
 
   /**
-   * Push a navigation step. Sets the hash, which fires `hashchange`,
-   * which dispatches to `_sendBrowse`. No direct WS send here so the
-   * "user clicked a folder" and "user hit back" code paths are the
-   * same — both land via hashchange.
+   * User-driven navigation entry point (folder click, breadcrumb click,
+   * "go home"). Appends to the internal history + fires the listing.
    */
   _navigate(path) {
-    const encoded = path ? encodeURIComponent(path) : "";
-    const target = `#projects=${encoded}`;
-    if (location.hash !== target) {
-      location.hash = target;
-    } else {
-      // No hash change but the caller asked for a refresh (e.g. after
-      // toggling show-hidden) — issue the browse directly.
-      this._sendBrowse(path);
+    const target = path || "";
+    if (target === (this._listing?.path || "")) {
+      // Same path — just a refresh (e.g. after toggling show-hidden).
+      this._sendBrowse(target);
+      return;
     }
+    this._pushHistory(target);
+    this._sendBrowse(target);
   }
 
   _sendBrowse(path) {
@@ -418,6 +530,18 @@ export class SessionView extends LitElement {
       ${this._renderPicker()}
       ${this._renderLaunching()}
       <div class="toolbar">
+        <button class="navbtn"
+                ?disabled=${this._histCursor <= 0}
+                title="Back (Alt+← or mouse back button)"
+                @click=${() => this._navBack()}>
+          ${icon("chevron-left", 12)}
+        </button>
+        <button class="navbtn"
+                ?disabled=${this._histCursor >= this._history.length - 1}
+                title="Forward (Alt+→ or mouse forward button)"
+                @click=${() => this._navForward()}>
+          ${icon("chevron-right", 12)}
+        </button>
         <div class="crumbs">
           <button @click=${() => this._browse("")}>${icon("folder-open", 12)} jail</button>
           ${crumbs.map((c, i) => {

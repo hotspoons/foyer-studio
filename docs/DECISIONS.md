@@ -1237,3 +1237,134 @@ Conversion would require destructive region operations
 would get lost on each flip. With an `active` flag, the region
 identity is stable across every conversion cycle — the only
 thing that changes is who's authoritative for the note list.
+
+
+## 29. Multi-session: N backends share one broadcast channel, envelopes carry `session_id`
+
+**Context.** Rich's 2026-04-22 ask: "I bounce between projects.
+Let's support opening multiple sessions in parallel." The sidecar
+today held exactly one `Arc<dyn Backend>` and `LaunchProject`
+swapped it. Building a session switcher required either:
+
+  (a) Multiple AppState instances, one per session, with separate
+      WS endpoints or connection state.
+  (b) One AppState, N backends in a `SessionRegistry`, every
+      envelope gets a `session_id` tag, clients filter by their
+      current selection.
+
+**Decision.** Option (b). The broadcast channel, ring buffer, and
+seq counter stay global. Each session has its own event pump that
+tags outbound envelopes with `session_id: Some(uuid)`. WS
+connections hold a per-connection `current_session_id` (via
+`Command::SelectSession`) and clients filter the incoming stream
+on the receive side.
+
+**Why not per-session AppStates.**
+
+1. **One WS connection, N sessions.** Users expect to open a
+   session, peek at another, and come back — all without
+   reconnecting the WebSocket. Separate AppStates would need
+   WS multiplexing or one socket per session, both of which
+   cost infrastructure for no user-visible benefit.
+2. **Global seq numbers are useful.** `?since=<seq>` replay
+   already works globally; keeping the ring + seq unified means
+   reconnects still work uniformly regardless of how many
+   sessions were in flight.
+3. **Pump logic is small.** `SessionRegistry::pump_session` is
+   40 lines and just forwards events with a tagged envelope.
+   Duplicating that as "one AppState per session" would be a
+   much larger refactor for no functional gain.
+
+**Tradeoffs.**
+
+- Clients that don't filter by `session_id` see events from
+  every session. The existing store handles this via the
+  `currentSessionId` state — events from non-current sessions
+  still update the `sessions` list + dirty flags, which is
+  desirable for the switcher chip.
+- The "legacy" pre-swap stub pump still exists for the
+  launcher-mode fallback. It emits events with `session_id:
+  None`; once a real session opens it takes over via the
+  registry path. Clean enough; not worth refactoring the stub
+  into a registered session.
+
+**Failure mode if re-implemented per-AppState.** The switcher
+would need a distinct WS connection per session, which means
+reconnect storms on every open/close, per-session rings + seq
+counters that don't compose for global replay, and the welcome
+screen would need a separate "overview" connection to enumerate
+sessions. The tag-by-session_id approach sidesteps all of that.
+
+
+## 30. Session UUID lives inside the .ardour file, shim writes the orphan registry
+
+**Context.** For multi-session the sidecar needs stable session
+identity across restarts + a way to detect orphaned shim
+processes when Foyer crashes. Two separable questions:
+
+  1. Where does the UUID live? (Options: sidecar config keyed by
+     path, or inside the .ardour file's extra_xml.)
+  2. How do we detect orphans? (Options: scan `ps`, or have the
+     shim leave breadcrumbs we parse.)
+
+**Decision.**
+
+  1. **UUID inside the .ardour file.** The shim, on
+     `set_active(true)`, reads `session.extra_xml("Foyer")` →
+     `<Session id="…"/>`. Missing node → generate a fresh UUID
+     v4, write it, call `session.set_dirty()` so the next save
+     persists it.
+  2. **Orphan detection via registry files.** Shim writes a
+     `~/.local/share/foyer/sessions/<uuid>.json` on
+     `set_active(true)` with `{pid, socket_path, project_path,
+     project_name, backend_id, started_at, last_updated}`. On
+     clean shutdown (`set_active(false)`) the shim removes it.
+     On sidecar startup, `orphans::scan_orphans` reads the dir:
+     pid alive + socket reachable → "running" (reattachable),
+     pid dead → "crashed" (reopen candidate), stale >7 days →
+     swept.
+
+**Why UUID in the .ardour file.**
+
+1. **Travels with the project.** Open the same .ardour file on
+   another machine → same UUID → the sidecar's
+   "already-open" detection works across collaborators sharing
+   a session over a common filesystem, and the switcher shows
+   one entry, not two.
+2. **Zero coordination.** No central registry of "Foyer knows
+   about these paths". The .ardour file IS the authority. A
+   Foyer install that never opens a file never writes a UUID.
+3. **Extension-friendly.** The `<Foyer>` extra_xml wrapper
+   already hosts sequencer layouts (Decision 28). Same attach-
+   point, same ownership model, same lifecycle.
+
+**Why registry files over `ps` scanning.**
+
+1. **`ps` is noisy and platform-specific.** Matching "my
+   shim's pid" by argv is fragile; a user who ran Ardour
+   manually without Foyer shouldn't look like an orphan.
+2. **Registry entries carry socket path.** Without that, even
+   if we identified a running shim via `ps` we'd have no way to
+   reconnect. The explicit JSON file pins the socket + pid +
+   project identity in one place.
+3. **Registry survives Foyer crash.** If Foyer dies without
+   cleaning up (kill -9, OOM, panic), the next Foyer sees the
+   leftover entry and offers reattach. A `ps` scan would miss
+   the user's intent to resume.
+
+**Tradeoffs.**
+
+- `.ardour` file gains a Foyer-specific XML node on first
+  Foyer-mediated save. Non-Foyer Ardour installs that open the
+  file preserve it transparently (Ardour's `Stateful` does so).
+  Net cost: ~80 bytes of XML per session.
+- Registry files accumulate until the shim removes them (or
+  the 7-day sweeper collects). Disk cost: one small JSON per
+  active session, cleaned on clean shutdown.
+
+**Failure mode if re-implemented sidecar-side.** A
+sidecar-keyed UUID map would misidentify sessions across
+`mv /path/to/session`, across users sharing a project folder,
+and across machine swaps. The identity would also reset every
+time the sidecar's config dir got cleared. Storing identity in
+the project file itself avoids every one of those.

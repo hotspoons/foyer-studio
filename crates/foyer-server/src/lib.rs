@@ -16,7 +16,9 @@ mod audio_ws;
 mod dev;
 mod files;
 mod jail;
+pub mod orphans;
 mod ring;
+mod sessions;
 mod ws;
 
 pub use jail::{Jail, JailError};
@@ -31,7 +33,9 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use foyer_backend::Backend;
-use foyer_schema::{BackendInfo, Envelope, Event, SCHEMA_VERSION};
+use foyer_schema::{BackendInfo, EntityId, Envelope, Event, SCHEMA_VERSION};
+
+use crate::sessions::SessionRegistry;
 use futures::StreamExt;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -103,14 +107,20 @@ pub(crate) struct AppState {
     /// Broadcast of all outgoing envelopes.
     pub(crate) tx: broadcast::Sender<Envelope<Event>>,
     /// Ring buffer for `?since=` resync.
-    pub(crate) ring: RwLock<DeltaRing>,
+    pub(crate) ring: Arc<RwLock<DeltaRing>>,
     /// Monotonic sequence counter.
-    pub(crate) next_seq: AtomicU64,
+    pub(crate) next_seq: Arc<AtomicU64>,
     /// Active backend. Wrapped in RwLock so the sidecar can swap
     /// backends at runtime (e.g. picker → open project → spawn Ardour
     /// → swap). WS handlers call `backend().await` to get a cheap
     /// `Arc<dyn Backend>` clone without holding the lock across an
     /// async backend call.
+    ///
+    /// With multi-session this points to the *most-recently-added*
+    /// session's backend. It's still here for two reasons: (1) legacy
+    /// callers (CLI bootstrap, tests) that haven't been migrated to
+    /// the sessions map, and (2) commands without an explicit
+    /// `session_id` that need somewhere to route.
     pub(crate) backend: RwLock<Arc<dyn Backend>>,
     /// Id of the active backend (matches `BackendInfo.id`). Tracks which
     /// entry in the spawner's list is currently live so the picker UI
@@ -132,11 +142,41 @@ pub(crate) struct AppState {
     /// `stream_id`; the `/ws/audio/:stream_id` route subscribes to
     /// its broadcasts. Shared across all connections.
     pub(crate) audio_hub: Arc<audio::AudioHub>,
+    /// Multi-session registry. Holds every currently-open session
+    /// keyed by its UUID; each has its own backend Arc + event pump.
+    /// `add_session`/`close_session` on this registry broadcasts
+    /// lifecycle events to all connected clients.
+    pub(crate) sessions: Arc<SessionRegistry>,
+    /// Orphans detected on sidecar startup. Kept so new clients can
+    /// retrieve the list on their first connect (vs. having to have
+    /// been attached when the scan happened). Cleared entries are
+    /// pruned when the user reattaches or dismisses.
+    pub(crate) orphans: RwLock<Vec<foyer_schema::OrphanInfo>>,
+    /// Which session the "default" command route targets when an
+    /// envelope arrives without an explicit `session_id`. Set by
+    /// `Command::SelectSession`; defaults to the most-recently-opened
+    /// session. Single-focus is good enough for the one-browser-
+    /// window-per-sidecar case today; a per-connection override can
+    /// layer on top later without breaking this default.
+    pub(crate) focus_session_id: RwLock<Option<EntityId>>,
 }
 
 impl AppState {
     fn next_seq(&self) -> u64 {
         self.next_seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Helper to build an `Envelope<Event>` tagged for the server
+    /// origin with a freshly-minted seq. Used by command dispatch
+    /// for error replies, lifecycle broadcasts, etc.
+    pub(crate) fn envelope(&self, body: Event, session_id: Option<EntityId>) -> Envelope<Event> {
+        Envelope {
+            schema: SCHEMA_VERSION,
+            seq: self.next_seq(),
+            origin: Some("server".into()),
+            session_id,
+            body,
+        }
     }
 
     pub(crate) async fn current_snapshot(&self) -> Option<Envelope<Event>> {
@@ -146,7 +186,18 @@ impl AppState {
     /// Get a cheap clone of the current backend trait-object. Release
     /// the read lock before awaiting anything on the returned `Arc`
     /// so a concurrent `swap_backend` isn't blocked on us.
+    ///
+    /// With multi-session enabled, this prefers the focused session's
+    /// backend (set via `Command::SelectSession`) over the legacy
+    /// `backend` field. Falls through to the legacy field when no
+    /// session is focused or the focused session's been closed,
+    /// which keeps the stub / launcher-mode path working.
     pub(crate) async fn backend(&self) -> Arc<dyn Backend> {
+        if let Some(id) = self.focus_session_id.read().await.clone() {
+            if let Some(be) = self.sessions.backend(&id).await {
+                return be;
+            }
+        }
         self.backend.read().await.clone()
     }
 
@@ -154,43 +205,70 @@ impl AppState {
     /// one subscribed to `next`, drops the cached snapshot (so the next
     /// `SessionSnapshot` from the new backend re-seeds it), and emits a
     /// `BackendSwapped` event to all connected clients.
+    ///
+    /// With multi-session enabled this also registers the new backend
+    /// in the sessions map so the switcher sees it. Existing sessions
+    /// are left alone — callers that want to *close* an old session
+    /// before swapping must call `sessions.close()` explicitly. The
+    /// `session_id` argument is the UUID the shim pre-generated and
+    /// wrote into the .ardour file; when `None` we synthesize a
+    /// random id for stub/anonymous backends.
     pub(crate) async fn swap_backend(
         self: &Arc<Self>,
         backend_id: String,
         project_path: Option<String>,
         next: Arc<dyn Backend>,
+        session_id: Option<EntityId>,
+        session_name: Option<String>,
     ) {
         *self.backend.write().await = next.clone();
         *self.active_backend_id.write().await = Some(backend_id.clone());
         *self.cached_snapshot.write().await = None;
 
-        // Restart pump against the new backend. event_pump itself
-        // emits BackendLost on natural exit (see its tail) so we
-        // don't need wrapper logic here.
+        // Abort the legacy one-shot pump if any. New sessions get
+        // their own pump spawned by the registry, so we don't
+        // re-spawn here.
         let mut slot = self.pump_handle.lock().await;
         if let Some(h) = slot.take() {
             h.abort();
         }
-        let s = self.clone();
-        *slot = Some(tokio::spawn(async move {
-            if let Err(e) = event_pump(next, s).await {
-                tracing::error!("event pump died: {e}");
-            }
-        }));
         drop(slot);
+
+        // Register the new session so the switcher + multi-session
+        // command routing sees it. Falls back to a synthetic id when
+        // the caller didn't supply one (stub backends, legacy tests).
+        let sid = session_id.unwrap_or_else(|| {
+            EntityId::new(format!(
+                "session.{}",
+                uuid::Uuid::new_v4().simple()
+            ))
+        });
+        let name = session_name.unwrap_or_else(|| {
+            project_path
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).file_stem()?.to_str().map(String::from))
+                .unwrap_or_else(|| backend_id.clone())
+        });
+        let path = project_path.clone().unwrap_or_default();
+        self.sessions
+            .clone()
+            .add(sid.clone(), backend_id.clone(), next, path, name)
+            .await;
+        // Newly-opened session automatically becomes the focus
+        // target so untagged commands flow to it. User can switch
+        // away via `SelectSession`.
+        *self.focus_session_id.write().await = Some(sid);
 
         // Tell all clients to re-snapshot. The swap event goes through
         // the same broadcast + ring as every other event so `?since=`
         // reconnects replay it.
-        let env = Envelope {
-            schema: SCHEMA_VERSION,
-            seq: self.next_seq(),
-            origin: Some("server".into()),
-            body: Event::BackendSwapped {
+        let env = self.envelope(
+            Event::BackendSwapped {
                 backend_id,
                 project_path,
             },
-        };
+            None,
+        );
         self.ring.write().await.push(env.clone());
         let _ = self.tx.send(env);
     }
@@ -221,11 +299,14 @@ impl Server {
         spawner: Option<Arc<dyn BackendSpawner>>,
     ) -> Self {
         let (tx, _) = broadcast::channel(BROADCAST_CAP);
+        let ring = Arc::new(RwLock::new(DeltaRing::new(RING_CAP)));
+        let next_seq = Arc::new(AtomicU64::new(1));
+        let sessions = Arc::new(SessionRegistry::new(tx.clone(), ring.clone(), next_seq.clone()));
         let state = Arc::new(AppState {
             cached_snapshot: RwLock::new(None),
             tx,
-            ring: RwLock::new(DeltaRing::new(RING_CAP)),
-            next_seq: AtomicU64::new(1),
+            ring,
+            next_seq,
             backend: RwLock::new(backend),
             active_backend_id: RwLock::new(None),
             spawner,
@@ -233,6 +314,9 @@ impl Server {
             jail: None,
             listen_port: std::sync::atomic::AtomicU16::new(0),
             audio_hub: Arc::new(audio::AudioHub::new()),
+            sessions,
+            orphans: RwLock::new(Vec::new()),
+            focus_session_id: RwLock::new(None),
         });
         Self { state }
     }
@@ -242,6 +326,22 @@ impl Server {
     /// knows what's active.
     pub async fn set_active_backend(&self, backend_id: impl Into<String>) {
         *self.state.active_backend_id.write().await = Some(backend_id.into());
+    }
+
+    /// Populate the orphan list from the session registry directory.
+    /// Called by the CLI at startup so the first client to connect
+    /// sees a live orphan roll-up. The server also ensures the
+    /// registry directory exists so the shim's write-on-startup step
+    /// doesn't race on an uncreated parent.
+    pub async fn scan_orphans(&self) {
+        if let Err(e) = orphans::ensure_registry_dir() {
+            tracing::warn!("orphan registry dir not usable: {e}");
+        }
+        let orphans = orphans::scan_orphans().await;
+        if !orphans.is_empty() {
+            tracing::info!("detected {} orphan session(s)", orphans.len());
+        }
+        *self.state.orphans.write().await = orphans;
     }
 
     pub async fn run(mut self, config: Config) -> Result<(), ServerError> {
@@ -358,6 +458,12 @@ async fn event_pump(
             schema: SCHEMA_VERSION,
             seq,
             origin: Some("backend".to_string()),
+            // Legacy bootstrap pump — the initial stub/launcher
+            // backend isn't registered as a real session so events
+            // are emitted session-less. Once a real session opens
+            // (via swap_backend → registry.add), that session's
+            // pump tags its own events.
+            session_id: None,
             body: event,
         };
         if matches!(env.body, Event::SessionSnapshot { .. }) {
@@ -401,6 +507,7 @@ async fn emit_backend_lost(state: &Arc<AppState>, backend_id: &str, reason: Stri
         schema: SCHEMA_VERSION,
         seq: state.next_seq(),
         origin: Some("server".into()),
+        session_id: None,
         body: Event::BackendLost {
             backend_id: backend_id.to_string(),
             reason,

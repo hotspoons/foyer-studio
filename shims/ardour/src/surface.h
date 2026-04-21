@@ -5,6 +5,7 @@
 #define foyer_shim_surface_h
 
 #include <memory>
+#include <string>
 
 #include "pbd/abstract_ui.h"
 #include "pbd/event_loop.h"
@@ -67,10 +68,18 @@ public:
 		return static_cast<PBD::EventLoop*> (this);
 	}
 
+	/// Stable session identifier (UUID v4 string) persisted inside
+	/// the .ardour file's extra_xml. Populated on `set_active(true)`.
+	/// Empty before the shim finishes activation or after a clean
+	/// shutdown. Accessors let the dispatcher advertise it to the
+	/// sidecar on the initial hello.
+	const std::string& session_uuid () const { return _session_uuid; }
+
 private:
 	std::unique_ptr<IpcServer>    _ipc;
 	std::unique_ptr<Dispatcher>   _dispatcher;
 	std::unique_ptr<SignalBridge> _bridge;
+	std::string                   _session_uuid;
 };
 
 } // namespace ArdourSurface

@@ -207,12 +207,25 @@ It would be awesome if we could have the midi generation happen in the foyer bac
 
 
 
-- More polish on the beats - The add pattern button should be above the patterns boxes, the arrangement box should be resizable veritcally with vertical overflow, the preset beat kit we detected should be able to add additional beats (pick from piano roll, name the custom drum, should get placed in the note sequence). Have a checkbox to enable/disable audio preview in all piano rolls so when you click a note or drum, as long as the channel is unmuted and bussed to output (not disk only). Add ability to drag up/down the velocity for beats on the sequencer (need to show colored velocity markers with multiple beats per note if there is overlap, see screenshot)
-- Add "add region" in midi channel context menu (should add region at point where right clicked)
-- Alt drag for adhoc placement of beats and notes in quantized grid, alt drag resize of notes too
-- Presets manager on beat loops (with option to import/export as $name.fybt or something json or yaml, look at persisting in ardour config if there are any extensible config sections for the DAW as a whole) - for now store in browser storage
-- Add disk (play) and in (monitor) option on the mixer
-
+- ~~More polish on the beats - The add pattern button should be above the patterns boxes, the arrangement box should be resizable veritcally with vertical overflow, the preset beat kit we detected should be able to add additional beats (pick from piano roll, name the custom drum, should get placed in the note sequence). Have a checkbox to enable/disable audio preview in all piano rolls so when you click a note or drum, as long as the channel is unmuted and bussed to output (not disk only). Add ability to drag up/down the velocity for beats on the sequencer (need to show colored velocity markers with multiple beats per note if there is overlap, see screenshot)~~
+- ~~Add "add region" in midi channel context menu (should add region at point where right clicked)~~
+- ~~Alt drag for adhoc placement of beats and notes in quantized grid, alt drag resize of notes too~~
+- ~~Presets manager on beat loops (with option to import/export as $name.fybt or something json or yaml, look at persisting in ardour config if there are any extensible config sections for the DAW as a whole) - for now store in browser storage~~
+- ~~Add disk (play) and in (monitor) option on the mixer~~
+- Session durability/cross-crash/restart recovery, ux for sessions
+  - Opening a session should create an internal UUID for that session in foyer, and from the UI we should be able to pick from open sessions
+  - If that session is open with ardour, we should not be able to reopen it, it should just switch to the active session
+  - If ardour crashes and we have the crash data, we should offer to reopen the session
+  - We should move off of hash-based navigation of files, and instead remember the last folder selected, and see if we can caputure browser forward/back actions (and mouse browser forward/back) and/or keyboard shortcuts while focused in the file view window
+  - Need way to reattach orphaned hardour processes if we close foyer while a session is running, currently no way
+    - Should prompt on first open of UI if we detect orphaned hardour processes to reattach
+  - We should catalog recently opened sessions (like 10 of them, configurable via settings) under session -> recent
+  - We should guard against opening a new session if the current session is unsaved (prompt if they want to abandon unsaved changes)
+    - A third option could be leave session running in background, come back to it later
+  - Close session (should close the Ardour process for the session, bring you back to main view)
+  - State of listen/monitoring should be persistent, not reset per project
+    - Default to listen off for local sessions, monitoring for remote sessions
+  - 
 
 Please follow-up on these:
 
@@ -221,3 +234,4 @@ Multi-track add/delete: schema has no CreateTrack / DeleteTrack — that's its o
 Browser→DAW ingress: the shim command now rejects cleanly instead of hanging. Needs a SidecarInputPort class parallel to MasterTap (Decision 24 has the sketch). ~200–400 lines of RT-disciplined Ardour C++.
 
 And review context and find any incomplete items and write up a new plan document with everything left to do based on instructions so far.
+

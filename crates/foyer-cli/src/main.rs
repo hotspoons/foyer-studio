@@ -377,6 +377,12 @@ async fn serve(
     // stub, but the picker should treat the user's configured default as
     // the preferred target — so we report the config id as "active."
     server.set_active_backend(initial_backend_id).await;
+    // Scan for orphaned shim sessions left behind by a previous Foyer
+    // run that crashed (or was killed without closing its sessions).
+    // The first client that connects will see these in their
+    // SessionList/OrphansDetected payload and can offer reattach or
+    // dismiss via the session switcher.
+    server.scan_orphans().await;
     if is_launcher_mode {
         tracing::info!(
             "launcher mode active — pick a project in the browser to launch Ardour"

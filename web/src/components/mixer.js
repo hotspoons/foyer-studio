@@ -147,20 +147,53 @@ export class Mixer extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    // The store mutates `session.tracks[i]` in place when a
-    // `track_updated` arrives (rename, color, etc.) so Lit's default
-    // property-identity check won't see a change on `.session`. Timeline
-    // avoids this by subscribing to control/selection events; mixer
-    // needs the same "repaint on change" listener or a rename only
-    // updates the timeline strip, not the mixer strip.
+    // Session-agnostic listen default + persistence. The user's
+    // previous pref (stored in localStorage under
+    // `foyer.listen.master`) wins if present; otherwise we default
+    // based on whether the client is local (speakers → the same
+    // host, off by default) or remote (no speakers on the sidecar
+    // → on by default so the remote listener hears something).
     this._onStoreChange = () => this.requestUpdate();
     window.__foyer?.store?.addEventListener("change", this._onStoreChange);
+    this._onGreeting = (ev) => {
+      const body = ev?.detail?.body;
+      if (body?.type !== "client_greeting") return;
+      this._maybeRestoreListen(!!body.is_local);
+    };
+    window.__foyer?.ws?.addEventListener("envelope", this._onGreeting);
+    // If the greeting already arrived before we connected, read it now.
+    const greet = window.__foyer?.store?.state?._greeting;
+    if (greet) this._maybeRestoreListen(!!greet.isLocal);
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
+    window.__foyer?.ws?.removeEventListener("envelope", this._onGreeting);
+    this._cleanupListener();
+    super.disconnectedCallback();
+  }
+
+  _maybeRestoreListen(isLocal) {
+    if (this._listening) return;
+    // Explicit saved pref wins. Default: off for local, on for
+    // remote (so remote clients hear the session without having
+    // to hunt for the Listen button).
+    const saved = localStorage.getItem("foyer.listen.master");
+    const wantOn =
+      saved === "1" ? true
+      : saved === "0" ? false
+      : !isLocal;
+    if (wantOn) {
+      // Fire once but don't await — the mixer's ready flag is more
+      // important than catching the listen Promise here.
+      this._toggleListen().catch(() => {});
+    }
+  }
+
+  // (connectedCallback + disconnectedCallback are defined above — the
+  // listener cleanup + store-change wiring lives there now.)
+  _cleanupListener() {
     this._listener?.stop();
     this._listener = null;
-    super.disconnectedCallback();
   }
 
   /** Mixers overflow horizontally on big sessions, but the browser's
@@ -187,6 +220,8 @@ export class Mixer extends LitElement {
       try { await this._listener?.stop(); } catch {}
       this._listener = null;
       this._listening = false;
+      // Persist user's preference: off.
+      localStorage.setItem("foyer.listen.master", "0");
       return;
     }
     // Master-out preview: listens on the sidecar's synthesized test
@@ -211,11 +246,19 @@ export class Mixer extends LitElement {
       console.info(`[mixer] Listen starting with codec=${codec}`);
       await this._listener.start();
       this._listening = true;
+      localStorage.setItem("foyer.listen.master", "1");
     } catch (e) {
       console.error("[mixer] listen failed:", e);
       this._listener = null;
       this._listening = false;
-      alert("Audio listen failed: " + e.message);
+      import("./confirm-modal.js").then(({ confirmAction }) => {
+        confirmAction({
+          title: "Listen failed",
+          message: `Couldn't start the master-out listener:\n\n${e.message}`,
+          confirmLabel: "OK",
+          cancelLabel: "Close",
+        });
+      });
     }
   };
 
