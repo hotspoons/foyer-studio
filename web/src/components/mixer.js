@@ -231,14 +231,38 @@ export class Mixer extends LitElement {
   _setMode(m)    { this._widthMode = m; this._save(); }
 
   _onChannelResize(ev) {
-    const { trackId, width, final } = ev.detail || {};
+    const { trackId, width, delta, startWidth, final, resizeAll } = ev.detail || {};
     if (!trackId) return;
-    // A zero width means "clear my override and follow the global setting."
     const next = { ...this._widthOverrides };
-    if (!width) delete next[trackId];
-    else next[trackId] = width;
+    if (resizeAll) {
+      // Shift-drag mode: every strip's width shifts by the same
+      // delta from wherever it started. Capture each strip's
+      // pre-drag width on first tick so subsequent ticks don't
+      // compound.
+      if (!this._resizeAllBase) {
+        const tracks = this.session?.tracks || [];
+        const base = {};
+        for (const t of tracks) {
+          if (!t?.id) continue;
+          base[t.id] = this._widthOverrides[t.id] || startWidth || 0;
+        }
+        this._resizeAllBase = base;
+      }
+      for (const [id, baseW] of Object.entries(this._resizeAllBase)) {
+        const w = Math.max(28, Math.min(360, (baseW || startWidth || 0) + (delta || 0)));
+        if (w > 0) next[id] = Math.round(w);
+      }
+    } else {
+      // A zero width means "clear my override and follow the
+      // global setting."
+      if (!width) delete next[trackId];
+      else next[trackId] = width;
+    }
     this._widthOverrides = next;
-    if (final) this._save();
+    if (final) {
+      this._resizeAllBase = null;
+      this._save();
+    }
   }
 
   _resetAllOverrides() {

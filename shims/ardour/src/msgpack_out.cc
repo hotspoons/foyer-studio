@@ -27,7 +27,6 @@
 #include <sstream>
 
 #include "ardour/automation_control.h"
-#include "ardour/file_source.h"
 #include "ardour/meter.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
@@ -592,10 +591,14 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	const bool emit_source_path = !r.source_path.empty ();
 	const bool emit_source_off  = r.has_source_offset && !r.source_path.empty ();
 	const bool emit_notes       = !r.notes.empty ();
+	const bool emit_patches     = !r.patch_changes.empty ();
+	const bool emit_sequencer   = r.sequencer.present;
 	if (emit_color)       ++n;
 	if (emit_source_path) ++n;
 	if (emit_source_off)  ++n;
 	if (emit_notes)       ++n;
+	if (emit_patches)     ++n;
+	if (emit_sequencer)   ++n;
 
 	o.map (n);
 	o.str ("id");             o.str (r.id);
@@ -611,9 +614,6 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 		o.str ("notes");
 		o.array (r.notes.size ());
 		for (auto const& nd : r.notes) {
-			// Foyer schema: MidiNote { id, pitch, velocity, start_ticks,
-			// length_ticks, channel }. Keep the map in lockstep with
-			// crates/foyer-schema/src/midi.rs.
 			o.map (6);
 			o.str ("id");            o.str (nd.id);
 			o.str ("pitch");         o.u (nd.pitch);
@@ -621,6 +621,51 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 			o.str ("start_ticks");   o.u (nd.start_ticks);
 			o.str ("length_ticks");  o.u (nd.length_ticks);
 			o.str ("channel");       o.u (nd.channel);
+		}
+	}
+	if (emit_patches) {
+		o.str ("patch_changes");
+		o.array (r.patch_changes.size ());
+		for (auto const& pc : r.patch_changes) {
+			// Foyer schema: PatchChange { id, channel, program, bank, start_ticks }.
+			o.map (5);
+			o.str ("id");          o.str (pc.id);
+			o.str ("channel");     o.u (pc.channel);
+			o.str ("program");     o.u (pc.program);
+			o.str ("bank");        o.i (pc.bank);
+			o.str ("start_ticks"); o.u (pc.start_ticks);
+		}
+	}
+	if (r.sequencer.present) {
+		o.str ("foyer_sequencer");
+		// SequencerLayout { version, mode, resolution, steps, rows, cells }
+		o.map (6);
+		o.str ("version");    o.u (r.sequencer.version);
+		o.str ("mode");       o.str (r.sequencer.mode);
+		o.str ("resolution"); o.u (r.sequencer.resolution);
+		o.str ("steps");      o.u (r.sequencer.steps);
+		o.str ("rows");
+		o.array (r.sequencer.rows.size ());
+		for (auto const& row : r.sequencer.rows) {
+			// SequencerRow { pitch, label, channel, color?, muted, soloed }
+			std::size_t mn = 5; // pitch, label, channel, muted, soloed
+			const bool emit_color = !row.color.empty ();
+			if (emit_color) ++mn;
+			o.map (mn);
+			o.str ("pitch");   o.u (row.pitch);
+			o.str ("label");   o.str (row.label);
+			o.str ("channel"); o.u (row.channel);
+			if (emit_color) { o.str ("color"); o.str (row.color); }
+			o.str ("muted");   o.b (row.muted);
+			o.str ("soloed");  o.b (row.soloed);
+		}
+		o.str ("cells");
+		o.array (r.sequencer.cells.size ());
+		for (auto const& c : r.sequencer.cells) {
+			o.map (3);
+			o.str ("row");      o.u (c.row);
+			o.str ("step");     o.u (c.step);
+			o.str ("velocity"); o.u (c.velocity);
 		}
 	}
 }
@@ -658,24 +703,15 @@ encode_region_updated (Session& session, const std::string& region_id)
 	auto hit = schema_map::find_region (session, region_id);
 	if (!hit.region) return {};
 
-	schema_map::RegionDesc d;
-	d.id             = region_id;
-	d.track_id       = hit.track_id;
-	d.name           = hit.region->name ();
-	d.start_samples  = static_cast<std::uint64_t> (std::max<samplepos_t> (hit.region->position_sample (), 0));
-	d.length_samples = static_cast<std::uint64_t> (std::max<samplecnt_t> (hit.region->length_samples (), 0));
-	d.muted          = hit.region->muted ();
-	d.color          = "";
-	auto src = hit.region->source (0);
-	if (src) {
-		auto fs = std::dynamic_pointer_cast<FileSource> (src);
-		if (fs) {
-			d.source_path            = fs->path ();
-			d.source_offset_samples  =
-			    static_cast<std::uint64_t> (std::max<samplecnt_t> (hit.region->start_sample (), 0));
-			d.has_source_offset      = true;
-		}
-	}
+	// Reuse the same extraction path as the initial snapshot so MIDI
+	// notes (and any other per-region derived data) ride along on every
+	// update. Prior to this, encode_region_updated manually constructed
+	// a RegionDesc and silently dropped `notes`, which made the web
+	// piano-roll context menu vanish after the first update.
+	schema_map::RegionDesc d = schema_map::describe_region_desc (*hit.region, hit.track_id);
+	// `find_region` returns the canonical "region.<pbd-id>" form; keep
+	// what the caller passed in, which already matches.
+	d.id = region_id;
 
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
@@ -683,6 +719,33 @@ encode_region_updated (Session& session, const std::string& region_id)
 		o.str ("type");   o.str ("region_updated");
 		o.str ("region");
 		emit_region_map (o, d);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_plugin_presets_listed (Session& session, const std::string& plugin_id)
+{
+	auto presets = schema_map::list_plugin_presets (session, plugin_id);
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");       o.str ("event");
+		o.str ("type");      o.str ("plugin_presets_listed");
+		o.str ("plugin_id"); o.str (plugin_id);
+		o.str ("presets");
+		o.array (presets.size ());
+		for (auto const& p : presets) {
+			// Foyer schema: PluginPreset { id, name, bank, is_factory }.
+			std::size_t n = 2; // id, name
+			const bool emit_bank = !p.bank.empty ();
+			if (emit_bank) ++n;
+			// is_factory is a bool so always emit
+			++n;
+			o.map (n);
+			o.str ("id");   o.str (p.id);
+			o.str ("name"); o.str (p.name);
+			if (emit_bank) { o.str ("bank"); o.str (p.bank); }
+			o.str ("is_factory"); o.b (p.is_factory);
+		}
 	});
 }
 

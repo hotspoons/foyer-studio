@@ -491,6 +491,45 @@ pub enum Command {
         region_id: EntityId,
         note_id: EntityId,
     },
+    /// Insert a program/bank change event into a MIDI region. The shim
+    /// builds an Ardour `Evoral::PatchChange` at `start_ticks` on
+    /// `channel` and ships it through `PatchChangeDiffCommand::add`.
+    AddPatchChange {
+        region_id: EntityId,
+        patch_change: crate::midi::PatchChange,
+    },
+    UpdatePatchChange {
+        region_id: EntityId,
+        patch_change_id: EntityId,
+        patch: crate::midi::PatchChangePatch,
+    },
+    DeletePatchChange {
+        region_id: EntityId,
+        patch_change_id: EntityId,
+    },
+
+    /// Install a beat-sequencer layout on a MIDI region. The shim
+    /// persists it in the region's `_extra_xml` sub-tree so stock
+    /// Ardour save/load cycles preserve it, and (re)generates the
+    /// region's note list from the layout's cells. Passing this
+    /// flips the region to "sequencer-owned" state.
+    SetSequencerLayout {
+        region_id: EntityId,
+        layout: crate::midi::SequencerLayout,
+    },
+    /// Drop the beat-sequencer metadata from a region. Note list is
+    /// left as-is — the user can keep editing in the piano roll.
+    ClearSequencerLayout {
+        region_id: EntityId,
+    },
+
+    // ───── session undo / redo ──────────────────────────────────────────
+    /// Pop one step off the session's undo stack. In Ardour this is
+    /// `Session::undo(1)`; other hosts should behave equivalently
+    /// (reverse the most recent reversible command).
+    Undo,
+    /// Re-apply the most recently undone step.
+    Redo,
 
     // ───── transport ────────────────────────────────────────────────────
     /// Move the playhead to the given sample position. Distinct from

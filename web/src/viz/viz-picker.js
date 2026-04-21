@@ -9,6 +9,7 @@ import { icon } from "../icons.js";
 import {
   WAVEFORM_STYLES,
   WAVEFORM_PALETTES,
+  MIDI_PALETTES,
   getVizPrefs,
   setVizPref,
 } from "./viz-settings.js";
@@ -169,6 +170,32 @@ export class VizPicker extends LitElement {
                      .value=${String(this._prefs.clipThreshold)}
                      @input=${(e) => this._set("clipThreshold", Number(e.currentTarget.value))}>
               <span class="num">${this._prefs.clipThreshold.toFixed(2)}</span>
+            </div>
+          </div>
+
+          <div class="row" style="border-top:1px solid var(--color-border);padding-top:10px;margin-top:4px">
+            <div class="label">MIDI note color</div>
+            <div class="swatches">
+              ${Object.entries(MIDI_PALETTES).map(([name, p]) => {
+                const fill = p.note || "linear-gradient(135deg, var(--color-accent), var(--color-accent-2))";
+                return html`
+                  <div class="swatch ${this._prefs.midiPalette === name ? "active" : ""}"
+                       title=${p.label}
+                       style=${p.note
+                         ? `background:${fill}`
+                         : `background-image:repeating-linear-gradient(45deg, var(--color-surface), var(--color-surface) 3px, var(--color-border) 3px, var(--color-border) 5px)`}
+                       @click=${() => this._set("midiPalette", name)}></div>
+                `;
+              })}
+            </div>
+          </div>
+          <div class="row">
+            <div class="label">MIDI velocity shading</div>
+            <div class="slider-row">
+              <input type="range" min="0" max="1" step="0.05"
+                     .value=${String(this._prefs.midiVelocityShading ?? 0.6)}
+                     @input=${(e) => this._set("midiVelocityShading", Number(e.currentTarget.value))}>
+              <span class="num">${(this._prefs.midiVelocityShading ?? 0.6).toFixed(2)}</span>
             </div>
           </div>
         </div>

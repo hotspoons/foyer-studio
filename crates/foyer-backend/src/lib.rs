@@ -14,9 +14,9 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use foyer_schema::{
-    Action, AudioFormat, AudioSource, ControlValue, EntityId, Event, LatencyReport, PathListing,
-    PluginCatalogEntry, Region, RegionPatch, Session, TimelineMeta, Track, TrackPatch,
-    WaveformPeaks,
+    Action, AudioFormat, AudioSource, ControlValue, EntityId, Event, LatencyReport, MidiNote,
+    MidiNotePatch, PatchChange, PatchChangePatch, PathListing, PluginCatalogEntry, PluginPreset,
+    Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -194,6 +194,98 @@ pub trait Backend: Send + Sync + 'static {
     /// on (so the server can emit `RegionRemoved { track_id, region_id }`).
     async fn delete_region(&self, _id: EntityId) -> Result<EntityId, BackendError> {
         Err(BackendError::Other("delete_region not supported".into()))
+    }
+
+    // ─── MIDI note edits ────────────────────────────────────────────────
+    //
+    // The backend is fire-and-forget: it accepts the command and relies
+    // on the host echoing a `RegionUpdated` event once the mutation has
+    // been applied to the model. Returning `Ok(())` here means "the
+    // command was dispatched", not "the model has committed" — callers
+    // reconcile via the event stream. This matches the mackie / OSC
+    // surface idiom: side-effect fire-and-forget, state ships over the
+    // subscription.
+    async fn add_midi_note(
+        &self,
+        _region_id: EntityId,
+        _note: MidiNote,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("add_midi_note not supported".into()))
+    }
+    async fn update_midi_note(
+        &self,
+        _region_id: EntityId,
+        _note_id: EntityId,
+        _patch: MidiNotePatch,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("update_midi_note not supported".into()))
+    }
+    async fn delete_midi_note(
+        &self,
+        _region_id: EntityId,
+        _note_id: EntityId,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("delete_midi_note not supported".into()))
+    }
+
+    async fn add_patch_change(
+        &self,
+        _region_id: EntityId,
+        _patch_change: PatchChange,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("add_patch_change not supported".into()))
+    }
+    async fn update_patch_change(
+        &self,
+        _region_id: EntityId,
+        _patch_change_id: EntityId,
+        _patch: PatchChangePatch,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("update_patch_change not supported".into()))
+    }
+    async fn delete_patch_change(
+        &self,
+        _region_id: EntityId,
+        _patch_change_id: EntityId,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("delete_patch_change not supported".into()))
+    }
+
+    async fn set_sequencer_layout(
+        &self,
+        _region_id: EntityId,
+        _layout: SequencerLayout,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("set_sequencer_layout not supported".into()))
+    }
+    async fn clear_sequencer_layout(
+        &self,
+        _region_id: EntityId,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("clear_sequencer_layout not supported".into()))
+    }
+
+    // ─── plugin presets ─────────────────────────────────────────────────
+    async fn list_plugin_presets(
+        &self,
+        _plugin_id: EntityId,
+    ) -> Result<Vec<PluginPreset>, BackendError> {
+        Ok(Vec::new())
+    }
+    async fn load_plugin_preset(
+        &self,
+        _plugin_id: EntityId,
+        _preset_id: EntityId,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("load_plugin_preset not supported".into()))
+    }
+
+    // ─── session undo / redo ────────────────────────────────────────────
+    async fn undo(&self) -> Result<(), BackendError> {
+        Err(BackendError::Other("undo not supported".into()))
+    }
+    async fn redo(&self) -> Result<(), BackendError> {
+        Err(BackendError::Other("redo not supported".into()))
     }
     async fn load_waveform(
         &self,

@@ -7,7 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{midi::MidiNote, EntityId};
+use crate::{
+    midi::{MidiNote, PatchChange, SequencerLayout},
+    EntityId,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Region {
@@ -40,6 +43,16 @@ pub struct Region {
     /// timeline lozenges) can ignore it.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub notes: Vec<MidiNote>,
+    /// For MIDI regions: program/bank change events embedded in the
+    /// region. Audio regions leave this empty.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub patch_changes: Vec<PatchChange>,
+    /// Optional Foyer beat-sequencer layout. Persisted on the shim
+    /// side inside the region's `_extra_xml` sub-tree; when present
+    /// the client's piano roll flips to read-only and the beat
+    /// sequencer owns the note list.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub foyer_sequencer: Option<SequencerLayout>,
 }
 
 /// Minimal viewport/scale info UIs need to lay out regions consistently.

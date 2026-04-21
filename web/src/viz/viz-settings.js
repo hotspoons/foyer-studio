@@ -38,6 +38,38 @@ export const WAVEFORM_PALETTES = Object.fromEntries(
   }]),
 );
 
+// MIDI-strip themes — independent from waveforms since MIDI regions
+// are a different visual primitive (notes as horizontal bars, no
+// sample peaks). Each theme maps to a color the timeline's
+// `<foyer-midi-strip>` uses for its note rectangles.
+export const MIDI_PALETTES_ORDER = [
+  "violet", "mint", "amber", "coral", "steel", "match",
+];
+const MIDI_PALETTE_LABELS = {
+  violet: "Violet",
+  mint:   "Mint",
+  amber:  "Amber",
+  coral:  "Coral",
+  steel:  "Steel",
+  match:  "Match track color",
+};
+export const MIDI_PALETTES_RAW = {
+  violet: { note: "#c4b5fd" },
+  mint:   { note: "#6ee7b7" },
+  amber:  { note: "#fcd34d" },
+  coral:  { note: "#fda4af" },
+  steel:  { note: "#cbd5e1" },
+  // Special sentinel — `foyer-midi-strip` falls back to `track.color`
+  // if set, otherwise the default violet.
+  match:  { note: null },
+};
+export const MIDI_PALETTES = Object.fromEntries(
+  MIDI_PALETTES_ORDER.map((id) => [id, {
+    label: MIDI_PALETTE_LABELS[id] || id,
+    ...MIDI_PALETTES_RAW[id],
+  }]),
+);
+
 export const DEFAULT_VIZ_PREFS = Object.freeze({
   /** Visual style for waveforms — matches the shader's u_style enum. */
   waveformStyle: "mirrored",
@@ -52,7 +84,25 @@ export const DEFAULT_VIZ_PREFS = Object.freeze({
   /** Whether underrun markers are painted (require shim-side underrun
    *  data; until that lands, setting this `true` simply does nothing). */
   showUnderruns: true,
+
+  /** Named palette from MIDI_PALETTES for the timeline's inline MIDI
+   *  strip. "match" follows the track's own color; everything else
+   *  pins a fixed color. */
+  midiPalette: "match",
+  /** Velocity shading on MIDI note bars (0..1 alpha multiplier on the
+   *  velocity-driven component). 0 = flat color, 1 = full dynamic range. */
+  midiVelocityShading: 0.6,
 });
+
+/** Resolve the current MIDI note color, falling through to `trackColor`
+ *  when the "match" palette is active and a track color exists. */
+export function resolveMidiNoteColor(trackColor) {
+  const name = read().midiPalette || "match";
+  const pal = MIDI_PALETTES[name];
+  if (pal?.note) return pal.note;
+  if (trackColor) return trackColor;
+  return MIDI_PALETTES.violet.note;
+}
 
 function read() {
   try {

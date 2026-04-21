@@ -85,6 +85,11 @@ std::vector<std::uint8_t> encode_track_meters (ARDOUR::Session&);
 std::vector<std::uint8_t> encode_track_meters_from_routes (
     const std::vector<std::shared_ptr<ARDOUR::Route>>& routes);
 
+/// Encode `Event::PluginPresetsListed { plugin_id, presets }` answering
+/// a `Command::ListPluginPresets` request.
+std::vector<std::uint8_t> encode_plugin_presets_listed (
+    ARDOUR::Session&, const std::string& plugin_id);
+
 /// Encode `Event::AudioEgressStarted { stream_id }`. Sent after the
 /// shim has installed a master tap — the HostBackend awaits this
 /// ACK to resolve its `open_egress` oneshot.

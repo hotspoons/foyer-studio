@@ -22,6 +22,31 @@
 
 const FRAME_HEADER_BYTES = 12;
 
+// Browser-side audio ingress preferences. Stored in localStorage so
+// the choice survives reloads. Rich's M6 note: "disable Opus
+// compression and use raw waveforms, set client sampling freq if
+// possible" — this is how the user picks that.
+const AUDIO_PREFS_KEY = "foyer.audio.prefs.v1";
+const DEFAULT_AUDIO_PREFS = Object.freeze({
+  codec: "opus",          // "opus" | "raw_f32_le"
+  sampleRate: 48_000,      // 44100 / 48000 / 96000 / 192000
+  channels: 2,
+});
+
+export function readAudioPrefs() {
+  try {
+    return { ...DEFAULT_AUDIO_PREFS, ...JSON.parse(localStorage.getItem(AUDIO_PREFS_KEY) || "{}") };
+  } catch {
+    return { ...DEFAULT_AUDIO_PREFS };
+  }
+}
+export function writeAudioPrefs(next) {
+  const merged = { ...readAudioPrefs(), ...next };
+  try { localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify(merged)); } catch {}
+  window.dispatchEvent(new CustomEvent("foyer:audio-prefs-changed", { detail: merged }));
+  return merged;
+}
+
 export class AudioListener {
   /**
    * @param {object} opts
@@ -36,14 +61,37 @@ export class AudioListener {
     this.baseUrl = opts.baseUrl;
     this.sourceKind = opts.sourceKind;
     this.sourceId = opts.sourceId;
-    this.codec = opts.codec || "opus";
+    // Codec & sample rate are user-selectable via the browser audio
+    // config pref (viz-settings.js). Defaults are Opus @ 48 kHz for
+    // bandwidth-friendly streaming; "raw_f32_le" skips the codec and
+    // ships PCM directly (higher bandwidth, lossless — needed for
+    // 96/192 kHz since Opus is capped at 48 kHz).
+    const userPrefs = readAudioPrefs();
+    this.codec = opts.codec || userPrefs.codec;
+    const sampleRate = opts.sampleRate || userPrefs.sampleRate;
+    const channels = opts.channels || userPrefs.channels;
     // JS's `| 0` coerces to i32 and can produce negative numbers —
     // the schema's `stream_id` is a u32 and the server rejects
     // negatives with a JSON parse error. `>>> 0` forces the
     // unsigned interpretation. Also keep it well under 2**32 so the
     // u32 wire encoding is exact.
     this.streamId = (Math.random() * 0xffffffff) >>> 0;
-    this.format = { sample_rate: 48_000, channels: 2, format: "f32_le", frame_size: 960, codec: this.codec };
+    // Opus only accepts 8 / 12 / 16 / 24 / 48 kHz — if the user
+    // requested a higher rate with opus selected, fall back to raw.
+    const effectiveCodec = (this.codec === "opus" && sampleRate > 48_000)
+      ? "raw_f32_le" : this.codec;
+    this.codec = effectiveCodec;
+    // Frame size scales with the sample rate so 20 ms frames stay
+    // 20 ms at whatever rate we ship — the browser-side worklet
+    // budgets its jitter window in samples, not seconds.
+    const frameSize = Math.round(sampleRate * 0.020);
+    this.format = {
+      sample_rate: sampleRate,
+      channels,
+      format: "f32_le",
+      frame_size: frameSize,
+      codec: effectiveCodec,
+    };
 
     /** @type {AudioContext | null} */
     this.ctx = null;

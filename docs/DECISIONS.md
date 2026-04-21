@@ -909,3 +909,123 @@ tap will silently stop working. No crash — just silent audio
 egress. Test for this: after installing the tap, grep daw.log
 for `foyer_shim: [audio] stream_id=<id> run=<N>` — if `run`
 stays `0` while transport is rolling, we're back in this trap.
+
+## 24. Audio ingress rides the active backend's soft-port API, not a custom backend
+
+**Date:** 2026-04-21
+
+**Context:** M6b needs the reverse of MasterTap — browser-captured
+audio (mic, system audio, another client's push-to-talk) has to
+land in Ardour as a recordable input. The wire path is already
+half-built: `AudioSource::VirtualInput { name }` exists in
+[foyer-schema/src/audio.rs:86](../crates/foyer-schema/src/audio.rs#L86),
+`Command::AudioIngressOpen` flows through the IPC layer, and the
+shim dispatcher has a stubbed `on_audio_frame` waiting for a
+handler. The open question was *which Ardour extension point*
+takes the incoming PCM and makes a Track see it as an input.
+
+**Decision.** Register virtual input ports on whatever
+`AudioBackend` is already active (JACK, ALSA, CoreAudio, WASAPI)
+via the public
+[`PortManager::register_input_port()`](../../ardour/libs/ardour/ardour/port_manager.h#L138)
+API at runtime, then feed their buffers from the shim each
+process cycle using the same IPC-drain pattern MasterTap uses in
+reverse. The user's real audio device stays connected to its
+real backend; our virtual ports are additional soft ports on the
+same backend instance, indistinguishable to Ardour's track-input
+routing from any other port.
+
+**Alternatives considered:**
+
+1. *Custom `FoyerAudioBackend` (full subclass of
+   `ARDOUR::AudioBackend`).* Rejected: Ardour holds a single
+   `shared_ptr<AudioBackend>` in
+   [port_manager.h:278](../../ardour/libs/ardour/ardour/port_manager.h#L278)
+   and `AudioEngine::set_backend()` calls `drop_backend()` before
+   instantiating a new one. Picking our backend would lock the
+   user out of their real audio I/O — a dealbreaker for a tool
+   meant to ride alongside an existing Ardour setup.
+
+2. *Subclass each of `JackAudioBackend`, `AlsaAudioBackend`,
+   `CoreAudioBackend`.* Rejected: each backend ships as its own
+   `.so` loaded via `Glib::Module`; we'd be maintaining three
+   forks of fast-moving code that isn't designed for subclassing
+   (not exported with extension in mind, no stable ABI). The
+   maintenance tax scales linearly with backends — exactly the
+   wrong direction.
+
+3. *Decorator / wrapper backend that composes the real one.*
+   Rejected as unnecessary: the public `register_input_port()`
+   API already provides the exact hook a decorator would expose,
+   without us having to implement an `AudioBackend` interface
+   at all.
+
+4. *Injection `Processor` mirrored from `MasterTap` (write audio
+   into a track's buffer on `run()`).* Rejected for the
+   recordable-input use case: Ardour's recording path reads from
+   input ports *upstream* of the processor chain, so a
+   processor-injected signal is monitorable and bounceable but
+   can't be armed and recorded the normal way. Fine if we later
+   want "route browser audio to a bus for live monitoring"; not
+   the primary ingress path.
+
+5. *`IOPlug` system.* Rejected: partially-implemented stubs in
+   [session.h:1007-1020](../../ardour/libs/ardour/ardour/session.h#L1007),
+   no working implementation in current Ardour — not production
+   ground.
+
+**Why.** Same logic as Decision 23 in spirit: find the Ardour
+API that already does the thing, use it, don't fork. Soft ports
+on the active backend give us exactly "a port the user can
+assign to a track's input, fed by us" with none of the "which
+backend is the user on" branching logic. Cross-platform falls
+out for free — ALSA on Linux, CoreAudio on macOS, WASAPI on
+Windows all go through the same `PortManager` public API.
+
+**Implementation sketch** (for when this moves up the priority
+queue):
+
+1. **Shim side.** On `AudioIngressOpen { stream_id, source:
+   VirtualInput { name }, format }`, call
+   `AudioEngine::instance()->register_input_port(DataType::AUDIO,
+   "foyer:" + name, …)`. Hold the returned `PortPtr` keyed by
+   `stream_id`. Each process cycle, drain the IPC ring of incoming
+   f32 PCM frames and write them into the port's buffer via
+   `port->get_audio_buffer(nframes)`. Pattern mirrors MasterTap
+   in reverse: non-RT IPC thread fills a `PBD::RingBuffer<float>`,
+   a lightweight per-port callback on the RT thread pulls from
+   the ring into the port buffer.
+
+2. **Sidecar side.** `FrameKind::Audio` already flows from
+   sidecar → shim (added for M6b scaffolding). Browser captures
+   via `getUserMedia`, encodes in WebCodecs (same Opus path as
+   egress, reused), sidecar decodes and forwards as PCM over IPC.
+
+3. **Latency.** The schema already carries a `LatencyReport`
+   type and `Backend::measure_latency()` trait method
+   ([foyer-backend/src/lib.rs:248](../crates/foyer-backend/src/lib.rs#L248)).
+   Actual implementation is TBD; rough ingress latency budget is
+   browser-capture + network + sidecar-decode + one process
+   period. Don't attempt sample-accurate multitrack overdubs in
+   v1 — advertise ingress as "monitoring / scratch-take grade"
+   until latency calibration lands.
+
+**Tradeoffs.**
+
+- Soft ports don't automatically appear in Ardour's hardware-port
+  UI the way a dedicated backend's ports would. They show up in
+  the input routing matrix as named Foyer ports, which is
+  actually what we want (clearly labeled, attributable to Foyer).
+- Backend-specific quirks (JACK's naming rules vs ALSA's period
+  handling vs CoreAudio's HAL integration) are mostly abstracted
+  by `PortManager`, but if a backend ever rejects a soft-port
+  registration we need a fallback — so far no evidence that any
+  of the three targeted backends do.
+
+**Failure mode if re-introduced.** If a future contributor looks
+at this and thinks "we should just write a custom backend,
+that's the 'right' abstraction" — reread the first alternative
+above. The custom-backend path is technically cleaner in the
+abstract and operationally catastrophic because it displaces the
+user's real audio device. Soft ports on the active backend is
+the less-pretty, more-correct answer.

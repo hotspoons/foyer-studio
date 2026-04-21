@@ -124,6 +124,28 @@ struct PluginDesc {
 /// so the generic client UI can render it like any other parameter.
 std::vector<PluginDesc> enumerate_plugins (std::shared_ptr<ARDOUR::Route> route);
 
+/// Plugin-preset metadata. Matches `foyer_schema::PluginPreset`.
+struct PluginPresetDesc {
+	std::string id;          ///< opaque URI (Ardour's PresetRecord::uri)
+	std::string name;        ///< PresetRecord::label
+	std::string bank;        ///< empty for LV2 (no native bank concept)
+	bool        is_factory = true;
+};
+
+/// Look up a PluginInsert by its Foyer id (`"plugin.<pi-id>"`).
+std::shared_ptr<ARDOUR::PluginInsert> find_plugin_insert_by_foyer_id (
+	ARDOUR::Session&, const std::string& plugin_id);
+
+/// List the presets exposed by a plugin (LV2's lilv-backed list +
+/// user-saved entries). Returns empty if the id doesn't resolve.
+std::vector<PluginPresetDesc> list_plugin_presets (
+	ARDOUR::Session&, const std::string& plugin_id);
+
+/// Apply a preset to a plugin by its URI. Returns `false` if the
+/// plugin or preset id can't be resolved or `load_preset` failed.
+bool load_plugin_preset (
+	ARDOUR::Session&, const std::string& plugin_id, const std::string& preset_id);
+
 /// Per-note payload attached to a MIDI region. Ticks are at the
 /// project's PPQN (960 by default). Matches `foyer_schema::MidiNote`.
 struct NoteDesc {
@@ -133,6 +155,47 @@ struct NoteDesc {
 	std::uint8_t  channel = 0;     ///< 0..15
 	std::uint64_t start_ticks  = 0;///< relative to region start
 	std::uint64_t length_ticks = 0;
+};
+
+/// Beat-sequencer row — matches `foyer_schema::SequencerRow`.
+struct SequencerRowDesc {
+	std::uint8_t  pitch   = 0;
+	std::string   label;
+	std::uint8_t  channel = 9;
+	std::string   color;    // empty means "no color"
+	bool          muted   = false;
+	bool          soloed  = false;
+};
+
+/// Beat-sequencer cell — matches `foyer_schema::SequencerCell`.
+struct SequencerCellDesc {
+	std::uint32_t row = 0;
+	std::uint32_t step = 0;
+	std::uint8_t  velocity = 100;
+};
+
+/// Beat-sequencer layout — matches `foyer_schema::SequencerLayout`.
+/// Stored verbatim inside the owning region's `_extra_xml`; when
+/// present the piano-roll client flips to read-only and the beat
+/// sequencer owns the region's note list.
+struct SequencerLayoutDesc {
+	std::uint32_t version = 1;
+	std::string   mode = "drum";
+	std::uint32_t resolution = 4;
+	std::uint32_t steps = 16;
+	std::vector<SequencerRowDesc>  rows;
+	std::vector<SequencerCellDesc> cells;
+	bool          present = false;   // false = region has no layout
+};
+
+/// Program/bank-change event attached to a MIDI region. Matches
+/// `foyer_schema::PatchChange`.
+struct PatchChangeDesc {
+	std::string   id;           ///< "patchchange.<region-pbd-id>.<event_id>"
+	std::uint8_t  channel = 0;  ///< 0..15
+	std::uint8_t  program = 0;  ///< 0..127
+	std::int32_t  bank    = -1; ///< (MSB<<7)|LSB or -1 for "no bank"
+	std::uint64_t start_ticks = 0;
 };
 
 /// Description of a single region on a track playlist, translated into
@@ -154,6 +217,13 @@ struct RegionDesc {
 	bool          has_source_offset = false;
 	/// Populated for MIDI regions only. Empty for audio.
 	std::vector<NoteDesc> notes;
+	/// Program/bank change events for MIDI regions only. Empty for
+	/// audio.
+	std::vector<PatchChangeDesc> patch_changes;
+	/// Foyer beat-sequencer layout, read from the region's
+	/// `_extra_xml` under the `Foyer/Sequencer` path. `.present`
+	/// is false for regions without a layout.
+	SequencerLayoutDesc sequencer;
 };
 
 /// Enumerate regions on the playlist of the track identified by `track_id`
@@ -161,6 +231,23 @@ struct RegionDesc {
 /// empty if the id doesn't map to an Audio/MIDI track (buses/masters
 /// don't host regions).
 std::vector<RegionDesc> enumerate_regions (ARDOUR::Session&, const std::string& track_id);
+
+/// Build a single RegionDesc from a live `ARDOUR::Region`. MIDI regions
+/// populate `notes`; audio regions leave it empty. Exported so the
+/// `region_updated` emitter can reuse the same extraction logic as
+/// `enumerate_regions` instead of duplicating (and drifting from) it.
+RegionDesc describe_region_desc (const ARDOUR::Region&, const std::string& track_id);
+
+/// Apply a beat-sequencer layout to a region: write it into the
+/// region's `_extra_xml` (creating or replacing the `<Foyer>` node).
+/// Returns `false` if the region can't be found.
+bool set_sequencer_layout (
+	ARDOUR::Session&, const std::string& region_id, const SequencerLayoutDesc& layout);
+
+/// Drop the beat-sequencer metadata from a region's `_extra_xml`.
+/// Leaves the region's note list untouched — callers do that
+/// separately if they want to start fresh.
+bool clear_sequencer_layout (ARDOUR::Session&, const std::string& region_id);
 
 /// Look up a region across every track's playlist by its Foyer id
 /// (`"region.<pbd-id>"`). Returns both the region and the owning track id

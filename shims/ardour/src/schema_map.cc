@@ -22,6 +22,7 @@
 #include "ardour/stripable.h"
 #include "ardour/track.h"
 #include "pbd/controllable.h"
+#include "pbd/xml++.h"
 
 using namespace ARDOUR;
 using namespace PBD;
@@ -406,6 +407,83 @@ track_by_foyer_id (Session& session, const std::string& track_id)
 	return {};
 }
 
+// Parse `<Foyer><Sequencer>` out of a region's `_extra_xml` if
+// present. Returns `SequencerLayoutDesc{present=false}` when nothing
+// is stashed. Extra-xml is opt-in per Ardour's `Stateful` base; the
+// class preserves unknown nodes through save/load so round-trips
+// work out of the box.
+static SequencerLayoutDesc
+read_sequencer_from_region (const Region& r)
+{
+	SequencerLayoutDesc out;
+	// `extra_xml(name, add_if_missing=false)` returns nullptr if the
+	// region has no "Foyer" extra node yet.
+	XMLNode* foyer = const_cast<Region&> (r).extra_xml ("Foyer");
+	if (!foyer) return out;
+	XMLNode* seq = foyer->child ("Sequencer");
+	if (!seq) return out;
+	out.present = true;
+	seq->get_property ("version",    out.version);
+	seq->get_property ("mode",       out.mode);
+	seq->get_property ("resolution", out.resolution);
+	seq->get_property ("steps",      out.steps);
+	for (XMLNode* rn : seq->children ("Row")) {
+		if (!rn) continue;
+		SequencerRowDesc row;
+		std::uint32_t p = 0, c = 9;
+		rn->get_property ("pitch",   p);
+		rn->get_property ("channel", c);
+		rn->get_property ("label",   row.label);
+		rn->get_property ("color",   row.color);
+		rn->get_property ("muted",   row.muted);
+		rn->get_property ("soloed",  row.soloed);
+		row.pitch   = static_cast<std::uint8_t> (std::min<std::uint32_t> (p, 127));
+		row.channel = static_cast<std::uint8_t> (c & 0x0f);
+		out.rows.push_back (std::move (row));
+	}
+	for (XMLNode* cn : seq->children ("Cell")) {
+		if (!cn) continue;
+		SequencerCellDesc cell;
+		std::uint32_t v = 100;
+		cn->get_property ("row",      cell.row);
+		cn->get_property ("step",     cell.step);
+		cn->get_property ("velocity", v);
+		cell.velocity = static_cast<std::uint8_t> (std::min<std::uint32_t> (v, 127));
+		out.cells.push_back (cell);
+	}
+	return out;
+}
+
+// Build a fresh `<Foyer><Sequencer>` XML subtree from a typed
+// layout. Returns an owned XMLNode*; caller hands it to
+// `region->add_extra_xml` which takes ownership by copying.
+static XMLNode*
+sequencer_to_xml (const SequencerLayoutDesc& layout)
+{
+	XMLNode* foyer = new XMLNode ("Foyer");
+	XMLNode* seq   = foyer->add_child ("Sequencer");
+	seq->set_property ("version",    layout.version);
+	seq->set_property ("mode",       layout.mode);
+	seq->set_property ("resolution", layout.resolution);
+	seq->set_property ("steps",      layout.steps);
+	for (auto const& r : layout.rows) {
+		XMLNode* rn = seq->add_child ("Row");
+		rn->set_property ("pitch",   static_cast<std::uint32_t> (r.pitch));
+		rn->set_property ("channel", static_cast<std::uint32_t> (r.channel));
+		rn->set_property ("label",   r.label);
+		if (!r.color.empty ()) rn->set_property ("color", r.color);
+		if (r.muted)  rn->set_property ("muted",  true);
+		if (r.soloed) rn->set_property ("soloed", true);
+	}
+	for (auto const& c : layout.cells) {
+		XMLNode* cn = seq->add_child ("Cell");
+		cn->set_property ("row",      c.row);
+		cn->set_property ("step",     c.step);
+		cn->set_property ("velocity", static_cast<std::uint32_t> (c.velocity));
+	}
+	return foyer;
+}
+
 RegionDesc
 describe_region (const Region& r, const std::string& track_id)
 {
@@ -429,12 +507,19 @@ describe_region (const Region& r, const std::string& track_id)
 		auto model = const_cast<ARDOUR::MidiRegion*> (mr)->model ();
 		if (model) {
 			auto lock = model->read_lock ();
-			std::uint32_t idx = 0;
 			for (auto const& note : model->notes ()) {
 				if (!note) continue;
 				NoteDesc nd;
+				// Stable note id keyed on Evoral's event_id_t. That's
+				// the same integer the MidiModel uses internally to
+				// identify the note across edits — position-based
+				// indexing (our previous scheme) shifted under any
+				// insert/remove and made UpdateNote / DeleteNote
+				// target the wrong note after a roundtrip. Keep the
+				// region-pbd-id prefix so IDs are unique across
+				// regions (Evoral event IDs are region-local).
 				std::ostringstream nid;
-				nid << "note." << region_pbd_id_string (r) << "." << idx++;
+				nid << "note." << region_pbd_id_string (r) << "." << note->id ();
 				nd.id       = nid.str ();
 				nd.pitch    = note->note ();
 				nd.velocity = note->velocity ();
@@ -445,6 +530,20 @@ describe_region (const Region& r, const std::string& track_id)
 				nd.start_ticks  = static_cast<std::uint64_t> (note->time ().to_ticks ());
 				nd.length_ticks = static_cast<std::uint64_t> (note->length ().to_ticks ());
 				d.notes.push_back (nd);
+			}
+			d.sequencer = read_sequencer_from_region (r);
+			// Patch/bank-change events embedded in the region.
+			for (auto const& pc : model->patch_changes ()) {
+				if (!pc) continue;
+				PatchChangeDesc pd;
+				std::ostringstream pid;
+				pid << "patchchange." << region_pbd_id_string (r) << "." << pc->id ();
+				pd.id      = pid.str ();
+				pd.channel = pc->channel ();
+				pd.program = pc->program ();
+				pd.bank    = static_cast<std::int32_t> (pc->bank ());
+				pd.start_ticks = static_cast<std::uint64_t> (pc->time ().to_ticks ());
+				d.patch_changes.push_back (pd);
 			}
 		}
 	}
@@ -472,6 +571,82 @@ enumerate_regions (Session& session, const std::string& track_id)
 		out.push_back (describe_region (*r, track_id));
 	}
 	return out;
+}
+
+RegionDesc
+describe_region_desc (const ARDOUR::Region& r, const std::string& track_id)
+{
+	return describe_region (r, track_id);
+}
+
+bool
+set_sequencer_layout (Session& session, const std::string& region_id, const SequencerLayoutDesc& layout)
+{
+	auto hit = find_region (session, region_id);
+	if (!hit.region) return false;
+	// `add_extra_xml` replaces any previously-stored node of the same
+	// name — exactly what we want for an idempotent set. The region
+	// takes ownership by copying (see `Stateful::add_extra_xml`).
+	XMLNode* node = sequencer_to_xml (layout);
+	hit.region->add_extra_xml (*node);
+	delete node;
+	return true;
+}
+
+bool
+clear_sequencer_layout (Session& session, const std::string& region_id)
+{
+	auto hit = find_region (session, region_id);
+	if (!hit.region) return false;
+	// `Stateful` doesn't expose a removal API, so we replace with an
+	// empty placeholder. The region-updated echo will then show no
+	// `<Sequencer>` child and the UI flips back to piano-roll mode.
+	XMLNode empty ("Foyer");
+	hit.region->add_extra_xml (empty);
+	return true;
+}
+
+std::shared_ptr<PluginInsert>
+find_plugin_insert_by_foyer_id (Session& session, const std::string& plugin_id)
+{
+	// Foyer ids for plugins are `"plugin.<pi-id>"` — strip the prefix
+	// before falling through to the internal resolver.
+	if (plugin_id.rfind ("plugin.", 0) != 0) return {};
+	const std::string pid = plugin_id.substr (7);
+	return find_plugin_insert (session, pid);
+}
+
+std::vector<PluginPresetDesc>
+list_plugin_presets (Session& session, const std::string& plugin_id)
+{
+	std::vector<PluginPresetDesc> out;
+	auto pi = find_plugin_insert_by_foyer_id (session, plugin_id);
+	if (!pi) return out;
+	auto plug = pi->plugin ();
+	if (!plug) return out;
+	auto presets = plug->get_presets ();
+	out.reserve (presets.size ());
+	for (auto const& pr : presets) {
+		PluginPresetDesc d;
+		d.id         = pr.uri;
+		d.name       = pr.label;
+		d.bank       = "";
+		d.is_factory = !pr.user;
+		out.push_back (std::move (d));
+	}
+	return out;
+}
+
+bool
+load_plugin_preset (Session& session, const std::string& plugin_id, const std::string& preset_id)
+{
+	auto pi = find_plugin_insert_by_foyer_id (session, plugin_id);
+	if (!pi) return false;
+	auto plug = pi->plugin ();
+	if (!plug) return false;
+	const auto* rec = plug->preset_by_uri (preset_id);
+	if (!rec) return false;
+	return plug->load_preset (*rec);
 }
 
 RegionHit

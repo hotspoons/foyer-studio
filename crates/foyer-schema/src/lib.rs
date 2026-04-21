@@ -27,7 +27,10 @@ pub use fs::{FsEntry, FsEntryKind, PathListing};
 pub use id::EntityId;
 pub use io::{IoDirection, IoPort};
 pub use message::{BackendInfo, Command, ControlUpdate, Envelope, Event, Patch, Seq};
-pub use midi::{MidiNote, MidiNotePatch};
+pub use midi::{
+    default_gm_drum_rows, MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, SequencerCell,
+    SequencerLayout, SequencerRow,
+};
 pub use plugin::{PluginCatalogEntry, PluginFormat, PluginPreset, PluginRole};
 pub use session::{
     Bus, Group, GroupPatch, PluginInstance, Send, Session, Track, TrackKind, TrackPatch, Transport,

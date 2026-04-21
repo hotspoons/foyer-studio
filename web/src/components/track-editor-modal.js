@@ -34,39 +34,32 @@ export class TrackEditorModal extends LitElement {
 
   static styles = css`
     :host {
-      position: fixed; inset: 0; z-index: 920;
-      display: flex; align-items: center; justify-content: center;
-      background: rgba(0, 0, 0, 0.55);
-      backdrop-filter: blur(3px);
+      display: flex; flex-direction: column;
+      width: 100%; height: 100%; min-height: 0;
+      background: var(--color-surface);
       font-family: var(--font-sans);
     }
     .card {
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-lg);
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
-      width: min(760px, 94vw);
-      max-height: 86vh;
-      display: flex; flex-direction: column; overflow: hidden;
+      display: flex; flex-direction: column;
+      width: 100%; height: 100%; min-height: 0;
+      overflow: hidden;
     }
     header {
       display: flex; align-items: center; gap: 10px;
-      padding: 12px 18px;
+      padding: 10px 16px;
       border-bottom: 1px solid var(--color-border);
+      flex: 0 0 auto;
     }
-    header h2 { margin: 0; font-size: 14px; color: var(--color-text); font-weight: 600; }
+    header h2 { margin: 0; font-size: 13px; color: var(--color-text); font-weight: 600; }
     header .swatch {
       width: 14px; height: 14px; border-radius: 3px;
       border: 1px solid var(--color-border);
     }
-    header .close {
-      margin-left: auto;
-      background: transparent; border: 0; color: var(--color-text-muted);
-      cursor: pointer; padding: 4px; border-radius: var(--radius-sm);
-    }
-    header .close:hover { color: var(--color-text); background: var(--color-surface-elevated); }
+    header .close { display: none; }
     .body {
-      padding: 14px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+      padding: 14px 18px; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 14px;
+      flex: 1; min-height: 0;
     }
     .section { display: flex; flex-direction: column; gap: 6px; }
     .section h3 {
@@ -160,13 +153,6 @@ export class TrackEditorModal extends LitElement {
     this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
   }
 
-  _onBackdrop(ev) { if (ev.target === this) this._close(); }
-  createRenderRoot() {
-    const root = super.createRenderRoot();
-    this.addEventListener("click", (e) => this._onBackdrop(e));
-    return root;
-  }
-
   _track() {
     const s = window.__foyer?.store?.state?.session;
     return s?.tracks?.find((t) => t.id === this.trackId) || null;
@@ -198,7 +184,6 @@ export class TrackEditorModal extends LitElement {
               The track this editor was opened for is no longer in the session.
             </div>
           </div>
-          <footer><button class="primary" @click=${this._close}>Close</button></footer>
         </div>
       `;
     }
@@ -264,9 +249,6 @@ export class TrackEditorModal extends LitElement {
             </div>
           </div>
         </div>
-        <footer>
-          <button class="primary" @click=${this._close}>Done</button>
-        </footer>
       </div>
     `;
   }
@@ -277,8 +259,12 @@ export function openTrackEditor(trackId) {
   if (!trackId) return () => {};
   const el = document.createElement("foyer-track-editor-modal");
   el.trackId = trackId;
-  const close = () => { el.remove(); };
-  el.addEventListener("close", close);
-  document.body.appendChild(el);
-  return close;
+  return import("./window.js").then((m) => m.openWindow({
+    title: "Track editor",
+    icon: "adjustments-horizontal",
+    storageKey: `track-editor.${trackId}`,
+    content: el,
+    width: 720,
+    height: 640,
+  }));
 }

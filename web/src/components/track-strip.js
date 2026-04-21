@@ -296,23 +296,42 @@ export class TrackStrip extends LitElement {
     this.setAttribute("resizing", "");
     const minW = 28;
     const maxW = 360;
+    // Shift-drag broadcasts a second event that tells the mixer to
+    // apply the same delta to every strip. We still do the local
+    // override for visual feedback; the mixer's handler interprets
+    // `resize_all: true` and fans the delta across all tracks.
+    const resizeAll = ev.shiftKey;
     const tick = (e) => {
       const w = Math.max(minW, Math.min(maxW, startW + (e.clientX - startX)));
       this.overrideWidth = w;
       this._applyWidth();
       this.dispatchEvent(new CustomEvent("channel-resize", {
-        detail: { trackId: this.track?.id, width: Math.round(w), final: false },
+        detail: {
+          trackId: this.track?.id,
+          width: Math.round(w),
+          delta: Math.round((e.clientX - startX)),
+          startWidth: Math.round(startW),
+          final: false,
+          resizeAll,
+        },
         bubbles: true,
         composed: true,
       }));
     };
-    const up = () => {
+    const up = (e) => {
       window.removeEventListener("pointermove", tick);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
       this.removeAttribute("resizing");
       this.dispatchEvent(new CustomEvent("channel-resize", {
-        detail: { trackId: this.track?.id, width: Math.round(this.overrideWidth || 0), final: true },
+        detail: {
+          trackId: this.track?.id,
+          width: Math.round(this.overrideWidth || 0),
+          delta: Math.round(((e?.clientX ?? startX) - startX)),
+          startWidth: Math.round(startW),
+          final: true,
+          resizeAll,
+        },
         bubbles: true,
         composed: true,
       }));

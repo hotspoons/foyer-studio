@@ -18,8 +18,9 @@ use foyer_ipc::{
     Control,
 };
 use foyer_schema::{
-    AudioFormat, AudioSource, Command, EntityId, Envelope, Event, LatencyReport, Region,
-    RegionPatch, Session, TimelineMeta, Track, TrackPatch, SCHEMA_VERSION,
+    AudioFormat, AudioSource, Command, EntityId, Envelope, Event, LatencyReport, MidiNote,
+    MidiNotePatch, PatchChange, PatchChangePatch, PluginPreset, Region, RegionPatch,
+    SequencerLayout, Session, TimelineMeta, Track, TrackPatch, SCHEMA_VERSION,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -87,6 +88,9 @@ struct Shared {
     pending_update_region: Mutex<HashMap<EntityId, Vec<oneshot::Sender<Region>>>>,
     pending_delete_region: Mutex<HashMap<EntityId, Vec<oneshot::Sender<EntityId>>>>,
     pending_update_track: Mutex<HashMap<EntityId, Vec<oneshot::Sender<Track>>>>,
+    /// In-flight list_plugin_presets requests, keyed by plugin id.
+    /// Resolved by the reader task on `Event::PluginPresetsListed`.
+    pending_presets: Mutex<HashMap<EntityId, Vec<oneshot::Sender<Vec<PluginPreset>>>>>,
     /// Cache of known regions, keyed by region id. Populated from every
     /// `RegionsList` / `RegionUpdated` event; drained on `RegionRemoved`.
     /// Used to look up `source_path` when the sidecar needs to decode
@@ -137,6 +141,7 @@ impl HostClient {
             pending_update_region: Mutex::new(HashMap::new()),
             pending_delete_region: Mutex::new(HashMap::new()),
             pending_update_track: Mutex::new(HashMap::new()),
+            pending_presets: Mutex::new(HashMap::new()),
             regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
             disconnected: AtomicBool::new(false),
@@ -379,6 +384,120 @@ impl HostClient {
         self.shared.regions_cache.lock().await.get(id).cloned()
     }
 
+    // ─── MIDI note edits ────────────────────────────────────────────────
+    //
+    // Fire-and-forget: enqueue the command, return as soon as the writer
+    // task accepts it. The shim applies the mutation to the Ardour
+    // MidiModel and emits a `RegionUpdated` event that everyone
+    // subscribed to the backend (including every browser client) sees.
+    // We deliberately don't await a specific echo — multiple note
+    // mutations on the same region can be in flight simultaneously and
+    // matching them to responses would need a correlation id we don't
+    // have (and don't really need: the UI reconciles on the event
+    // stream).
+
+    pub async fn add_midi_note(
+        &self,
+        region_id: EntityId,
+        note: MidiNote,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::AddNote { region_id, note }).await
+    }
+
+    pub async fn update_midi_note(
+        &self,
+        region_id: EntityId,
+        note_id: EntityId,
+        patch: MidiNotePatch,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::UpdateNote {
+            region_id,
+            note_id,
+            patch,
+        })
+        .await
+    }
+
+    pub async fn delete_midi_note(
+        &self,
+        region_id: EntityId,
+        note_id: EntityId,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::DeleteNote {
+            region_id,
+            note_id,
+        })
+        .await
+    }
+
+    pub async fn undo(&self) -> Result<(), ClientError> {
+        self.send_command(Command::Undo).await
+    }
+    pub async fn redo(&self) -> Result<(), ClientError> {
+        self.send_command(Command::Redo).await
+    }
+
+    pub async fn list_plugin_presets(
+        &self,
+        plugin_id: EntityId,
+    ) -> Result<Vec<PluginPreset>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_presets
+            .lock()
+            .await
+            .entry(plugin_id.clone())
+            .or_default()
+            .push(tx);
+        self.send_command(Command::ListPluginPresets { plugin_id }).await?;
+        timeout(rx, "list_plugin_presets").await
+    }
+
+    pub async fn load_plugin_preset(
+        &self,
+        plugin_id: EntityId,
+        preset_id: EntityId,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::LoadPluginPreset { plugin_id, preset_id }).await
+    }
+
+    pub async fn add_patch_change(
+        &self,
+        region_id: EntityId,
+        patch_change: PatchChange,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::AddPatchChange { region_id, patch_change }).await
+    }
+    pub async fn update_patch_change(
+        &self,
+        region_id: EntityId,
+        patch_change_id: EntityId,
+        patch: PatchChangePatch,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::UpdatePatchChange { region_id, patch_change_id, patch }).await
+    }
+    pub async fn delete_patch_change(
+        &self,
+        region_id: EntityId,
+        patch_change_id: EntityId,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::DeletePatchChange { region_id, patch_change_id }).await
+    }
+
+    pub async fn set_sequencer_layout(
+        &self,
+        region_id: EntityId,
+        layout: SequencerLayout,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::SetSequencerLayout { region_id, layout }).await
+    }
+    pub async fn clear_sequencer_layout(
+        &self,
+        region_id: EntityId,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::ClearSequencerLayout { region_id }).await
+    }
+
     pub async fn update_track(
         &self,
         id: EntityId,
@@ -603,6 +722,18 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     {
                         for w in waiters {
                             let _ = w.send(track_id.clone());
+                        }
+                    }
+                }
+                Event::PluginPresetsListed { plugin_id, presets } => {
+                    if let Some(waiters) = shared
+                        .pending_presets
+                        .lock()
+                        .await
+                        .remove(plugin_id)
+                    {
+                        for w in waiters {
+                            let _ = w.send(presets.clone());
                         }
                     }
                 }

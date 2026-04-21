@@ -14,6 +14,15 @@ export class PluginPickerModal extends LitElement {
   static properties = {
     trackId:   { type: String, attribute: "track-id" },
     trackName: { type: String, attribute: "track-name" },
+    // When set, pre-filters the picker to a single role and hides the
+    // role dropdown. Used by the MIDI manager's "Add/change
+    // instrument…" flow, where the user specifically wants an
+    // instrument and not an effect.
+    lockedRole: { type: String, attribute: "locked-role" },
+    // When true, pass `replace: true` on add_plugin so the shim
+    // removes the current instrument before inserting the new one
+    // (instrument-swap shape instead of "append to chain").
+    replaceInstrument: { type: Boolean, attribute: "replace-instrument" },
     _entries:  { state: true, type: Array },
     _loading:  { state: true, type: Boolean },
     _query:    { state: true, type: String },
@@ -138,6 +147,8 @@ export class PluginPickerModal extends LitElement {
     super();
     this.trackId = "";
     this.trackName = "";
+    this.lockedRole = "";
+    this.replaceInstrument = false;
     this._entries = [];
     this._loading = true;
     this._query = "";
@@ -172,9 +183,12 @@ export class PluginPickerModal extends LitElement {
 
   _filtered() {
     const q = this._query.trim().toLowerCase();
+    const lockRole = this.lockedRole || null;
     return this._entries.filter((e) => {
       if (this._format !== "all" && e.format !== this._format) return false;
-      if (this._role   !== "all" && e.role   !== this._role)   return false;
+      if (lockRole) {
+        if (e.role !== lockRole) return false;
+      } else if (this._role !== "all" && e.role !== this._role) return false;
       if (!q) return true;
       return (e.name || "").toLowerCase().includes(q)
           || (e.vendor || "").toLowerCase().includes(q);
@@ -192,10 +206,25 @@ export class PluginPickerModal extends LitElement {
   _insert(p) {
     const ws = window.__foyer?.ws;
     if (!ws || !this.trackId || !p?.uri) return;
+    // Instrument-swap case: if there's an existing instrument, remove
+    // it first so the new one becomes the sole instrument on the
+    // track (Ardour restricts one instrument per route; adding a
+    // second silently appends as an effect-like insert).
+    if (this.replaceInstrument) {
+      const session = window.__foyer?.store?.state?.session;
+      const track = session?.tracks?.find((t) => t.id === this.trackId);
+      const current = track?.plugins?.find((pi) => pi && !pi.bypassed) || track?.plugins?.[0];
+      if (current?.id) {
+        ws.send({ type: "remove_plugin", plugin_id: current.id });
+      }
+    }
     ws.send({
       type: "add_plugin",
       track_id: this.trackId,
       plugin_uri: p.uri,
+      // `index: 0` puts the new plugin at the head of the chain —
+      // where the instrument belongs on a MIDI track.
+      index: this.lockedRole === "instrument" ? 0 : undefined,
     });
     this._close();
   }
@@ -217,7 +246,9 @@ export class PluginPickerModal extends LitElement {
     return html`
       <div class="card" @click=${(e) => e.stopPropagation()}>
         <header>
-          <h2>Insert plugin</h2>
+          <h2>${this.lockedRole === "instrument"
+                  ? (this.replaceInstrument ? "Change instrument" : "Add instrument")
+                  : "Insert plugin"}</h2>
           <span class="target">→ ${this.trackName || this.trackId || "track"}</span>
           <button class="close" title="Close" @click=${this._close}>${icon("x-mark", 16)}</button>
         </header>
@@ -236,14 +267,16 @@ export class PluginPickerModal extends LitElement {
             <option value="au">AU</option>
             <option value="internal">Internal</option>
           </select>
-          <select @change=${(e) => { this._role = e.currentTarget.value; }}>
-            <option value="all">All roles</option>
-            <option value="effect">Effect</option>
-            <option value="instrument">Instrument</option>
-            <option value="generator">Generator</option>
-            <option value="analyzer">Analyzer</option>
-            <option value="utility">Utility</option>
-          </select>
+          ${this.lockedRole ? null : html`
+            <select @change=${(e) => { this._role = e.currentTarget.value; }}>
+              <option value="all">All roles</option>
+              <option value="effect">Effect</option>
+              <option value="instrument">Instrument</option>
+              <option value="generator">Generator</option>
+              <option value="analyzer">Analyzer</option>
+              <option value="utility">Utility</option>
+            </select>
+          `}
         </div>
         <div class="list">
           ${this._loading && this._entries.length === 0
@@ -288,12 +321,25 @@ customElements.define("foyer-plugin-picker-modal", PluginPickerModal);
 
 /** Convenience: open the modal as a detached overlay attached to
  * `<body>`, anchored to the given track. Returns a `close()` handle. */
-export function openPluginPicker({ trackId, trackName }) {
+export function openPluginPicker({ trackId, trackName, lockedRole = "", replaceInstrument = false } = {}) {
   const el = document.createElement("foyer-plugin-picker-modal");
   el.trackId = trackId || "";
   el.trackName = trackName || "";
+  if (lockedRole) el.lockedRole = lockedRole;
+  if (replaceInstrument) el.replaceInstrument = true;
   const close = () => { el.remove(); };
   el.addEventListener("close", close);
   document.body.appendChild(el);
   return close;
+}
+
+/** Convenience: open the picker restricted to instruments (role ==
+ *  "instrument") and, if `replace` is true, swap the existing
+ *  instrument for the chosen one instead of appending. */
+export function openInstrumentPicker({ trackId, trackName, replace = false } = {}) {
+  return openPluginPicker({
+    trackId, trackName,
+    lockedRole: "instrument",
+    replaceInstrument: replace,
+  });
 }

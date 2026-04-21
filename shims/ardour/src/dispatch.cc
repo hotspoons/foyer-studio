@@ -14,6 +14,8 @@
 #include <cstring>
 #include <string>
 
+#include "ardour/midi_model.h"
+#include "ardour/midi_region.h"
 #include "ardour/playlist.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
@@ -23,8 +25,11 @@
 #include "ardour/route.h"
 #include "ardour/session.h"
 #include "ardour/track.h"
+#include "evoral/Note.h"
+#include "evoral/PatchChange.h"
 #include "pbd/controllable.h"
 #include "pbd/error.h"
+#include "temporal/beats.h"
 #include "temporal/timeline.h"
 
 #include "ipc.h"
@@ -201,12 +206,27 @@ struct DecodedCmd
 		AddPlugin,
 		RemovePlugin,
 		SaveSession,
+		AddNote,
+		UpdateNote,
+		DeleteNote,
+		AddPatchChange,
+		UpdatePatchChange,
+		DeletePatchChange,
+		Undo,
+		Redo,
+		ListPluginPresets,
+		LoadPluginPreset,
+		SetSequencerLayout,
+		ClearSequencerLayout,
+		AudioIngressOpen,
+		AudioIngressClose,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
 	std::string track_id;
 	std::string plugin_uri;   // Command::AddPlugin
 	std::string plugin_id;    // Command::RemovePlugin (= "plugin.<pid>")
+	std::string preset_id;    // Command::LoadPluginPreset (preset URI)
 	double value = 0.0;
 
 	// Audio stream fields (AudioStreamOpen / Close).
@@ -233,13 +253,285 @@ struct DecodedCmd
 	std::string   patch_group_id;
 	bool          has_patch_bus_assign = false;
 	std::string   patch_bus_assign;
+
+	// MIDI note fields — AddNote / UpdateNote / DeleteNote.
+	//  * region_id stored in `track_id` (reuse: the sidecar sends
+	//    `region_id` but the field is a plain string slot and tracking
+	//    a dedicated field doubles ceremony for no benefit).
+	//  * note_id stored in `id`.
+	// All note-data fields come in via `note` (AddNote) or `patch`
+	// (UpdateNote) sub-maps — both reuse this set.
+	bool          has_note_pitch        = false;
+	std::uint8_t  note_pitch            = 60;
+	bool          has_note_velocity     = false;
+	std::uint8_t  note_velocity         = 100;
+	bool          has_note_channel      = false;
+	std::uint8_t  note_channel          = 0;
+	bool          has_note_start        = false;
+	std::uint64_t note_start_ticks      = 0;
+	bool          has_note_length       = false;
+	std::uint64_t note_length_ticks     = 0;
+
+	// PatchChange fields — AddPatchChange / UpdatePatchChange /
+	// DeletePatchChange. Same reuse strategy as notes: region_id lands
+	// in `track_id`, patch_change_id in `id`, program/bank via
+	// `patch_change` sub-map.
+	bool          has_pc_channel   = false;
+	std::uint8_t  pc_channel       = 0;
+	bool          has_pc_program   = false;
+	std::uint8_t  pc_program       = 0;
+	bool          has_pc_bank      = false;
+	std::int32_t  pc_bank          = -1;
+	bool          has_pc_start     = false;
+	std::uint64_t pc_start_ticks   = 0;
+
+	// SequencerLayout payload — decoded during SetSequencerLayout.
+	// We only need this on the shim side for the Set handler, so we
+	// stash a full SequencerLayoutDesc here to hand straight to
+	// schema_map::set_sequencer_layout.
+	schema_map::SequencerLayoutDesc seq_layout;
 };
 
-// Parse either a RegionPatch or TrackPatch sub-map. Keys the current
-// command doesn't care about stay `has_patch_*` = false on the output;
-// the dispatcher only reads the fields that match its command kind.
+// Read an int64 that may be positive or negative on the wire —
+// msgpack picks the smallest fixed-int form. Returns false if the
+// next value isn't an integer.
 static bool
-read_region_patch (In& in, DecodedCmd& out)
+read_i64 (In& in, std::int64_t& out)
+{
+	if (in.p >= in.end) return false;
+	std::uint8_t b = *in.p;
+	if (b <= 0x7f) { out = b; ++in.p; return true; }
+	if (b >= 0xe0) { out = static_cast<std::int8_t> (b); ++in.p; return true; }
+	if (b == 0xcc || b == 0xd0) {
+		++in.p;
+		std::uint8_t v = in.take_u8 ();
+		out = (b == 0xcc) ? static_cast<std::int64_t> (v) : static_cast<std::int64_t> (static_cast<std::int8_t> (v));
+		return true;
+	}
+	if (b == 0xcd || b == 0xd1) {
+		++in.p;
+		std::uint16_t v = in.take_be16 ();
+		out = (b == 0xcd) ? static_cast<std::int64_t> (v) : static_cast<std::int64_t> (static_cast<std::int16_t> (v));
+		return true;
+	}
+	if (b == 0xce || b == 0xd2) {
+		++in.p;
+		std::uint32_t v = in.take_be32 ();
+		out = (b == 0xce) ? static_cast<std::int64_t> (v) : static_cast<std::int64_t> (static_cast<std::int32_t> (v));
+		return true;
+	}
+	if (b == 0xcf || b == 0xd3) {
+		++in.p;
+		std::uint64_t v = in.take_be64 ();
+		out = (b == 0xcf) ? static_cast<std::int64_t> (v) : static_cast<std::int64_t> (v);
+		return true;
+	}
+	return false;
+}
+
+// Parse a PatchChange / PatchChangePatch sub-map.
+static bool
+read_pc_fields (In& in, DecodedCmd& out)
+{
+	std::size_t n = 0;
+	if (!in.read_map_header (n)) return false;
+	for (std::size_t i = 0; i < n; ++i) {
+		std::string k;
+		if (!in.read_str (k)) return false;
+		if (k == "channel") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			out.pc_channel = static_cast<std::uint8_t> (v & 0x0f);
+			out.has_pc_channel = true;
+		} else if (k == "program") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			out.pc_program = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+			out.has_pc_program = true;
+		} else if (k == "bank") {
+			std::int64_t v = 0;
+			if (!read_i64 (in, v)) return false;
+			out.pc_bank = static_cast<std::int32_t> (v);
+			out.has_pc_bank = true;
+		} else if (k == "start_ticks") {
+			if (!in.read_u64 (out.pc_start_ticks)) return false;
+			out.has_pc_start = true;
+		} else if (k == "id") {
+			if (!in.read_str (out.id)) return false;
+		} else {
+			if (!in.skip_value ()) return false;
+		}
+	}
+	return true;
+}
+
+// Parse one SequencerRow sub-map into an entry on `layout.rows`.
+static bool
+read_seq_row (In& in, schema_map::SequencerLayoutDesc& layout)
+{
+	std::size_t n = 0;
+	if (!in.read_map_header (n)) return false;
+	schema_map::SequencerRowDesc row;
+	std::uint64_t v = 0;
+	for (std::size_t i = 0; i < n; ++i) {
+		std::string k;
+		if (!in.read_str (k)) return false;
+		if (k == "pitch") {
+			if (!in.read_u64 (v)) return false;
+			row.pitch = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+		} else if (k == "channel") {
+			if (!in.read_u64 (v)) return false;
+			row.channel = static_cast<std::uint8_t> (v & 0x0f);
+		} else if (k == "label") {
+			if (!in.read_str (row.label)) return false;
+		} else if (k == "color") {
+			if (!in.read_str (row.color)) return false;
+		} else if (k == "muted") {
+			if (!in.read_bool (row.muted)) return false;
+		} else if (k == "soloed") {
+			if (!in.read_bool (row.soloed)) return false;
+		} else {
+			if (!in.skip_value ()) return false;
+		}
+	}
+	layout.rows.push_back (std::move (row));
+	return true;
+}
+
+// Parse one SequencerCell sub-map into an entry on `layout.cells`.
+static bool
+read_seq_cell (In& in, schema_map::SequencerLayoutDesc& layout)
+{
+	std::size_t n = 0;
+	if (!in.read_map_header (n)) return false;
+	schema_map::SequencerCellDesc cell;
+	std::uint64_t v = 0;
+	for (std::size_t i = 0; i < n; ++i) {
+		std::string k;
+		if (!in.read_str (k)) return false;
+		if (k == "row") {
+			if (!in.read_u64 (v)) return false;
+			cell.row = static_cast<std::uint32_t> (v);
+		} else if (k == "step") {
+			if (!in.read_u64 (v)) return false;
+			cell.step = static_cast<std::uint32_t> (v);
+		} else if (k == "velocity") {
+			if (!in.read_u64 (v)) return false;
+			cell.velocity = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+		} else {
+			if (!in.skip_value ()) return false;
+		}
+	}
+	layout.cells.push_back (cell);
+	return true;
+}
+
+// Parse a SequencerLayout sub-map — the `layout` field on
+// Command::SetSequencerLayout. Unknown fields are skipped so a
+// client on a newer schema won't hang the shim.
+static bool
+read_sequencer_layout (In& in, schema_map::SequencerLayoutDesc& layout)
+{
+	std::size_t n = 0;
+	if (!in.read_map_header (n)) return false;
+	layout.present = true;
+	for (std::size_t i = 0; i < n; ++i) {
+		std::string k;
+		if (!in.read_str (k)) return false;
+		if (k == "version") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			layout.version = static_cast<std::uint32_t> (v);
+		} else if (k == "mode") {
+			if (!in.read_str (layout.mode)) return false;
+		} else if (k == "resolution") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			layout.resolution = static_cast<std::uint32_t> (v);
+		} else if (k == "steps") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			layout.steps = static_cast<std::uint32_t> (v);
+		} else if (k == "rows") {
+			std::size_t rn = 0;
+			// Array header, then `rn` row maps.
+			std::uint8_t b = in.peek ();
+			if ((b & 0xf0) == 0x90) { in.take_u8 (); rn = b & 0x0f; }
+			else if (b == 0xdc)     { in.take_u8 (); rn = in.take_be16 (); }
+			else if (b == 0xdd)     { in.take_u8 (); rn = in.take_be32 (); }
+			else return false;
+			for (std::size_t j = 0; j < rn; ++j) {
+				if (!read_seq_row (in, layout)) return false;
+			}
+		} else if (k == "cells") {
+			std::size_t cn = 0;
+			std::uint8_t b = in.peek ();
+			if ((b & 0xf0) == 0x90) { in.take_u8 (); cn = b & 0x0f; }
+			else if (b == 0xdc)     { in.take_u8 (); cn = in.take_be16 (); }
+			else if (b == 0xdd)     { in.take_u8 (); cn = in.take_be32 (); }
+			else return false;
+			for (std::size_t j = 0; j < cn; ++j) {
+				if (!read_seq_cell (in, layout)) return false;
+			}
+		} else {
+			if (!in.skip_value ()) return false;
+		}
+	}
+	return true;
+}
+
+// Parse a MidiNote / MidiNotePatch sub-map. MidiNote includes `id`
+// which we drop into DecodedCmd::id (overwriting whatever was there —
+// AddNote uses the server-assigned note id as the source-of-truth).
+// MidiNotePatch has the same fields except `id`.
+static bool
+read_note_fields (In& in, DecodedCmd& out)
+{
+	std::size_t n = 0;
+	if (!in.read_map_header (n)) return false;
+	for (std::size_t i = 0; i < n; ++i) {
+		std::string k;
+		if (!in.read_str (k)) return false;
+		if (k == "pitch") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			out.note_pitch = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+			out.has_note_pitch = true;
+		} else if (k == "velocity") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			out.note_velocity = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+			out.has_note_velocity = true;
+		} else if (k == "channel") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			out.note_channel = static_cast<std::uint8_t> (v & 0x0f);
+			out.has_note_channel = true;
+		} else if (k == "start_ticks") {
+			if (!in.read_u64 (out.note_start_ticks)) return false;
+			out.has_note_start = true;
+		} else if (k == "length_ticks") {
+			if (!in.read_u64 (out.note_length_ticks)) return false;
+			out.has_note_length = true;
+		} else if (k == "id") {
+			// MidiNote.id — treat the incoming id as the note id so
+			// AddNote can preserve whatever EntityId the sidecar
+			// generated (round-trips cleaner than reassigning).
+			if (!in.read_str (out.id)) return false;
+		} else {
+			if (!in.skip_value ()) return false;
+		}
+	}
+	return true;
+}
+
+// Unified patch reader that handles both `RegionPatch` (UpdateRegion /
+// UpdateTrack) and `MidiNotePatch` (UpdateNote). The key sets are
+// disjoint so we can just try both — unknown keys skip, known keys
+// flip their `has_*` flag, and the dispatcher only reads the fields
+// that match its command kind.
+static bool
+read_region_patch_or_note (In& in, DecodedCmd& out)
 {
 	std::size_t pm = 0;
 	if (!in.read_map_header (pm)) return false;
@@ -267,6 +559,27 @@ read_region_patch (In& in, DecodedCmd& out)
 		} else if (pk == "bus_assign") {
 			if (!in.read_str (out.patch_bus_assign)) return false;
 			out.has_patch_bus_assign = true;
+		} else if (pk == "pitch") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			out.note_pitch = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+			out.has_note_pitch = true;
+		} else if (pk == "velocity") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			out.note_velocity = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+			out.has_note_velocity = true;
+		} else if (pk == "channel") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			out.note_channel = static_cast<std::uint8_t> (v & 0x0f);
+			out.has_note_channel = true;
+		} else if (pk == "start_ticks") {
+			if (!in.read_u64 (out.note_start_ticks)) return false;
+			out.has_note_start = true;
+		} else if (pk == "length_ticks") {
+			if (!in.read_u64 (out.note_length_ticks)) return false;
+			out.has_note_length = true;
 		} else {
 			if (!in.skip_value ()) return false;
 		}
@@ -304,14 +617,38 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.id)) return out;
 				} else if (k == "track_id") {
 					if (!in.read_str (out.track_id)) return out;
+				} else if (k == "region_id") {
+					// MIDI note commands target a region; stash it in
+					// track_id (free string slot; dispatch disambiguates
+					// by cmd kind).
+					if (!in.read_str (out.track_id)) return out;
+				} else if (k == "note_id") {
+					if (!in.read_str (out.id)) return out;
+				} else if (k == "note") {
+					if (!read_note_fields (in, out)) return out;
+				} else if (k == "patch_change") {
+					if (!read_pc_fields (in, out)) return out;
+				} else if (k == "patch_change_id") {
+					if (!in.read_str (out.id)) return out;
+				} else if (k == "layout") {
+					if (!read_sequencer_layout (in, out.seq_layout)) return out;
 				} else if (k == "value") {
 					if (!in.read_f64 (out.value)) return out;
 				} else if (k == "patch") {
-					if (!read_region_patch (in, out)) return out;
+					// RegionPatch and MidiNotePatch have disjoint keys,
+					// so a single reader is safe — unknown keys fall
+					// through the opposite path. But structurally: try
+					// MIDI-note fields first if the current command kind
+					// is a note cmd. For simplicity we read both: the
+					// decoder is a forward-only walk and unknown-key
+					// skipping is cheap.
+					if (!read_region_patch_or_note (in, out)) return out;
 				} else if (k == "plugin_uri") {
 					if (!in.read_str (out.plugin_uri)) return out;
 				} else if (k == "plugin_id") {
 					if (!in.read_str (out.plugin_id)) return out;
+				} else if (k == "preset_id") {
+					if (!in.read_str (out.preset_id)) return out;
 				} else if (k == "stream_id") {
 					std::uint64_t v = 0;
 					if (!in.read_u64 (v)) return out;
@@ -389,6 +726,20 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "add_plugin")         out.kind = DecodedCmd::Kind::AddPlugin;
 			else if (cmd_type == "remove_plugin")      out.kind = DecodedCmd::Kind::RemovePlugin;
 			else if (cmd_type == "save_session")       out.kind = DecodedCmd::Kind::SaveSession;
+			else if (cmd_type == "add_note")           out.kind = DecodedCmd::Kind::AddNote;
+			else if (cmd_type == "update_note")        out.kind = DecodedCmd::Kind::UpdateNote;
+			else if (cmd_type == "delete_note")        out.kind = DecodedCmd::Kind::DeleteNote;
+			else if (cmd_type == "add_patch_change")    out.kind = DecodedCmd::Kind::AddPatchChange;
+			else if (cmd_type == "update_patch_change") out.kind = DecodedCmd::Kind::UpdatePatchChange;
+			else if (cmd_type == "delete_patch_change") out.kind = DecodedCmd::Kind::DeletePatchChange;
+			else if (cmd_type == "undo")               out.kind = DecodedCmd::Kind::Undo;
+			else if (cmd_type == "redo")               out.kind = DecodedCmd::Kind::Redo;
+			else if (cmd_type == "list_plugin_presets") out.kind = DecodedCmd::Kind::ListPluginPresets;
+			else if (cmd_type == "load_plugin_preset") out.kind = DecodedCmd::Kind::LoadPluginPreset;
+			else if (cmd_type == "set_sequencer_layout")   out.kind = DecodedCmd::Kind::SetSequencerLayout;
+			else if (cmd_type == "clear_sequencer_layout") out.kind = DecodedCmd::Kind::ClearSequencerLayout;
+			else if (cmd_type == "audio_ingress_open")  out.kind = DecodedCmd::Kind::AudioIngressOpen;
+			else if (cmd_type == "audio_ingress_close") out.kind = DecodedCmd::Kind::AudioIngressClose;
 			else if (cmd_type == "audio_stream_open"
 			    ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
 			else if (cmd_type == "audio_stream_close"
@@ -620,6 +971,293 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						break;
 					}
 				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::AddNote: {
+			// cmd.track_id holds the region id (decoder reuse); cmd.id
+			// is ignored on add — Ardour assigns its own event_id.
+			if (cmd.track_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.track_id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: add_note: unknown region id: " << snap.track_id << endmsg;
+					return;
+				}
+				auto mr = std::dynamic_pointer_cast<ARDOUR::MidiRegion> (hit.region);
+				if (!mr) {
+					PBD::warning << "foyer_shim: add_note: region is not MIDI: " << snap.track_id << endmsg;
+					return;
+				}
+				auto model = mr->model ();
+				if (!model) return;
+				auto note = std::make_shared<Evoral::Note<Temporal::Beats>> (
+					snap.has_note_channel  ? snap.note_channel  : 0,
+					Temporal::Beats::ticks (static_cast<std::int64_t> (snap.has_note_start  ? snap.note_start_ticks  : 0)),
+					Temporal::Beats::ticks (static_cast<std::int64_t> (snap.has_note_length ? snap.note_length_ticks : 480)),
+					snap.has_note_pitch    ? snap.note_pitch    : 60,
+					snap.has_note_velocity ? snap.note_velocity : 100);
+				auto* diff = model->new_note_diff_command ("foyer add note");
+				diff->add (note);
+				model->apply_diff_command_as_commit (shim->session (), diff);
+				auto bytes = msgpack_out::encode_region_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::UpdateNote: {
+			if (cmd.track_id.empty () || cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.track_id);
+				if (!hit.region) return;
+				auto mr = std::dynamic_pointer_cast<ARDOUR::MidiRegion> (hit.region);
+				if (!mr) return;
+				auto model = mr->model ();
+				if (!model) return;
+
+				// Decode the note id back into an Evoral event_id. Our
+				// wire form is "note.<region-pbd>.<event_id>"; take the
+				// substring after the last '.'.
+				auto pos = snap.id.find_last_of ('.');
+				if (pos == std::string::npos) return;
+				Evoral::event_id_t target_id = 0;
+				try {
+					target_id = static_cast<Evoral::event_id_t> (std::stoi (snap.id.substr (pos + 1)));
+				} catch (...) { return; }
+
+				auto note = model->find_note (target_id);
+				if (!note) {
+					PBD::warning << "foyer_shim: update_note: note not found: " << snap.id << endmsg;
+					return;
+				}
+				auto* diff = model->new_note_diff_command ("foyer edit note");
+				if (snap.has_note_pitch) {
+					diff->change (note, ARDOUR::MidiModel::NoteDiffCommand::NoteNumber, snap.note_pitch);
+				}
+				if (snap.has_note_velocity) {
+					diff->change (note, ARDOUR::MidiModel::NoteDiffCommand::Velocity, snap.note_velocity);
+				}
+				if (snap.has_note_channel) {
+					diff->change (note, ARDOUR::MidiModel::NoteDiffCommand::Channel, snap.note_channel);
+				}
+				if (snap.has_note_start) {
+					diff->change (note, ARDOUR::MidiModel::NoteDiffCommand::StartTime,
+					              Temporal::Beats::ticks (static_cast<std::int64_t> (snap.note_start_ticks)));
+				}
+				if (snap.has_note_length) {
+					diff->change (note, ARDOUR::MidiModel::NoteDiffCommand::Length,
+					              Temporal::Beats::ticks (static_cast<std::int64_t> (snap.note_length_ticks)));
+				}
+				model->apply_diff_command_as_commit (shim->session (), diff);
+				auto bytes = msgpack_out::encode_region_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::DeleteNote: {
+			if (cmd.track_id.empty () || cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.track_id);
+				if (!hit.region) return;
+				auto mr = std::dynamic_pointer_cast<ARDOUR::MidiRegion> (hit.region);
+				if (!mr) return;
+				auto model = mr->model ();
+				if (!model) return;
+
+				auto pos = snap.id.find_last_of ('.');
+				if (pos == std::string::npos) return;
+				Evoral::event_id_t target_id = 0;
+				try {
+					target_id = static_cast<Evoral::event_id_t> (std::stoi (snap.id.substr (pos + 1)));
+				} catch (...) { return; }
+
+				auto note = model->find_note (target_id);
+				if (!note) {
+					PBD::warning << "foyer_shim: delete_note: note not found: " << snap.id << endmsg;
+					return;
+				}
+				auto* diff = model->new_note_diff_command ("foyer delete note");
+				diff->remove (note);
+				model->apply_diff_command_as_commit (shim->session (), diff);
+				auto bytes = msgpack_out::encode_region_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::AddPatchChange: {
+			if (cmd.track_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.track_id);
+				if (!hit.region) return;
+				auto mr = std::dynamic_pointer_cast<ARDOUR::MidiRegion> (hit.region);
+				if (!mr) return;
+				auto model = mr->model ();
+				if (!model) return;
+				auto pc = std::make_shared<Evoral::PatchChange<Temporal::Beats>> (
+					Temporal::Beats::ticks (static_cast<std::int64_t> (snap.has_pc_start ? snap.pc_start_ticks : 0)),
+					snap.has_pc_channel ? snap.pc_channel : 0,
+					snap.has_pc_program ? snap.pc_program : 0,
+					snap.has_pc_bank    ? snap.pc_bank    : -1);
+				auto* diff = model->new_patch_change_diff_command ("foyer add patch change");
+				diff->add (pc);
+				model->apply_diff_command_as_commit (shim->session (), diff);
+				auto bytes = msgpack_out::encode_region_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::UpdatePatchChange: {
+			if (cmd.track_id.empty () || cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.track_id);
+				if (!hit.region) return;
+				auto mr = std::dynamic_pointer_cast<ARDOUR::MidiRegion> (hit.region);
+				if (!mr) return;
+				auto model = mr->model ();
+				if (!model) return;
+				auto dot = snap.id.find_last_of ('.');
+				if (dot == std::string::npos) return;
+				Evoral::event_id_t target = 0;
+				try { target = static_cast<Evoral::event_id_t> (std::stoi (snap.id.substr (dot + 1))); }
+				catch (...) { return; }
+				auto pc = model->find_patch_change (target);
+				if (!pc) return;
+				auto* diff = model->new_patch_change_diff_command ("foyer edit patch change");
+				if (snap.has_pc_channel) diff->change_channel (pc, snap.pc_channel);
+				if (snap.has_pc_program) diff->change_program (pc, snap.pc_program);
+				if (snap.has_pc_bank)    diff->change_bank    (pc, snap.pc_bank);
+				if (snap.has_pc_start)   diff->change_time    (pc,
+					Temporal::Beats::ticks (static_cast<std::int64_t> (snap.pc_start_ticks)));
+				model->apply_diff_command_as_commit (shim->session (), diff);
+				auto bytes = msgpack_out::encode_region_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::DeletePatchChange: {
+			if (cmd.track_id.empty () || cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.track_id);
+				if (!hit.region) return;
+				auto mr = std::dynamic_pointer_cast<ARDOUR::MidiRegion> (hit.region);
+				if (!mr) return;
+				auto model = mr->model ();
+				if (!model) return;
+				auto dot = snap.id.find_last_of ('.');
+				if (dot == std::string::npos) return;
+				Evoral::event_id_t target = 0;
+				try { target = static_cast<Evoral::event_id_t> (std::stoi (snap.id.substr (dot + 1))); }
+				catch (...) { return; }
+				auto pc = model->find_patch_change (target);
+				if (!pc) return;
+				auto* diff = model->new_patch_change_diff_command ("foyer delete patch change");
+				diff->remove (pc);
+				model->apply_diff_command_as_commit (shim->session (), diff);
+				auto bytes = msgpack_out::encode_region_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::AudioIngressOpen:
+		case DecodedCmd::Kind::AudioIngressClose: {
+			// Honest stub — a real impl needs a new shim class
+			// (mirror of MasterTap but for input): register a soft
+			// input port via `session.engine().register_input_port`,
+			// own a non-RT ring buffer fed by the sidecar's IPC audio
+			// drain, and pull into the port's `AudioBuffer` on each
+			// RT cycle. That's ~200-400 lines of Ardour C++ + careful
+			// RT discipline (same shape as master_tap.cc). Decision
+			// 24 in docs/DECISIONS.md spells out the approach.
+			//
+			// Surface a clean error so the sidecar's latency-probe
+			// / ingress negotiation unwinds cleanly instead of
+			// hanging waiting for an AudioIngressOpened event that
+			// never comes.
+			PBD::warning << "foyer_shim: audio_ingress_open/close not implemented yet; "
+			             << "ignoring (see Decision 24)" << endmsg;
+			break;
+		}
+		case DecodedCmd::Kind::SetSequencerLayout: {
+			if (cmd.track_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				bool ok = schema_map::set_sequencer_layout (
+					shim->session (), snap.track_id, snap.seq_layout);
+				if (!ok) return;
+				auto bytes = msgpack_out::encode_region_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ClearSequencerLayout: {
+			if (cmd.track_id.empty ()) break;
+			std::string region_id = cmd.track_id;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, region_id] () {
+				schema_map::clear_sequencer_layout (shim->session (), region_id);
+				auto bytes = msgpack_out::encode_region_updated (shim->session (), region_id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ListPluginPresets: {
+			if (cmd.plugin_id.empty ()) break;
+			std::string plugin_id = cmd.plugin_id;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, plugin_id] () {
+				auto bytes = msgpack_out::encode_plugin_presets_listed (shim->session (), plugin_id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::LoadPluginPreset: {
+			if (cmd.plugin_id.empty () || cmd.preset_id.empty ()) break;
+			std::string plugin_id = cmd.plugin_id;
+			std::string preset_id = cmd.preset_id;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, plugin_id, preset_id] () {
+				bool ok = schema_map::load_plugin_preset (shim->session (), plugin_id, preset_id);
+				if (!ok) {
+					PBD::warning << "foyer_shim: load_plugin_preset: failed for "
+					             << plugin_id << " / " << preset_id << endmsg;
+				}
+				// Preset load re-writes parameter values on the plugin;
+				// Ardour's parameter-changed signals already re-emit each
+				// controllable so clients will see the new values drift
+				// in via the normal control-update stream.
+			});
+			break;
+		}
+		case DecodedCmd::Kind::Undo: {
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
+				shim->session ().undo (1);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::Redo: {
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
+				shim->session ().redo (1);
 			});
 			break;
 		}

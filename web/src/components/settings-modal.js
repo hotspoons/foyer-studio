@@ -17,6 +17,7 @@ import {
   getVizPref, setVizPref,
 } from "../viz/viz-settings.js";
 import { loadMixerSettings } from "../mixer-density.js";
+import { readAudioPrefs, writeAudioPrefs } from "../viz/audio-listener.js";
 
 export class SettingsModal extends LitElement {
   static properties = {
@@ -145,6 +146,52 @@ export class SettingsModal extends LitElement {
     return root;
   }
 
+  _renderAudioSection() {
+    const a = readAudioPrefs();
+    const rates = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
+    const hint = a.codec === "opus" && a.sampleRate > 48_000
+      ? html`<div style="font-size:10px;color:var(--color-warning,#f59e0b);padding:4px 0">
+               Opus tops out at 48 kHz — the stream will automatically fall back to raw when you
+               start a higher-rate listen. Switch codec to raw for predictable behavior.
+             </div>`
+      : null;
+    const hint2 = (a.sampleRate > 48_000)
+      ? html`<div style="font-size:10px;color:var(--color-text-muted);padding:4px 0">
+               Higher-rate streaming requires Ardour itself running at this sample rate — the
+               shim doesn't resample yet. Mismatches cause pitch/time drift.
+             </div>`
+      : null;
+    return html`
+      <div class="section">
+        <h3>Browser audio stream</h3>
+        <div class="row">
+          <label>Codec</label>
+          <div class="chip-row">
+            <button class="chip ${a.codec === "opus" ? "active" : ""}"
+                    @click=${() => { writeAudioPrefs({ codec: "opus" }); this._refresh(); }}>
+              Opus (compressed)
+            </button>
+            <button class="chip ${a.codec === "raw_f32_le" ? "active" : ""}"
+                    @click=${() => { writeAudioPrefs({ codec: "raw_f32_le" }); this._refresh(); }}>
+              Raw PCM (lossless)
+            </button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Sample rate</label>
+          <select @change=${(e) => { writeAudioPrefs({ sampleRate: Number(e.currentTarget.value) }); this._refresh(); }}
+                  style="background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;padding:2px 6px">
+            ${rates.map((r) => html`
+              <option value=${r} ?selected=${r === a.sampleRate}>${(r / 1000).toFixed(1)} kHz</option>
+            `)}
+          </select>
+        </div>
+        ${hint}
+        ${hint2}
+      </div>
+    `;
+  }
+
   render() {
     const returnMode = getReturnMode();
     const wfStyle = getVizPref("waveformStyle");
@@ -207,6 +254,7 @@ export class SettingsModal extends LitElement {
               <label style="color:var(--color-text-muted);font-size:11px">Change in the mixer toolbar.</label>
             </div>
           </div>
+          ${this._renderAudioSection()}
         </div>
         <footer>
           <button class="primary" @click=${this._close}>Done</button>

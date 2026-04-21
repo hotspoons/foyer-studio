@@ -22,8 +22,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmRx, PcmTx};
 use foyer_schema::{
-    AudioFormat, AudioSource, Command, ControlValue, EntityId, LatencyReport, Region, RegionPatch,
-    Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    AudioFormat, AudioSource, Command, ControlValue, EntityId, LatencyReport, MidiNote,
+    MidiNotePatch, PatchChange, PatchChangePatch, PluginPreset, Region, RegionPatch,
+    SequencerLayout, Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 
 mod waveform;
@@ -208,6 +209,105 @@ impl Backend for HostBackend {
         self.client
             .update_track(id, patch)
             .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn add_midi_note(
+        &self,
+        region_id: EntityId,
+        note: MidiNote,
+    ) -> Result<(), BackendError> {
+        self.client
+            .add_midi_note(region_id, note)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn update_midi_note(
+        &self,
+        region_id: EntityId,
+        note_id: EntityId,
+        patch: MidiNotePatch,
+    ) -> Result<(), BackendError> {
+        self.client
+            .update_midi_note(region_id, note_id, patch)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn delete_midi_note(
+        &self,
+        region_id: EntityId,
+        note_id: EntityId,
+    ) -> Result<(), BackendError> {
+        self.client
+            .delete_midi_note(region_id, note_id)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn undo(&self) -> Result<(), BackendError> {
+        self.client.undo().await.map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn redo(&self) -> Result<(), BackendError> {
+        self.client.redo().await.map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn list_plugin_presets(
+        &self,
+        plugin_id: EntityId,
+    ) -> Result<Vec<PluginPreset>, BackendError> {
+        self.client.list_plugin_presets(plugin_id).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn load_plugin_preset(
+        &self,
+        plugin_id: EntityId,
+        preset_id: EntityId,
+    ) -> Result<(), BackendError> {
+        self.client.load_plugin_preset(plugin_id, preset_id).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn add_patch_change(
+        &self,
+        region_id: EntityId,
+        patch_change: PatchChange,
+    ) -> Result<(), BackendError> {
+        self.client.add_patch_change(region_id, patch_change).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn update_patch_change(
+        &self,
+        region_id: EntityId,
+        patch_change_id: EntityId,
+        patch: PatchChangePatch,
+    ) -> Result<(), BackendError> {
+        self.client.update_patch_change(region_id, patch_change_id, patch).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn delete_patch_change(
+        &self,
+        region_id: EntityId,
+        patch_change_id: EntityId,
+    ) -> Result<(), BackendError> {
+        self.client.delete_patch_change(region_id, patch_change_id).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn set_sequencer_layout(
+        &self,
+        region_id: EntityId,
+        layout: SequencerLayout,
+    ) -> Result<(), BackendError> {
+        self.client.set_sequencer_layout(region_id, layout).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn clear_sequencer_layout(
+        &self,
+        region_id: EntityId,
+    ) -> Result<(), BackendError> {
+        self.client.clear_sequencer_layout(region_id).await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 

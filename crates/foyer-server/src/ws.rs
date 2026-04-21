@@ -650,18 +650,198 @@ async fn dispatch_command(
             broadcast_event(state, Event::AudioEgressStopped { stream_id }).await;
         }
 
+        // MIDI note edits — fire-and-forget to the backend. The host
+        // backend forwards the command to the shim, which applies it to
+        // Ardour's MidiModel and emits a RegionUpdated event. The web
+        // UI does optimistic updates and reconciles on RegionUpdated.
+        Command::AddNote { region_id, note } => {
+            if let Err(e) = state.backend().await.add_midi_note(region_id, note).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "add_note_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::UpdateNote {
+            region_id,
+            note_id,
+            patch,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .update_midi_note(region_id, note_id, patch)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "update_note_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::DeleteNote {
+            region_id,
+            note_id,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .delete_midi_note(region_id, note_id)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "delete_note_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::AddPatchChange { region_id, patch_change } => {
+            if let Err(e) = state.backend().await.add_patch_change(region_id, patch_change).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "add_patch_change_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::UpdatePatchChange { region_id, patch_change_id, patch } => {
+            if let Err(e) = state.backend().await
+                .update_patch_change(region_id, patch_change_id, patch).await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "update_patch_change_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::DeletePatchChange { region_id, patch_change_id } => {
+            if let Err(e) = state.backend().await
+                .delete_patch_change(region_id, patch_change_id).await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "delete_patch_change_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::SetSequencerLayout { region_id, layout } => {
+            if let Err(e) = state.backend().await.set_sequencer_layout(region_id, layout).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "set_sequencer_layout_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::ClearSequencerLayout { region_id } => {
+            if let Err(e) = state.backend().await.clear_sequencer_layout(region_id).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "clear_sequencer_layout_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::Undo => {
+            if let Err(e) = state.backend().await.undo().await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "undo_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::Redo => {
+            if let Err(e) = state.backend().await.redo().await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "redo_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::ListPluginPresets { plugin_id } => {
+            match state.backend().await.list_plugin_presets(plugin_id.clone()).await {
+                Ok(presets) => {
+                    broadcast_event(
+                        state,
+                        Event::PluginPresetsListed { plugin_id, presets },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "list_plugin_presets_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::LoadPluginPreset { plugin_id, preset_id } => {
+            if let Err(e) = state.backend().await
+                .load_plugin_preset(plugin_id, preset_id).await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "load_plugin_preset_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
         Command::CreateGroup { .. }
         | Command::UpdateGroup { .. }
         | Command::DeleteGroup { .. }
         | Command::MovePlugin { .. }
-        | Command::ListPluginPresets { .. }
-        | Command::LoadPluginPreset { .. }
         | Command::SavePluginPreset { .. }
         | Command::OpenPluginGui { .. }
         | Command::ClosePluginGui { .. }
-        | Command::AddNote { .. }
-        | Command::UpdateNote { .. }
-        | Command::DeleteNote { .. }
         | Command::Locate { .. }
         | Command::AudioSdpAnswer { .. }
         | Command::AudioIceCandidate { .. } => {

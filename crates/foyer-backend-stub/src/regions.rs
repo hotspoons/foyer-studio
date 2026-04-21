@@ -88,6 +88,8 @@ fn synthesize_for(track_id: &EntityId) -> Vec<Region> {
             source_path: None,
             source_offset_samples: None,
             notes: vec![],
+            patch_changes: vec![],
+            foyer_sequencer: None,
         });
     }
     out

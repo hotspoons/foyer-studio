@@ -14,6 +14,7 @@
 import { LitElement, html, css } from "lit";
 import { WaveformCache } from "../layout/waveform-cache.js";
 import "../viz/waveform-gl.js";
+import "./midi-strip.js";
 import "../viz/viz-picker.js";
 import { scrollbarStyles } from "../shared-styles.js";
 import { showContextMenu } from "./context-menu.js";
@@ -279,6 +280,11 @@ export class TimelineView extends LitElement {
     this._regionsByTrack = {};
     this._timeline = { sample_rate: 48_000, length_samples: 48_000 * 60 };
     this._zoom = 60;
+    // Virtual timeline-length extension in seconds; grows only when
+    // the user scroll-zooms past the session's own length so that
+    // pointer-anchored zoom can always seat its target sample under
+    // the cursor without the browser clamping scrollLeft.
+    this._zoomPadSec = 0;
     this._playheadSamples = 0;
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
     this._wfCache = null;
@@ -354,6 +360,7 @@ export class TimelineView extends LitElement {
     if (body.type === "regions_list") {
       this._regionsByTrack = { ...this._regionsByTrack, [body.track_id]: body.regions };
       this._timeline = body.timeline;
+      this.dispatchEvent(new CustomEvent("foyer:regions-updated", { detail: { track_id: body.track_id } }));
     } else if (body.type === "region_updated") {
       const r = body.region;
       const list = this._regionsByTrack[r.track_id];
@@ -363,8 +370,13 @@ export class TimelineView extends LitElement {
           const copy = list.slice();
           copy[idx] = r;
           this._regionsByTrack = { ...this._regionsByTrack, [r.track_id]: copy };
+        } else {
+          // New region (e.g. AddNote on a region the backend just
+          // discovered) — append to the list so the editor sees it.
+          this._regionsByTrack = { ...this._regionsByTrack, [r.track_id]: [...list, r] };
         }
       }
+      this.dispatchEvent(new CustomEvent("foyer:regions-updated", { detail: { region_id: r.id, track_id: r.track_id } }));
     } else if (body.type === "region_removed") {
       const { track_id, region_id } = body;
       const list = this._regionsByTrack[track_id];
@@ -374,6 +386,7 @@ export class TimelineView extends LitElement {
           [track_id]: list.filter((r) => r.id !== region_id),
         };
       }
+      this.dispatchEvent(new CustomEvent("foyer:regions-updated", { detail: { region_id, track_id } }));
     } else if (body.type === "control_update" && body.update?.id === "transport.position") {
       this._playheadSamples = this._positionOrPin(Number(body.update.value) || 0);
     } else if (body.type === "meter_batch" && Array.isArray(body.values)) {
@@ -422,9 +435,94 @@ export class TimelineView extends LitElement {
   _onLaneHeadContext(ev, track) {
     ev.preventDefault();
     ev.stopPropagation();
-    // Import lazily to avoid pulling the modal into the initial bundle
-    // for sessions that never right-click a lane.
-    import("./track-editor-modal.js").then((m) => m.openTrackEditor(track.id));
+    const items = [
+      { heading: track.name },
+      {
+        label: "Track editor…",
+        icon: "adjustments-horizontal",
+        action: () => import("./track-editor-modal.js")
+                        .then((m) => m.openTrackEditor(track.id)),
+      },
+    ];
+    if (track.kind === "midi") {
+      items.push({
+        label: "Open piano roll…",
+        icon: "sparkles",
+        action: () => this._openMidiEditorForTrack(track),
+      });
+      items.push({
+        label: "Open beat sequencer…",
+        icon: "queue-list",
+        action: () => this._openBeatSequencerForTrack(track),
+      });
+      items.push({
+        label: "MIDI patches & banks…",
+        icon: "queue-list",
+        action: () => this._openMidiManager(track),
+      });
+    }
+    showContextMenu(ev, items);
+  }
+
+  _openBeatSequencerForTrack(track) {
+    if (!track) return;
+    const regions = this._regionsByTrack[track.id] || [];
+    const region = regions[0] || { id: `__empty.${track.id}`, track_id: track.id, name: track.name, notes: [] };
+    this._openBeatSequencer(region);
+  }
+
+  _openBeatSequencer(region) {
+    Promise.all([
+      import("./beat-sequencer.js"),
+      import("./window.js"),
+    ]).then(([, winMod]) => {
+      const seq = document.createElement("foyer-beat-sequencer");
+      seq.regionId   = region?.id || "";
+      seq.regionName = region?.name || "";
+      seq.notes      = Array.isArray(region?.notes) ? region.notes : [];
+      seq.layout     = region?.foyer_sequencer || null;
+      const trackId  = region?.track_id;
+      const onUpdate = () => {
+        const list = this._regionsByTrack[trackId] || [];
+        const fresh = list.find((r) => r.id === seq.regionId);
+        if (fresh) {
+          seq.notes  = Array.isArray(fresh.notes) ? fresh.notes : [];
+          if (fresh.foyer_sequencer) seq.layout = fresh.foyer_sequencer;
+        }
+      };
+      this.addEventListener("foyer:regions-updated", onUpdate);
+      winMod.openWindow({
+        title: `Beat — ${region?.name || region?.id || "region"}`,
+        icon: "queue-list",
+        storageKey: "beat-sequencer",
+        content: seq,
+        width: 1100,
+        height: 560,
+      });
+      const win = seq.closest("foyer-window");
+      win?.addEventListener("close", () => {
+        this.removeEventListener("foyer:regions-updated", onUpdate);
+      }, { once: true });
+    });
+  }
+
+  _openMidiManager(track) {
+    Promise.all([
+      import("./midi-manager.js"),
+      import("./window.js"),
+    ]).then(([, winMod]) => {
+      const mgr = document.createElement("foyer-midi-manager");
+      mgr.trackId = track.id;
+      mgr.trackName = track.name;
+      winMod.openWindow({
+        title: `MIDI — ${track.name}`,
+        icon: "queue-list",
+        storageKey: "midi-manager",
+        content: mgr,
+        width: 720,
+        height: 520,
+      });
+    });
   }
 
   // ── zoom stack ─────────────────────────────────────────────────────
@@ -546,7 +644,13 @@ export class TimelineView extends LitElement {
   render() {
     const tracks = this.session?.tracks ?? [];
     const sr = this._timeline?.sample_rate || 48_000;
-    const totalSec = Math.max(30, (this._timeline?.length_samples || sr * 30) / sr);
+    // Base content length: session length (or 30s min). Extended on the
+    // fly by `_zoomPadSec` when the user scroll-zooms past the natural
+    // content edge, so anchored zoom keeps the cursor pinned to the
+    // sample under it even in the dead-space case where there's no
+    // region farther right to hold the scroll range open.
+    const baseSec = Math.max(30, (this._timeline?.length_samples || sr * 30) / sr);
+    const totalSec = Math.max(baseSec, this._zoomPadSec || 0);
     const widthPx = totalSec * this._zoom;
     const gridWidth = widthPx + HEAD_WIDTH;
 
@@ -653,12 +757,20 @@ export class TimelineView extends LitElement {
         ${regions.map(r => {
           const leftPx = HEAD_WIDTH + (r.start_samples / sr) * this._zoom;
           const widthPx = Math.max(10, (r.length_samples / sr) * this._zoom);
+          // MIDI regions paint their actual note list — audio regions
+          // paint waveform peaks. The host backend would otherwise
+          // fall through to synthesized sine peaks for MIDI regions
+          // (no source_path → synth_waveform fallback in
+          // foyer-backend-host/src/lib.rs:244), which is a visual lie.
+          const isMidi = track.kind === "midi";
           return html`
             <div class="region" data-id=${r.id}
                  style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px"
                  @pointerdown=${(e) => this._startDrag(e, r, "move")}
                  @contextmenu=${(e) => this._regionContextMenu(e, r)}>
-              <foyer-waveform-gl class="viz" data-id=${r.id}></foyer-waveform-gl>
+              ${isMidi
+                ? html`<foyer-midi-strip class="viz" .notes=${r.notes || []} .color=${track.color || ""}></foyer-midi-strip>`
+                : html`<foyer-waveform-gl class="viz" data-id=${r.id}></foyer-waveform-gl>`}
               <div class="name">${r.name}</div>
               <div class="edge left"  @pointerdown=${(e) => this._startDrag(e, r, "resize-left")}></div>
               <div class="edge right" @pointerdown=${(e) => this._startDrag(e, r, "resize-right")}></div>
@@ -702,24 +814,46 @@ export class TimelineView extends LitElement {
       requestAnimationFrame(() => this._repaintWaveforms());
       return;
     }
-    // Temporal zoom — anchor around the pointer's current time so the user's
-    // cursor stays over the same sample while the scale changes.
+    // Temporal zoom — anchor around the pointer's current time so the
+    // user's cursor stays over the same sample while the scale changes.
+    //
+    // Previously this set scrollLeft and let the browser clamp if the
+    // target exceeded the content width. That clamp produced a visible
+    // jump whenever the zoom operation moved the pointer's tick past
+    // the content's right edge (Rich's "perfect until there's dead
+    // space" bug). Fix: pre-compute the content width we'll need to
+    // honor the anchor, bump `_zoomPadSec` to guarantee it, then set
+    // the exact scrollLeft after layout settles.
     ev.preventDefault();
     const scroll = ev.currentTarget;
     const bounds = scroll.getBoundingClientRect();
-    const pointerX = ev.clientX - bounds.left + scroll.scrollLeft - HEAD_WIDTH;
-    const sr = this._timeline?.sample_rate || 48_000;
-    const t0 = pointerX / this._zoom;
+    const pointerScreenX = ev.clientX - bounds.left;   // viewport-relative
+    const pointerContentX = pointerScreenX + scroll.scrollLeft - HEAD_WIDTH;
+    const t0 = pointerContentX / this._zoom;
     const factor = dy < 0 ? 1.18 : 1 / 1.18;
     const next = Math.max(2, Math.min(4000, Math.round(this._zoom * factor)));
     if (next === this._zoom) return;
     this._zoom = next;
-    // Keep `t0` under the cursor: the new scroll position lines up so the
-    // sample at t0 sits under the pointer.
+
+    // Compute the target scrollLeft that keeps t0 under the pointer.
+    const newPointerContentX = t0 * next;
+    const targetScrollLeft = newPointerContentX - (pointerScreenX - HEAD_WIDTH);
+    // Content width needed so the target is reachable: enough room for
+    // scrollLeft + viewport (minus the sticky HEAD column). Also keep
+    // a small buffer past the right edge so zoom-out near the tail
+    // doesn't clamp.
+    const viewportRest = scroll.clientWidth - HEAD_WIDTH;
+    const neededContentPx = targetScrollLeft + viewportRest + 80;
+    const neededSec = Math.max(0, neededContentPx / next);
+    const baseSec = Math.max(30, (this._timeline?.length_samples || 48000 * 30) / (this._timeline?.sample_rate || 48000));
+    if (neededSec > baseSec) {
+      this._zoomPadSec = Math.max(this._zoomPadSec || 0, neededSec);
+    } else {
+      // Below base — no pad needed. Preserve any larger pad the user
+      // built up by zooming out recently, though; it's harmless.
+    }
     requestAnimationFrame(() => {
-      const newPointerX = t0 * this._zoom;
-      scroll.scrollLeft = newPointerX - (ev.clientX - bounds.left - HEAD_WIDTH);
-      void sr;
+      scroll.scrollLeft = Math.max(0, targetScrollLeft);
     });
   }
 
@@ -734,9 +868,6 @@ export class TimelineView extends LitElement {
   _regionContextMenu(ev, region) {
     ev.preventDefault();
     ev.stopPropagation();
-    // A MIDI region has `notes` (non-empty for regions the shim has
-    // populated). Expose "Open piano roll…" for those; the audio
-    // menu stays minimal.
     const items = [
       { heading: region.name || region.id },
       {
@@ -749,11 +880,20 @@ export class TimelineView extends LitElement {
         }),
       },
     ];
-    if (Array.isArray(region.notes)) {
+    // Offer piano roll for any region on a MIDI track. Checking by
+    // owning track kind (rather than `Array.isArray(region.notes)`)
+    // keeps the option visible for empty regions and survives a
+    // post-update envelope that hasn't carried notes yet.
+    if (this._isMidiRegion(region)) {
       items.push({
         label: "Open piano roll…",
         icon: "sparkles",
         action: () => this._openMidiEditor(region),
+      });
+      items.push({
+        label: region.foyer_sequencer ? "Open beat sequencer…" : "Convert to beat sequencer…",
+        icon: "queue-list",
+        action: () => this._openBeatSequencer(region),
       });
     }
     items.push({ separator: true });
@@ -766,40 +906,90 @@ export class TimelineView extends LitElement {
     showContextMenu(ev, items);
   }
 
+  _isMidiRegion(region) {
+    if (Array.isArray(region?.notes)) return true;
+    const tracks = this.session?.tracks || [];
+    const track = tracks.find((t) => t.id === region?.track_id);
+    return track?.kind === "midi";
+  }
+
   _openMidiEditor(region) {
-    import("./midi-editor.js").then(() => {
-      // A simple centered modal wrapper is overkill — reuse the project
-      // pattern of spawning a detached element and appending to body.
-      const wrap = document.createElement("div");
-      wrap.style.cssText = "position:fixed;inset:0;z-index:900;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center";
-      const card = document.createElement("div");
-      card.style.cssText = "background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-lg);width:min(960px,95vw);height:min(640px,90vh);display:flex;flex-direction:column;overflow:hidden";
-      const header = document.createElement("div");
-      header.style.cssText = "display:flex;align-items:center;padding:10px 14px;border-bottom:1px solid var(--color-border);font-family:var(--font-sans);font-size:13px;font-weight:600;color:var(--color-text)";
-      header.innerHTML = `<span style="flex:1">MIDI — ${region.name || region.id}</span><button style="background:transparent;border:1px solid var(--color-border);color:var(--color-text);border-radius:4px;padding:4px 10px;cursor:pointer">Close</button>`;
-      header.querySelector("button").addEventListener("click", () => wrap.remove());
-      card.appendChild(header);
+    Promise.all([
+      import("./midi-editor.js"),
+      import("./window.js"),
+    ]).then(([, winMod]) => {
       const editor = document.createElement("foyer-midi-editor");
-      editor.notes = region.notes || [];
-      editor.regionName = region.name || "";
-      editor.style.flex = "1";
-      editor.style.minHeight = "0";
-      card.appendChild(editor);
-      wrap.appendChild(card);
-      wrap.addEventListener("click", (e) => { if (e.target === wrap) wrap.remove(); });
-      document.body.appendChild(wrap);
+      editor.notes      = Array.isArray(region?.notes) ? region.notes : [];
+      editor.regionId   = region?.id || "";
+      editor.regionName = region?.name || "";
+      const trackId = region?.track_id;
+      // Keep the editor in sync with the live region list — when the
+      // backend echoes a RegionUpdated for this region, push the fresh
+      // note list in. Without this the editor would show the snapshot
+      // from open-time and drift as the user edits.
+      const onUpdate = () => {
+        const list = this._regionsByTrack[trackId] || [];
+        const fresh = list.find((r) => r.id === editor.regionId);
+        if (fresh) {
+          editor.notes = Array.isArray(fresh.notes) ? fresh.notes : [];
+          editor.regionName = fresh.name || editor.regionName;
+        }
+      };
+      this.addEventListener("foyer:regions-updated", onUpdate);
+      const close = winMod.openWindow({
+        title: `MIDI — ${region?.name || region?.id || "region"}`,
+        icon: "sparkles",
+        storageKey: "midi-editor",
+        content: editor,
+        width: 1040,
+        height: 680,
+      });
+      // foyer-window dispatches `close` when the user clicks X /
+      // presses Escape / clicks the backdrop. Clean up our listener
+      // then so we don't keep stale closures alive forever.
+      const win = editor.closest("foyer-window");
+      const unsub = () => this.removeEventListener("foyer:regions-updated", onUpdate);
+      win?.addEventListener("close", unsub, { once: true });
+      // (We also return the `close` fn for parity with other openWindow
+      // callers, though none of timeline's menu items need it.)
+      void close;
     });
+  }
+
+  _openMidiEditorForTrack(track) {
+    if (!track) return;
+    const list = this._regionsByTrack[track.id] || [];
+    // Prefer the first region so the editor has something to show;
+    // fall back to a synthetic empty region rooted at zero so the
+    // piano roll still opens with its empty-state messaging.
+    const region = list[0] || {
+      id: `__empty.${track.id}`,
+      track_id: track.id,
+      name: track.name,
+      notes: [],
+    };
+    this._openMidiEditor(region);
   }
 
   _startLaneResize(ev, trackId) {
     ev.preventDefault();
     ev.stopPropagation();
     const start = ev.clientY;
-    const h0 = this._laneHeightFor(trackId);
+    const tracks = this.session?.tracks || [];
+    // Hold Shift to resize every lane by the same delta. Saves having
+    // to drag each one individually when the user wants a uniform
+    // set-height pass (common ergonomic ask).
+    const resizeAll = ev.shiftKey;
+    const origHeights = resizeAll
+      ? Object.fromEntries(tracks.map((t) => [t.id, this._laneHeightFor(t.id)]))
+      : { [trackId]: this._laneHeightFor(trackId) };
     const move = (e) => {
       const dy = e.clientY - start;
-      const h = Math.max(LANE_HEIGHT_MIN, Math.min(LANE_HEIGHT_MAX, h0 + dy));
-      this._laneHeights = { ...this._laneHeights, [trackId]: h };
+      const next = { ...this._laneHeights };
+      for (const [id, h0] of Object.entries(origHeights)) {
+        next[id] = Math.max(LANE_HEIGHT_MIN, Math.min(LANE_HEIGHT_MAX, h0 + dy));
+      }
+      this._laneHeights = next;
       this.requestUpdate();
     };
     const up = () => {

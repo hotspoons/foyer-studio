@@ -84,6 +84,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libayatana-appindicator3-dev \
       librsvg2-dev \
       libsoup-3.0-dev \
+      # ---- LV2 plugin + soundfont bundle ----
+      # Gives Ardour something real to load in the devcontainer so feature
+      # work (plugin-panel rendering, MIDI piano roll, instrument tracks,
+      # record-arm testing) has actual audio / MIDI targets instead of an
+      # empty plugin list. ardour-lv2-plugins pulls in fluidsynth so
+      # a-Fluid Synth works as a GM synth backed by fluid-soundfont-gm.
+      # AVL drums + soundfont gives us a ready drum instrument; synthv1
+      # / samplv1 / drumkv1 / padthv1 cover the old-school synth shapes;
+      # calf / lsp / swh / mda / dpf / x42 / zam / dragonfly are the
+      # standard Linux-audio effects suites. Total install: ~200 LV2
+      # plugins under /usr/lib/lv2/ + GM soundfont under
+      # /usr/share/sounds/sf2/.
+      ardour-lv2-plugins \
+      avldrums.lv2 \
+      avldrums.lv2-soundfont \
+      calf-plugins \
+      dpf-plugins-lv2 \
+      dragonfly-reverb-lv2 \
+      drumkv1-lv2 \
+      fluid-soundfont-gm \
+      fluidsynth \
+      lsp-plugins-lv2 \
+      mda-lv2 \
+      padthv1-lv2 \
+      samplv1-lv2 \
+      setbfree \
+      swh-lv2 \
+      synthv1-lv2 \
+      timgm6mb-soundfont \
+      x42-plugins \
+      zam-plugins \
     && rm -rf /var/lib/apt/lists/*
 
 # Create vscode user (UID 1000) with passwordless sudo, mirroring the devcontainer convention.
