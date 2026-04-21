@@ -755,3 +755,157 @@ speech-like signals is irrelevant here.
 speech-like content than Hybrid/SILK — we pay maybe 10-20 % more
 bitrate on spoken-voice tracks. For an interactive monitoring
 stream on a LAN that's a non-issue.
+
+## 22. Shim CMakeLists MUST define `WAF_BUILD`
+
+**Date:** 2026-04-21
+**Decision:** `shims/ardour/CMakeLists.txt` passes
+`-DWAF_BUILD` as a compile definition for every shim translation
+unit. This is non-optional — without it, the shim is ABI-incompatible
+with libardour.so at the struct-layout level and any method call that
+touches a conditional Session/Route member will silently read garbage
+memory.
+
+**Why.** Ardour's headers (`session.h:34`, and many others under
+`libs/ardour/ardour/`) guard `#include "libardour-config.h"` behind:
+
+```cpp
+#ifdef WAF_BUILD
+#include "libardour-config.h"
+#endif
+```
+
+`libardour-config.h` is the generated config header that defines
+`USE_TLSF`, `LV2_SUPPORT`, `VST3_SUPPORT`, `HAVE_COREAUDIO`, and
+dozens of other flags. Those flags gate conditional members inside
+Session and Route with `#ifdef USE_TLSF` (session.h:66-70,
+1666-1670) and similar. When libardour.so was built with those
+defines set, its Session has one layout. When our shim compiles
+against the same headers WITHOUT those defines, its Session has a
+different layout — different offsets for `routes`, `_master_out`,
+etc.
+
+Concretely: the shim calls `session.get_routes()`. Under the hood
+that's `routes.reader()` which dereferences `managed_object`.
+libardour::Session has `routes` at offset ~12700 bytes; our
+miscompiled Session has `routes` at a DIFFERENT offset (e.g. 12728
+vs 12720). Our call reads from the wrong place, gets zero bytes,
+dereferences a null atomic, SIGSEGV inside `RCUManager::reader()`.
+
+**How we found it.** Every crash stack landed in
+`RCUManager::reader` with `managed_object` somehow null, but
+Ardour's own code at [session_state.cc:318] was using the same
+RCU synchronously just moments before. The tell-tale sign was
+`gdb -ex "x/4xg $rcu_addr"` showing all zeros at the RCUManager's
+member location — bytes that in real libardour contained a vtable
+and non-null atomic pointer. Those bytes were ZERO in our compile
+because we were reading past the actual `routes` member, into
+unused padding or an adjacent std::string. The six hours of
+"RCU race" debugging we did before finding this — weak_ptr
+caches, `session_loaded` signal timing, same-thread vs event-loop
+handler dispatch — were ALL ghost chases. The bug was ABI
+mismatch, not concurrency.
+
+**Alternatives:**
+1. *Forward-declare Session opaquely and call all methods through
+   a PIMPL.* Rejected: would require a wrapper library maintained
+   in Ardour's tree — that defeats the whole standalone-shim
+   point (see Decision 18) and still requires matching flags on
+   the wrapper side.
+2. *Mirror libardour's exact set of defines explicitly in our
+   CMakeLists.* Rejected: brittle. Ardour's flags depend on what
+   was detected at Ardour's own configure time; we'd have to
+   re-run the same detection or parse `libardour-config.h`.
+   Defining `WAF_BUILD` lets Ardour's own generated header ride
+   in with the correct flags for whichever build of libardour we
+   link against.
+
+**Tradeoff.** The `WAF_BUILD` name implies "we're being built by
+waf." We're not — we're CMake. But it's the token Ardour's
+headers chose to pivot on, and defining it in our CMake build
+is the minimum-surface way to be compatible. Adds nothing else
+to our compile.
+
+**Failure mode if re-introduced.** Any future refactor that
+splits the CMakeLists, moves the target_compile_definitions to a
+different scope, or migrates to a `find_package(Ardour)` helper
+must carry `WAF_BUILD` (or an equivalent Ardour-blessed include
+trigger) forward. The failure is non-obvious: crashes look like
+concurrency bugs, not ABI bugs, because the struct layouts are
+plausibly close (just different by a few bytes).
+
+## 23. Passive-tap Processors must `display_to_user() == true`
+
+**Date:** 2026-04-21
+**Decision:** `MasterTap` (and any future `ARDOUR::Processor`
+subclass we install on a Route for a read-only audio tap) returns
+`true` from `display_to_user()`. The processor shows up in Ardour's
+GUI mixer as `"Foyer Studio Master Tap"`. Users who open the
+native GUI see it; users running headless don't care.
+
+**Why.** `Route::setup_invisible_processors()`
+([route.cc:5591-5610](../../ardour/libs/ardour/route.cc#L5591))
+is called from `configure_processors_unlocked`, which runs on
+every `add_processor` cycle and every time the processor chain
+is touched. It builds a fresh `new_processors` list and only
+keeps:
+
+- Processors where `display_to_user()` returns `true`
+- Ardour's own hardcoded internal types (amp, meter, main_outs,
+  trim, monitor_send, monitor_control, surround_send, foldback
+  sends, beatbox)
+- Foldback `Send` instances specifically
+
+**Anything else with `display_to_user()==false` is silently
+dropped.** Line 5873 then does
+`_processors = new_processors;` — the DROP is the assignment;
+nobody logs it, nobody returns an error. `Route::add_processor`
+returns 0 (success), the processor passes initial insertion into
+`_processors` at line 1205, then `setup_invisible_processors`
+rebuilds the list without it. From our side we see: rc=0, no
+err, but `foreach_processor` enumerates 5 items instead of 6.
+Our tap's `run()` never fires because Ardour has no pointer to
+it in the active chain.
+
+**How we found it.** Instrumented the add flow with:
+- `rc` from `Route::add_processor`
+- `err.index / err.count` from the `ProcessorStreams` out-param
+- A `tap_found_in_chain=0/1` boolean checking the chain
+  post-add
+
+Got `rc=0 err.index=0 err.count=(0,0) tap_found_in_chain=0`
+— pointing the finger at a silent drop between insert-success
+and post-add readback. Grep of Ardour's source for the code
+between insert and readback led to `setup_invisible_processors`.
+
+**Alternatives:**
+
+1. *Pretend to be one of Ardour's hardcoded internal types.*
+   Rejected: would require subclassing e.g. `Meter` or `Amp` and
+   would tie our ABI to Ardour's internal class hierarchy. Also
+   the hardcoded list lives in `_processors`-identity tests
+   (`if (proc == _meter)`), not type checks — impossible to
+   impersonate from outside.
+2. *Install the tap via a mechanism that's not a `Processor`
+   subclass on the Route* (e.g. an IO port connection at the
+   JACK layer, or a hook in `Session::process`). Rejected for
+   M6a: keeps the shim's GPL surface minimal and matches the
+   Mackie/OSC idiom of "surface code lives in
+   `libs/surfaces/...`." Revisit if we ever need a truly
+   invisible tap.
+3. *Extend Ardour to support third-party invisible processors.*
+   Upstreamable in theory, rejected for now: Decision 18 keeps
+   Ardour pristine.
+
+**Tradeoff.** Users opening the GUI mixer will see the tap.
+Informative ("Foyer Studio is monitoring this bus"); not
+destructive (tap is pass-through, zero signal effect). Could
+cause confusion for a user who doesn't know about Foyer. Fine
+for now.
+
+**Failure mode if re-introduced.** If someone flips
+`display_to_user()` back to `false` thinking it's a cleanup, the
+tap will silently stop working. No crash — just silent audio
+egress. Test for this: after installing the tap, grep daw.log
+for `foyer_shim: [audio] stream_id=<id> run=<N>` — if `run`
+stays `0` while transport is rolling, we're back in this trap.

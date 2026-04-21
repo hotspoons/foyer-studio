@@ -46,7 +46,18 @@ public:
 	~MasterTap () override;
 
 	std::string display_name () const override { return "Foyer Studio Master Tap"; }
-	bool display_to_user () const override     { return false; }
+	// MUST be true even though we'd prefer to hide from Ardour's GUI.
+	// Route::setup_invisible_processors() (route.cc:5591-5610) rebuilds
+	// _processors on every configure_io cycle and only keeps processors
+	// that either display_to_user() == true OR are one of Ardour's
+	// hardcoded internal types (amp / meter / main_outs / trim /
+	// monitor_send / surround_send / foldback_sends / beatbox). Any
+	// other display_to_user()==false processor gets silently dropped
+	// from _processors — Route::add_processor returns 0 (success)
+	// but the tap vanishes before run()/silence() ever fires. Setting
+	// this to true keeps the tap in the chain. Cost: it shows up in
+	// Ardour's GUI mixer as "Foyer Studio Master Tap". Worth it.
+	bool display_to_user () const override     { return true; }
 	bool does_routing () const override        { return false; }
 
 	// Force "always on" — Ardour's process loop checks `active()` /

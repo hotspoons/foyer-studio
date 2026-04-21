@@ -903,7 +903,20 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					             << " n_outputs.audio=" << master->n_outputs ().n_audio ()
 					             << endmsg;
 				}
-				if (master->add_processor (tap, ARDOUR::PostFader, nullptr, true /* activation */) != 0) {
+				// Capture err so we can see WHY insertion might silently
+				// fail even when add_processor returns 0 (observed:
+				// tap_found_in_chain=0 with rc=0, so something inside
+				// add_processors is either rolling back via pstate
+				// without returning -1, or silently adding us to the
+				// skip-list).
+				ARDOUR::Route::ProcessorStreams err;
+				const int add_rc = master->add_processor (tap, ARDOUR::PostFader, &err, true /* activation */);
+				PBD::warning << "foyer_shim: [audio] add_processor rc=" << add_rc
+				             << " err.index=" << err.index
+				             << " err.count.audio=" << err.count.n_audio ()
+				             << " err.count.midi=" << err.count.n_midi ()
+				             << endmsg;
+				if (add_rc != 0) {
 					PBD::warning << "foyer_shim: audio_stream_open: add_processor failed" << endmsg;
 					return;
 				}

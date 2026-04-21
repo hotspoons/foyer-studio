@@ -49,3 +49,12 @@ processor chain is firing at all. Rich's session opens with
 all-silent mastering and our auto-play workaround forces stop —
 user has to hit Play (or arm a track with monitoring) to see
 movement.
+
+
+---
+
+## Rich new notes
+
+- Midi editor! We need a midi editor
+- A beat sequencer would be *awesome* as an option for a MIDI channel. Think the primary UI for oxygen with a sequencer and layout def could be used for drum tracks, awesome
+- Push-to-talk audio broadcast for multi-user colabs (pipes audio to all clients of same session except ours)
