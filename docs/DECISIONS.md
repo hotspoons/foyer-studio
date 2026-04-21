@@ -1029,3 +1029,211 @@ above. The custom-backend path is technically cleaner in the
 abstract and operationally catastrophic because it displaces the
 user's real audio device. Soft ports on the active backend is
 the less-pretty, more-correct answer.
+
+## 25. Beat-sequencer audio preview is a browser-side synth, not DAW-routed
+
+**Context.** Users want audible feedback when they click a cell in
+the beat sequencer (or a key in the piano roll) so they know which
+drum they just placed without having to hit play. Rich's ask on
+2026-04-21: "have a checkbox to enable/disable audio preview in
+all piano rolls so when you click a note or drum, as long as the
+channel is unmuted and bussed to output (not disk only) it plays".
+
+**Decision.** The `Preview` toggle in the beat sequencer plays a
+short WebAudio tone/drum synth in the browser, independent of the
+DAW's actual instrument or mixer routing. State is stored in
+`localStorage` at `foyer.beat.preview.v1`. The real DAW-routed
+preview (hear the actual instrument, through the user's plugin
+chain, respecting mute/solo/send state) is deferred.
+
+**Why not DAW-routed.**
+
+1. **No clean Ardour API for single-shot MIDI injection.** The
+   obvious knobs (`Session::process_transport_fsm`,
+   `MidiTrack::process_output_buffers`) are all hot-path RT code.
+   Adding a soft MIDI port just for preview notes is a non-trivial
+   slice (mirror of the ingress work called out in Decision 24).
+2. **Latency of the IPC round-trip.** Even if we had the API, a
+   click → IPC → shim → Ardour RT → audio out round trip is tens
+   of ms — audible "click-then-sound" lag that defeats the point.
+   The browser path is ~3 ms.
+3. **Ship-first rule.** Rich asked for audio feedback; a browser
+   synth meets the UX intent today while a DAW-routed variant can
+   land alongside the ingress work (Decision 24).
+
+**Tradeoffs.**
+
+- Preview doesn't honor the track's plugin chain — kick clicks
+  like a sine blip, not like the instrument on the track.
+- Preview doesn't respect mute/solo — it always plays, since it's
+  out-of-band.
+- The checkbox is a UX promise we'll keep: when DAW-routed
+  preview lands, the same toggle controls it; no user-facing
+  change required.
+
+**Failure mode if re-implemented as DAW-routed first.** The
+feature would sit behind the ingress-slice blocker indefinitely.
+A browser synth is the pragmatic stop-gap; it unblocks the "did I
+just add a kick?" workflow without waiting on RT-discipline work.
+
+
+## 26. Track monitoring (auto/input/disk) lands as a string field on TrackPatch, not as a Parameter
+
+**Context.** Ardour has `ARDOUR::MonitorChoice` (`Auto`, `Input`,
+`Disk`, `Cue`) on every track. Rich's 2026-04-21 ask: "Add disk
+(play) and in (monitor) option on the mixer". The two natural
+representations are:
+
+1. **As a Parameter** — like `gain` / `mute` / `solo`, subscribe
+   via `ControlController`, `ControlSet` messages both ways.
+2. **As a string field** on `Track` (snapshot) and `TrackPatch`
+   (mutate), going through `UpdateTrack` / `TrackUpdated`.
+
+**Decision.** Option 2 — string field. The on-the-wire values are
+`"auto" | "input" | "disk" | "cue"`. Schema path:
+`Track::monitoring: Option<String>` +
+`TrackPatch::monitoring: Option<String>`. Shim maps to / from
+`ARDOUR::MonitorChoice` at the boundary.
+
+**Why not a Parameter.**
+
+1. **It's a 4-value enum, not a continuous control.** Parameters
+   fit faders and toggles. A four-state radio group is awkward in
+   the `ControlValue::Float|Bool|Int|Enum` vocabulary without
+   leaning on the enum variant — which would mean burning a
+   numeric id into the client wire protocol for an opaque
+   MonitorChoice int.
+2. **The UI is coarse.** A 3-button segmented control (AUTO / IN
+   / DISK — we hide `cue` for now since Ardour's Cue mode is a
+   monitor-section feature most users don't touch) is cleaner as
+   a `TrackPatch` one-shot than as a fader-shaped parameter.
+3. **Monitoring is stripe-level metadata, not a plugin-chain
+   parameter.** It lives alongside `name`, `color`, `group_id` in
+   the patch vocabulary, not alongside gain/mute/solo.
+
+**Tradeoffs.**
+
+- No per-value control-id, so the meter-batch pattern doesn't
+  apply. But: monitoring state changes on the order of human
+  clicks, not per-frame, so the patch path's granularity is fine.
+- A future change to bring in `cue` is purely additive: the enum
+  string gains a value, no breaking change.
+
+**Failure mode if re-implemented as a Parameter.** The UI would
+need bespoke dropdown rendering in `track-strip.js` keyed on the
+parameter's `enum_labels`, and the wire format would carry
+Ardour's numeric choice ids directly — a tighter coupling that
+we'd eventually have to undo when another host with a different
+monitoring vocabulary showed up.
+
+
+## 27. Region creation is a dedicated `CreateRegion` command, not a generic "save empty region" via UpdateRegion
+
+**Context.** Rich's 2026-04-21 ask: "Add 'add region' in midi
+channel context menu (should add region at point where right
+clicked)". Two shapes:
+
+1. **`UpdateRegion` on a nonexistent id** — if the backend
+   doesn't find the id, fall through to creating a region with
+   that id + the patch's fields. Zero-new-schema approach.
+2. **Dedicated `CreateRegion { track_id, at_samples, length_samples, kind, name }`**.
+
+**Decision.** Option 2 — dedicated command. Shape matches
+`DuplicateRegion` for symmetry; the sidecar forwards to the shim
+which calls `Session::create_midi_source_for_session` +
+`RegionFactory::create(source, plist, true)` +
+`playlist->add_region(...)`.
+
+**Why not UpdateRegion fall-through.**
+
+1. **Id semantics become ambiguous.** `UpdateRegion` means "the
+   region you're thinking of". Creating a region from a missing
+   id silently would hide bugs (typo'd id? stale id after
+   delete?) that we want to surface as errors.
+2. **Kind is required at create time.** A MIDI region needs a
+   MidiSource; an audio region needs an AudioSource + file path.
+   `UpdateRegion` has no `kind` field and shouldn't — patches are
+   "change what's there", not "construct new storage".
+3. **The shim side is mechanically different.** `UpdateRegion`
+   walks to a known region via `find_region`; `CreateRegion`
+   picks a playlist off a track, allocates a fresh source,
+   constructs the region with PropertyList defaults. Two paths
+   in the handler with no shared code.
+
+**Tradeoffs.**
+
+- One more schema variant to maintain. Minor.
+- Audio region creation is gated (kind != "midi" returns an
+  error) until we wire a source-file picker — that's a separate
+  UX slice we don't have today.
+
+**Failure mode if re-implemented as UpdateRegion fall-through.**
+Typos in a region-edit path would silently create phantom regions
+on the timeline. The dedicated `CreateRegion` keeps the two
+intents (create vs mutate) syntactically distinct and catches
+those bugs at the wire level.
+
+
+## 28. Sequencer/MIDI conversion uses an `active` flag on the layout, not separate regions
+
+**Context.** Rich's 2026-04-22 ergonomic ask: opening a
+sequencer-owned region in the piano roll should be read-only
+(because manual edits would be clobbered by the next sequencer
+regen), with a "Convert to MIDI" escape hatch; and opening the
+sequencer on a regular MIDI region should warn about the
+destructive overwrite, with an option to restore a previously
+archived sequencer layout.
+
+**Decision.** Add a single `active: bool` field on
+`SequencerLayout` (default true). State machine:
+
+- `active = true`: server regenerates notes on every
+  `SetSequencerLayout`; piano roll boots read-only with a
+  "Convert to MIDI" banner that flips the flag to `false`.
+- `active = false`: server persists the layout metadata but
+  skips `ReplaceRegionNotes`. The notes on the region are
+  authoritative MIDI. Piano roll is editable. Beat sequencer
+  shows an "Archived" banner with a "Restore sequencer" button
+  that flips the flag back to `true` (and triggers a regen,
+  overwriting the MIDI edits the user made in the meantime).
+
+The layout is never deleted by the conversion — it's archived in
+place on the region's `extra_xml`, survives save/load cycles,
+and can always be restored from the piano-roll context menu's
+"Restore beat sequencer…" option.
+
+**Why not separate regions or `ClearSequencerLayout`.**
+
+1. **Separate regions fragment the project.** "Sequencer region"
+   and "MIDI region" as distinct types would mean the user has
+   to split or merge regions to convert between them — which
+   breaks the "my track is one region" mental model Hydrogen /
+   FL Studio users bring. One region, one state flag, one place
+   to toggle.
+2. **`ClearSequencerLayout` throws away work.** The existing
+   clear command drops the layout entirely. That's the *wrong*
+   destructive semantic for "convert to MIDI" — the user almost
+   certainly wants to come back to the sequencer later. An
+   `active` flag preserves the layout while changing who owns
+   the notes.
+3. **Round-trip fidelity.** A single boolean round-trips through
+   `extra_xml` with zero format churn. The stock Ardour
+   save/load cycle preserves it for free.
+
+**Tradeoffs.**
+
+- One extra boolean on the wire. Negligible.
+- Users can "edit the archive" in the sequencer UI without
+  restoring it — valid for tweaking the layout ahead of a
+  restore, but needs a banner so they don't wonder why their
+  changes aren't playing. Banner cost is a few lines of CSS.
+- Piano-roll edits during the archived window are mortal: they
+  get overwritten by a restore. The warning in the "Restore
+  sequencer" confirm dialog has to be unmistakable.
+
+**Failure mode if re-implemented with separate region types.**
+Conversion would require destructive region operations
+(delete + re-create) and the user's fade/envelope/color metadata
+would get lost on each flip. With an `active` flag, the region
+identity is stable across every conversion cycle — the only
+thing that changes is who's authoritative for the note list.

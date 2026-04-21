@@ -130,6 +130,29 @@ export class TrackStrip extends LitElement {
       background: var(--color-accent);
     }
     foyer-plugin-strip { flex: 0 0 auto; }
+    .mon-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 2px;
+      padding: 0 2px;
+    }
+    .mon-btn {
+      font-family: var(--font-sans);
+      font-size: 8.5px; font-weight: 700;
+      padding: 2px 0;
+      border-radius: 3px;
+      border: 1px solid var(--color-border);
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      letter-spacing: 0.04em;
+    }
+    .mon-btn:hover { color: var(--color-text); border-color: var(--color-accent); }
+    .mon-btn.on {
+      color: #fff;
+      background: color-mix(in oklab, var(--color-accent) 55%, transparent);
+      border-color: var(--color-accent);
+    }
   `;
 
   constructor() {
@@ -272,6 +295,23 @@ export class TrackStrip extends LitElement {
           <foyer-toggle tone="rec" label="●" .on=${rec} @input=${(e) => this._setBool(t.record_arm.id, e.detail.value)}></foyer-toggle>
         ` : null}
       </div>
+      ${t.monitoring !== undefined && t.monitoring !== null ? html`
+        <div class="mon-row" title="Monitoring: auto, input (live), disk (playback) — Ardour MonitorChoice">
+          ${["auto", "in", "disk"].map((mode) => {
+            const full = mode === "in" ? "input" : mode;
+            const active = (t.monitoring || "auto") === full;
+            return html`
+              <button class="mon-btn ${active ? "on" : ""}"
+                      title=${
+                        full === "input" ? "Input — always monitor the live input (rehearsing)"
+                        : full === "disk" ? "Disk — always play back from disk (no live input)"
+                        : "Auto — switch based on transport state"
+                      }
+                      @click=${() => this._setMonitoring(full)}>${mode.toUpperCase()}</button>
+            `;
+          })}
+        </div>
+      ` : null}
       <div class="body">
         <foyer-fader
           .value=${gainNorm}
@@ -416,6 +456,15 @@ export class TrackStrip extends LitElement {
   _updatePatch(patch) {
     if (!this.track?.id) return;
     window.__foyer?.ws?.send({ type: "update_track", id: this.track.id, patch });
+  }
+
+  _setMonitoring(mode) {
+    // Optimistic local update so the pressed state flips immediately
+    // — the shim echoes a track_updated event with the committed
+    // value shortly after. "auto" | "input" | "disk" | "cue".
+    if (!this.track) return;
+    this.track = { ...this.track, monitoring: mode };
+    this._updatePatch({ monitoring: mode });
   }
 
   updated(changed) {

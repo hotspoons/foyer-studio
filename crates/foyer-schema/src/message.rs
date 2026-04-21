@@ -299,6 +299,8 @@ pub enum Event {
 
 fn is_zero_u16(n: &u16) -> bool { *n == 0 }
 
+fn default_region_kind() -> String { "midi".to_string() }
+
 /// Metadata for a single backend entry in the sidecar's config — what
 /// the picker UI needs to render a "pick a DAW" dropdown.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -389,6 +391,22 @@ pub enum Command {
     /// Remove a region from its track. Emits `RegionRemoved` on success.
     DeleteRegion {
         id: EntityId,
+    },
+    /// Create a brand-new empty region on `track_id` starting at
+    /// `at_samples`. `length_samples` defaults to one bar at the
+    /// session's current tempo if omitted. `kind` selects the
+    /// region's media type — today only "midi" is wired (audio
+    /// regions need a source file, which the UI doesn't yet have a
+    /// picker for). Emits `RegionsList` for the track on success.
+    CreateRegion {
+        track_id: EntityId,
+        at_samples: u64,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        length_samples: Option<u64>,
+        #[serde(default = "default_region_kind")]
+        kind: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        name: Option<String>,
     },
     /// Clone `source_region_id` into a new region on the same track,
     /// starting at `at_samples`. If `length_samples` is `None` the
@@ -650,6 +668,7 @@ mod tests {
             mute: tempo_param(0.0),
             solo: tempo_param(0.0),
             record_arm: None,
+            monitoring: None,
             sends: vec![],
             plugins: vec![],
             peak_meter: None,

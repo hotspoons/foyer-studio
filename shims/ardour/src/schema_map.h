@@ -190,6 +190,10 @@ struct SequencerCellDesc {
 	std::uint32_t row = 0;
 	std::uint32_t step = 0;
 	std::uint8_t  velocity = 100;
+	/// 0 means "one step" (drum-mode default). Values > 1 mark
+	/// pitched-mode long notes spanning that many consecutive
+	/// steps. Persisted as an XML attribute on `<Cell>`.
+	std::uint32_t length_steps = 0;
 };
 
 /// One named pattern. Mirrors `foyer_schema::SequencerPattern`.
@@ -221,6 +225,12 @@ struct SequencerLayoutDesc {
 	// v1 carry-through.
 	std::vector<SequencerCellDesc>    cells;
 	bool          present = false;   // false = region has no layout
+	// When true (default), the server expands this layout into
+	// notes on every SetSequencerLayout. When false, the layout
+	// is archived alongside authoritative MIDI notes — the piano
+	// roll can edit freely and "Restore sequencer" flips the flag
+	// back. Persisted as the `active` XML attribute on Sequencer.
+	bool          active  = true;
 };
 
 /// Program/bank-change event attached to a MIDI region. Matches

@@ -16,6 +16,8 @@
 
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
+#include "ardour/midi_source.h"
+#include "ardour/monitor_control.h"
 #include "ardour/playlist.h"
 #include "ardour/region_factory.h"
 #include "ardour/plugin.h"
@@ -222,6 +224,7 @@ struct DecodedCmd
 		AudioIngressOpen,
 		AudioIngressClose,
 		DuplicateRegion,
+		CreateRegion,
 		ReplaceRegionNotes,
 		ListPlugins,
 	};
@@ -257,6 +260,8 @@ struct DecodedCmd
 	std::string   patch_group_id;
 	bool          has_patch_bus_assign = false;
 	std::string   patch_bus_assign;
+	bool          has_patch_monitoring = false;
+	std::string   patch_monitoring;       // "auto"|"input"|"disk"|"cue"
 
 	// MIDI note fields — AddNote / UpdateNote / DeleteNote.
 	//  * region_id stored in `track_id` (reuse: the sidecar sends
@@ -300,6 +305,11 @@ struct DecodedCmd
 	std::uint64_t dup_at_samples = 0;
 	bool          dup_has_length = false;
 	std::uint64_t dup_length_samples = 0;
+
+	// CreateRegion payload. Shares at/length/name with DuplicateRegion /
+	// RegionPatch; `create_kind` is the region's media type ("midi" is
+	// the only wired variant).
+	std::string   create_kind;
 
 	// ReplaceRegionNotes payload — parsed into a vector so the
 	// handler can feed it straight into a single NoteDiffCommand.
@@ -458,6 +468,9 @@ read_one_cell (In& in, std::vector<schema_map::SequencerCellDesc>& dest)
 		} else if (k == "velocity") {
 			if (!in.read_u64 (v)) return false;
 			cell.velocity = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+		} else if (k == "length_steps") {
+			if (!in.read_u64 (v)) return false;
+			cell.length_steps = static_cast<std::uint32_t> (v);
 		} else {
 			if (!in.skip_value ()) return false;
 		}
@@ -553,6 +566,8 @@ read_sequencer_layout (In& in, schema_map::SequencerLayoutDesc& layout)
 			std::uint64_t v = 0;
 			if (!in.read_u64 (v)) return false;
 			layout.resolution = static_cast<std::uint32_t> (v);
+		} else if (k == "active") {
+			if (!in.read_bool (layout.active)) return false;
 		} else if (k == "pattern_steps" || k == "steps") {
 			std::uint64_t v = 0;
 			if (!in.read_u64 (v)) return false;
@@ -711,6 +726,9 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 		} else if (pk == "bus_assign") {
 			if (!in.read_str (out.patch_bus_assign)) return false;
 			out.has_patch_bus_assign = true;
+		} else if (pk == "monitoring") {
+			if (!in.read_str (out.patch_monitoring)) return false;
+			out.has_patch_monitoring = true;
 		} else if (pk == "pitch") {
 			std::uint64_t v = 0;
 			if (!in.read_u64 (v)) return false;
@@ -784,6 +802,15 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.id)) return out;
 				} else if (k == "source_region_id") {
 					if (!in.read_str (out.dup_source_id)) return out;
+				} else if (k == "name") {
+					// CreateRegion / top-level name field (no patch
+					// wrapper). Reused with patch_name so the shim
+					// can pick it up via existing storage.
+					if (!in.read_str (out.patch_name)) return out;
+					out.has_patch_name = true;
+				} else if (k == "kind") {
+					// CreateRegion's media-type selector ("midi" | "audio").
+					if (!in.read_str (out.create_kind)) return out;
 				} else if (k == "at_samples") {
 					if (!in.read_u64 (out.dup_at_samples)) return out;
 				} else if (k == "length_samples") {
@@ -911,6 +938,7 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "audio_ingress_open")  out.kind = DecodedCmd::Kind::AudioIngressOpen;
 			else if (cmd_type == "audio_ingress_close") out.kind = DecodedCmd::Kind::AudioIngressClose;
 			else if (cmd_type == "duplicate_region")    out.kind = DecodedCmd::Kind::DuplicateRegion;
+			else if (cmd_type == "create_region")       out.kind = DecodedCmd::Kind::CreateRegion;
 			else if (cmd_type == "replace_region_notes") out.kind = DecodedCmd::Kind::ReplaceRegionNotes;
 			else if (cmd_type == "list_plugins")        out.kind = DecodedCmd::Kind::ListPlugins;
 			else if (cmd_type == "audio_stream_open"
@@ -1451,6 +1479,88 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			});
 			break;
 		}
+		case DecodedCmd::Kind::CreateRegion: {
+			if (cmd.track_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				// Find the target track by matching `track.<pbd-id>`
+				// against each Route's PBD id.
+				if (snap.track_id.rfind ("track.", 0) != 0) return;
+				const std::string sid = snap.track_id.substr (6);
+				std::shared_ptr<ARDOUR::Track> track;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp; tmp << r->id ();
+					if (tmp.str () == sid) {
+						track = std::dynamic_pointer_cast<ARDOUR::Track> (r);
+						break;
+					}
+				}
+				if (!track) {
+					PBD::warning << "foyer_shim: create_region: unknown track "
+					             << snap.track_id << endmsg;
+					return;
+				}
+				auto playlist = track->playlist ();
+				if (!playlist) {
+					PBD::warning << "foyer_shim: create_region: track has no playlist" << endmsg;
+					return;
+				}
+				// Media-type gate. Audio regions need a source file
+				// (we don't have a picker for that yet). MIDI creates
+				// a fresh empty source on the session.
+				const std::string kind = snap.create_kind.empty () ? "midi" : snap.create_kind;
+				if (kind != "midi") {
+					PBD::warning << "foyer_shim: create_region: kind '"
+					             << kind << "' not yet wired (midi only)" << endmsg;
+					return;
+				}
+				const std::string region_name =
+					snap.has_patch_name && !snap.patch_name.empty ()
+						? snap.patch_name
+						: std::string ("Region");
+				// Length defaults: 1 bar @ the session's tempo map.
+				// When the client doesn't send a length, compute a
+				// sample count that matches "1 bar" at 4/4 using the
+				// current tempo. This keeps new regions visually
+				// meaningful instead of zero-width.
+				Temporal::samplepos_t length_samples;
+				if (snap.dup_has_length && snap.dup_length_samples > 0) {
+					length_samples = static_cast<Temporal::samplepos_t> (snap.dup_length_samples);
+				} else {
+					const double spl_rate = shim->session ().sample_rate ();
+					// 1 bar at 120 bpm 4/4 = 2 seconds. Good enough
+					// default — the user can resize.
+					length_samples = static_cast<Temporal::samplepos_t> (spl_rate * 2.0);
+				}
+				std::shared_ptr<ARDOUR::MidiSource> src =
+					shim->session ().create_midi_source_for_session (region_name);
+				if (!src) {
+					PBD::warning << "foyer_shim: create_region: create_midi_source_for_session returned null" << endmsg;
+					return;
+				}
+				PBD::PropertyList plist;
+				plist.add (ARDOUR::Properties::name, region_name);
+				plist.add (ARDOUR::Properties::start,
+					Temporal::timepos_t (Temporal::Beats ()));
+				plist.add (ARDOUR::Properties::length,
+					Temporal::timecnt_t::from_samples (length_samples));
+				plist.add (ARDOUR::Properties::whole_file, false);
+				auto region = ARDOUR::RegionFactory::create (src, plist, true /* announce */);
+				if (!region) {
+					PBD::warning << "foyer_shim: create_region: RegionFactory::create returned null" << endmsg;
+					return;
+				}
+				playlist->add_region (region, Temporal::timepos_t (
+					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+				shim->session ().set_dirty ();
+				// Playlist's RegionAdded signal fires an echo back
+				// to the sidecar, which forwards RegionsList.
+			});
+			break;
+		}
 		case DecodedCmd::Kind::AudioIngressOpen:
 		case DecodedCmd::Kind::AudioIngressClose: {
 			// Honest stub — a real impl needs a new shim class
@@ -1563,6 +1673,20 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					// Empty string or clear sentinel → reset the color.
 					const std::uint32_t packed = schema_map::color_from_hex (snap.patch_color);
 					route->presentation_info ().set_color (packed);
+				}
+				if (snap.has_patch_monitoring) {
+					// Map the string → ARDOUR::MonitorChoice. Unknown
+					// values fall back to MonitorAuto so a typo doesn't
+					// strand a track with no monitoring policy.
+					ARDOUR::MonitorChoice mc = ARDOUR::MonitorAuto;
+					if      (snap.patch_monitoring == "input") mc = ARDOUR::MonitorInput;
+					else if (snap.patch_monitoring == "disk")  mc = ARDOUR::MonitorDisk;
+					else if (snap.patch_monitoring == "cue")   mc = ARDOUR::MonitorCue;
+					auto mon = route->monitoring_control ();
+					if (mon) {
+						mon->set_value (static_cast<double> (mc),
+						                PBD::Controllable::NoGroup);
+					}
 				}
 				// group_id / bus_assign deferred — Ardour's RouteGroup API
 				// is stable but wiring it belongs with the group commands.

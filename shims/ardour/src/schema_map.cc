@@ -425,6 +425,10 @@ read_sequencer_from_region (const Region& r)
 	seq->get_property ("version",       out.version);
 	seq->get_property ("mode",          out.mode);
 	seq->get_property ("resolution",    out.resolution);
+	// `active` was added after the initial v2 shape — older
+	// saved sessions don't have the attribute, so we default to
+	// true (the behavior pre-deactivate-feature).
+	if (!seq->get_property ("active", out.active)) { out.active = true; }
 	// Accept legacy "steps" attribute alongside the v2 name.
 	if (!seq->get_property ("pattern_steps", out.pattern_steps)) {
 		seq->get_property ("steps", out.pattern_steps);
@@ -448,9 +452,10 @@ read_sequencer_from_region (const Region& r)
 		if (!cn) continue;
 		SequencerCellDesc cell;
 		std::uint32_t v = 100;
-		cn->get_property ("row",      cell.row);
-		cn->get_property ("step",     cell.step);
-		cn->get_property ("velocity", v);
+		cn->get_property ("row",          cell.row);
+		cn->get_property ("step",         cell.step);
+		cn->get_property ("velocity",     v);
+		cn->get_property ("length_steps", cell.length_steps);
 		cell.velocity = static_cast<std::uint8_t> (std::min<std::uint32_t> (v, 127));
 		out.cells.push_back (cell);
 	}
@@ -465,9 +470,10 @@ read_sequencer_from_region (const Region& r)
 			if (!cn) continue;
 			SequencerCellDesc cell;
 			std::uint32_t v = 100;
-			cn->get_property ("row",      cell.row);
-			cn->get_property ("step",     cell.step);
-			cn->get_property ("velocity", v);
+			cn->get_property ("row",          cell.row);
+			cn->get_property ("step",         cell.step);
+			cn->get_property ("velocity",     v);
+			cn->get_property ("length_steps", cell.length_steps);
 			cell.velocity = static_cast<std::uint8_t> (std::min<std::uint32_t> (v, 127));
 			pat.cells.push_back (cell);
 		}
@@ -496,6 +502,7 @@ sequencer_to_xml (const SequencerLayoutDesc& layout)
 	seq->set_property ("mode",          layout.mode);
 	seq->set_property ("resolution",    layout.resolution);
 	seq->set_property ("pattern_steps", layout.pattern_steps);
+	seq->set_property ("active",        layout.active);
 	for (auto const& r : layout.rows) {
 		XMLNode* rn = seq->add_child ("Row");
 		rn->set_property ("pitch",   static_cast<std::uint32_t> (r.pitch));
@@ -512,6 +519,7 @@ sequencer_to_xml (const SequencerLayoutDesc& layout)
 			cn->set_property ("row",      c.row);
 			cn->set_property ("step",     c.step);
 			cn->set_property ("velocity", static_cast<std::uint32_t> (c.velocity));
+			if (c.length_steps > 1) cn->set_property ("length_steps", c.length_steps);
 		}
 	}
 	for (auto const& p : layout.patterns) {
@@ -524,6 +532,7 @@ sequencer_to_xml (const SequencerLayoutDesc& layout)
 			cn->set_property ("row",      c.row);
 			cn->set_property ("step",     c.step);
 			cn->set_property ("velocity", static_cast<std::uint32_t> (c.velocity));
+			if (c.length_steps > 1) cn->set_property ("length_steps", c.length_steps);
 		}
 	}
 	for (auto const& s : layout.arrangement) {

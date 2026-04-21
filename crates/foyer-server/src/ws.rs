@@ -764,6 +764,21 @@ async fn dispatch_command(
             }
         }
 
+        Command::CreateRegion { track_id, at_samples, length_samples, kind, name } => {
+            if let Err(e) = state.backend().await
+                .create_region(track_id, at_samples, length_samples, kind, name).await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "create_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
         Command::SetSequencerLayout { region_id, layout } => {
             // Three-phase: (1) persist the layout metadata on the
             // host (writes into the region's `_extra_xml`),
@@ -783,6 +798,14 @@ async fn dispatch_command(
             // 960 — both wrong by a factor of 2 vs Ardour's actual
             // tick scale, so notes played at double-time and the
             // region length came out half the intended duration.
+            //
+            // `active == false` means the client is *deactivating*
+            // the sequencer (converting to MIDI) — persist the
+            // metadata but DON'T regenerate notes. The region's
+            // current notes stay in place and become the
+            // authoritative content. `active == true` (default)
+            // keeps the old behavior: regen notes from the layout.
+            let is_active = layout.active;
             let notes = foyer_schema::expand_sequencer_layout(&layout, 1920);
             // Region length = arrangement extent in ticks → samples
             // at the session's sample rate. We don't know the SR
@@ -816,18 +839,23 @@ async fn dispatch_command(
             // so it shows up in diagnostics; native resize lands
             // alongside `length_ticks` schema support.
             tracing::debug!(
-                "sequencer regenerate: region={region_id:?} notes={} length_ticks={length_ticks}",
+                "sequencer regenerate: region={region_id:?} active={is_active} notes={} length_ticks={length_ticks}",
                 notes.len(),
             );
-            if let Err(e) = state.backend().await.replace_region_notes(region_id, notes).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "replace_region_notes_failed".into(),
-                        message: e.to_string(),
-                    },
-                )
-                .await;
+            // Only regenerate notes when the layout is active.
+            // Deactivation (active=false) leaves existing notes
+            // untouched so piano-roll edits can take over.
+            if is_active {
+                if let Err(e) = state.backend().await.replace_region_notes(region_id, notes).await {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "replace_region_notes_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
             }
         }
         Command::ReplaceRegionNotes { region_id, notes } => {

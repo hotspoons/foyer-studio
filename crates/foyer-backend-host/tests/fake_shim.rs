@@ -121,6 +121,7 @@ fn fake_session() -> Session {
             mute: toggle("track.x.mute"),
             solo: toggle("track.x.solo"),
             record_arm: None,
+            monitoring: None,
             sends: vec![],
             plugins: vec![],
             peak_meter: None,

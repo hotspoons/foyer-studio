@@ -380,6 +380,20 @@ impl HostClient {
         .await
     }
 
+    pub async fn create_region(
+        &self,
+        track_id: EntityId,
+        at_samples: u64,
+        length_samples: Option<u64>,
+        kind: String,
+        name: Option<String>,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::CreateRegion {
+            track_id, at_samples, length_samples, kind, name,
+        })
+        .await
+    }
+
     pub async fn delete_region(&self, id: EntityId) -> Result<EntityId, ClientError> {
         let (tx, rx) = oneshot::channel();
         self.shared

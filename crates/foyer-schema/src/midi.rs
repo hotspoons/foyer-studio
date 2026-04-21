@@ -123,7 +123,15 @@ pub struct SequencerCell {
     pub step: u32,
     #[serde(default)]
     pub velocity: u8,
+    /// How many consecutive steps this cell spans. `0` or missing is
+    /// treated as `1` — the common drum-grid case. Pitched mode uses
+    /// values > 1 so a piano-roll-style long note can cross beats
+    /// without leaving the sequencer region.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub length_steps: u32,
 }
+
+fn is_zero_u32(n: &u32) -> bool { *n == 0 }
 
 /// One named beat pattern — a (rowIdx, stepIdx, velocity) cell list
 /// the user authored. Patterns are reused across the song timeline
@@ -208,7 +216,25 @@ pub struct SequencerLayout {
     /// Legacy v1 free-form notes. Same migration story.
     #[serde(default)]
     pub free_notes: Vec<MidiNote>,
+    /// When true (default), the server regenerates notes from this
+    /// layout whenever `SetSequencerLayout` arrives. When false,
+    /// the layout is *archived* — the notes on the region are
+    /// treated as authoritative MIDI, piano-roll edits are live,
+    /// and the sequencer layout sits alongside as a restorable
+    /// snapshot.
+    ///
+    /// Two-way conversion:
+    ///   - "Convert to MIDI" in the piano roll → sets active=false.
+    ///     Region notes stay exactly as the sequencer last emitted
+    ///     them; user can edit them freely.
+    ///   - "Restore sequencer" in the piano roll → sets active=true.
+    ///     Server regenerates notes from the layout, overwriting
+    ///     any manual edits.
+    #[serde(default = "sequencer_default_active")]
+    pub active: bool,
 }
+
+fn sequencer_default_active() -> bool { true }
 
 fn sequencer_default_version() -> u32 { 2 }
 fn sequencer_default_mode() -> String { "drum".into() }
@@ -237,6 +263,7 @@ impl Default for SequencerLayout {
             }],
             cells: Vec::new(),
             free_notes: Vec::new(),
+            active: true,
         }
     }
 }
@@ -261,6 +288,13 @@ impl Default for SequencerLayout {
 /// grid. That lets pitched mode carry notes the grid can't
 /// represent (off-grid starts, arbitrary lengths).
 pub fn expand_sequencer_layout(layout: &SequencerLayout, ppqn: u32) -> Vec<MidiNote> {
+    // Archived / inactive layouts don't generate notes — the
+    // region's current notes are authoritative. Callers that want
+    // to *restore* an archived layout must explicitly set
+    // `active = true` on the layout before expansion.
+    if !layout.active {
+        return Vec::new();
+    }
     let ppqn = ppqn.max(1);
     let resolution = layout.resolution.max(1);
     let step_ticks = (ppqn / resolution) as u64;
@@ -319,13 +353,25 @@ pub fn expand_sequencer_layout(layout: &SequencerLayout, ppqn: u32) -> Vec<MidiN
             if row_def.muted { continue; }
             if layout.rows.iter().any(|r| r.soloed) && !row_def.soloed { continue; }
             let start = bar_offset + (cell.step as u64) * step_ticks;
+            // length_steps > 1 = pitched-mode long note. A cell with
+            // length_steps == N fills N consecutive steps visually;
+            // the emitted MIDI note's length_ticks covers N*step_ticks
+            // minus a tiny gap so adjacent notes don't chord. The
+            // default (0/missing/1) keeps the drum-grid behavior:
+            // one short note per cell at `note_ticks` length.
+            let len_steps = cell.length_steps.max(1) as u64;
+            let length = if len_steps > 1 {
+                (len_steps * step_ticks).saturating_sub(step_ticks / 10).max(1)
+            } else {
+                note_ticks
+            };
             let id_str = format!("note.seq.{}.{}.{}.{}", slot.bar, slot.pattern_id, cell.row, cell.step);
             out.push(MidiNote {
                 id: EntityId::new(id_str),
                 pitch: row_def.pitch,
                 velocity: cell.velocity.max(1),
                 start_ticks: start,
-                length_ticks: note_ticks,
+                length_ticks: length,
                 channel: row_def.channel,
             });
         }

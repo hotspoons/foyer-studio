@@ -452,6 +452,11 @@ export class TimelineView extends LitElement {
     ];
     if (track.kind === "midi") {
       items.push({
+        label: "Add region at playhead",
+        icon: "plus",
+        action: () => this._addRegionAtPlayhead(track),
+      });
+      items.push({
         label: "Open piano roll…",
         icon: "sparkles",
         action: () => this._openMidiEditorForTrack(track),
@@ -470,6 +475,60 @@ export class TimelineView extends LitElement {
     showContextMenu(ev, items);
   }
 
+  _addRegionAtPlayhead(track) {
+    if (!track || track.kind !== "midi") return;
+    const store = window.__foyer?.store;
+    const playhead = Number(store?.get?.("transport.position") ?? 0);
+    this._createRegionAt(track, playhead);
+  }
+
+  /** Right-click on empty lane space. If the click fell through from
+   *  a region or lane-head, those handlers already stopped
+   *  propagation. So we only fire here for bona fide empty-lane
+   *  clicks — which is exactly the spot "Add region here" should act
+   *  on. Only shown for MIDI tracks (audio region creation needs a
+   *  source picker we don't have yet). */
+  _onLaneContext(ev, track) {
+    if (track?.kind !== "midi") return;
+    // If the event originated inside a region or lane-head, the
+    // bubble reaches us but the original target is one of those
+    // children; skip to avoid overriding the more specific menu.
+    if (ev.target?.closest?.(".region") || ev.target?.closest?.(".lane-head")) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const bounds = scroll.getBoundingClientRect();
+    const contentX = ev.clientX - bounds.left + scroll.scrollLeft - HEAD_WIDTH;
+    const sr = this._timeline?.sample_rate || 48_000;
+    const atSamples = Math.max(0, Math.round((contentX / this._zoom) * sr));
+    showContextMenu(ev, [
+      { heading: `${track.name} · ${(atSamples / sr).toFixed(2)}s` },
+      {
+        label: "Add region here",
+        icon: "plus",
+        action: () => this._createRegionAt(track, atSamples),
+      },
+      {
+        label: "Add region at playhead",
+        icon: "play",
+        action: () => this._addRegionAtPlayhead(track),
+      },
+    ]);
+  }
+
+  _createRegionAt(track, atSamples, lengthSamples = null) {
+    const ws = window.__foyer?.ws;
+    if (!ws || !track?.id) return;
+    ws.send({
+      type: "create_region",
+      track_id: track.id,
+      at_samples: Math.max(0, Math.round(atSamples)),
+      length_samples: lengthSamples ? Math.round(lengthSamples) : undefined,
+      kind: "midi",
+    });
+  }
+
   _openBeatSequencerForTrack(track) {
     if (!track) return;
     const regions = this._regionsByTrack[track.id] || [];
@@ -478,6 +537,47 @@ export class TimelineView extends LitElement {
   }
 
   _openBeatSequencer(region) {
+    // Pre-open gate. Three states:
+    //
+    //   * Active sequencer layout → just open. The user is coming
+    //     back to their beat; no warning needed.
+    //   * Archived layout (active=false) → open in edit-archived
+    //     mode silently. Safe (the layout is metadata-only until
+    //     the user clicks "Restore sequencer" in the banner).
+    //   * No layout + existing MIDI notes → confirm the
+    //     overwrite. The first cell-click regenerates the note
+    //     list and wipes the hand-authored MIDI.
+    //
+    // The archived "would you like to restore?" prompt was
+    // removed per Rich's 2026-04-22 feedback — the distinction
+    // between "edit archived" and "restore" is too subtle for a
+    // blocking prompt. Users who want to restore click the
+    // prominent "Restore sequencer" button in the banner after
+    // the editor opens.
+    const layout = region?.foyer_sequencer || null;
+    const hasNotes = Array.isArray(region?.notes) && region.notes.length > 0;
+    const open = () => this._doOpenBeatSequencer(region);
+    if (!layout && hasNotes) {
+      import("./confirm-modal.js").then(({ confirmAction }) => {
+        confirmAction({
+          title: "Convert region to beat sequencer?",
+          message:
+            "This region already has MIDI notes. Once you place a cell "
+            + "in the sequencer and it saves, the region's note list will "
+            + "be regenerated from the sequencer's arrangement and the "
+            + "existing MIDI notes will be overwritten.\n\n"
+            + "You can always come back with \"Convert to MIDI\" from "
+            + "the piano roll to make the region editable again.",
+          confirmLabel: "Convert to sequencer",
+          tone: "warning",
+        }).then((ok) => { if (ok) open(); });
+      });
+      return;
+    }
+    open();
+  }
+
+  _doOpenBeatSequencer(region) {
     Promise.all([
       import("./beat-sequencer.js"),
       import("./window.js"),
@@ -756,7 +856,8 @@ export class TimelineView extends LitElement {
     const canArm = !!track.record_arm;
     const selected = !!store?.isTrackSelected?.(track.id);
     return html`
-      <div class="lane ${selected ? "selected" : ""}" style="height:${h}px">
+      <div class="lane ${selected ? "selected" : ""}" style="height:${h}px"
+           @contextmenu=${(e) => this._onLaneContext(e, track)}>
         <div class="lane-head" style="height:${h}px"
              @click=${(e) => this._onLaneHeadClick(e, track.id)}
              @contextmenu=${(e) => this._onLaneHeadContext(e, track)}>
@@ -918,14 +1019,29 @@ export class TimelineView extends LitElement {
     // owning track kind (rather than `Array.isArray(region.notes)`)
     // keeps the option visible for empty regions and survives a
     // post-update envelope that hasn't carried notes yet.
+    //
+    // The label wording makes the region's state explicit at the
+    // menu level so the user knows what they're about to open:
+    //
+    //   * no sequencer layout     → "Open piano roll…"
+    //                                "Convert to beat sequencer…" (warns on open)
+    //   * active sequencer        → "Open piano roll (read-only)…"
+    //                                "Open beat sequencer…" (normal)
+    //   * archived sequencer      → "Open piano roll…" (editable, MIDI is authoritative)
+    //                                "Restore beat sequencer…" (warns → overwrites MIDI)
     if (this._isMidiRegion(region)) {
+      const layout = region.foyer_sequencer;
+      const active = !!(layout && layout.active !== false);
+      const archived = !!(layout && layout.active === false);
       items.push({
-        label: "Open piano roll…",
+        label: active ? "Open piano roll (read-only)…" : "Open piano roll…",
         icon: "sparkles",
         action: () => this._openMidiEditor(region),
       });
       items.push({
-        label: region.foyer_sequencer ? "Open beat sequencer…" : "Convert to beat sequencer…",
+        label: active ? "Open beat sequencer…"
+             : archived ? "Restore beat sequencer…"
+             : "Convert to beat sequencer…",
         icon: "queue-list",
         action: () => this._openBeatSequencer(region),
       });
@@ -956,6 +1072,13 @@ export class TimelineView extends LitElement {
       editor.notes      = Array.isArray(region?.notes) ? region.notes : [];
       editor.regionId   = region?.id || "";
       editor.regionName = region?.name || "";
+      // If the region is sequencer-owned (active layout), the
+      // piano roll boots in read-only mode + shows a banner. The
+      // banner's "Convert to MIDI" button flips active=false,
+      // after which the next regions-updated echo reads through
+      // to editor.readOnly = false and unlocks editing.
+      editor.sequencerLayout = region?.foyer_sequencer || null;
+      editor.readOnly = !!(region?.foyer_sequencer && region.foyer_sequencer.active !== false);
       const trackId = region?.track_id;
       // Keep the editor in sync with the live region list — when the
       // backend echoes a RegionUpdated for this region, push the fresh
@@ -967,6 +1090,8 @@ export class TimelineView extends LitElement {
         if (fresh) {
           editor.notes = Array.isArray(fresh.notes) ? fresh.notes : [];
           editor.regionName = fresh.name || editor.regionName;
+          editor.sequencerLayout = fresh.foyer_sequencer || null;
+          editor.readOnly = !!(fresh.foyer_sequencer && fresh.foyer_sequencer.active !== false);
         }
       };
       this.addEventListener("foyer:regions-updated", onUpdate);

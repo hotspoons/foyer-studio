@@ -31,8 +31,44 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
+import { playPreviewNote, resumePreviewCtx } from "../audio/midi-preview.js";
 
 const PPQN = 960;
+const PREVIEW_PREF_KEY = "foyer.beat.preview.v1";
+const ARR_HEIGHT_KEY = "foyer.beat.arr-height.v1";
+const PRESETS_KEY = "foyer.beat.presets.v1";
+const PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+// General-MIDI drum map — the short-name subset used by the "+ Drum" picker.
+// Just the practical kit names; the picker also lets the user type a label
+// if they want something non-GM.
+const GM_DRUM_KIT = [
+  { pitch: 35, label: "Kick 2" },
+  { pitch: 36, label: "Kick" },
+  { pitch: 37, label: "Side stick" },
+  { pitch: 38, label: "Snare" },
+  { pitch: 39, label: "Clap" },
+  { pitch: 40, label: "Snare 2" },
+  { pitch: 41, label: "Low tom" },
+  { pitch: 42, label: "HH closed" },
+  { pitch: 43, label: "High floor tom" },
+  { pitch: 44, label: "HH pedal" },
+  { pitch: 45, label: "Mid tom" },
+  { pitch: 46, label: "HH open" },
+  { pitch: 47, label: "Low-mid tom" },
+  { pitch: 48, label: "Hi-mid tom" },
+  { pitch: 49, label: "Crash" },
+  { pitch: 50, label: "High tom" },
+  { pitch: 51, label: "Ride" },
+  { pitch: 52, label: "China" },
+  { pitch: 53, label: "Ride bell" },
+  { pitch: 54, label: "Tambourine" },
+  { pitch: 55, label: "Splash" },
+  { pitch: 56, label: "Cowbell" },
+  { pitch: 57, label: "Crash 2" },
+  { pitch: 58, label: "Vibraslap" },
+  { pitch: 59, label: "Ride 2" },
+];
 
 const STEP_COUNTS = [8, 16, 32, 64];
 const RESOLUTIONS = [
@@ -95,23 +131,72 @@ function defaultLayout() {
     mode: "drum",
     resolution: 4,
     pattern_steps: 16,
+    active: true,
     rows: defaultDrumRows(),
     patterns: [{ id, name: "Pattern 1", color: pickPatternColor(0), cells: [], free_notes: [] }],
     arrangement: [{ pattern_id: id, bar: 0, arrangement_row: 0 }],
   };
 }
 
+// Coerce `resolution` to the nearest valid subdiv — matches the
+// values the Res dropdown offers. Sessions round-tripped through
+// the shim's XML can come back with 0 (property missing) or a
+// stale stale value; clamp so the dropdown doesn't render a
+// "no-match → first-option" fallback that looks like a silent reset.
+function normalizeResolution(v) {
+  const allowed = [1, 2, 4, 8];
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 4;
+  return allowed.includes(n) ? n : 4;
+}
+
 // Migrate a v1 layout (top-level cells, no patterns) into a v2
 // shape with one synthesized "Pattern 1" containing those cells.
-// Returns the input untouched if it's already v2.
+// Also normalizes resolution/pattern_steps so the rest of the
+// component doesn't have to defensively check these.
+//
+// IMPORTANT: when the input is *already* fully normalized, return
+// the same reference. The component's `updated()` assigns
+// `this.layout = migrateToV2(this.layout)`, and Lit's default
+// hasChanged compares by identity — so if we always returned a
+// fresh object, that assignment would fire another `updated()`
+// cycle, re-migrate, and loop forever (which is exactly the
+// freeze Rich hit on 2026-04-22). Returning the same ref when
+// nothing needs rewriting makes the assignment a no-op and
+// breaks the cycle.
 function migrateToV2(layout) {
   if (!layout) return defaultLayout();
-  if (layout.patterns && layout.patterns.length > 0) return layout;
+  const resolution = normalizeResolution(layout.resolution);
+  const pattern_steps = Number(layout.pattern_steps ?? layout.steps ?? 16) || 16;
+  if (layout.patterns && layout.patterns.length > 0) {
+    // Already v2. Return the same reference when nothing needs
+    // rewriting — the render loop assigns `this.layout =
+    // migrateToV2(this.layout)` and Lit's hasChanged default is
+    // strict-equality, so returning a fresh object every time
+    // creates an infinite `updated()` recursion (Rich's
+    // 2026-04-22 freeze).
+    //
+    // `active` is deliberately NOT compared/rewritten here: its
+    // default (undefined → treated as true) is read safely
+    // everywhere via `layout.active !== false`. If we wrote
+    // `active: true` back into an input that had undefined, the
+    // ref would change on every pass → loop.
+    if (layout.resolution === resolution && layout.pattern_steps === pattern_steps) {
+      return layout;
+    }
+    return { ...layout, resolution, pattern_steps };
+  }
   const id = newPatternId();
   return {
     ...layout,
     version: 2,
-    pattern_steps: layout.pattern_steps ?? layout.steps ?? 16,
+    resolution,
+    pattern_steps,
+    // `active` is intentionally not set here — readers check
+    // `layout.active !== false` so undefined is fine. Writing it
+    // explicitly would just bloat the blob; the explicit
+    // `active` only appears when the user flips it to false via
+    // "Convert to MIDI".
     patterns: [{
       id,
       name: "Pattern 1",
@@ -139,9 +224,19 @@ export class BeatSequencer extends LitElement {
     _cellW:     { state: true, type: Number },
     _selectedPatternId: { state: true, type: String },
     _arrCols:   { state: true, type: Number },
+    _arrH:      { state: true, type: Number },
+    _preview:   { state: true, type: Boolean },
+    _addDrum:   { state: true, type: Boolean },
+    _drumPitch: { state: true, type: Number },
+    _drumLabel: { state: true, type: String },
+    _presetsOpen: { state: true, type: Boolean },
   };
 
   static styles = css`
+    /* Force border-box throughout so padding + border don't drift
+       our cell heights away from the row-head heights. Same fix we
+       used in timeline-view after the lane-head width bug. */
+    :host, *, *::before, *::after { box-sizing: border-box; }
     :host {
       display: flex; flex-direction: column;
       width: 100%; height: 100%; min-height: 0;
@@ -186,11 +281,11 @@ export class BeatSequencer extends LitElement {
     /* ── ARRANGEMENT ──────────────────────────────────── */
     .arr {
       flex: 0 0 auto;
-      max-height: 220px;
       display: flex; flex-direction: column;
       background: var(--color-surface);
       border-bottom: 2px solid var(--color-border);
       overflow: hidden;
+      position: relative;
     }
     .arr-head {
       display: flex; align-items: center; gap: 8px;
@@ -201,20 +296,41 @@ export class BeatSequencer extends LitElement {
       font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
     }
     .arr-head .add {
-      margin-left: auto;
       background: transparent;
       border: 1px dashed var(--color-border);
       color: var(--color-text-muted);
       padding: 2px 8px; border-radius: 4px;
       cursor: pointer; font: inherit; font-size: 10px;
     }
-    .arr-head .add:hover { color: var(--color-text); border-color: var(--color-accent); }
+    .arr-head .add:hover {
+      color: var(--color-text); border-color: var(--color-accent);
+    }
+    /* The "+ Pattern" button sits at the left side of arr-head so
+       it's visually *above* the pattern label column. Rich's ask
+       2026-04-21: "add pattern button should be above the patterns
+       boxes". Putting it inline in arr-head keeps the alignment
+       clean (no spacer row in the cell grid to drift out of sync
+       with the column header). */
+    .arr-head .add.add-pattern {
+      margin-left: 0;
+      padding: 1px 8px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .arr-head .add.bars { margin-left: auto; }
     .arr-body {
       display: grid;
       grid-template-columns: 160px 1fr;
       flex: 1; min-height: 0;
       overflow: auto;
     }
+    .arr-resize {
+      position: absolute;
+      left: 0; right: 0; bottom: -3px;
+      height: 7px; cursor: ns-resize;
+      z-index: 2;
+    }
+    .arr-resize:hover { background: color-mix(in oklab, var(--color-accent) 35%, transparent); }
     .arr-pat-list { display: flex; flex-direction: column; background: var(--color-surface-elevated); border-right: 1px solid var(--color-border); }
     .arr-pat {
       display: grid;
@@ -222,7 +338,7 @@ export class BeatSequencer extends LitElement {
       align-items: center; gap: 6px;
       padding: 4px 8px;
       height: 22px;
-      border-bottom: 1px solid rgba(255,255,255,0.04);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
       cursor: pointer;
       font-size: 11px;
     }
@@ -249,24 +365,33 @@ export class BeatSequencer extends LitElement {
       grid-template-columns: var(--arr-cols-tpl, repeat(16, 16px));
     }
     .arr-cell {
-      border-right: 1px solid rgba(255,255,255,0.03);
-      border-bottom: 1px solid rgba(255,255,255,0.04);
+      height: 22px;
+      border-right: 1px solid rgba(255,255,255,0.10);
+      border-bottom: 1px solid rgba(255,255,255,0.10);
       cursor: pointer;
     }
-    .arr-cell.beat-edge { border-right-color: rgba(255,255,255,0.18); }
-    .arr-cell:hover { background: rgba(255,255,255,0.04); }
+    .arr-cell.beat-edge { border-right-color: rgba(255,255,255,0.28); }
+    .arr-cell:hover { background: rgba(255,255,255,0.06); }
     .arr-cell.on { background: var(--cell-color, var(--color-accent, #7c5cff)); }
     .arr-cell.on:hover { filter: brightness(1.15); }
 
     /* ── PATTERN EDITOR (cell grid) ────────────────────── */
+    /*
+     * Outer flex split:
+     *    .body      — rows column + grid, scrolls together
+     *    .velocity  — pinned to the bottom, mirrors the grid's
+     *                 column layout, does not scroll with the body
+     *
+     * Previous design put velocity inside .body as a grid-area
+     * "velocity" row. That made it scroll with the grid when the
+     * rows column exceeded viewport height. Moving velocity to a
+     * sibling fixes the "velocity scrolls off the bottom" issue.
+     */
     .body {
       flex: 1; min-height: 0;
       display: grid;
       grid-template-columns: 180px 1fr;
-      grid-template-rows: 1fr auto;
-      grid-template-areas:
-        "rows grid"
-        "rows velocity";
+      grid-template-areas: "rows grid";
       overflow: auto;
     }
     .rows {
@@ -318,14 +443,17 @@ export class BeatSequencer extends LitElement {
       display: grid;
       border-bottom: 1px solid var(--color-border);
       height: var(--row-h);
+      /* box-sizing inherits from the :host border-box rule, so
+         --row-h is the *total* row height including the bottom
+         border — matches .row-head's border-box height exactly. */
     }
     .cell {
-      border-right: 1px solid rgba(255, 255, 255, 0.04);
+      border-right: 1px solid rgba(255, 255, 255, 0.10);
       cursor: pointer;
       position: relative;
     }
-    .cell.beat { border-right-color: rgba(255, 255, 255, 0.18); }
-    .cell:hover { background: rgba(255, 255, 255, 0.04); }
+    .cell.beat { border-right-color: rgba(255, 255, 255, 0.32); }
+    .cell:hover { background: rgba(255, 255, 255, 0.06); }
     .cell.on { background: var(--row-color, var(--color-accent, #7c5cff)); }
     .cell.on:hover { filter: brightness(1.15); }
     .cell.on .vel {
@@ -334,24 +462,47 @@ export class BeatSequencer extends LitElement {
       background: rgba(255, 255, 255, 0.18);
       pointer-events: none;
     }
+    /* Right-edge resize grip for pitched-mode cells — drag to
+       extend a note across multiple steps without needing to
+       switch to a separate editor. */
+    .cell.on .resize-r {
+      position: absolute;
+      top: 0; right: 0; bottom: 0;
+      width: 6px;
+      cursor: ew-resize;
+      z-index: 2;
+    }
+    .cell.on .resize-r:hover {
+      background: rgba(255, 255, 255, 0.35);
+    }
 
     .velocity {
-      grid-area: velocity;
+      flex: 0 0 auto;
       height: 70px;
       display: grid;
       align-items: flex-end;
       background: var(--color-surface-muted);
       border-top: 1px solid var(--color-border);
       padding-top: 6px;
+      /* 180px spacer mirrors the rows column above so velocity
+         bars line up with the pattern cells. The velocity lane
+         is a sibling of .body (not inside it) so it stays pinned
+         to the bottom when the body scrolls vertically. */
+      padding-left: 180px;
+      overflow: hidden;
+      flex: 0 0 76px;
     }
     .vel-col {
       height: 100%;
       display: flex; align-items: flex-end; justify-content: center;
+      gap: 1px;
       border-right: 1px solid rgba(255, 255, 255, 0.03);
     }
     .vel-col .bar {
-      width: 70%; background: var(--color-accent, #7c5cff);
+      flex: 1;
+      background: var(--color-accent, #7c5cff);
       border-radius: 2px 2px 0 0; min-height: 1px;
+      max-width: 10px;
     }
 
     .hint {
@@ -361,6 +512,114 @@ export class BeatSequencer extends LitElement {
       border-top: 1px solid var(--color-border);
       background: var(--color-surface-elevated);
     }
+
+    .tb label.chk {
+      display: inline-flex; align-items: center; gap: 4px;
+      color: var(--color-text-muted); cursor: pointer;
+      user-select: none;
+    }
+    .tb label.chk input { accent-color: var(--color-accent, #7c5cff); }
+
+    /* Archived-layout banner — mirror of the piano-roll banner so
+       both directions of the conversion read as the same amber
+       "not-the-authoritative-view" cue. */
+    .archived-banner {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 12px;
+      background: color-mix(in oklab, #fbbf24 22%, var(--color-surface-elevated));
+      border-bottom: 1px solid color-mix(in oklab, #fbbf24 40%, var(--color-border));
+      color: var(--color-text);
+      font-size: 11px;
+    }
+    .archived-banner .icon { font-size: 14px; }
+    .archived-banner .text { flex: 1; }
+    .archived-banner .text strong { color: #fbbf24; }
+    .archived-banner button {
+      background: #fbbf24;
+      border: 1px solid #fbbf24;
+      color: #000;
+      font: inherit; font-weight: 600; font-size: 11px;
+      padding: 3px 10px; border-radius: 4px;
+      cursor: pointer;
+    }
+    .archived-banner button:hover { filter: brightness(1.1); }
+
+    /* "+ Drum" row at bottom of row-head column, drum mode only. */
+    .add-drum-row {
+      height: var(--row-h);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--color-text-muted);
+      border-bottom: 1px solid var(--color-border);
+      background: var(--color-surface-elevated);
+      font-size: 10px; letter-spacing: 0.06em;
+      cursor: pointer;
+    }
+    .add-drum-row:hover { color: var(--color-accent); }
+
+    /* modal shim — reused by drum picker and preset manager */
+    .modal {
+      position: fixed; inset: 0; z-index: 2000;
+      background: rgba(0,0,0,0.45);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .modal .panel {
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: 6px;
+      min-width: 320px; max-width: 480px;
+      padding: 14px 16px;
+      display: flex; flex-direction: column; gap: 10px;
+      color: var(--color-text);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.55);
+    }
+    .modal h3 { margin: 0; font-size: 13px; font-weight: 600; }
+    .modal .row-f {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; color: var(--color-text-muted);
+    }
+    .modal input[type="text"], .modal select, .modal input[type="number"] {
+      flex: 1;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      padding: 4px 8px; border-radius: 4px;
+      font: inherit; font-size: 11px;
+    }
+    .modal .actions {
+      display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;
+    }
+    .modal button {
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      padding: 4px 10px; border-radius: 4px;
+      font: inherit; font-size: 11px; cursor: pointer;
+    }
+    .modal button.primary {
+      background: var(--color-accent);
+      border-color: var(--color-accent);
+      color: #fff;
+    }
+    .modal button:hover { filter: brightness(1.1); }
+
+    .preset-list {
+      display: flex; flex-direction: column; gap: 2px;
+      max-height: 240px; overflow: auto;
+      border: 1px solid var(--color-border);
+      border-radius: 4px;
+      background: var(--color-surface-elevated);
+    }
+    .preset-list .empty { padding: 12px; color: var(--color-text-muted); font-size: 11px; text-align: center; }
+    .preset-list .item {
+      display: grid; grid-template-columns: 1fr auto auto auto;
+      gap: 6px; align-items: center;
+      padding: 6px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      font-size: 11px;
+    }
+    .preset-list .item:last-child { border-bottom: 0; }
+    .preset-list .item button { padding: 2px 8px; font-size: 10px; }
   `;
 
   constructor() {
@@ -377,6 +636,12 @@ export class BeatSequencer extends LitElement {
     this._paintState = null;
     this._selectedPatternId = "";
     this._arrCols = 16;
+    this._arrH = Number(localStorage.getItem(ARR_HEIGHT_KEY)) || 200;
+    this._preview = localStorage.getItem(PREVIEW_PREF_KEY) === "1";
+    this._addDrum = false;
+    this._drumPitch = 36;
+    this._drumLabel = "Custom";
+    this._presetsOpen = false;
     this._onStoreControl = (ev) => {
       if (ev.detail === "transport.position"
           || ev.detail === "transport.tempo"
@@ -391,6 +656,36 @@ export class BeatSequencer extends LitElement {
     window.__foyer?.store?.addEventListener("control", this._onStoreControl);
     window.__foyer?.store?.addEventListener("change", this._onStoreControl);
   }
+  firstUpdated() {
+    // Lit binds @wheel= as a passive listener in some browsers,
+    // which makes our preventDefault() a no-op — the browser still
+    // horizontally scrolls on Shift-wheel. Re-attach the grid
+    // wheel handler non-passively so cell velocity + zoom both
+    // consume the event cleanly.
+    const body = this.renderRoot?.querySelector?.(".body");
+    if (body && !this._wheelBound) {
+      body.addEventListener("wheel", (ev) => this._onBodyWheel(ev), { passive: false });
+      this._wheelBound = true;
+    }
+  }
+  _onBodyWheel(ev) {
+    // Zoom is Ctrl/Meta-wheel (preserved from the old handler).
+    if (ev.ctrlKey || ev.metaKey) return this._onGridWheel(ev);
+    if (!ev.shiftKey) return;
+    // Shift-wheel: adjust the velocity of the cell under the
+    // pointer. Resolve the target cell via elementFromPoint so
+    // we work regardless of which element the wheel technically
+    // fired on (the scrolling container, a .vel overlay, etc.).
+    const el = this.renderRoot.elementFromPoint
+      ? this.renderRoot.elementFromPoint(ev.clientX, ev.clientY)
+      : document.elementFromPoint(ev.clientX, ev.clientY);
+    const cell = el?.closest?.(".cell");
+    if (!cell) return;
+    const row = Number(cell.dataset.row);
+    const step = Number(cell.dataset.step);
+    if (Number.isNaN(row) || Number.isNaN(step)) return;
+    this._onCellWheel(ev, row, step);
+  }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("control", this._onStoreControl);
     window.__foyer?.store?.removeEventListener("change", this._onStoreControl);
@@ -399,9 +694,13 @@ export class BeatSequencer extends LitElement {
 
   updated(changed) {
     if (changed.has("layout") || changed.has("regionId")) {
-      // Migrate legacy v1 layouts on receive so the rest of the
-      // component sees a uniform v2 shape.
-      if (this.layout && (!this.layout.patterns || this.layout.patterns.length === 0)) {
+      // Always route incoming layouts through migrateToV2 so both
+      // v1 and v2 get normalized (resolution clamped, pattern_steps
+      // coerced). Fixes a first-open bug where a stored v2 layout
+      // with a missing / stale `resolution` attr silently rendered
+      // as 1/8 because the Res dropdown's ?selected match failed
+      // and the browser fell through to the second option.
+      if (this.layout) {
         this.layout = migrateToV2(this.layout);
       }
       // Default the pattern selection to the first pattern of the
@@ -454,13 +753,16 @@ export class BeatSequencer extends LitElement {
     return pattern?.cells?.find((c) => c.row === row && c.step === step)?.velocity
       ?? this._defaultVelocity;
   }
+  _cellLenSteps(pattern, row, step) {
+    return pattern?.cells?.find((c) => c.row === row && c.step === step)?.length_steps ?? 1;
+  }
   _maxVelocityInPattern(pattern, step) {
     let max = 0;
     for (const c of pattern?.cells || []) if (c.step === step && c.velocity > max) max = c.velocity;
     return max;
   }
 
-  _setCell(row, step, on, velocity) {
+  _setCell(row, step, on, velocity, lengthSteps) {
     const targetId = this._selectedPatternId;
     this._commit((L) => {
       const pat = L.patterns.find((p) => p.id === targetId);
@@ -468,12 +770,41 @@ export class BeatSequencer extends LitElement {
       const idx = pat.cells.findIndex((c) => c.row === row && c.step === step);
       if (on) {
         const vel = Math.min(127, Math.max(1, Math.round(velocity ?? this._defaultVelocity)));
-        if (idx >= 0) pat.cells[idx] = { ...pat.cells[idx], velocity: vel };
-        else pat.cells.push({ row, step, velocity: vel });
+        const baseLen = idx >= 0 ? (pat.cells[idx].length_steps ?? 1) : 1;
+        const len = Math.max(1, Math.round(lengthSteps ?? baseLen));
+        if (idx >= 0) pat.cells[idx] = { ...pat.cells[idx], velocity: vel, length_steps: len };
+        else pat.cells.push({ row, step, velocity: vel, length_steps: len });
       } else if (idx >= 0) {
         pat.cells.splice(idx, 1);
       }
     });
+  }
+
+  _onNoteResizeStart(ev, row, step) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const pat = this._selectedPattern();
+    if (!pat) return;
+    const L = this._currentLayout();
+    const startLen = this._cellLenSteps(pat, row, step);
+    const startX = ev.clientX;
+    const cellW = this._cellW;
+    const vel = this._velocityInPattern(pat, row, step);
+    const maxLen = Math.max(1, L.pattern_steps - step);
+    const onMove = (e) => {
+      const dx = e.clientX - startX;
+      const deltaSteps = Math.round(dx / cellW);
+      const next = Math.max(1, Math.min(maxLen, startLen + deltaSteps));
+      if (next !== this._cellLenSteps(this._selectedPattern(), row, step)) {
+        this._setCell(row, step, true, vel, next);
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   }
 
   _ticksPerStep() {
@@ -517,13 +848,24 @@ export class BeatSequencer extends LitElement {
     });
   }
   _deletePattern(patternId) {
-    if (!confirm("Delete this pattern? It will be removed from the arrangement too.")) return;
-    this._commit((L) => {
-      L.patterns = L.patterns.filter((p) => p.id !== patternId);
-      L.arrangement = L.arrangement.filter((s) => s.pattern_id !== patternId);
-      if (this._selectedPatternId === patternId) {
-        this._selectedPatternId = L.patterns[0]?.id || "";
-      }
+    const L = this._currentLayout();
+    const pat = L.patterns.find((p) => p.id === patternId);
+    import("./confirm-modal.js").then(({ confirmAction }) => {
+      confirmAction({
+        title: "Delete pattern?",
+        message: `"${pat?.name || "This pattern"}" will be removed from the arrangement.`,
+        confirmLabel: "Delete",
+        tone: "danger",
+      }).then((ok) => {
+        if (!ok) return;
+        this._commit((Lnext) => {
+          Lnext.patterns = Lnext.patterns.filter((p) => p.id !== patternId);
+          Lnext.arrangement = Lnext.arrangement.filter((s) => s.pattern_id !== patternId);
+          if (this._selectedPatternId === patternId) {
+            this._selectedPatternId = Lnext.patterns[0]?.id || "";
+          }
+        });
+      });
     });
   }
 
@@ -551,6 +893,225 @@ export class BeatSequencer extends LitElement {
     this._commit((L) => {
       const pat = L.patterns.find((p) => p.id === targetId);
       if (pat) { pat.cells = []; pat.free_notes = []; }
+    });
+  }
+
+  // ── rows (drums / pitches) ──────────────────────────────────────
+  _addCustomRow(pitch, label) {
+    const p = Math.max(0, Math.min(127, Math.round(Number(pitch))));
+    const name = (label || pitchLabel(p)).trim() || pitchLabel(p);
+    const L = this._currentLayout();
+    const ch = L.mode === "drum" ? 9 : 0;
+    const palette = ["#f59e0b", "#a78bfa", "#22d3ee", "#67e8f9", "#fb7185", "#fda4af", "#fcd34d", "#fbbf24", "#34d399", "#c084fc"];
+    const color = palette[L.rows.length % palette.length];
+    this._commit((Lnext) => {
+      Lnext.rows = [...Lnext.rows, { pitch: p, label: name, channel: ch, color }];
+    });
+  }
+  _removeRow(idx) {
+    this._commit((L) => {
+      if (idx < 0 || idx >= L.rows.length) return;
+      L.rows.splice(idx, 1);
+      for (const pat of L.patterns) {
+        pat.cells = (pat.cells || [])
+          .filter((c) => c.row !== idx)
+          .map((c) => c.row > idx ? { ...c, row: c.row - 1 } : c);
+      }
+    });
+  }
+  _onRowHeadContext(ev, rowIdx, row) {
+    ev.preventDefault();
+    import("./confirm-modal.js").then(({ confirmAction }) => {
+      confirmAction({
+        title: "Remove row?",
+        message: `"${row.label}" will be removed from the grid along with any cells on it.`,
+        confirmLabel: "Remove",
+        tone: "danger",
+      }).then((ok) => {
+        if (ok) this._removeRow(rowIdx);
+      });
+    });
+  }
+
+  _openDrumPicker() {
+    this._drumPitch = 36;
+    this._drumLabel = "Custom";
+    this._addDrum = true;
+  }
+  _confirmDrumPicker() {
+    const pitch = Number(this._drumPitch);
+    const label = String(this._drumLabel || "").trim() || pitchLabel(pitch);
+    this._addCustomRow(pitch, label);
+    this._addDrum = false;
+  }
+
+  // ── presets ─────────────────────────────────────────────────────
+  _loadPresets() {
+    try {
+      const raw = localStorage.getItem(PRESETS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  _savePresets(list) {
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(list));
+    this.requestUpdate();
+  }
+  _saveAsPreset() {
+    const snapshot = JSON.parse(JSON.stringify(this._currentLayout()));
+    import("./prompt-modal.js").then(({ promptText }) => {
+      promptText({
+        title: "Save beat preset",
+        message: "Saves the current layout to your browser. Presets are per-browser — use Export to share across machines.",
+        defaultValue: `Beat ${new Date().toLocaleDateString()}`,
+        placeholder: "preset name",
+        confirmLabel: "Save",
+      }).then((name) => {
+        if (!name) return;
+        const presets = this._loadPresets();
+        presets.push({
+          name,
+          created: new Date().toISOString(),
+          layout: snapshot,
+        });
+        this._savePresets(presets);
+      });
+    });
+  }
+  _applyPreset(p) {
+    if (!p?.layout) return;
+    // Preserve region identity — we only replace the editable
+    // layout, not the region-level binding.
+    const next = JSON.parse(JSON.stringify(p.layout));
+    next.version = 2;
+    if (!next.patterns?.length) {
+      const id = newPatternId();
+      next.patterns = [{ id, name: "Pattern 1", color: pickPatternColor(0), cells: [], free_notes: [] }];
+      next.arrangement = [{ pattern_id: id, bar: 0, arrangement_row: 0 }];
+    }
+    this.layout = next;
+    this._selectedPatternId = next.patterns[0]?.id || "";
+    this._persistLayout();
+    this._tick++;
+  }
+  _deletePreset(idx) {
+    const presets = this._loadPresets();
+    if (idx < 0 || idx >= presets.length) return;
+    const name = presets[idx].name;
+    import("./confirm-modal.js").then(({ confirmAction }) => {
+      confirmAction({
+        title: "Delete preset?",
+        message: `"${name}" will be removed from your browser-saved presets.`,
+        confirmLabel: "Delete",
+        tone: "danger",
+      }).then((ok) => {
+        if (!ok) return;
+        const latest = this._loadPresets();
+        const pos = latest.findIndex((p) => p.name === name);
+        if (pos >= 0) {
+          latest.splice(pos, 1);
+          this._savePresets(latest);
+        }
+      });
+    });
+  }
+  _exportPreset(idx) {
+    const presets = this._loadPresets();
+    const p = presets[idx];
+    if (!p) return;
+    const blob = new Blob([JSON.stringify(p, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${p.name.replace(/[^a-z0-9_-]+/gi, "_")}.fybt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+  _importPresetFile() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".fybt,application/json";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        if (!parsed?.layout) throw new Error("no layout in preset");
+        const presets = this._loadPresets();
+        presets.push({
+          name: parsed.name || file.name.replace(/\.fybt$/i, "") || "Imported",
+          created: new Date().toISOString(),
+          layout: parsed.layout,
+        });
+        this._savePresets(presets);
+      } catch (e) {
+        import("./confirm-modal.js").then(({ confirmAction }) => {
+          confirmAction({
+            title: "Import failed",
+            message: `Couldn't read this .fybt file: ${e.message}`,
+            confirmLabel: "OK",
+            cancelLabel: "Close",
+          });
+        });
+      }
+    };
+    input.click();
+  }
+
+  // ── arrangement-box vertical resize ──────────────────────────────
+  _startArrResize(ev) {
+    ev.preventDefault();
+    const startY = ev.clientY;
+    const startH = this._arrH;
+    const onMove = (e) => {
+      const h = Math.max(80, Math.min(600, startH + (e.clientY - startY)));
+      this._arrH = h;
+    };
+    const onUp = () => {
+      localStorage.setItem(ARR_HEIGHT_KEY, String(Math.round(this._arrH)));
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  _togglePreview() {
+    this._preview = !this._preview;
+    localStorage.setItem(PREVIEW_PREF_KEY, this._preview ? "1" : "0");
+    if (this._preview) resumePreviewCtx();
+  }
+
+  /** Flip `active=true` on the layout. Server regenerates notes
+   *  from the arrangement, overwriting whatever MIDI was on the
+   *  region. Used by the "archived" banner's Restore button. */
+  _restoreSequencer() {
+    const L = this._currentLayout();
+    if (!this.regionId) return;
+    if (L.active !== false) return;
+    import("./confirm-modal.js").then(({ confirmAction }) => {
+      confirmAction({
+        title: "Restore beat sequencer?",
+        message:
+          "The archived sequencer layout will become active again. "
+          + "The region's current MIDI notes will be overwritten with "
+          + "notes regenerated from the sequencer's arrangement.\n\n"
+          + "Any edits you made in the piano roll since this layout "
+          + "was archived will be lost.",
+        confirmLabel: "Restore & overwrite MIDI",
+        tone: "warning",
+      }).then((ok) => {
+        if (!ok) return;
+        const next = { ...L, active: true };
+        this.layout = next;
+        this._persistLayout();
+        this._tick++;
+      });
     });
   }
 
@@ -588,17 +1149,82 @@ export class BeatSequencer extends LitElement {
     ev.preventDefault();
     const pat = this._selectedPattern();
     if (!pat) return;
+    const L = this._currentLayout();
+    const rowDef = L.rows[row];
     const wasOn = this._isOnInPattern(pat, row, step);
-    this._paintState = { mode: wasOn ? "off" : "on" };
-    this._setCell(row, step, !wasOn);
-    const onMove = (e) => this._paintOnCellAt(e);
+
+    // If clicking on an existing ON cell: enter velocity-drag mode.
+    // Vertical drag adjusts velocity (up = louder); pure click with
+    // no movement toggles the cell off. Moving out of the cell while
+    // dragging falls through to paint mode.
+    // If clicking on an OFF cell: paint mode (create + drag-paint).
+    const startY = ev.clientY;
+    const startX = ev.clientX;
+    const startVel = wasOn ? this._velocityInPattern(pat, row, step) : this._defaultVelocity;
+    let dragMode = wasOn ? "maybe-velocity" : "paint-on";
+    let paintStarted = false;
+    const commitVel = (v) => {
+      const vel = Math.min(127, Math.max(1, Math.round(v)));
+      this._setCell(row, step, true, vel);
+    };
+
+    if (!wasOn) {
+      this._paintState = { mode: "on" };
+      this._setCell(row, step, true, this._defaultVelocity);
+      paintStarted = true;
+      this._maybePreview(rowDef, this._defaultVelocity);
+    } else {
+      this._maybePreview(rowDef, startVel);
+    }
+
+    const onMove = (e) => {
+      const dy = e.clientY - startY;
+      const dx = e.clientX - startX;
+      if (dragMode === "maybe-velocity") {
+        // Promote to velocity-drag once the user crosses a small
+        // vertical threshold. A big horizontal move before vertical
+        // means they want to paint — demote to off-paint.
+        if (Math.abs(dy) > 3 && Math.abs(dy) > Math.abs(dx)) {
+          dragMode = "velocity";
+        } else if (Math.abs(dx) > 6 && Math.abs(dx) > Math.abs(dy)) {
+          dragMode = "paint-off";
+          this._paintState = { mode: "off" };
+          this._setCell(row, step, false);
+          paintStarted = true;
+        }
+      }
+      if (dragMode === "velocity") {
+        // 2 px = 1 velocity unit; up increases.
+        const v = startVel - dy / 2;
+        commitVel(v);
+        return;
+      }
+      if (dragMode === "paint-on" || dragMode === "paint-off") {
+        this._paintOnCellAt(e);
+      }
+    };
     const onUp = () => {
+      if (dragMode === "maybe-velocity" && !paintStarted) {
+        // Pure click on an existing cell → toggle off.
+        this._setCell(row, step, false);
+      }
       this._paintState = null;
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+  }
+
+  _maybePreview(rowDef, velocity) {
+    if (!this._preview || !rowDef) return;
+    try {
+      playPreviewNote({
+        pitch: rowDef.pitch,
+        velocity: velocity ?? this._defaultVelocity,
+        channel: rowDef.channel ?? 0,
+      });
+    } catch (e) { /* best-effort preview */ }
   }
   _paintOnCellAt(ev) {
     if (!this._paintState) return;
@@ -612,8 +1238,14 @@ export class BeatSequencer extends LitElement {
     if (Number.isNaN(row) || Number.isNaN(step)) return;
     const pat = this._selectedPattern();
     const isOn = this._isOnInPattern(pat, row, step);
-    if (this._paintState.mode === "on" && !isOn) this._setCell(row, step, true);
-    else if (this._paintState.mode === "off" && isOn) this._setCell(row, step, false);
+    const L = this._currentLayout();
+    const rowDef = L.rows[row];
+    if (this._paintState.mode === "on" && !isOn) {
+      this._setCell(row, step, true);
+      this._maybePreview(rowDef, this._defaultVelocity);
+    } else if (this._paintState.mode === "off" && isOn) {
+      this._setCell(row, step, false);
+    }
   }
   _onGridWheel(ev) {
     if (ev.ctrlKey || ev.metaKey) {
@@ -631,8 +1263,18 @@ export class BeatSequencer extends LitElement {
     ev.preventDefault();
     const pat = this._selectedPattern();
     if (!this._isOnInPattern(pat, row, step)) return;
+    // Some browsers (Chrome/Edge on most OSes) swap the wheel
+    // axis when Shift is held: deltaY goes to 0 and deltaX
+    // carries the wheel direction. Other browsers (Firefox on
+    // Linux) leave deltaY populated. Read whichever has a
+    // non-zero magnitude, defaulting to deltaY so an
+    // un-modified wheel still works. Without this, Shift-wheel
+    // only ever got one direction on the axis-swapping path —
+    // hence Rich's "only turns velocity down" report 2026-04-21.
+    const delta = ev.deltaY !== 0 ? ev.deltaY : ev.deltaX;
+    if (delta === 0) return;
     const v = this._velocityInPattern(pat, row, step);
-    const next = Math.min(127, Math.max(1, v + (ev.deltaY < 0 ? +4 : -4)));
+    const next = Math.min(127, Math.max(1, v + (delta < 0 ? +4 : -4)));
     if (next !== v) this._setCell(row, step, true, next);
   }
 
@@ -641,9 +1283,90 @@ export class BeatSequencer extends LitElement {
     const L = this._currentLayout();
     return html`
       ${this._renderToolbar(L)}
+      ${L.active === false ? this._renderArchivedBanner() : null}
       ${this._renderSeekBar()}
       ${this._renderArrangement(L)}
       ${this._renderPatternEditor(L)}
+      ${this._addDrum ? this._renderDrumPicker() : null}
+      ${this._presetsOpen ? this._renderPresetsModal() : null}
+    `;
+  }
+
+  _renderArchivedBanner() {
+    return html`
+      <div class="archived-banner">
+        <span class="icon">⚠</span>
+        <span class="text">
+          This layout is <strong>archived</strong> — the region's notes
+          are being edited as plain MIDI. Changes you make here will be
+          saved, but they won't play back until you restore the sequencer.
+          Restoring will overwrite any MIDI edits on the region.
+        </span>
+        <button title="Activate this sequencer and regenerate the region's notes from its layout"
+                @click=${() => this._restoreSequencer()}>Restore sequencer</button>
+      </div>
+    `;
+  }
+
+  _renderDrumPicker() {
+    return html`
+      <div class="modal" @click=${(e) => { if (e.target === e.currentTarget) this._addDrum = false; }}>
+        <div class="panel">
+          <h3>Add drum / note to grid</h3>
+          <div class="row-f">
+            <span>Pitch</span>
+            <select @change=${(e) => { this._drumPitch = Number(e.currentTarget.value); const hit = GM_DRUM_KIT.find((d) => d.pitch === this._drumPitch); if (hit) this._drumLabel = hit.label; }}>
+              ${GM_DRUM_KIT.map((d) => html`
+                <option value=${d.pitch} ?selected=${d.pitch === this._drumPitch}>${d.pitch} — ${d.label}</option>
+              `)}
+            </select>
+            <input type="number" min="0" max="127" style="flex:0 0 70px"
+                   .value=${String(this._drumPitch)}
+                   @input=${(e) => { this._drumPitch = Number(e.currentTarget.value); }}>
+          </div>
+          <div class="row-f">
+            <span>Label</span>
+            <input type="text" .value=${this._drumLabel}
+                   @input=${(e) => { this._drumLabel = e.currentTarget.value; }}>
+          </div>
+          <div class="actions">
+            <button @click=${() => { this._addDrum = false; }}>Cancel</button>
+            <button class="primary" @click=${() => this._confirmDrumPicker()}>Add</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _renderPresetsModal() {
+    const presets = this._loadPresets();
+    return html`
+      <div class="modal" @click=${(e) => { if (e.target === e.currentTarget) this._presetsOpen = false; }}>
+        <div class="panel" style="min-width:420px">
+          <h3>Beat presets</h3>
+          <div class="row-f">
+            <button class="primary" @click=${() => { this._saveAsPreset(); }}>Save current…</button>
+            <button @click=${() => this._importPresetFile()}>Import .fybt…</button>
+            <span style="flex:1"></span>
+            <span style="font-size:10px">${presets.length} saved</span>
+          </div>
+          <div class="preset-list">
+            ${presets.length === 0
+              ? html`<div class="empty">No presets yet — click "Save current…" to stash this layout.</div>`
+              : presets.map((p, i) => html`
+                <div class="item">
+                  <span title=${p.created || ""}>${p.name}</span>
+                  <button @click=${() => { this._applyPreset(p); this._presetsOpen = false; }}>Load</button>
+                  <button @click=${() => this._exportPreset(i)}>Export</button>
+                  <button @click=${() => this._deletePreset(i)}>×</button>
+                </div>
+              `)}
+          </div>
+          <div class="actions">
+            <button @click=${() => { this._presetsOpen = false; }}>Close</button>
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -655,22 +1378,22 @@ export class BeatSequencer extends LitElement {
         <span>${this.regionName || "—"}</span>
         <span style="flex:1"></span>
         <label>Mode
-          <select @change=${(e) => this._setMode(e.currentTarget.value)}>
-            <option value="drum" ?selected=${L.mode === "drum"}>Drum</option>
-            <option value="pitched" ?selected=${L.mode === "pitched"}>Pitched (piano roll)</option>
+          <select .value=${L.mode} @change=${(e) => this._setMode(e.currentTarget.value)}>
+            <option value="drum">Drum</option>
+            <option value="pitched">Pitched (piano roll)</option>
           </select>
         </label>
         <label>Steps/bar
-          <select @change=${(e) => this._setSteps(Number(e.currentTarget.value))}>
+          <select .value=${String(L.pattern_steps)} @change=${(e) => this._setSteps(Number(e.currentTarget.value))}>
             ${STEP_COUNTS.map((n) => html`
-              <option value=${n} ?selected=${n === L.pattern_steps}>${n}</option>
+              <option value=${n}>${n}</option>
             `)}
           </select>
         </label>
         <label>Res
-          <select @change=${(e) => this._setResolution(Number(e.currentTarget.value))}>
+          <select .value=${String(L.resolution)} @change=${(e) => this._setResolution(Number(e.currentTarget.value))}>
             ${RESOLUTIONS.map((r) => html`
-              <option value=${r.subdiv} ?selected=${r.subdiv === L.resolution}>${r.label}</option>
+              <option value=${r.subdiv}>${r.label}</option>
             `)}
           </select>
         </label>
@@ -688,6 +1411,12 @@ export class BeatSequencer extends LitElement {
         </label>
         <button title="Play" @click=${() => window.__foyer?.ws?.controlSet?.("transport.playing", 1)}>▶</button>
         <button title="Stop" @click=${() => window.__foyer?.ws?.controlSet?.("transport.playing", 0)}>■</button>
+        <label class="chk" title="Play a short sound in the browser when you click a cell (browser-only; does not route through the DAW yet)">
+          <input type="checkbox" .checked=${this._preview}
+                 @change=${() => this._togglePreview()}>
+          Preview
+        </label>
+        <button title="Beat loop presets" @click=${() => { this._presetsOpen = true; }}>Presets…</button>
         <button title="Clear selected pattern" @click=${() => this._clearSelectedPattern()}>Clear</button>
       </div>
     `;
@@ -725,12 +1454,12 @@ export class BeatSequencer extends LitElement {
     const cols = Math.max(this._arrCols, maxBar + 4);
     const cellPx = 16;
     return html`
-      <div class="arr">
+      <div class="arr" style="height:${this._arrH}px">
         <div class="arr-head">
-          <span>Arrangement · ${L.patterns.length} pattern${L.patterns.length === 1 ? "" : "s"} · ${maxBar + 1} bar${maxBar + 1 === 1 ? "" : "s"}</span>
-          <button class="add" title="Add a new empty pattern"
+          <button class="add add-pattern" title="Add a new empty pattern"
                   @click=${() => this._addPattern()}>+ Pattern</button>
-          <button class="add" title="Show more bars in the arrangement"
+          <span>Arrangement · ${L.patterns.length} pattern${L.patterns.length === 1 ? "" : "s"} · ${maxBar + 1} bar${maxBar + 1 === 1 ? "" : "s"}</span>
+          <button class="add bars" title="Show more bars in the arrangement"
                   @click=${() => { this._arrCols = Math.min(cols + 8, 256); }}>+ 8 bars</button>
         </div>
         <div class="arr-body" style="--arr-cols-tpl:repeat(${cols}, ${cellPx}px)">
@@ -761,6 +1490,8 @@ export class BeatSequencer extends LitElement {
             `)}
           </div>
         </div>
+        <div class="arr-resize" title="Drag to resize the arrangement panel"
+             @pointerdown=${(e) => this._startArrResize(e)}></div>
       </div>
     `;
   }
@@ -780,35 +1511,57 @@ export class BeatSequencer extends LitElement {
             const black = L.mode === "pitched" && isBlackKey(row.pitch);
             const cRow = L.mode === "pitched" && (row.pitch % 12 === 0);
             return html`
-              <div class="row-head ${black ? "black-key" : ""} ${cRow ? "c-row" : ""}">
+              <div class="row-head ${black ? "black-key" : ""} ${cRow ? "c-row" : ""}"
+                   @contextmenu=${(e) => this._onRowHeadContext(e, i, row)}>
                 <button class="mute ${row.muted ? "on" : ""}"
                         title="Mute this row"
                         @click=${() => this._toggleRowFlag(i, "muted")}>M</button>
                 <button class="solo ${row.soloed ? "on" : ""}"
                         title="Solo this row"
                         @click=${() => this._toggleRowFlag(i, "soloed")}>S</button>
-                <div class="label" title="pitch ${row.pitch} · ch ${row.channel + 1}">${row.label}</div>
+                <div class="label" title="pitch ${row.pitch} · ch ${row.channel + 1} · right-click to remove">${row.label}</div>
               </div>
             `;
           })}
+          ${L.mode === "drum" ? html`
+            <div class="add-drum-row" title="Add a custom drum / hit to the grid"
+                 @click=${() => this._openDrumPicker()}>+ Drum</div>
+          ` : null}
         </div>
         <div class="grid">
           ${L.rows.map((row, i) => {
             const black = L.mode === "pitched" && isBlackKey(row.pitch);
+            // Compute which step-cells are "under" a preceding long
+            // note so we don't render them as separate cells — the
+            // long note's grid-column span covers them instead.
+            const covered = new Set();
+            for (const c of pat?.cells || []) {
+              if (c.row !== i) continue;
+              const len = Math.max(1, Number(c.length_steps) || 1);
+              for (let k = 1; k < len; k++) covered.add(c.step + k);
+            }
+            const isPitched = L.mode === "pitched";
             return html`
               <div class="grid-row ${black ? "black-key" : ""}"
                    style="grid-template-columns:${gridTpl};--row-color:${row.color || "var(--color-accent, #7c5cff)"}">
                 ${Array.from({ length: steps }).map((_, s) => {
+                  if (covered.has(s)) return null;
                   const on = this._isOnInPattern(pat, i, s);
                   const vel = on ? this._velocityInPattern(pat, i, s) : 0;
                   const alpha = on ? 0.55 + (vel / 127) * 0.45 : 1;
+                  const lenSteps = on ? Math.max(1, Number(this._cellLenSteps(pat, i, s)) || 1) : 1;
+                  const spanStyle = lenSteps > 1 ? `;grid-column:span ${lenSteps}` : "";
                   return html`
                     <div class="cell ${on ? "on" : ""} ${(s + 1) % beatEvery === 0 ? "beat" : ""}"
                          data-row=${i} data-step=${s}
-                         style=${on ? `opacity:${alpha}` : ""}
+                         style=${on ? `opacity:${alpha}${spanStyle}` : ""}
                          @pointerdown=${(e) => this._onCellDown(e, i, s)}
                          @wheel=${(e) => this._onCellWheel(e, i, s)}>
                       ${on ? html`<div class="vel" style="height:${Math.round(40 + vel / 127 * 40)}%"></div>` : null}
+                      ${on && isPitched ? html`
+                        <div class="resize-r" data-grip="right" data-row=${i} data-step=${s}
+                             @pointerdown=${(e) => this._onNoteResizeStart(e, i, s)}></div>
+                      ` : null}
                     </div>
                   `;
                 })}
@@ -816,16 +1569,34 @@ export class BeatSequencer extends LitElement {
             `;
           })}
         </div>
-        <div class="velocity" style="grid-template-columns:${gridTpl}">
-          ${Array.from({ length: steps }).map((_, s) => {
-            const v = this._maxVelocityInPattern(pat, s);
-            const h = v > 0 ? (v / 127) * 100 : 0;
-            return html`<div class="vel-col"><div class="bar" style="height:${h}%"></div></div>`;
-          })}
-        </div>
+      </div>
+      <div class="velocity" style="grid-template-columns:${gridTpl}">
+        ${Array.from({ length: steps }).map((_, s) => {
+          // One mini-bar per row that has a cell at this step,
+          // colored with that row's color. If more than one row
+          // fires on the same step (kick + hat, snare + tom, etc.)
+          // each gets its own column so the user can see the
+          // individual velocities instead of just the max.
+          const hits = [];
+          for (const c of pat?.cells || []) {
+            if (c.step !== s) continue;
+            const row = L.rows[c.row];
+            if (!row) continue;
+            hits.push({ v: c.velocity ?? this._defaultVelocity, color: row.color || "var(--color-accent,#7c5cff)" });
+          }
+          hits.sort((a, b) => b.v - a.v);
+          return html`
+            <div class="vel-col">
+              ${hits.map((h) => html`
+                <div class="bar" style="height:${(h.v / 127) * 100}%;background:${h.color}"
+                     title="vel ${h.v}"></div>
+              `)}
+            </div>
+          `;
+        })}
       </div>
       <div class="hint">
-        Editing <strong>${pat.name}</strong> · arrangement decides where it plays · click+drag = paint · Shift-wheel = velocity · Ctrl-wheel = zoom
+        Editing <strong>${pat.name}</strong> · click an empty cell = add · click+drag = paint/erase · drag up/down on a cell = velocity · Shift-wheel = velocity · Ctrl-wheel = zoom${L.mode === "pitched" ? " · drag right edge = extend note" : ""}
       </div>
     `;
   }

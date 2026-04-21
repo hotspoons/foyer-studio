@@ -78,6 +78,7 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
         mute: toggle(&format!("track.{slug}.mute"), "Mute"),
         solo: toggle(&format!("track.{slug}.solo"), "Solo"),
         record_arm: Some(toggle(&format!("track.{slug}.rec"), "Rec")),
+        monitoring: Some("auto".into()),
         sends: vec![],
         plugins: default_inserts_for(slug),
         peak_meter: Some(EntityId::new(format!("track.{slug}.meter"))),

@@ -55,6 +55,12 @@ pub struct Track {
     pub solo: Parameter,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub record_arm: Option<Parameter>,
+    /// Monitoring mode: `"auto" | "input" | "disk" | "cue"`. Matches
+    /// Ardour's `MonitorChoice`. Absent = host doesn't expose it
+    /// (e.g. bus/master strips). Editable via `UpdateTrack { patch:
+    /// { monitoring: Some(...) } }`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub monitoring: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub sends: Vec<Send>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -105,6 +111,10 @@ pub struct TrackPatch {
     /// the assignment back to master.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub bus_assign: Option<EntityId>,
+    /// Set the track's monitoring mode: `"auto" | "input" | "disk" | "cue"`.
+    /// Maps to Ardour's `MonitorChoice`. `None` leaves the setting alone.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub monitoring: Option<String>,
 }
 
 /// Patch set for [`Command::UpdateGroup`]. Same `None`-leaves-unchanged
@@ -285,6 +295,7 @@ mod tests {
                 mute: toggle("track.abc.mute", "Mute"),
                 solo: toggle("track.abc.solo", "Solo"),
                 record_arm: Some(toggle("track.abc.rec", "Rec")),
+                monitoring: Some("auto".into()),
                 sends: vec![],
                 plugins: vec![],
                 peak_meter: Some(EntityId::new("track.abc.meter")),

@@ -134,6 +134,8 @@ mod tests {
             source_path: None,
             source_offset_samples: None,
             notes: vec![],
+            patch_changes: vec![],
+            foyer_sequencer: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         let back: Region = serde_json::from_str(&j).unwrap();

@@ -28,6 +28,7 @@
 
 #include "ardour/automation_control.h"
 #include "ardour/meter.h"
+#include "ardour/monitor_control.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
@@ -397,9 +398,11 @@ encode_session_snapshot (Session& session,
 			auto it = route_by_id.find (s.self_id);
 			std::vector<schema_map::PluginDesc> plugins;
 			std::shared_ptr<AutomationControl> rec_ctl;
+			std::shared_ptr<ARDOUR::MonitorControl> mon_ctl;
 			if (it != route_by_id.end ()) {
 				plugins = schema_map::enumerate_plugins (it->second);
 				rec_ctl = it->second->rec_enable_control ();
+				mon_ctl = it->second->monitoring_control ();
 			}
 
 			// Base track shape is 9 fields (id, name, kind, color,
@@ -409,6 +412,7 @@ encode_session_snapshot (Session& session,
 			// present.
 			std::size_t track_fields = 9;
 			if (rec_ctl) ++track_fields;
+			if (mon_ctl) ++track_fields;
 			if (!plugins.empty ()) ++track_fields;
 
 			o.map (track_fields);
@@ -430,6 +434,15 @@ encode_session_snapshot (Session& session,
 			if (rec_ctl) {
 				o.str ("record_arm");
 				emit_param_bool ((s.self_id + ".rec").c_str (), "Rec", rec_ctl->get_value () >= 0.5);
+			}
+			if (mon_ctl) {
+				const int v = static_cast<int> (mon_ctl->get_value ());
+				const char* lbl =
+					(v == ARDOUR::MonitorInput) ? "input" :
+					(v == ARDOUR::MonitorDisk)  ? "disk"  :
+					(v == ARDOUR::MonitorCue)   ? "cue"   : "auto";
+				o.str ("monitoring");
+				o.str (lbl);
 			}
 
 			if (!plugins.empty ()) {
@@ -639,13 +652,14 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	if (r.sequencer.present) {
 		o.str ("foyer_sequencer");
 		// SequencerLayout v2 { version, mode, resolution,
-		// pattern_steps, rows, patterns, arrangement, cells (v1
-		// carry-through) }.
-		o.map (8);
+		// pattern_steps, active, rows, patterns, arrangement,
+		// cells (v1 carry-through) }.
+		o.map (9);
 		o.str ("version");       o.u (r.sequencer.version);
 		o.str ("mode");          o.str (r.sequencer.mode);
 		o.str ("resolution");    o.u (r.sequencer.resolution);
 		o.str ("pattern_steps"); o.u (r.sequencer.pattern_steps);
+		o.str ("active");        o.b (r.sequencer.active);
 		o.str ("rows");
 		o.array (r.sequencer.rows.size ());
 		for (auto const& row : r.sequencer.rows) {
@@ -673,10 +687,14 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 			o.str ("cells");
 			o.array (p.cells.size ());
 			for (auto const& c : p.cells) {
-				o.map (3);
+				const bool emit_len = c.length_steps > 1;
+				o.map (emit_len ? 4 : 3);
 				o.str ("row");      o.u (c.row);
 				o.str ("step");     o.u (c.step);
 				o.str ("velocity"); o.u (c.velocity);
+				if (emit_len) {
+					o.str ("length_steps"); o.u (c.length_steps);
+				}
 			}
 		}
 		o.str ("arrangement");
@@ -877,6 +895,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 
 	auto plugins = schema_map::enumerate_plugins (route);
 	auto rec_ctl = route->rec_enable_control ();
+		auto mon_ctl = route->monitoring_control ();
 
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
@@ -886,6 +905,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 
 		std::size_t track_fields = 9; // +1 for peak_meter
 		if (rec_ctl) ++track_fields;
+			if (mon_ctl) ++track_fields;
 		if (!plugins.empty ()) ++track_fields;
 
 		o.map (track_fields);
@@ -906,6 +926,15 @@ encode_track_updated (Session& session, const std::string& track_id)
 		if (rec_ctl) {
 			o.str ("record_arm");
 			emit_named_param (o, matched.self_id + ".rec", "Rec", "trigger", true, 0.0, rec_ctl->get_value () >= 0.5);
+		}
+		if (mon_ctl) {
+			const int v = static_cast<int> (mon_ctl->get_value ());
+			const char* lbl =
+				(v == ARDOUR::MonitorInput) ? "input" :
+				(v == ARDOUR::MonitorDisk)  ? "disk"  :
+				(v == ARDOUR::MonitorCue)   ? "cue"   : "auto";
+			o.str ("monitoring");
+			o.str (lbl);
 		}
 
 		if (!plugins.empty ()) {

@@ -213,6 +213,20 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn create_region(
+        &self,
+        track_id: EntityId,
+        at_samples: u64,
+        length_samples: Option<u64>,
+        kind: String,
+        name: Option<String>,
+    ) -> Result<(), BackendError> {
+        self.client
+            .create_region(track_id, at_samples, length_samples, kind, name)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn update_track(
         &self,
         id: EntityId,

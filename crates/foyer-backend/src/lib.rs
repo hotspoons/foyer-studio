@@ -207,6 +207,20 @@ pub trait Backend: Send + Sync + 'static {
         Err(BackendError::Other("duplicate_region not supported".into()))
     }
 
+    /// Create a brand-new empty region on the given track.
+    /// Fire-and-forget: the host echoes a `RegionsList` once the
+    /// playlist has committed.
+    async fn create_region(
+        &self,
+        _track_id: EntityId,
+        _at_samples: u64,
+        _length_samples: Option<u64>,
+        _kind: String,
+        _name: Option<String>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("create_region not supported".into()))
+    }
+
     // ─── MIDI note edits ────────────────────────────────────────────────
     //
     // The backend is fire-and-forget: it accepts the command and relies

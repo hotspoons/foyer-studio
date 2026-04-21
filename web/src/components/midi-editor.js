@@ -77,6 +77,16 @@ export class MidiEditor extends LitElement {
     regionId:    { type: String, attribute: "region-id" },
     regionName:  { type: String, attribute: "region-name" },
     ppqn:        { type: Number },
+    /** When true, all mutations are blocked — the region is
+     *  sequencer-owned (active SequencerLayout on the region).
+     *  Callers flip this to false after the user clicks "Convert
+     *  to MIDI" in the banner and the sidecar echoes an updated
+     *  region with `active: false`. */
+    readOnly:    { type: Boolean, attribute: "read-only" },
+    /** The full foyer_sequencer layout, if any. Only inspected
+     *  when readOnly is true so the banner can explain *what*
+     *  is authoritative (sequencer) and offer the conversion. */
+    sequencerLayout: { attribute: false },
     _zoomIdx:    { state: true, type: Number },
     _rowIdx:     { state: true, type: Number },
     _pitchLo:    { state: true, type: Number },
@@ -239,6 +249,36 @@ export class MidiEditor extends LitElement {
       font-variant-numeric: tabular-nums;
       display: flex; align-items: center; gap: 14px;
     }
+
+    /* Sequencer-lock banner. Amber so it reads as "active warning"
+       rather than a critical error. The user has a single next
+       action: convert to MIDI. */
+    .seq-banner {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 12px;
+      background: color-mix(in oklab, #fbbf24 22%, var(--color-surface-elevated));
+      border-bottom: 1px solid color-mix(in oklab, #fbbf24 40%, var(--color-border));
+      color: var(--color-text);
+      font-size: 11px;
+    }
+    .seq-banner .icon { font-size: 14px; }
+    .seq-banner .text { flex: 1; }
+    .seq-banner .text strong { color: #fbbf24; }
+    .seq-banner button {
+      background: #fbbf24;
+      border: 1px solid #fbbf24;
+      color: #000;
+      font: inherit; font-weight: 600; font-size: 11px;
+      padding: 3px 10px; border-radius: 4px;
+      cursor: pointer;
+    }
+    .seq-banner button:hover { filter: brightness(1.1); }
+
+    /* Dim the canvas slightly in read-only mode so it reads as
+       "not the active editing surface". Still fully legible. */
+    :host([readonly]) .notes-canvas { cursor: not-allowed; }
+    :host([readonly]) .note { cursor: not-allowed; }
   `;
 
   constructor() {
@@ -246,6 +286,8 @@ export class MidiEditor extends LitElement {
     this.notes = [];
     this.regionId = "";
     this.regionName = "";
+    this.readOnly = false;
+    this.sequencerLayout = null;
     this.ppqn = 960;
     this._zoomIdx = nearestIdx(H_ZOOM_LEVELS, 0.0167);
     this._rowIdx  = nearestIdx(V_ROW_HEIGHTS, 14);
@@ -291,6 +333,41 @@ export class MidiEditor extends LitElement {
     window.addEventListener("pointermove", this._onPointerMove);
     this.addEventListener("pointerenter", () => { this._mouseOver = true; });
     this.addEventListener("pointerleave", () => { this._mouseOver = false; });
+    this._reflectReadOnlyAttr();
+  }
+  _reflectReadOnlyAttr() {
+    if (this.readOnly) this.setAttribute("readonly", "");
+    else this.removeAttribute("readonly");
+  }
+
+  _convertSequencerToMidi() {
+    // Send a SetSequencerLayout with `active: false`. The server
+    // persists the metadata via shim extra_xml but does NOT
+    // regenerate notes (see ws.rs `is_active` branch). The notes
+    // that are currently on the region become the authoritative
+    // content and the piano roll becomes editable.
+    if (!this.regionId || !this.sequencerLayout) return;
+    import("./confirm-modal.js").then(({ confirmAction }) => {
+      confirmAction({
+        title: "Convert to MIDI?",
+        message:
+          "This region will stop being driven by the beat sequencer. "
+          + "The sequencer layout is archived (not deleted) and the notes "
+          + "currently on the region become editable in the piano roll.\n\n"
+          + "You can restore the sequencer later, but restoring will "
+          + "overwrite any MIDI edits you make in the meantime.",
+        confirmLabel: "Convert to MIDI",
+        tone: "warning",
+      }).then((ok) => {
+        if (!ok) return;
+        const next = { ...this.sequencerLayout, active: false };
+        window.__foyer?.ws?.send({
+          type: "set_sequencer_layout",
+          region_id: this.regionId,
+          layout: next,
+        });
+      });
+    });
   }
   firstUpdated() {
     // Wheel listener needs to be non-passive so preventDefault actually
@@ -312,6 +389,7 @@ export class MidiEditor extends LitElement {
   }
 
   updated(changed) {
+    if (changed.has("readOnly")) this._reflectReadOnlyAttr();
     if (changed.has("notes")) {
       // Reconcile with backend. Drop optimistic-only entries that the
       // backend didn't confirm (their ids start with "note.opt.") and
@@ -444,6 +522,11 @@ export class MidiEditor extends LitElement {
 
   _onCanvasDown(ev) {
     if (ev.button !== 0) return;
+    // Sequencer-owned regions are read-only in the piano roll.
+    // The banner spells out "Convert to MIDI" as the escape
+    // hatch; swallowing pointerdown here means the user's click
+    // still gets the visual hover but nothing mutates.
+    if (this.readOnly) return;
     const hitNoteId = this._noteIdFromEvent(ev);
     const gripDir = ev.target?.dataset?.grip || null;
 
@@ -600,6 +683,14 @@ export class MidiEditor extends LitElement {
 
   _handleKeydown(e) {
     if (!this.renderRoot) return;
+    // Read-only mode blocks every keyboard mutation too — Del,
+    // Ctrl+Z, paste, duplicate. The region's sequencer layout is
+    // authoritative; edits must go through "Convert to MIDI"
+    // first. Undo/redo still fire at the session level, but we
+    // don't let this editor initiate them against a sequencer
+    // region (undoing a regen would bounce notes around in a way
+    // that's impossible to reason about).
+    if (this.readOnly) return;
     const active = document.activeElement;
     const tag = (active?.tagName || "").toLowerCase();
     if (tag === "input" || tag === "textarea" || tag === "select") return;
@@ -787,6 +878,17 @@ export class MidiEditor extends LitElement {
     }
 
     return html`
+      ${this.readOnly && this.sequencerLayout ? html`
+        <div class="seq-banner">
+          <span class="icon">⚠</span>
+          <span class="text">
+            This region is <strong>sequencer-owned</strong> — notes are generated from the beat sequencer layout.
+            Piano-roll editing is disabled. Convert to MIDI to edit directly (the sequencer layout is archived, not lost).
+          </span>
+          <button title="Archive the sequencer layout and make the notes editable"
+                  @click=${() => this._convertSequencerToMidi()}>Convert to MIDI</button>
+        </div>
+      ` : null}
       <div class="toolbar">
         <span class="title">MIDI</span>
         <span>${this.regionName || "—"}</span>
@@ -895,11 +997,18 @@ export class MidiEditor extends LitElement {
 customElements.define("foyer-midi-editor", MidiEditor);
 
 /** Open the MIDI editor for `region` as a bare element (no chrome). Caller
- *  wraps in a `<foyer-window>` or similar container. */
+ *  wraps in a `<foyer-window>` or similar container.
+ *
+ *  If the region has an active sequencer layout, the editor opens in
+ *  read-only mode with a banner explaining why — piano-roll edits would
+ *  be clobbered by the next SetSequencerLayout regen. The banner's
+ *  "Convert to MIDI" button flips the layout to `active: false`. */
 export function openMidiEditor(region) {
   const el = document.createElement("foyer-midi-editor");
   el.notes      = region?.notes || [];
   el.regionId   = region?.id || "";
   el.regionName = region?.name || "";
+  el.sequencerLayout = region?.foyer_sequencer || null;
+  el.readOnly = !!(region?.foyer_sequencer && region.foyer_sequencer.active !== false);
   return el;
 }
