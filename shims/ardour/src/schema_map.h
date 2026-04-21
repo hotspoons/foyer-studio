@@ -15,6 +15,7 @@
 #define foyer_shim_schema_map_h
 
 #include <cstdint>
+#include <list>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,6 +29,10 @@ class Plugin;
 class PluginInsert;
 class Region;
 struct ParameterDescriptor;
+// RouteList is a typedef in ardour/types.h — forward-declaring it here
+// as the same typedef so our safe_get_routes signature compiles without
+// dragging ardour/types.h into every schema_map.h consumer.
+typedef std::list<std::shared_ptr<Route>> RouteList;
 } // namespace ARDOUR
 
 namespace PBD {
@@ -35,6 +40,23 @@ class Controllable;
 }
 
 namespace ArdourSurface::schema_map {
+
+/// Safe wrapper around `session.get_routes()` that returns an empty
+/// (non-null) RouteList shared_ptr while the session is still loading.
+///
+/// Rationale: `Session::get_routes()` reaches into `RCUManager::reader()`
+/// which `*managed_object.load()` without a null check. During session
+/// load (from XML or new-session bootstrap), the RCU's backing
+/// shared_ptr is zero-initialized and null-deref crashes the process
+/// (SIGSEGV in shared_ptr_base.h). Ardour's `Session::loading()` is
+/// true through this entire window, and goes false in `session_loaded()`
+/// once state parsing, route instantiation, and AudioEngine connect-up
+/// are complete. Using it as a gate makes every call site crash-safe.
+///
+/// Callers that iterate the returned list handle an empty one as a
+/// no-op naturally; nothing to draw / meter / dispatch against means
+/// nothing is emitted until the next tick / signal pumps re-runs them.
+std::shared_ptr<ARDOUR::RouteList const> safe_get_routes (const ARDOUR::Session&);
 
 /// Foyer stable ID for a route/bus/master's gain / pan / etc.
 std::string id_gain  (const ARDOUR::Stripable&);

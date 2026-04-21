@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ use futures::Stream;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
 const EVENT_BROADCAST_CAP: usize = 2048;
 const COMMAND_QUEUE_CAP: usize = 256;
@@ -94,6 +94,15 @@ struct Shared {
     regions_cache: Mutex<HashMap<EntityId, Region>>,
     /// Where to route incoming audio frames, keyed by stream_id.
     audio_routes: Mutex<HashMap<u32, AudioRoute>>,
+    /// Flipped true when the reader/writer task exits (shim crash,
+    /// socket close, process gone). `subscribe()` streams watch this
+    /// via `disconnected_notify` and terminate when it flips, so the
+    /// sidecar's event pump can emit `BackendLost` instead of hanging
+    /// on a broadcast that never closes (the broadcast Sender lives
+    /// in this Shared — its existence keeps the channel open even
+    /// after the reader task has dropped its clone).
+    disconnected: AtomicBool,
+    disconnected_notify: Notify,
 }
 
 pub struct HostClient {
@@ -130,9 +139,29 @@ impl HostClient {
             pending_update_track: Mutex::new(HashMap::new()),
             regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
+            disconnected: AtomicBool::new(false),
+            disconnected_notify: Notify::new(),
         });
-        tokio::spawn(writer_task(w, out_rx));
-        tokio::spawn(reader_task(r, shared.clone()));
+        // Each task gets a clone; on exit, the LAST one to finish
+        // flips `disconnected` and fires the Notify so pending
+        // `subscribe()` streams terminate. We wrap the spawned
+        // futures so the signaling happens no matter how the
+        // task exits (clean, error, or panic — the wrapper's
+        // drop is what counts).
+        {
+            let s = shared.clone();
+            tokio::spawn(async move {
+                writer_task(w, out_rx).await;
+                signal_disconnect(&s, "writer task exited");
+            });
+        }
+        {
+            let s = shared.clone();
+            tokio::spawn(async move {
+                reader_task(r, s.clone()).await;
+                signal_disconnect(&s, "reader task exited");
+            });
+        }
         Self { shared }
     }
 
@@ -175,13 +204,33 @@ impl HostClient {
         let mut rx = self.shared.events.subscribe();
         self.send_command(Command::Subscribe).await?;
 
+        // Hold a reference to `Shared` for the disconnect flag + Notify.
+        // When reader/writer tasks exit (shim died), they flip the flag
+        // and wake `disconnected_notify`. We select! against both
+        // `rx.recv()` and the Notify so the stream terminates instead
+        // of hanging forever on a broadcast whose Sender (held in
+        // `Shared`) never drops.
+        let shared = self.shared.clone();
+
         let stream = async_stream::stream! {
             yield snap_event;
+            // Already disconnected before we even started? Bail.
+            if shared.disconnected.load(Ordering::Acquire) {
+                return;
+            }
             loop {
-                match rx.recv().await {
-                    Ok(ev) => yield ev,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                tokio::select! {
+                    res = rx.recv() => {
+                        match res {
+                            Ok(ev) => yield ev,
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    _ = shared.disconnected_notify.notified() => {
+                        tracing::debug!("subscribe stream: disconnected, terminating");
+                        break;
+                    }
                 }
             }
         };
@@ -368,6 +417,18 @@ pub fn f32_to_le_bytes(samples: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&s.to_le_bytes());
     }
     out
+}
+
+/// Mark the client as disconnected. Idempotent — multiple callers
+/// (reader + writer task exits) all converging at the same state is
+/// fine. The Notify wakes all currently-awaiting `subscribe` streams
+/// so they can terminate; subsequent checks of the AtomicBool handle
+/// the case where the Notify fired before a stream started watching.
+fn signal_disconnect(shared: &Arc<Shared>, why: &str) {
+    if !shared.disconnected.swap(true, Ordering::AcqRel) {
+        tracing::info!("HostClient disconnected: {why}");
+        shared.disconnected_notify.notify_waiters();
+    }
 }
 
 /// Unpack a little-endian `f32` byte slice back into samples. Inverse of

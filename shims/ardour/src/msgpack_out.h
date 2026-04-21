@@ -14,11 +14,13 @@
 #define foyer_shim_msgpack_out_h
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace ARDOUR {
 class Session;
+class Route;
 }
 namespace PBD {
 class Controllable;
@@ -26,8 +28,14 @@ class Controllable;
 
 namespace ArdourSurface::msgpack_out {
 
-/// Encode `session.snapshot` from the current session state.
-std::vector<std::uint8_t> encode_session_snapshot (ARDOUR::Session&);
+/// Encode `session.snapshot` from the current session state. The
+/// `routes` list must come from the caller's own weak_ptr tracking
+/// (see `SignalBridge::snapshot_tracked_routes`) — we do NOT touch
+/// `session.get_routes()` here because that call can SIGSEGV on
+/// RCU teardown races during session lifecycle transitions.
+std::vector<std::uint8_t> encode_session_snapshot (
+    ARDOUR::Session&,
+    const std::vector<std::shared_ptr<ARDOUR::Route>>& routes);
 
 /// Encode a `control.update` event for a single controllable.
 std::vector<std::uint8_t> encode_control_update (ARDOUR::Session&, const PBD::Controllable&);
@@ -66,6 +74,16 @@ std::vector<std::uint8_t> encode_session_dirty_changed (bool dirty);
 /// `Route::peak_meter()->meter_level(0, MeterPeak)`. Empty if the
 /// session has no routes.
 std::vector<std::uint8_t> encode_track_meters (ARDOUR::Session&);
+
+/// Variant of `encode_track_meters` that reads from a caller-supplied
+/// list of strong references instead of `Session::get_routes()`. Used
+/// by the 30 Hz tick loop which maintains its own weak_ptr cache
+/// (`SignalBridge::_tracked_routes`) and locks each entry just before
+/// each tick — avoids the RCU teardown race where `get_routes()` can
+/// SIGSEGV during session destruction with no Ardour-side hook
+/// reliably firing "stop your reads now" for us.
+std::vector<std::uint8_t> encode_track_meters_from_routes (
+    const std::vector<std::shared_ptr<ARDOUR::Route>>& routes);
 
 /// Encode `Event::AudioEgressStarted { stream_id }`. Sent after the
 /// shim has installed a master tap — the HostBackend awaits this

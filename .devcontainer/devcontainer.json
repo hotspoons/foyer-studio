@@ -11,7 +11,46 @@
     "ghcr.io/devcontainers/features/git:1": {}
   },
   "runArgs": [
-    "--platform=${localEnv:DOCKER_DEFAULT_PLATFORM:linux/arm64}"
+    "--platform=${localEnv:DOCKER_DEFAULT_PLATFORM:linux/arm64}",
+    // Privileged: JACK needs realtime scheduling (SCHED_FIFO) + locked
+    // pages (mlock) to run without xruns; those capabilities require
+    // CAP_SYS_NICE + CAP_IPC_LOCK, which a non-privileged container
+    // can't reliably hand out. Privileged is the pragmatic knob.
+    "--privileged",
+    // Host networking: skip Docker's port-forward shim. The sidecar
+    // binds 127.0.0.1:3838 directly on the host, no `-p 3838:3838`
+    // dance. JACK's `/dev/shm/jack-<uid>/` is also host-shared so
+    // you can run jackd in the container and connect from host
+    // tools if you ever need to.
+    "--network=host",
+    // Realtime scheduling + unlimited locked memory. Docker passes
+    // these ulimits through the Colima VM kernel, which grants
+    // the non-root `vscode` user CAP_SYS_NICE-equivalent rlimits
+    // without needing PAM / /etc/security/limits.d magic (those
+    // don't work in containers). Concretely: jackd's `-R` can now
+    // acquire SCHED_FIFO threads, and libardour can lock its
+    // ~107 MB graph memory.
+    //
+    // Without these, the non-RT fallback causes:
+    //   · JackEngine XRuns every ~20 ms under load (ardour
+    //     process callback misses the deadline)
+    //   · After enough XRuns, jackd disconnects ardour →
+    //     AudioEngine::Halted signal → hardour exits / segfaults
+    //   · Net: `just run` → project picker → hardour dies in
+    //     ~4 seconds with no useful audio
+    //
+    // rtprio=95 leaves a little headroom under the kernel's typical
+    // 99-max for OS-level RT tasks. memlock=-1 is unlimited.
+    "--ulimit", "rtprio=95",
+    "--ulimit", "memlock=-1",
+    // Docker's default /dev/shm is 64 MB. libardour + jackd use
+    // /dev/shm heavily — libardour reserves a ~107 MB audio graph
+    // (the "Cannot lock down 107350048 byte memory area" warning
+    // is actually an ENOMEM from the tmpfs, not a rlimit issue),
+    // and jackd shares client state through /dev/shm/jack-<uid>/.
+    // 2 GB leaves plenty of slack for multi-client sessions +
+    // whatever else uses /dev/shm inside the dev workflow.
+    "--shm-size=2g"
   ],
   "containerEnv": {
     "CARGO_TERM_COLOR": "always"

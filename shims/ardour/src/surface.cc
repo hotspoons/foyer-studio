@@ -66,3 +66,4 @@ FoyerShim::set_active (bool yn)
 	ControlProtocol::set_active (yn);
 	return 0;
 }
+

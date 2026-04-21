@@ -254,14 +254,47 @@ encode_transport_state (Session& session)
 }
 
 std::vector<std::uint8_t>
-encode_session_snapshot (Session& session)
+encode_session_snapshot (Session& session,
+                         const std::vector<std::shared_ptr<Route>>& routes)
 {
 	PBD::warning << "foyer_shim: SNAPSHOT: " << transport_state_str (session) << endmsg;
 	// M3 baseline: a minimal snapshot shape. Parameter metadata for plugins
 	// gets filled in for M5; for now we emit transport + tracks with
 	// gain/pan/mute/solo parameters only. The Rust HostBackend doesn't care
 	// about fields it doesn't recognize.
-	auto ids = schema_map::enumerate_stripables (session);
+	//
+	// Stripables enumeration uses the caller-supplied routes directly
+	// rather than `session.get_stripables()` (which reads the RCU and
+	// is unsafe during Session lifecycle transitions). Stripable
+	// metadata we need (name, kind, color) is reachable through the
+	// Route's Stripable interface.
+	std::vector<schema_map::StripableIds> ids;
+	ids.reserve (routes.size ());
+	for (auto const& r : routes) {
+		if (!r) continue;
+		schema_map::StripableIds entry;
+		std::ostringstream tmp;
+		tmp << r->id ();
+		entry.self_id = "track." + tmp.str ();
+		entry.name    = r->name ();
+		// Route IS a Stripable — kind + color come through it.
+		entry.kind    = r->is_master () ? "master"
+		              : r->is_monitor () ? "monitor"
+		              : (dynamic_cast<const Track*> (r.get ())
+		                  ? ((dynamic_cast<const Track*> (r.get ())->data_type () == DataType::MIDI)
+		                     ? "midi" : "audio")
+		                  : "bus");
+		{
+			const std::uint32_t c = static_cast<std::uint32_t> (r->presentation_info ().color ());
+			if (c != 0) {
+				char buf[8];
+				std::snprintf (buf, sizeof (buf), "#%02x%02x%02x",
+				               (c >> 24) & 0xff, (c >> 16) & 0xff, (c >> 8) & 0xff);
+				entry.color = std::string (buf);
+			}
+		}
+		ids.push_back (std::move (entry));
+	}
 
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
@@ -315,11 +348,10 @@ encode_session_snapshot (Session& session)
 
 		// Per-track emission — includes loaded plugin instances with their
 		// full parameter sets so the generic web plugin panel can render them
-		// without a second round trip.
-		std::shared_ptr<RouteList const> routes = session.get_routes ();
-		// Map stripable-id → route for O(n) lookup while iterating ids.
+		// without a second round trip. Uses caller-supplied routes (no RCU
+		// read) for the same reason explained in the function header.
 		std::map<std::string, std::shared_ptr<Route>> route_by_id;
-		for (auto const& r : *routes) {
+		for (auto const& r : routes) {
 			if (!r) continue;
 			std::ostringstream tmp;
 			tmp << r->id ();
@@ -446,34 +478,64 @@ encode_session_dirty_changed (bool dirty)
 // no schema or client-side changes: the store already routes
 // `control.update` events keyed by `track.<id>.meter` into the
 // `<foyer-meter>` bindings.
+// Shared body: walk the provided routes, sample peak meters, build the
+// id/dBFS pair list. Both public entry points below feed into this.
+static std::vector<std::pair<std::string, double>>
+meter_snapshot_from_routes (
+    const std::vector<std::shared_ptr<Route>>& routes)
+{
+	std::vector<std::pair<std::string, double>> snap;
+	snap.reserve (routes.size ());
+	for (auto const& r : routes) {
+		if (!r) continue;
+		auto pm = r->peak_meter ();
+		if (!pm) continue;
+		// Take the maximum across all channels so stereo/mono
+		// routes render the same way — one bar per track.
+		// `MeterPeak` is Ardour's standard peak-with-falloff
+		// reading; `meter_level` returns dBFS directly.
+		float peak_db = -120.0f;
+		const ChanCount cc = pm->input_streams ();
+		const uint32_t n = cc.n_audio ();
+		for (uint32_t ch = 0; ch < n; ++ch) {
+			const float v = pm->meter_level (ch, ARDOUR::MeterPeak);
+			if (v > peak_db) peak_db = v;
+		}
+		if (n == 0) peak_db = -60.0f; // no audio channels — show floor
+		std::ostringstream idss;
+		idss << "track." << r->id () << ".meter";
+		snap.emplace_back (idss.str (), static_cast<double> (peak_db));
+	}
+	return snap;
+}
+
+static std::vector<std::uint8_t>
+encode_meter_snapshot (const std::vector<std::pair<std::string, double>>& snap);
+
 std::vector<std::uint8_t>
 encode_track_meters (Session& session)
 {
-	std::shared_ptr<RouteList const> routes = session.get_routes ();
-	std::vector<std::pair<std::string, double>> snap;
-	snap.reserve (routes ? routes->size () : 0);
+	std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
+	std::vector<std::shared_ptr<Route>> copy;
 	if (routes) {
-		for (auto const& r : *routes) {
-			if (!r) continue;
-			auto pm = r->peak_meter ();
-			if (!pm) continue;
-			// Take the maximum across all channels so stereo/mono
-			// routes render the same way — one bar per track.
-			// `MeterPeak` is Ardour's standard peak-with-falloff
-			// reading; `meter_level` returns dBFS directly.
-			float peak_db = -120.0f;
-			const ChanCount cc = pm->input_streams ();
-			const uint32_t n = cc.n_audio ();
-			for (uint32_t ch = 0; ch < n; ++ch) {
-				const float v = pm->meter_level (ch, ARDOUR::MeterPeak);
-				if (v > peak_db) peak_db = v;
-			}
-			if (n == 0) peak_db = -60.0f; // no audio channels — show floor
-			std::ostringstream idss;
-			idss << "track." << r->id () << ".meter";
-			snap.emplace_back (idss.str (), static_cast<double> (peak_db));
-		}
+		copy.reserve (routes->size ());
+		for (auto const& r : *routes) copy.push_back (r);
 	}
+	auto snap = meter_snapshot_from_routes (copy);
+	return encode_meter_snapshot (snap);
+}
+
+std::vector<std::uint8_t>
+encode_track_meters_from_routes (
+    const std::vector<std::shared_ptr<Route>>& routes)
+{
+	auto snap = meter_snapshot_from_routes (routes);
+	return encode_meter_snapshot (snap);
+}
+
+static std::vector<std::uint8_t>
+encode_meter_snapshot (const std::vector<std::pair<std::string, double>>& snap)
+{
 
 	if (snap.empty ()) return {};
 
@@ -664,7 +726,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 	std::shared_ptr<Route> route;
 	std::shared_ptr<Stripable> stripable;
 	{
-		std::shared_ptr<RouteList const> routes = session.get_routes ();
+		std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
 		for (auto const& r : *routes) {
 			if (!r) continue;
 			std::ostringstream tmp;

@@ -116,6 +116,11 @@ export class Store extends EventTarget {
    * Wire the store to a FoyerWs instance. Returns a detach function.
    */
   attach(ws) {
+    // Hold a ref so event handlers (see `session_patch` case in
+    // `_onEnvelope`) can send commands back on the WS — specifically
+    // to re-request a snapshot when the shim tells us state has
+    // reloaded.
+    this._ws = ws;
     const onStatus = (ev) => {
       this.state.status = ev.detail;
       this._emit();
@@ -126,6 +131,7 @@ export class Store extends EventTarget {
     return () => {
       ws.removeEventListener("status", onStatus);
       ws.removeEventListener("envelope", onEnvelope);
+      if (this._ws === ws) this._ws = null;
     };
   }
 
@@ -185,8 +191,23 @@ export class Store extends EventTarget {
         break;
       }
       case "session_patch": {
-        // Coarse handling: request a fresh snapshot. The details of per-op
-        // patching land in later polish.
+        // Coarse handling: request a fresh snapshot from the sidecar.
+        // The details of per-op patching land in later polish — for now
+        // any `session_patch` with any payload triggers a full reload.
+        //
+        // The shim emits `{op: "reload"}` after `on_session_loaded`
+        // finishes populating its route cache, which is how the first
+        // non-empty snapshot reaches a browser that connected before
+        // routes were actually in Ardour's session. Without sending
+        // request_snapshot here, the browser stays on whatever empty
+        // snapshot arrived at subscribe-time — mixer renders "Waiting
+        // for session…" forever.
+        //
+        // The CustomEvent is kept for any other listener that wants
+        // to react to reloads without duplicating the request.
+        if (this._ws && typeof this._ws.requestSnapshot === "function") {
+          this._ws.requestSnapshot();
+        }
         this.dispatchEvent(new CustomEvent("reload-requested"));
         break;
       }

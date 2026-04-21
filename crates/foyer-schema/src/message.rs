@@ -184,6 +184,18 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         project_path: Option<String>,
     },
+    /// Emitted when the DAW backend disconnects unexpectedly (shim crash,
+    /// process killed, socket broken). Clients should surface this
+    /// prominently — sessions can't be saved, controls won't actuate,
+    /// and audio streaming will have fallen through to the sidecar
+    /// test tone. The sidecar itself continues to run; relaunching the
+    /// project from the picker rebuilds a fresh backend.
+    BackendLost {
+        backend_id: String,
+        /// Human-readable reason as reported by the backend client
+        /// (e.g. "frame read error: Connection reset by peer").
+        reason: String,
+    },
     /// Sent once to each newly-connected client so it can figure out
     /// whether its WebSocket arrived over loopback (same box as the
     /// sidecar) or from a remote host. Drives the "share session" UX

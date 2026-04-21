@@ -98,9 +98,31 @@ SignalBridge::tick_loop ()
 		// plugin noise bleed, hit-test sanity). Cheap: each
 		// `meter_level()` is an atomic read from PeakMeter's
 		// precomputed vector.
-		auto mbytes = msgpack_out::encode_track_meters (session);
-		if (!mbytes.empty ()) {
-			_shim.ipc ().send (foyer_ipc::FrameKind::Control, mbytes);
+		//
+		// THREAD SAFETY: this loop used to call `session.get_routes()`
+		// which reads Ardour's route RCU. That RCU's backing pointer
+		// can be freed while we're mid-read during session teardown,
+		// and neither `session.loading()` nor
+		// `session.deletion_in_progress()` close the race (the flag
+		// is checked then acted on separately — Ardour can flip it
+		// between the check and the call). Instead we snapshot our
+		// own weak_ptr cache under a local mutex; weak_ptr::lock()
+		// is always safe, returning nullptr if the Route is gone.
+		std::vector<std::shared_ptr<ARDOUR::Route>> live_routes;
+		{
+			std::lock_guard<std::mutex> g (_tracked_routes_mx);
+			live_routes.reserve (_tracked_routes.size ());
+			for (auto const& wr : _tracked_routes) {
+				if (auto r = wr.lock ()) {
+					live_routes.push_back (std::move (r));
+				}
+			}
+		}
+		if (!live_routes.empty ()) {
+			auto mbytes = msgpack_out::encode_track_meters_from_routes (live_routes);
+			if (!mbytes.empty ()) {
+				_shim.ipc ().send (foyer_ipc::FrameKind::Control, mbytes);
+			}
 		}
 
 		// Skip most idle ticks for the TRANSPORT event to keep the
@@ -206,14 +228,79 @@ SignalBridge::subscribe_all ()
 	    std::bind<void> (&SignalBridge::on_dirty_changed, this),
 	    _shim.event_loop ());
 
-	// Walk existing routes and wire per-control + per-playlist signals.
-	std::shared_ptr<RouteList const> routes = session.get_routes ();
-	for (auto const& r : *routes) {
+	// Defer the initial walk of routes to `Session::SessionLoaded`.
+	// Why not walk now:
+	//   `subscribe_all` runs from `FoyerShim::set_active(true)`,
+	//   invoked by `ControlProtocolManager::set_session` at
+	//   session_state.cc:336 — this is INSIDE `Session::post_engine_init`.
+	//   Line 318 of session_state.cc reads `routes.reader()` safely
+	//   just before our call, so intuitively the RCU should be safe.
+	//   Empirically it's not: `session.get_routes()` from our
+	//   subscribe_all SIGSEGVs in `RCUManager::reader()`. The RCU
+	//   backing pointer is in some transient state we can't cheaply
+	//   detect. session_loaded() (which clears the Loading flag and
+	//   emits SessionLoaded) runs later in the ctor body, AFTER the
+	//   state machine has fully stabilized.
+	//
+	// `Session::SessionLoaded` is the signal Ardour designed exactly
+	// for "your surface can now trust the session." MidiTrack also
+	// connects to it ([../ardour/libs/ardour/midi_track.cc:96]).
+	// Our handler does the initial walk + populates the weak_ptr
+	// cache once the session is definitively ready.
+	// connect_same_thread (not `connect(...event_loop())`) is load-bearing.
+	// SessionLoaded fires from session_loaded() on the main thread, which
+	// is still inside the Session ctor and will immediately run more
+	// state work (force_locate, etc.) after returning from the signal
+	// emission. If we marshal to our event-loop thread, our handler races
+	// with those post-signal mutations — `get_routes()` from our thread
+	// while the main thread is touching the RCU is a SIGSEGV. Running
+	// SAME-thread means Ardour blocks on our handler inside the signal,
+	// no concurrent modification possible. MidiTrack uses this exact
+	// pattern (libs/ardour/midi_track.cc:96).
+	session.SessionLoaded.connect_same_thread (
+	    _connections,
+	    std::bind<void> (&SignalBridge::on_session_loaded, this));
+}
+
+void
+SignalBridge::on_session_loaded ()
+{
+	// This runs AFTER `Session::session_loaded()` has called
+	// `set_clean()` which cleared the Loading flag. Routes are
+	// populated, state machine stable, and `get_routes()` is safe.
+	Session& session = _shim.session ();
+	PBD::warning << "foyer_shim: on_session_loaded — doing initial route walk" << endmsg;
+	std::shared_ptr<ARDOUR::RouteList const> initial;
+	try {
+		initial = session.get_routes ();
+	} catch (...) {
+		PBD::warning << "foyer_shim: on_session_loaded: get_routes threw" << endmsg;
+		return;
+	}
+	if (!initial) return;
+	{
+		std::lock_guard<std::mutex> g (_tracked_routes_mx);
+		for (auto const& r : *initial) {
+			if (!r) continue;
+			_tracked_routes.emplace_back (r);
+		}
+	}
+	for (auto const& r : *initial) {
 		if (!r) continue;
 		subscribe_controls_on_route (*r);
 		subscribe_playlist_for_route (*r);
 		subscribe_presentation_for_route (*r);
 	}
+	_routes_ready.store (true, std::memory_order_release);
+	PBD::warning << "foyer_shim: on_session_loaded — " << initial->size ()
+	             << " routes tracked" << endmsg;
+	// Push a Reload patch so the sidecar re-requests the snapshot
+	// with the now-ready route list. Without this, the sidecar's
+	// initial snapshot request (sent at subscribe-time, before this
+	// signal fires) came back with zero tracks and the UI stays
+	// empty until some other event happens to re-trigger a snapshot.
+	auto bytes = msgpack_out::encode_patch_reload ();
+	_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 }
 
 void
@@ -330,15 +417,52 @@ SignalBridge::on_route_presentation_changed (std::string track_id)
 	}
 }
 
+std::vector<std::shared_ptr<ARDOUR::Route>>
+SignalBridge::snapshot_tracked_routes () const
+{
+	std::vector<std::shared_ptr<ARDOUR::Route>> out;
+	std::lock_guard<std::mutex> g (_tracked_routes_mx);
+	out.reserve (_tracked_routes.size ());
+	for (auto const& wr : _tracked_routes) {
+		if (auto r = wr.lock ()) {
+			out.push_back (std::move (r));
+		}
+	}
+	return out;
+}
+
 void
 SignalBridge::on_route_added (RouteList& added)
 {
+	// Diagnostic: confirm the signal actually fires + how many routes
+	// came in. Gated to first-fire so long sessions don't spam the
+	// log; if Rich sees "tracks load but meters stay flat", this is
+	// the fastest way to tell whether the signal never fired vs.
+	// it fired but our handler had a bug.
+	if (!_route_added_logged.exchange (true, std::memory_order_acq_rel)) {
+		PBD::warning << "foyer_shim: on_route_added FIRST fire — "
+		             << added.size () << " routes added" << endmsg;
+	}
+	// Populate our weak_ptr cache BEFORE we subscribe per-route
+	// signals so the tick thread can start metering as soon as
+	// possible. weak_ptr is the right lifetime primitive here:
+	// expired()/lock() are safe even after the Route is gone, so
+	// the tick thread never touches freed memory the way a
+	// `get_routes()` / RouteList* read would.
+	{
+		std::lock_guard<std::mutex> g (_tracked_routes_mx);
+		for (auto const& r : added) {
+			if (!r) continue;
+			_tracked_routes.emplace_back (r);
+		}
+	}
 	for (auto const& r : added) {
 		if (!r) continue;
 		subscribe_controls_on_route (*r);
 		subscribe_playlist_for_route (*r);
 		subscribe_presentation_for_route (*r);
 	}
+	_routes_ready.store (true, std::memory_order_release);
 
 	// Simplest correct behavior for M3: emit a Reload patch hinting clients
 	// to re-request a full snapshot. Per-op patches can land as an optimization.

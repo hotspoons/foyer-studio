@@ -9,6 +9,7 @@
  * an `Error` event for now and are filled in alongside their milestones.
  */
 #include "dispatch.h"
+#include "signal_bridge.h"
 
 #include <cstring>
 #include <string>
@@ -428,7 +429,12 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 	switch (cmd.kind) {
 		case DecodedCmd::Kind::Subscribe:
 		case DecodedCmd::Kind::RequestSnapshot: {
-			auto bytes = msgpack_out::encode_session_snapshot (_shim.session ());
+			// Source routes from the SignalBridge's weak_ptr cache
+			// instead of `session.get_routes()` — the RCU teardown
+			// race that used to SIGSEGV this code path can't happen
+			// when lifting through weak_ptr.lock().
+			auto routes = _shim.signal_bridge ().snapshot_tracked_routes ();
+			auto bytes = msgpack_out::encode_session_snapshot (_shim.session (), routes);
 			_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			break;
 		}
@@ -502,7 +508,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			{
 				std::string pid = cmd.id.substr (7, cmd.id.size () - 7 - suffix.size ());
 				auto& session = _shim.session ();
-				std::shared_ptr<RouteList const> routes = session.get_routes ();
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
 				bool handled = false;
 				for (auto const& r : *routes) {
 					if (!r || handled) continue;
@@ -602,7 +608,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				// `RegionRemoved` signal will fire on the playlist and our
 				// signal bridge relays it; we don't re-emit here.
-				std::shared_ptr<RouteList const> routes = shim->session ().get_routes ();
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
 				for (auto const& r : *routes) {
 					if (!r) continue;
 					auto track = std::dynamic_pointer_cast<Track> (r);
@@ -626,7 +632,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (snap.id.rfind ("track.", 0) != 0) return;
 				const std::string sid = snap.id.substr (6);
 				std::shared_ptr<Route> route;
-				std::shared_ptr<RouteList const> routes = shim->session ().get_routes ();
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
 				for (auto const& r : *routes) {
 					if (!r) continue;
 					std::ostringstream tmp;
@@ -747,7 +753,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (snap.track_id.rfind ("track.", 0) != 0) return;
 				const std::string sid = snap.track_id.substr (6);
 				std::shared_ptr<Route> route;
-				std::shared_ptr<RouteList const> routes = shim->session ().get_routes ();
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
 				for (auto const& r : *routes) {
 					if (!r) continue;
 					std::ostringstream tmp;
@@ -799,7 +805,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// bypass toggle.
 				if (snap.plugin_id.rfind ("plugin.", 0) != 0) return;
 				const std::string pid = snap.plugin_id.substr (7);
-				std::shared_ptr<RouteList const> routes = shim->session ().get_routes ();
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
 				std::string affected_track;
 				for (auto const& r : *routes) {
 					if (!r) continue;
@@ -858,9 +864,27 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			FoyerShim* shim = &_shim;
 			Dispatcher* self = this;
 			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, stream_id, channels] () {
-				auto master = shim->session ().master_out ();
+				auto& session = shim->session ();
+				// Prefer master_out() — it's a single-pointer read, no RCU.
+				// If it's null we fall back to walking our own tracked
+				// weak_ptr cache (safe against RCU teardown races) and
+				// picking out the master there. Calling
+				// `schema_map::safe_get_routes` here would reach into
+				// Ardour's RCU and has crashed in the past.
+				auto master = session.master_out ();
 				if (!master) {
-					PBD::warning << "foyer_shim: audio_stream_open: no master route" << endmsg;
+					auto tracked = shim->signal_bridge ().snapshot_tracked_routes ();
+					for (auto const& r : tracked) {
+						if (r && r->is_master ()) { master = r; break; }
+					}
+				}
+				if (!master) {
+					auto tracked = shim->signal_bridge ().snapshot_tracked_routes ();
+					PBD::warning << "foyer_shim: audio_stream_open: no master route. "
+					             << "tracked_routes=" << tracked.size ()
+					             << " (session.master_out() null AND no is_master in cache — "
+					             << "session probably not done loading; sidecar should retry)"
+					             << endmsg;
 					return;
 				}
 				auto tap = std::make_shared<MasterTap> (*shim, shim->session (), stream_id, channels);
@@ -885,12 +909,21 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				{
 					std::ostringstream post;
+					bool tap_found = false;
+					void* tap_addr = tap.get ();
 					master->foreach_processor (
-					    [&post] (std::weak_ptr<ARDOUR::Processor> wp) {
+					    [&post, &tap_found, tap_addr] (std::weak_ptr<ARDOUR::Processor> wp) {
 					        auto p = wp.lock ();
-					        if (p) post << " [" << p->display_name () << " active=" << p->active () << "]";
+					        if (p) {
+					            post << " [" << p->display_name ()
+					                 << " active=" << p->active ()
+					                 << " addr=" << (void*) p.get () << "]";
+					            if ((void*) p.get () == tap_addr) tap_found = true;
+					        }
 					    });
-					PBD::warning << "foyer_shim: [audio] master AFTER add:" << post.str () << endmsg;
+					PBD::warning << "foyer_shim: [audio] master AFTER add:" << post.str ()
+					             << " tap_addr=" << tap_addr
+					             << " tap_found_in_chain=" << tap_found << endmsg;
 				}
 				// `add_processor` allows activation but doesn't
 				// itself flip the active flag — the base Processor

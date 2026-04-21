@@ -155,9 +155,25 @@ add_library(foyer_shim SHARED
 
 # Match the wscript: PACKAGE macro + DLL-export define for portability
 # across MSVC / mingw. Harmless on Linux.
+#
+# WAF_BUILD is LOAD-BEARING. Ardour's headers (session.h line 34, and
+# many others) guard `#include "libardour-config.h"` behind
+# `#ifdef WAF_BUILD`. Without this define, config.h is NOT pulled in,
+# so flags like USE_TLSF, LV2_SUPPORT, VST3_SUPPORT, etc. stay
+# undefined when we compile. The headers themselves have
+# `#ifdef USE_TLSF` blocks that pick different types / member layouts
+# — without the flag, OUR Session struct has different offsets than
+# the one libardour.so was built with. Reads of members like `routes`
+# actually dereference garbage memory → SIGSEGV in `RCUManager::reader`
+# (you see `managed_object == nullptr` because you're reading from
+# the wrong struct offset entirely). Every "RCU crash" we chased for
+# the past six hours traces back here. Define WAF_BUILD to force the
+# config header include; match flags to what Ardour itself was built
+# with.
 target_compile_definitions(foyer_shim PRIVATE
   PACKAGE="foyer_shim"
   ARDOURSURFACE_DLL_EXPORTS
+  WAF_BUILD
 )
 
 target_include_directories(foyer_shim PRIVATE

@@ -25,11 +25,21 @@ check: fmt-check clippy test
 # Launch foyer with whatever `default_backend` is in config.yaml (stub on
 # first run — dummy data, no DAW process). `just run` is the everyday
 # "bring up the UI" command.
-run *args:
+#
+# `jack-dummy` is a dependency because the moment the user picks a project
+# in the browser picker, the sidecar spawns a hardour process that tries
+# to connect to JACK (hardour's default backend is "JACK/Pipewire"). If
+# jackd isn't running, hardour errors out at startup with "Cannot set
+# Audio/MIDI engine backend: JACK/Pipewire" and the LaunchBackend swap
+# fails. The `jack-dummy` recipe is idempotent — no-op if jackd is
+# already up, so chaining is cheap.
+run *args: jack-dummy shim-check
     cargo run --bin foyer -- serve {{args}}
 
 # Launch with the stub (dummy) backend explicitly — useful if config
-# default got changed and you just want the demo UI back.
+# default got changed and you just want the demo UI back. No JACK
+# dependency because the stub generates its own sine wave and never
+# spawns a DAW.
 run-stub *args:
     cargo run --bin foyer -- serve --backend stub {{args}}
 
@@ -40,7 +50,7 @@ run-stub *args:
 #
 #   just run-ardour                        # attach to already-running Ardour
 #   just run-ardour /tmp/foyer-session/foyer-smoke.ardour
-run-ardour project="" *args:
+run-ardour project="" *args: jack-dummy shim-check
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{project}}" ]; then
@@ -100,58 +110,176 @@ ardour-test:
 ardour-clean:
     cd {{ardour_dir}} && python3 waf clean
 
-# --- foyer shim (C++, builds against Ardour tree) ---
+# --- foyer shim (standalone out-of-tree CMake build) ---
+#
+# The shim is a pure third-party control surface: a `libfoyer_shim.so`
+# dropped into an `ARDOUR_SURFACES_PATH` directory and `dlopen`d by
+# Ardour at startup, identically to Mackie / OSC / Generic MIDI. The
+# Ardour source tree is untouched; we only link against its built
+# libraries under `build/libs/`.
+#
+# Requires a sibling Ardour tree to be configured + built at least
+# once (`just ardour-configure && just ardour-build`). When Ardour
+# ships `ardour-surface.pc` upstream this will flip to
+# `find_package(Ardour)` and we'll drop the source-tree dependency.
+#
+# Earlier iterations of this project had a `shim-link`/`shim-unlink`
+# pair that symlinked the shim directory into Ardour's `libs/surfaces/`
+# so Ardour's waf build would include it as an in-tree target. That
+# workflow was removed on 2026-04-20 because it conflicts with the
+# "don't fork Ardour, keep its commercial build pristine" posture
+# documented in [docs/DECISIONS.md#18] — building the shim into
+# Ardour's tree means the Ardour binary we ship is a MODIFIED version
+# of Ardour, which has license + commercial implications. Standalone
+# is the one true path; if you find yourself wanting an in-tree build
+# for faster iteration, read Decision 18 first.
 shim_dir := justfile_directory() + "/shims/ardour"
-shim_link := ardour_dir + "/libs/surfaces/foyer_shim"
+shim_build_dir := shim_dir + "/cmake-build"
 
-# Symlink the shim into Ardour's libs/surfaces/ so waf picks it up.
-shim-link:
-    test -L "{{shim_link}}" || ln -s "{{shim_dir}}" "{{shim_link}}"
-
-# Build the shim (or anything else).
-shim-build: shim-link
-    cd {{ardour_dir}} && python3 waf build
-
-# Remove the shim from Ardour's tree (clean Ardour rebuild).
-shim-unlink:
-    rm -f "{{shim_link}}"
-
-# --- foyer shim (out-of-tree CMake build, no Ardour source edits) ---
-#
-# Builds `libfoyer_shim.so` against a sibling Ardour source tree
-# without touching any file in it. Matches the eventual shipping
-# story: third-party control-surface authors drop their .so into
-# `$ARDOUR_SURFACES_PATH` and Ardour picks it up at startup. See
-# [docs/PROPOSAL-surface-auto-discovery.md](docs/PROPOSAL-surface-auto-discovery.md).
-#
-# Requires the sibling Ardour tree to be configured + built at least
-# once (`just ardour-configure && just ardour-build`) — we link
-# against its in-tree libraries under build/libs/. When Ardour ships
-# a proper `ardour-surface.pc` upstream this will flip to
-# `find_package(Ardour)` and be even simpler.
-shim_cmake_build := shim_dir + "/cmake-build"
-
-shim-cmake-configure:
-    cmake -S {{shim_dir}} -B {{shim_cmake_build}} \
+shim-configure:
+    cmake -S {{shim_dir}} -B {{shim_build_dir}} \
           -DCMAKE_BUILD_TYPE=RelWithDebInfo \
           -DFOYER_ARDOUR_SOURCE={{ardour_dir}}
 
-shim-cmake-build: shim-cmake-configure
-    cmake --build {{shim_cmake_build}} -j
+shim-build: shim-configure
+    cmake --build {{shim_build_dir}} -j
 
-# Install the out-of-tree .so into a user-scoped Ardour surfaces dir.
-# Ardour's default `ARDOUR_SURFACES_PATH` already scans
-# `$HOME/.config/ardour<N>/surfaces/` so no env var tweak needed.
-# Override DEST to point elsewhere (system-wide, test dir, etc).
-shim-install DEST="$HOME/.config/ardour9": shim-cmake-build
+# Install the .so into a user-scoped Ardour surfaces dir. Ardour's
+# `control_protocol_search_path()` scans `$HOME/.config/ardour<N>/surfaces/`
+# (see libs/ardour/search_paths.cc) plus anything in `ARDOUR_SURFACES_PATH`,
+# so this location works with zero env var tweaks. Override DEST for
+# system-wide installs or isolated test configs.
+#
+# Always rebuilds via `shim-build` (CMake incremental is fast when the
+# tree hasn't changed, ~1.7 s). For a true no-op-when-current check
+# used by `run` / `run-ardour`, see `shim-check`.
+shim-install DEST="$HOME/.config/ardour9": shim-build
     mkdir -p "{{DEST}}/surfaces"
-    cp {{shim_cmake_build}}/libfoyer_shim.so "{{DEST}}/surfaces/"
+    cp {{shim_build_dir}}/libfoyer_shim.so "{{DEST}}/surfaces/"
     echo "✓ Installed libfoyer_shim.so → {{DEST}}/surfaces/"
-    echo "  Ardour will pick it up from ARDOUR_SURFACES_PATH at next startup."
+    echo "  Ardour will dlopen it at next startup — no env vars needed."
 
-# Clean the out-of-tree build.
-shim-cmake-clean:
-    rm -rf {{shim_cmake_build}}
+# Ensure the installed shim is present and current; short-circuit
+# when it is. Used as a dep by `run` / `run-ardour` / `shim-e2e` /
+# `ardour-hardev` so every recipe that spawns hardour auto-discovers
+# a missing or stale shim without paying the ~1.7 s CMake-incremental
+# cost when nothing needs updating.
+#
+# "Current" = installed .so mtime >= every source file under shims/ardour.
+# If the source tree or CMakeLists.txt has been touched since last
+# install, we fall through to `shim-install`.
+shim-check:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    INSTALLED="$HOME/.config/ardour9/surfaces/libfoyer_shim.so"
+    SRC_ROOT="{{shim_dir}}"
+    if [ ! -e "$INSTALLED" ]; then
+        echo "shim-check: not installed → building + installing"
+        exec just shim-install
+    fi
+    # Find any source file newer than the installed .so. -newer uses
+    # mtime comparison; we cover src/, CMakeLists.txt, and the linked
+    # libfoyer_shim.so in the build dir itself (so a manual cmake
+    # rebuild without install is noticed).
+    NEWER=$(find "$SRC_ROOT/src" "$SRC_ROOT/CMakeLists.txt" \
+                 "{{shim_build_dir}}/libfoyer_shim.so" \
+                 -newer "$INSTALLED" 2>/dev/null | head -1)
+    if [ -n "$NEWER" ]; then
+        echo "shim-check: stale (newer: $NEWER) → rebuilding"
+        exec just shim-install
+    fi
+    echo "shim-check: up to date"
+
+shim-clean:
+    rm -rf {{shim_build_dir}}
+
+# One-shot: rebuild + install + report what Ardour will load.
+shim: shim-install
+    @echo ""
+    @echo "Next step:"
+    @echo "  Start Ardour (fresh process — it only scans surfaces at startup)"
+    @echo "  Verify load: tail Ardour's startup output for 'FoyerShim' or"
+    @echo "  check dlopen-level with:"
+    @echo "    LD_DEBUG=files <ardour-launch> 2>&1 | grep foyer_shim"
+
+# --- JACK (audio server required by Ardour's default backend) ---
+#
+# Why JACK + dummy driver: hardour's default backend is "JACK/Pipewire".
+# In the dev container we don't have Pipewire or a real audio device,
+# so we run `jackd -d dummy` which simulates an audio device at a chosen
+# sample rate + buffer size. Ardour connects to the JACK server via a
+# socket in /dev/shm and gets a steady run()/silence() cadence — exactly
+# what our MasterTap processor needs.
+#
+# Privileged-container requirement: JACK tries SCHED_FIFO + mlock for
+# realtime behavior; without --privileged those calls fail and JACK
+# falls back to non-realtime mode (which still works for dummy). See
+# devcontainer.json's runArgs.
+#
+# Runs in the background (`run_in_background` in the recipe below).
+# `just jack-stop` kills it. `just jack-status` reports.
+jack-dummy:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if pgrep -x jackd > /dev/null; then
+        echo "jackd already running (pid $(pgrep -x jackd))"
+        exit 0
+    fi
+    # Sweep stale shm segments left behind by a hard-killed jackd.
+    # Restart-after-stop races kernel cleanup; explicit sweep avoids
+    # "server already active" on startup. Glob is broad but safe —
+    # only jackd itself owns these paths.
+    rm -rf /dev/shm/jack-"$(id -u)" /dev/shm/jack_default_* 2>/dev/null || true
+    # Realtime mode (`-R`) is the default and works now that the
+    # devcontainer grants `rtprio=95 / memlock=-1` via Docker's
+    # --ulimit. JACK's callback thread runs on SCHED_FIFO so
+    # Ardour's process graph meets its deadlines reliably, and
+    # libardour can lock its ~107 MB audio graph against paging.
+    #
+    # Priority 10 leaves plenty of headroom for OS-level RT tasks
+    # (max is typically 99 on Linux). Buffer 1024 @ 48 kHz ≈ 21 ms
+    # — a comfortable middle ground: small enough that monitoring
+    # latency isn't noticeable, large enough that the Colima VM's
+    # 9p filesystem hiccups and cross-VM scheduling jitter don't
+    # trigger xruns. Drop to 256 or 128 on bare-metal Linux for
+    # real tracking-grade latency.
+    echo "Starting jackd -R -d dummy @ 48 kHz, 1024-sample buffer (~21 ms)…"
+    jackd -R -P 10 -d dummy -r 48000 -p 1024 > /tmp/jackd.log 2>&1 &
+    # Poll for process + short settle time. jackd clients block on
+    # connect until the server is actually ready, so we don't need
+    # to sniff the log — existence + a beat is enough.
+    for _ in {1..20}; do
+        pgrep -x jackd > /dev/null && break
+        sleep 0.1
+    done
+    sleep 0.3
+    if pgrep -x jackd > /dev/null; then
+        echo "✓ jackd up (pid $(pgrep -x jackd)) — log at /tmp/jackd.log"
+    else
+        echo "✗ jackd failed to start — check /tmp/jackd.log"
+        tail /tmp/jackd.log
+        exit 1
+    fi
+
+jack-stop:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if pgrep -x jackd > /dev/null; then
+        pkill -TERM -x jackd || true
+        # Wait briefly for the process to clear + sweep shm so the
+        # next `jack-dummy` doesn't hit "server already active".
+        for _ in {1..20}; do
+            pgrep -x jackd > /dev/null || break
+            sleep 0.1
+        done
+        rm -rf /dev/shm/jack-"$(id -u)" /dev/shm/jack_default_* 2>/dev/null || true
+        echo "✓ jackd stopped"
+    else
+        echo "(jackd not running)"
+    fi
+
+jack-status:
+    @pgrep -x jackd > /dev/null && echo "jackd running (pid $(pgrep -x jackd))" || echo "jackd not running"
 
 # --- cleanup ---
 # Kill any stale DAW + sidecar processes and their IPC detritus.
@@ -223,22 +351,25 @@ populate-demo-session:
     source {{ardour_dir}}/build/gtk2_ardour/ardev_common_waf.sh
     {{ardour_dir}}/build/luasession/luasession {{justfile_directory()}}/scripts/populate-demo-session.lua
 
-# Launch hardour against the session with foyer_shim on the surfaces path.
-# Shim activation must be configured by patching the session file (see docs).
-ardour-hardev name="foyer-smoke":
+# Launch hardour against the session with the standalone foyer_shim .so on
+# the surfaces path. The shim still needs `<Protocol name="Foyer Studio Shim"
+# active="1"/>` in the .ardour XML for a given session — Ardour's
+# control-surface registry is a two-step process (dlopen the .so, then
+# enable-per-session). `shim-e2e` below adds that XML snippet automatically.
+ardour-hardev name="foyer-smoke": jack-dummy shim-check
     #!/usr/bin/env bash
     set -eo pipefail
     export TOP={{ardour_dir}}
     source {{ardour_dir}}/build/gtk2_ardour/ardev_common_waf.sh
-    export ARDOUR_SURFACES_PATH="{{ardour_dir}}/build/libs/surfaces/foyer_shim:${ARDOUR_SURFACES_PATH}"
-    export ARDOUR_BACKEND="None (Dummy)"
+    export ARDOUR_SURFACES_PATH="{{shim_build_dir}}:${ARDOUR_SURFACES_PATH}"
     rm -f /tmp/foyer.sock
     exec {{ardour_dir}}/build/headless/hardour-9.2.583 {{session_dir}} {{name}}
 
-# Full E2E: creates a session (if missing), launches hardour + foyer_shim,
-# connects foyer-cli with --backend=host, reports success/failure. Call after
-# `just ardour-build` + `just shim-build`.
-shim-e2e:
+# Full E2E: creates a session (if missing), launches hardour with the
+# standalone foyer_shim.so on the surfaces path, connects foyer-cli with
+# --backend=host, reports success/failure. Call after `just ardour-build`
+# (once, for the linked libraries) + `just shim-build` (the standalone .so).
+shim-e2e: jack-dummy shim-check
     #!/usr/bin/env bash
     set -o pipefail
     cleanup() { kill ${HP:-0} ${FP:-0} 2>/dev/null; wait 2>/dev/null; }
@@ -251,8 +382,7 @@ shim-e2e:
     fi
     export TOP={{ardour_dir}}
     source {{ardour_dir}}/build/gtk2_ardour/ardev_common_waf.sh > /dev/null
-    export ARDOUR_SURFACES_PATH="{{ardour_dir}}/build/libs/surfaces/foyer_shim:${ARDOUR_SURFACES_PATH}"
-    export ARDOUR_BACKEND="None (Dummy)"
+    export ARDOUR_SURFACES_PATH="{{shim_build_dir}}:${ARDOUR_SURFACES_PATH}"
     {{ardour_dir}}/build/headless/hardour-9.2.583 {{session_dir}} foyer-smoke > /tmp/hardour.log 2>&1 &
     HP=$!
     for i in {1..40}; do [ -S /tmp/foyer.sock ] && break; sleep 0.5; done

@@ -61,6 +61,15 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Event> + Send>>;
 pub trait Backend: Send + Sync + 'static {
     // ─── state ──────────────────────────────────────────────────────────
 
+    /// Short human-readable identifier for logs / diagnostics. Default is
+    /// "unknown" so old backend impls keep compiling; real backends
+    /// override (e.g. "stub", "stub-launcher", "host"). Let us tell
+    /// whether a given `open_egress` is being served by a connected
+    /// shim or by a fallback without hunting through wiring code.
+    fn kind_str(&self) -> &'static str {
+        "unknown"
+    }
+
     async fn snapshot(&self) -> Result<Session, BackendError>;
     async fn subscribe(&self) -> Result<EventStream, BackendError>;
     async fn set_control(&self, id: EntityId, value: ControlValue) -> Result<(), BackendError>;

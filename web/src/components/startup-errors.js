@@ -21,6 +21,11 @@ export class StartupErrors extends LitElement {
   static properties = {
     _errors:   { state: true, type: Array },
     _dismissed:{ state: true, type: Boolean },
+    // BackendLost is rarer and more severe than Error — when set, the
+    // banner switches to a dedicated CRASH presentation that survives
+    // the per-session dismiss + shows retry guidance. Cleared on the
+    // next `backend_swapped` (i.e. the user successfully reattached).
+    _backendLost: { state: true, type: Object },
   };
 
   static styles = css`
@@ -41,6 +46,17 @@ export class StartupErrors extends LitElement {
       box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
       overflow: hidden;
       animation: foyer-slide-in 0.18s ease;
+    }
+    /* Crash = full-severity. Pulse the border so the eye catches it. */
+    .card.crash {
+      border-color: var(--color-danger);
+      border-width: 2px;
+      animation: foyer-slide-in 0.18s ease, foyer-crash-pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes foyer-crash-pulse {
+      0%, 100% { box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45); }
+      50%      { box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45),
+                              0 0 0 4px color-mix(in oklab, var(--color-danger) 30%, transparent); }
     }
     @keyframes foyer-slide-in {
       from { transform: translateY(-8px); opacity: 0; }
@@ -129,9 +145,23 @@ export class StartupErrors extends LitElement {
     const body = env?.body;
     if (!body) return;
     if (body.type === "backend_swapped") {
-      // Fresh session loading — collect its errors too.
+      // Fresh session loading — collect its errors too, and clear
+      // any lingering crash state (successful reattach).
       this._errors = [];
+      this._backendLost = null;
       this._openCaptureWindow();
+      return;
+    }
+    if (body.type === "backend_lost") {
+      // DAW crashed / shim disconnected. Override any pending error
+      // display — this is more important to see. Not auto-dismissed
+      // by the capture-window expiry; user must acknowledge OR a
+      // successful `backend_swapped` must clear it.
+      this._backendLost = {
+        backendId: body.backend_id || "unknown",
+        reason: body.reason || "backend disconnected",
+      };
+      this._dismissed = false;
       return;
     }
     if (body.type !== "error") return;
@@ -147,7 +177,31 @@ export class StartupErrors extends LitElement {
   };
 
   render() {
-    if (this._dismissed || this._errors.length === 0) return null;
+    if (this._dismissed) return null;
+    // Crash state dominates — more critical than accumulated errors.
+    if (this._backendLost) {
+      return html`
+        <div class="card crash">
+          <header>
+            ${icon("exclamation-triangle", 14)}
+            <span class="title">DAW disconnected</span>
+            <button title="Dismiss" @click=${this._dismiss}>${icon("x-mark", 12)}</button>
+          </header>
+          <div class="list">
+            <div class="row">
+              <span class="code">backend_lost</span>
+              <span class="msg">${this._backendLost.backendId}: ${this._backendLost.reason}</span>
+            </div>
+          </div>
+          <footer>
+            Audio, metering, and control commands won't work until you reopen
+            the project from the picker. Transport events after this point
+            are stale — don't trust them.
+          </footer>
+        </div>
+      `;
+    }
+    if (this._errors.length === 0) return null;
     return html`
       <div class="card">
         <header>

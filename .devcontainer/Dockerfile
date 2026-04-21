@@ -17,6 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ninja-build \
       clang \
       lld \
+      # gdb for post-mortem crash analysis (core file backtraces when
+      # hardour or the shim SIGSEGV); file for quick binary inspection.
+      gdb \
+      file \
       git \
       git-lfs \
       curl \

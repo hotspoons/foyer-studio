@@ -164,7 +164,9 @@ impl AppState {
         *self.active_backend_id.write().await = Some(backend_id.clone());
         *self.cached_snapshot.write().await = None;
 
-        // Restart pump against the new backend.
+        // Restart pump against the new backend. event_pump itself
+        // emits BackendLost on natural exit (see its tail) so we
+        // don't need wrapper logic here.
         let mut slot = self.pump_handle.lock().await;
         if let Some(h) = slot.take() {
             h.abort();
@@ -321,7 +323,35 @@ async fn event_pump(
     backend: Arc<dyn Backend>,
     state: Arc<AppState>,
 ) -> Result<(), foyer_backend::BackendError> {
-    let mut stream = backend.subscribe().await?;
+    // Capture the backend id at pump start so we can report it in a
+    // BackendLost event if this pump exits naturally (not via abort()
+    // from swap_backend). Early-exit here is a disconnect from the
+    // client's point of view — the DAW crashed, the shim socket
+    // broke, or something similar. Without the event the browser
+    // sits on stale state silently.
+    let pump_backend_id = state
+        .active_backend_id
+        .read()
+        .await
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let subscribe_result = backend.subscribe().await;
+    let mut stream = match subscribe_result {
+        Ok(s) => s,
+        Err(e) => {
+            // subscribe() failed at startup — we never got a stream.
+            // Still a backend-lost from the client's POV.
+            emit_backend_lost(
+                &state,
+                &pump_backend_id,
+                format!("backend.subscribe() failed: {e}"),
+            )
+            .await;
+            return Err(e);
+        }
+    };
+
     while let Some(event) = stream.next().await {
         let seq = state.next_seq();
         let env = Envelope {
@@ -337,7 +367,47 @@ async fn event_pump(
         // broadcast::send returns err only if there are no receivers — fine.
         let _ = state.tx.send(env);
     }
+
+    // Stream ended cleanly. From the pump's perspective that's a lost
+    // backend — the other side closed. Emit the crash event IF we're
+    // still the active backend (a swap_backend would have called
+    // abort() on this task before reaching here, so this check is
+    // belt-and-braces in the face of an accidental race).
+    let still_active = {
+        let active = state.active_backend_id.read().await;
+        active.as_deref() == Some(pump_backend_id.as_str())
+    };
+    if still_active {
+        emit_backend_lost(
+            &state,
+            &pump_backend_id,
+            "backend event stream closed".to_string(),
+        )
+        .await;
+    }
     Ok(())
+}
+
+/// Broadcast a `BackendLost` event to every connected client.
+/// Persists into the ring so late-joining clients (`?since=`) still
+/// see it in the replay.
+async fn emit_backend_lost(state: &Arc<AppState>, backend_id: &str, reason: String) {
+    tracing::warn!(
+        "backend `{}` lost — notifying clients: {}",
+        backend_id,
+        reason
+    );
+    let env = Envelope {
+        schema: SCHEMA_VERSION,
+        seq: state.next_seq(),
+        origin: Some("server".into()),
+        body: Event::BackendLost {
+            backend_id: backend_id.to_string(),
+            reason,
+        },
+    };
+    state.ring.write().await.push(env.clone());
+    let _ = state.tx.send(env);
 }
 
 /// Axum handler state extractor used by the ws module.

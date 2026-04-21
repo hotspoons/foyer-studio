@@ -28,6 +28,37 @@ using namespace PBD;
 
 namespace ArdourSurface::schema_map {
 
+std::shared_ptr<ARDOUR::RouteList const>
+safe_get_routes (const ARDOUR::Session& session)
+{
+	// Two windows when `session.get_routes()` will SIGSEGV in
+	// `RCUManager::reader()` because the backing shared_ptr is
+	// null or being freed:
+	//
+	//   1. Session is still loading. During `post_engine_init()`
+	//      (when ControlProtocolManager activates us), the route-list
+	//      RCU has been zero-initialized but its backing pointer
+	//      hasn't been set. Gated by `session.loading()`.
+	//
+	//   2. Session is being destroyed. `Session::destroy()` at
+	//      session.cc:674 sets `_state_of_the_state = (CannotSave |
+	//      Deletion)` — which CLEARS the Loading flag — BEFORE
+	//      calling `drop_protocols()` which then tears down our
+	//      shim's tick thread. Between those two points our
+	//      tick_loop still calls get_routes() but the RCU is
+	//      already in free-me territory. Gated by
+	//      `session.deletion_in_progress()`.
+	//
+	// In both cases we return an empty (non-null) list so callers'
+	// `for (auto& r : *routes)` loops are harmless no-ops. Signal
+	// bridge re-emits a Reload patch on the first `RouteAdded` so
+	// the sidecar re-requests state once the session is ready.
+	if (session.loading () || session.deletion_in_progress ()) {
+		return std::make_shared<ARDOUR::RouteList> ();
+	}
+	return session.get_routes ();
+}
+
 namespace {
 
 std::string
@@ -107,7 +138,7 @@ std::string id_meter (const Stripable& s) { return "track." + stripable_id_strin
 std::string
 id_for_controllable (const Session& session, const Controllable& c)
 {
-	std::shared_ptr<RouteList const> routes = session.get_routes ();
+	std::shared_ptr<RouteList const> routes = safe_get_routes (session);
 	for (auto const& r : *routes) {
 		if (!r) continue;
 		if (r->gain_control ().get () == &c)         return id_gain (*r);
@@ -125,7 +156,7 @@ namespace {
 std::shared_ptr<PluginInsert>
 find_plugin_insert (Session& session, const std::string& pid)
 {
-	std::shared_ptr<RouteList const> routes = session.get_routes ();
+	std::shared_ptr<RouteList const> routes = safe_get_routes (session);
 	for (auto const& r : *routes) {
 		if (!r) continue;
 		for (uint32_t i = 0; ; ++i) {
@@ -153,7 +184,7 @@ resolve (Session& session, const std::string& id)
 		std::string sid = id.substr (6, last_dot - 6);
 		std::string field = id.substr (last_dot + 1);
 
-		std::shared_ptr<RouteList const> routes = session.get_routes ();
+		std::shared_ptr<RouteList const> routes = safe_get_routes (session);
 		for (auto const& r : *routes) {
 			if (!r) continue;
 			std::ostringstream o;
@@ -364,7 +395,7 @@ track_by_foyer_id (Session& session, const std::string& track_id)
 {
 	if (track_id.rfind ("track.", 0) != 0) return {};
 	const std::string sid = track_id.substr (6);
-	std::shared_ptr<RouteList const> routes = session.get_routes ();
+	std::shared_ptr<RouteList const> routes = safe_get_routes (session);
 	for (auto const& r : *routes) {
 		if (!r) continue;
 		std::ostringstream tmp;
@@ -450,7 +481,7 @@ find_region (Session& session, const std::string& region_id)
 	if (region_id.rfind ("region.", 0) != 0) return hit;
 	const std::string rid = region_id.substr (7);
 
-	std::shared_ptr<RouteList const> routes = session.get_routes ();
+	std::shared_ptr<RouteList const> routes = safe_get_routes (session);
 	for (auto const& r : *routes) {
 		if (!r) continue;
 		auto track = std::dynamic_pointer_cast<Track> (r);

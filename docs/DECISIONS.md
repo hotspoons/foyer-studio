@@ -585,10 +585,37 @@ gstreamer, vim, VSCode).
 - Output location: `shims/ardour/cmake-build/libfoyer_shim.so`.
   Install prefix convention: `${PREFIX}/surfaces/`, which matches
   Ardour's default scan paths.
-- The in-tree wscript stays in `shims/ardour/wscript` and is used
-  by `just shim-build`. It symlinks the shim dir into
-  `/workspaces/ardour/libs/surfaces/foyer_shim`. Only touches the
-  sibling clone, never upstream Ardour's committed files.
+- **(2026-04-20 update)** The in-tree waf path described originally is
+  GONE. `just shim-link` / `shim-unlink` / the waf variant of
+  `shim-build` have all been removed. Reason: keeping even a
+  dev-convenience in-tree build meant you could accidentally ship /
+  test against a modified Ardour binary (and that modified binary
+  carried our shim inside it, which is exactly the GPL-containment
+  anti-pattern Decision 15 warns about). The standalone CMake build
+  is now the ONLY path. If you need faster iteration, the CMake
+  build incrementally links against Ardour's pre-built libs in
+  `build/libs/*/` — a first-touch rebuild is ~15 s, not the 30 min
+  a full Ardour waf cycle costs, so the convenience trade-off
+  evaporates in practice. See `shims/ardour/wscript` — kept only as
+  a historical marker; it isn't invoked by any just recipe.
+
+- **(2026-04-20 follow-up)** Both Ardour-side patches we'd carried
+  have now been reverted, so Ardour's source tree is byte-identical
+  to upstream except for the revert commits themselves:
+    * `0030687bf8` (libs/surfaces/wscript foyer_shim auto-discovery)
+      → reverted by `919f18ab48`
+    * `546a702116` (headless: ARDOUR_BACKEND env var override)
+      → reverted by `dcc6bb18e5`
+  The ARDOUR_BACKEND patch had been used to let `shim-e2e` run
+  hardour with "None (Dummy)" backend without a JACK server. That
+  trade-off is no longer acceptable — the devcontainer now runs
+  `jackd -d dummy` via `just jack-dummy` (added as a dependency of
+  both `shim-e2e` and `ardour-hardev`). The container config was
+  updated to `--privileged` + `--network=host` so jackd gets
+  realtime scheduling and the sidecar's 127.0.0.1:3838 binds
+  directly on the host. Net result: zero Ardour modifications,
+  real JACK-driven audio path identical to what an end user would
+  run on bare metal.
 
 ## 19. Master-bus audio tap lives in the shim as a Processor subclass, not a port insert
 
