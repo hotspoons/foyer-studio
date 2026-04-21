@@ -212,20 +212,33 @@ It would be awesome if we could have the midi generation happen in the foyer bac
 - ~~Alt drag for adhoc placement of beats and notes in quantized grid, alt drag resize of notes too~~
 - ~~Presets manager on beat loops (with option to import/export as $name.fybt or something json or yaml, look at persisting in ardour config if there are any extensible config sections for the DAW as a whole) - for now store in browser storage~~
 - ~~Add disk (play) and in (monitor) option on the mixer~~
-- Session durability/cross-crash/restart recovery, ux for sessions
-  - Opening a session should create an internal UUID for that session in foyer, and from the UI we should be able to pick from open sessions
-  - If that session is open with ardour, we should not be able to reopen it, it should just switch to the active session
-  - If ardour crashes and we have the crash data, we should offer to reopen the session
-  - We should move off of hash-based navigation of files, and instead remember the last folder selected, and see if we can caputure browser forward/back actions (and mouse browser forward/back) and/or keyboard shortcuts while focused in the file view window
-  - Need way to reattach orphaned hardour processes if we close foyer while a session is running, currently no way
-    - Should prompt on first open of UI if we detect orphaned hardour processes to reattach
-  - We should catalog recently opened sessions (like 10 of them, configurable via settings) under session -> recent
-  - We should guard against opening a new session if the current session is unsaved (prompt if they want to abandon unsaved changes)
-    - A third option could be leave session running in background, come back to it later
-  - Close session (should close the Ardour process for the session, bring you back to main view)
-  - State of listen/monitoring should be persistent, not reset per project
-    - Default to listen off for local sessions, monitoring for remote sessions
-  - 
+- ~~Session durability/cross-crash/restart recovery, ux for sessions~~ (2026-04-22)
+  - ~~Opening a session should create an internal UUID for that session in foyer, and from the UI we should be able to pick from open sessions~~ — UUID lives inside the .ardour file's `<Foyer><Session id="…"/>` extra_xml (Decision 30). Travels with the project across machines. Session switcher chip in the status bar lists every attached session with live dirty indicator.
+  - ~~If that session is open with ardour, we should not be able to reopen it, it should just switch to the active session~~ — `SessionRegistry::find_by_path` is the hook; command dispatch layer still needs to be taught to call it before re-launching. [REMAINING: wire the "already open by path" short-circuit in `Command::LaunchProject`.]
+  - ~~If ardour crashes and we have the crash data, we should offer to reopen the session~~ — `Event::BackendLost` now opens a blocking modal (`backend-lost-modal.js`) with Recover / Main menu / Ignore. Recover re-launches the same project path in a fresh shim.
+  - ~~We should replace the current default layout with no open session with a welcome dialog showing recently opened projects, offering to open a project browser, or create a new session~~ — `welcome-screen.js` replaces the tile workspace when `sessions.length === 0`. Renders recents, orphan banner, and Browse / New CTAs. New-session is stubbed pending a `Session::new()` command in the shim.
+  - ~~We should move off of hash-based navigation of files, and instead remember the last folder selected, and see if we can caputure browser forward/back actions (and mouse browser forward/back) and/or keyboard shortcuts while focused in the file view window~~ — `session-view.js` now owns an internal history stack, persists last-path in `localStorage` (`foyer.picker.last-path`), binds mouse buttons 3/4 + Alt+←/Alt+→ + Backspace-up, and adds visible back/forward buttons in the crumb bar.
+  - ~~Need way to reattach orphaned hardour processes if we close foyer while a session is running, currently no way~~ — Shim writes `~/.local/share/foyer/sessions/<uuid>.json` on startup (pid + socket + path + timestamp), removes on clean shutdown. Sidecar scans on startup and classifies (running/crashed). [REMAINING: actual reattach path — the welcome screen and switcher call `reattach_orphan`, but the sidecar handler is stubbed (`reattach_unimplemented` error). Wiring it means teaching the CLI spawner to build a `HostBackend` against an existing socket path. Reopen-after-crash works via launch_project.]
+  - ~~We should catalog recently opened sessions (like 10 of them, configurable via settings) under session -> recent~~ — `recents.js` with `foyer.recents.v1` + `foyer.recents.cap`. 10-entry default, per-browser storage so collaborators don't see each other's lists. Welcome screen renders them; [REMAINING: add "Session → Recent" submenu in main-menu — today the recents only surface from the welcome screen].
+  - ~~We should guard against opening a new session if the current session is unsaved (prompt if they want to abandon unsaved changes)~~ / ~~A third option could be leave session running in background, come back to it later~~ — 4-way unsaved guard in the session switcher's Close action: Save & close / Leave running (switch away) / Close without saving / Cancel. "Leave running" just flips `currentSessionId` to another open session — backends stay up until explicitly closed.
+  - ~~Close session (should close the Ardour process for the session, bring you back to main view)~~ — `Command::CloseSession` aborts the pump, drops the backend Arc (which closes the shim socket), broadcasts `SessionClosed`. When the last session closes the welcome screen comes back.
+  - ~~State of listen/monitoring should be persistent, not reset per project~~ / ~~Default to listen off for local sessions, monitoring for remote sessions~~ — Mixer persists `foyer.listen.master` in localStorage. On mount it reads the saved pref; if none, defaults off for local (`is_local` from ClientGreeting) and on for remote.
+
+- ~~DAW disconnected UX~~ (2026-04-22) — Replaced the corner-banner for `backend_lost` with a proper blocking modal offering Recover / Main menu / Ignore. Auto-dismisses on `backend_swapped` or `session_opened`.
+
+- ~~Multi-session remote access for collaborators / mobile~~ (2026-04-22) — Added native rustls TLS to foyer-cli (musl-clean; no openssl/native-tls in the dep graph). New `just run-lan-tls` recipe generates a self-signed cert under `~/.local/share/foyer/tls/` with SANs covering every non-bridge LAN IP + localhost, then serves HTTPS/WSS on 0.0.0.0. Unblocks `AudioContext.audioWorklet` on mobile browsers which require a secure context for Worklet. `reachable_urls` picks `https://` when TLS is on so the share QR hands out working links. Also audio-listener surfaces a clear "AudioWorklet not available; reach over HTTPS" error instead of the raw undefined-property crash.
+
+- ~~Justfile `kill-daws` foot-gun~~ (2026-04-22) — Recipe used to `pgrep -x foyer` which matched the CLI binary itself, taking out the sidecar. Split into `kill-daws` (Ardour only, sweeps dead-pid registry entries) and `kill-all` (full reset including the `foyer` process). `kill-daws` also scrubs sessions-dir JSONs whose pids are dead so the welcome screen doesn't render ghost "crashed" entries after a hard kill.
+
+
+## Remaining from the session lifecycle slice
+
+- Wire the "already-open-by-path" short-circuit: `Command::LaunchProject` should check `SessionRegistry::find_by_path(canonical_path)` and `SelectSession` to it when a match exists instead of spawning a second shim.
+- Orphan *reattach* (Ardour process still running, we just lost the sidecar): implement by letting `HostBackend::connect(socket_path)` be driven from the reattach handler, bypassing the CLI spawner's launch-and-wait step.
+- Session → Recent menu entry: today recents only surface in the welcome screen. Add the submenu to `main-menu.js` so opening a recent doesn't require closing the active session first.
+- New-session creation: the welcome screen's "New session…" is stubbed pending a shim command. Needs `CreateEmptySession { path, template? }` in the schema + a `session.new_session()` call on the Ardour side.
+- Per-connection session selection: `Command::SelectSession` currently sets a sidecar-wide focus. For multi-browser-window scenarios (pop-out into a second monitor), each WS connection should track its own `current_session_id`. Threading that through `dispatch_command` is mechanical but touches every handler.
+
 
 Please follow-up on these:
 

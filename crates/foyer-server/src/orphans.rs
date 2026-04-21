@@ -140,6 +140,7 @@ pub async fn scan_orphans() -> Vec<OrphanInfo> {
             } else {
                 Some(entry.socket_path)
             },
+            started_at: entry.started_at,
         });
     }
     out

@@ -150,6 +150,25 @@ export class AudioListener {
     // module's served URL — the worklet is sibling in /src/viz/.
     // Must complete before any `postMessage` is issued, else the
     // transfer lands on a port with no onmessage handler yet.
+    //
+    // `AudioContext.audioWorklet` is `undefined` outside a secure
+    // context — browsers gate it on HTTPS + localhost. Hitting the
+    // sidecar over a plain LAN IP (e.g. `http://192.168.1.5:3838/`)
+    // trips this on phones and on any iOS browser. Detect early and
+    // surface a useful message instead of the raw
+    // "cannot read properties of undefined" crash the bare
+    // `.addModule` call produced.
+    if (!this.ctx.audioWorklet || typeof this.ctx.audioWorklet.addModule !== "function") {
+      const https = location.protocol === "https:";
+      const host = location.hostname;
+      const isLocalhost = host === "localhost" || host === "127.0.0.1" || host === "::1";
+      const hint = (!https && !isLocalhost)
+        ? `Browsers disable AudioWorklet on plain HTTP LAN origins. Reach the sidecar over HTTPS (a reverse proxy like \`caddy reverse-proxy --from :8443 --to :3838\` gives you an auto-cert) or over localhost via an SSH/Tailscale tunnel.`
+        : `This browser doesn't support AudioWorklet — try Chrome / Firefox / Safari 14.1+.`;
+      throw new Error(
+        `AudioWorklet not available on ${location.origin}. ${hint}`,
+      );
+    }
     const workletUrl = new URL("./audio-worklet.js", import.meta.url);
     await this.ctx.audioWorklet.addModule(workletUrl);
     this.workletNode = new AudioWorkletNode(this.ctx, "foyer-pcm", {

@@ -6,6 +6,7 @@
 #define foyer_shim_signal_bridge_h
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -53,6 +54,27 @@ private:
 	// after load either confirms stopped or marks a start we can
 	// capture a stacktrace for.
 	std::atomic<bool>            _last_rolling { false };
+
+	// Auto-play suppression window. Ardour's FSM can flip to Rolling
+	// at any point during the first few seconds post-session-load
+	// (root cause still TBD — see on_session_loaded). A single-shot
+	// stop at subscribe time (the original workaround) catches it
+	// only if the flip happened BEFORE subscribe fired, which it
+	// frequently doesn't. This window lets every TransportStateChange
+	// within N seconds of subscribe cross-check against the last
+	// user play-request: if we see a 0→1 transition with no recent
+	// dispatch-path `transport.playing=true`, we stop it.
+	std::chrono::steady_clock::time_point _startup_grace_until {};
+	std::atomic<std::int64_t>    _last_user_play_ms { 0 };
+
+public:
+	/// Called by the dispatcher when the client explicitly sets
+	/// `transport.playing = true`. Records a timestamp so the
+	/// auto-play suppression window can tell "user clicked play"
+	/// from "Ardour FSM spontaneously started rolling" and only
+	/// interdict the latter.
+	void note_user_play_request ();
+private:
 
 	// Session route-list readiness gate. `Session::get_routes()` crashes
 	// in RCUManager::reader() if called before Ardour populates the

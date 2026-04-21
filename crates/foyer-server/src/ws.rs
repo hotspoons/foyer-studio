@@ -44,12 +44,17 @@ pub(crate) async fn upgrade(
 /// (IPv6, additional NICs). We skip loopback so the list is empty when
 /// nothing outside the current host could connect — the client uses that
 /// emptiness as a signal that share-session won't work here.
-fn reachable_urls(hostname: &str, port: u16) -> Vec<String> {
+fn reachable_urls(hostname: &str, port: u16, tls: bool) -> Vec<String> {
     use local_ip_address::list_afinet_netifas;
     let mut urls = Vec::new();
     if port == 0 {
         return urls;
     }
+    // Match the sidecar's actual scheme so the QR round-trips to a
+    // working origin — serving HTTPS but advertising `http://` URLs
+    // would hand out dead links (connection refused), and vice
+    // versa browsers reject a worklet load.
+    let scheme = if tls { "https" } else { "http" };
     if let Ok(ifaces) = list_afinet_netifas() {
         for (_name, ip) in ifaces {
             if ip.is_loopback() {
@@ -65,13 +70,13 @@ fn reachable_urls(hostname: &str, port: u16) -> Vec<String> {
                 IpAddr::V4(v4) => v4.to_string(),
                 IpAddr::V6(v6) => format!("[{v6}]"),
             };
-            urls.push(format!("http://{host}:{port}/"));
+            urls.push(format!("{scheme}://{host}:{port}/"));
         }
     }
     // Hostname URL last — most portable but depends on the other machine's
     // mDNS / DNS resolving it. Real IPs first so QR scans "just work."
     if !hostname.is_empty() {
-        urls.push(format!("http://{hostname}:{port}/"));
+        urls.push(format!("{scheme}://{hostname}:{port}/"));
     }
     urls
 }
@@ -115,7 +120,8 @@ async fn handle(
             .or_else(|_| hostname::get().map(|h| h.to_string_lossy().into_owned()))
             .unwrap_or_default();
         let port = state.listen_port.load(Ordering::Relaxed);
-        let server_urls = reachable_urls(&server_host, port);
+        let tls = state.tls_enabled.load(Ordering::Relaxed);
+        let server_urls = reachable_urls(&server_host, port, tls);
         let greeting = Envelope {
             schema: SCHEMA_VERSION,
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),

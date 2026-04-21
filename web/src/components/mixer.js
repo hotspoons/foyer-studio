@@ -147,23 +147,44 @@ export class Mixer extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    // Session-agnostic listen default + persistence. The user's
-    // previous pref (stored in localStorage under
-    // `foyer.listen.master`) wins if present; otherwise we default
-    // based on whether the client is local (speakers → the same
-    // host, off by default) or remote (no speakers on the sidecar
-    // → on by default so the remote listener hears something).
+    // Listen-state restore has two paths:
+    //   1. Explicit saved pref in localStorage → honor it immediately,
+    //      no greeting needed. This path also handles the common
+    //      case where the mixer mounts on a session switch (the
+    //      greeting fired once, at WS connect, so it's long gone
+    //      by the time we get here on a fresh mount).
+    //   2. No saved pref → wait for the greeting, then default based
+    //      on `is_local` (off for local, on for remote).
+    // Previous version relied on a `store.state._greeting` fallback
+    // that never actually got populated — the greeting lived in
+    // status-bar's private state, so cases where the greeting fired
+    // before the mixer mounted left the saved pref unapplied.
     this._onStoreChange = () => this.requestUpdate();
     window.__foyer?.store?.addEventListener("change", this._onStoreChange);
     this._onGreeting = (ev) => {
       const body = ev?.detail?.body;
-      if (body?.type !== "client_greeting") return;
-      this._maybeRestoreListen(!!body.is_local);
+      if (!body) return;
+      if (body.type === "client_greeting") {
+        this._applyListenPref(!!body.is_local);
+      } else if (body.type === "backend_swapped" || body.type === "session_opened") {
+        // Session changed — the old listener's stream belongs to the
+        // previous shim and is dead. Tear it down so the saved-pref
+        // branch below can spin up a fresh one against the new
+        // backend's master tap.
+        if (this._listening) {
+          this._cleanupListener();
+          this._listening = false;
+          // Deliberately NOT saving "0" here — the user's saved
+          // preference should survive across switches. Just apply
+          // the pref again to restart if wanted.
+        }
+        this._applyListenPref(null);
+      }
     };
     window.__foyer?.ws?.addEventListener("envelope", this._onGreeting);
-    // If the greeting already arrived before we connected, read it now.
-    const greet = window.__foyer?.store?.state?._greeting;
-    if (greet) this._maybeRestoreListen(!!greet.isLocal);
+    // Apply the saved pref right away. Remote-session / no-pref case
+    // falls through here (`wantOn = null`) and waits for the greeting.
+    this._applyListenPref(null);
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
@@ -172,16 +193,14 @@ export class Mixer extends LitElement {
     super.disconnectedCallback();
   }
 
-  _maybeRestoreListen(isLocal) {
+  _applyListenPref(isLocal) {
     if (this._listening) return;
-    // Explicit saved pref wins. Default: off for local, on for
-    // remote (so remote clients hear the session without having
-    // to hunt for the Listen button).
     const saved = localStorage.getItem("foyer.listen.master");
-    const wantOn =
-      saved === "1" ? true
-      : saved === "0" ? false
-      : !isLocal;
+    let wantOn;
+    if (saved === "1") wantOn = true;
+    else if (saved === "0") wantOn = false;
+    else if (isLocal === null) return; // no pref + no greeting yet — wait
+    else wantOn = !isLocal;
     if (wantOn) {
       // Fire once but don't await — the mixer's ready flag is more
       // important than catching the listen Promise here.

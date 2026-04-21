@@ -184,28 +184,43 @@ SignalBridge::subscribe_all ()
 	// right after session load (root cause TBD — TransportStateChange
 	// fires without any caller-visible request_roll from our shim;
 	// config.auto_play is 0, transport master is internal + not
-	// external, and no ControlSet came through). Force the transport
-	// to a known-stopped state once, on the event loop, right after
-	// subscribe. Harmless if it's already stopped; fixes the
-	// "open session, hear audio playing" surprise. If this workaround
-	// ever suppresses a legitimate auto-roll request, remove it and
-	// chase the root cause via the [DIAG-STARTED] backtrace.
+	// external, and no ControlSet came through). The flip can arrive
+	// BEFORE or AFTER our subscribe timeslot, and previously we only
+	// checked once at subscribe — post-subscribe flips slipped through
+	// and the session started playing on every open.
+	//
+	// Fix: arm a grace window. For the next N seconds, every
+	// TransportStateChange that sees a 0→1 rolling transition cross-
+	// checks `_last_user_play_ms`. If the user didn't just click
+	// play (set via SignalBridge::note_user_play_request from
+	// dispatch.cc), we call transport_stop(). Legitimate user-
+	// initiated play still works because the ControlSet path calls
+	// note_user_play_request *before* transport_play, so the
+	// timestamp is fresh when TransportStateChange fires.
+	//
+	// FOYER_ALLOW_AUTO_ROLL=1 disables the whole guard for debugging.
 	{
-		FoyerShim* shim = &_shim;
-		_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
-			auto& s = shim->session ();
-			if (s.transport_state_rolling ()) {
-				PBD::warning << "foyer_shim: [WORKAROUND] session opened with "
-				             << "transport rolling — calling transport_stop() "
-				             << "to restore sane default. Set env "
-				             << "FOYER_ALLOW_AUTO_ROLL=1 to disable."
-				             << endmsg;
-				const char* allow = std::getenv ("FOYER_ALLOW_AUTO_ROLL");
-				if (!allow || std::string (allow) == "0") {
+		const char* allow = std::getenv ("FOYER_ALLOW_AUTO_ROLL");
+		const bool disable = allow && std::string (allow) == "1";
+		if (!disable) {
+			_startup_grace_until =
+			    std::chrono::steady_clock::now () + std::chrono::seconds (15);
+			// Also do the one-shot stop at subscribe time for the
+			// already-rolling case (covers the pre-subscribe flip).
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
+				auto& s = shim->session ();
+				if (s.transport_state_rolling ()) {
+					PBD::warning << "foyer_shim: [AUTO-PLAY GUARD] session opened "
+					             << "with transport already rolling — stopping."
+					             << endmsg;
 					shim->transport_stop ();
 				}
-			}
-		});
+			});
+		} else {
+			PBD::warning << "foyer_shim: FOYER_ALLOW_AUTO_ROLL=1 — "
+			             << "auto-play guard disabled." << endmsg;
+		}
 	}
 
 	session.RouteAdded.connect (
@@ -505,6 +520,38 @@ SignalBridge::on_transport_state_changed ()
 		             << " get_play_loop=" << s.get_play_loop ()
 		             << " get_play_range=" << s.get_play_range ()
 		             << endmsg;
+
+		// Auto-play guard: if we're still inside the post-subscribe
+		// grace window AND the user didn't just ask for play, stop
+		// the transport. The 500ms threshold accommodates the IPC
+		// round-trip between dispatch.cc's note_user_play_request()
+		// and Ardour's TransportStateChange fire.
+		const auto now_tp = std::chrono::steady_clock::now ();
+		if (now_tp < _startup_grace_until) {
+			const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+			    now_tp.time_since_epoch ()).count ();
+			const auto last_user = _last_user_play_ms.load ();
+			const bool user_asked = last_user > 0 && (now_ms - last_user) < 500;
+			if (!user_asked) {
+				PBD::warning << "foyer_shim: [AUTO-PLAY GUARD] suppressing "
+				             << "spontaneous transport start (grace window active; "
+				             << "no recent user play request) — calling "
+				             << "transport_stop()." << endmsg;
+				_shim.transport_stop ();
+				// Don't emit SIGNAL-STARTED to the client — the
+				// subsequent stop will race through another
+				// TransportStateChange and undo this one at the UI
+				// level. Let that second signal be the one clients
+				// see.
+				auto bytes = msgpack_out::encode_transport_state (s);
+				_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				return;
+			}
+			PBD::warning << "foyer_shim: [AUTO-PLAY GUARD] allowed "
+			             << "user-initiated play (" << (now_ms - last_user)
+			             << "ms since request)." << endmsg;
+		}
+
 		PBD::warning << "foyer_shim: [DIAG-STARTED] backtrace below — "
 		             << "look for `start_transport`, `request_roll`, "
 		             << "`transport_play`, or a MIDI-clock / JACK slave "
@@ -514,6 +561,14 @@ SignalBridge::on_transport_state_changed ()
 
 	auto bytes = msgpack_out::encode_transport_state (s);
 	_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+}
+
+void
+SignalBridge::note_user_play_request ()
+{
+	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+	    std::chrono::steady_clock::now ().time_since_epoch ()).count ();
+	_last_user_play_ms.store (now_ms);
 }
 
 void

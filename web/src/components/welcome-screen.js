@@ -166,6 +166,42 @@ export class WelcomeScreen extends LitElement {
       cursor: pointer;
     }
     .orphan-row .reattach:hover { filter: brightness(1.08); }
+    .orphan-row .badge {
+      font-size: 9px; font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: color-mix(in oklab, #fbbf24 30%, transparent);
+      color: #fbbf24;
+      margin-right: 6px;
+    }
+    .orphan-row .expand {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--color-text-muted);
+      font: inherit; font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .orphan-row .expand:hover { border-color: var(--color-border); color: var(--color-text); }
+    .orphan-detail {
+      padding: 4px 14px 10px 46px;
+      background: color-mix(in oklab, #fbbf24 4%, transparent);
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      font-size: 10px;
+      color: var(--color-text-muted);
+      font-family: var(--font-mono);
+    }
+    .orphan-detail .attempt {
+      display: grid;
+      grid-template-columns: auto 1fr auto auto;
+      gap: 10px;
+      padding: 3px 0;
+      align-items: center;
+    }
+    .orphan-detail .attempt .when { color: var(--color-text); }
+    .orphan-detail .attempt .kind.running { color: var(--color-success, #22c55e); }
+    .orphan-detail .attempt .kind.crashed { color: var(--color-danger, #ef4444); }
 
     .empty {
       padding: 24px;
@@ -194,9 +230,51 @@ export class WelcomeScreen extends LitElement {
     this._recents = loadRecents();
     this._orphans = [];
     this._sessions = [];
+    this._expandedGroups = new Set();
     this._onStore = () => this._refresh();
     this._onOrphans = () => this._refresh();
     this._onSessions = () => this._refresh();
+  }
+
+  /** Group orphans so duplicate entries for the same project path
+   *  collapse into a single row with "N attempts" metadata. Same
+   *  .ardour file opened multiple times before the user ever saved
+   *  — each open got a fresh UUID because the session's extra_xml
+   *  never hit disk — produces a registry entry per attempt. The
+   *  grouping is by `path` (or `id` as a fallback when the shim
+   *  didn't record a path, e.g. launcher-stub sessions).
+   *
+   *  Entries within a group are sorted newest-first. The "primary"
+   *  entry — used for the headline name/kind/action — is the most
+   *  recent running one if any, else the most recent crashed one.
+   *  Dismiss and Reopen apply to the whole group. */
+  _groupOrphans(orphans) {
+    const byKey = new Map();
+    for (const o of orphans) {
+      const key = o.path && o.path.length > 0 ? o.path : `id:${o.id}`;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(o);
+    }
+    const groups = [];
+    for (const [key, list] of byKey) {
+      list.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+      const primary = list.find((o) => o.kind === "running") || list[0];
+      groups.push({
+        key,
+        primary,
+        count: list.length,
+        entries: list,
+      });
+    }
+    // Surface running groups first (reattachable), then crashed by
+    // most-recent-attempt.
+    groups.sort((a, b) => {
+      const aRun = a.primary.kind === "running" ? 0 : 1;
+      const bRun = b.primary.kind === "running" ? 0 : 1;
+      if (aRun !== bRun) return aRun - bRun;
+      return (b.primary.started_at || 0) - (a.primary.started_at || 0);
+    });
+    return groups;
   }
 
   connectedCallback() {
@@ -264,31 +342,61 @@ export class WelcomeScreen extends LitElement {
     // slot stays so the landing patch is a one-file change.
   }
 
-  _reattach(orphan) {
+  _reattachGroup(group) {
     const ws = window.__foyer?.ws;
-    if (!ws || !orphan) return;
-    if (orphan.kind === "running") {
-      ws.send({ type: "reattach_orphan", orphan_id: orphan.id });
+    if (!ws || !group) return;
+    const primary = group.primary;
+    if (primary.kind === "running") {
+      // Reattach the single live shim. All other entries in the
+      // group are by definition crashed copies — dismiss them.
+      ws.send({ type: "reattach_orphan", orphan_id: primary.id });
+      for (const o of group.entries) {
+        if (o.id !== primary.id) {
+          ws.send({ type: "dismiss_orphan", orphan_id: o.id });
+        }
+      }
     } else {
-      // Crashed — attempt to reopen the project (same as clicking a
-      // recents entry). The orphan registry entry gets cleared once
-      // the sidecar re-launches against that path and succeeds.
+      // Crashed — relaunch the project. Any of the group's entries
+      // carries the same path; use the primary. Then clear every
+      // entry in the group since a successful relaunch makes them
+      // all moot.
       ws.send({
         type: "launch_project",
-        backend_id: orphan.backend_id || "ardour",
-        project_path: orphan.path,
+        backend_id: primary.backend_id || "ardour",
+        project_path: primary.path,
       });
-      ws.send({ type: "dismiss_orphan", orphan_id: orphan.id });
+      for (const o of group.entries) {
+        ws.send({ type: "dismiss_orphan", orphan_id: o.id });
+      }
     }
-    window.__foyer?.store?.forgetOrphan(orphan.id);
+    for (const o of group.entries) {
+      window.__foyer?.store?.forgetOrphan(o.id);
+    }
   }
 
-  _dismiss(orphan) {
+  _dismissGroup(group) {
     const ws = window.__foyer?.ws;
-    if (ws && orphan?.id) {
-      ws.send({ type: "dismiss_orphan", orphan_id: orphan.id });
+    if (!ws || !group) return;
+    for (const o of group.entries) {
+      ws.send({ type: "dismiss_orphan", orphan_id: o.id });
+      window.__foyer?.store?.forgetOrphan(o.id);
     }
-    window.__foyer?.store?.forgetOrphan(orphan?.id);
+    this._expandedGroups.delete(group.key);
+  }
+
+  _toggleGroup(group) {
+    if (this._expandedGroups.has(group.key)) this._expandedGroups.delete(group.key);
+    else this._expandedGroups.add(group.key);
+    this.requestUpdate();
+  }
+
+  _pickAttempt(group, orphan) {
+    // User picked a specific attempt from the expanded list.
+    // Treat identically to reattaching the group's primary but
+    // with this entry as the primary (so reattach targets its
+    // specific socket / pid if running).
+    const synthetic = { ...group, primary: orphan };
+    this._reattachGroup(synthetic);
   }
 
   _switchToOpen(info) {
@@ -298,7 +406,7 @@ export class WelcomeScreen extends LitElement {
 
   render() {
     const recents = this._recents || [];
-    const orphans = this._orphans || [];
+    const orphanGroups = this._groupOrphans(this._orphans || []);
     const openSessions = this._sessions || [];
     return html`
       <div class="panel">
@@ -307,26 +415,57 @@ export class WelcomeScreen extends LitElement {
           <span class="sub">Open a project to start mixing, or pick up where you left off.</span>
         </header>
 
-        ${orphans.length > 0 ? html`
+        ${orphanGroups.length > 0 ? html`
           <section class="orphans">
             <h3>⚠ Unfinished sessions found</h3>
             <div class="orphan-list">
-              ${orphans.map((o) => html`
-                <div class="orphan-row" title="Session registry entry at ${o.socket || "(no socket)"}">
-                  <span class="icon">${icon("archive-box", 18)}</span>
-                  <div>
-                    <div class="name">${o.name || "(unnamed)"}</div>
-                    <div class="path">${o.path || ""}</div>
+              ${orphanGroups.map((g) => {
+                const p = g.primary;
+                const multi = g.count > 1;
+                const expanded = this._expandedGroups.has(g.key);
+                return html`
+                  <div class="orphan-row" title=${p.path || ""}>
+                    <span class="icon">${icon("archive-box", 18)}</span>
+                    <div>
+                      <div class="name">
+                        ${multi ? html`<span class="badge">${g.count} attempts</span>` : null}
+                        ${p.name || "(unnamed)"}
+                      </div>
+                      <div class="path">${p.path || ""}</div>
+                    </div>
+                    <span class="tag">${p.kind === "running" ? "Still running" : "Crashed"}${multi ? ` · ${formatWhen(p.started_at)}` : ""}</span>
+                    <div>
+                      ${multi ? html`
+                        <button class="expand" @click=${() => this._toggleGroup(g)}>
+                          ${expanded ? "Hide" : "Details"}
+                        </button>
+                      ` : null}
+                      <button class="reattach" @click=${() => this._reattachGroup(g)}>
+                        ${p.kind === "running" ? "Reattach" : "Reopen"}
+                      </button>
+                      <button class="x" @click=${() => this._dismissGroup(g)}>
+                        ${multi ? "Dismiss all" : "Dismiss"}
+                      </button>
+                    </div>
                   </div>
-                  <span class="tag">${o.kind === "running" ? "Still running" : "Crashed"}</span>
-                  <div>
-                    <button class="reattach" @click=${() => this._reattach(o)}>
-                      ${o.kind === "running" ? "Reattach" : "Reopen"}
-                    </button>
-                    <button class="x" @click=${() => this._dismiss(o)}>Dismiss</button>
-                  </div>
-                </div>
-              `)}
+                  ${expanded ? html`
+                    <div class="orphan-detail">
+                      ${g.entries.map((o) => html`
+                        <div class="attempt">
+                          <span class="kind ${o.kind}">${o.kind === "running" ? "●" : "×"}</span>
+                          <span class="when">${formatWhen(o.started_at)}</span>
+                          <span>${o.pid ? `pid ${o.pid}` : "no pid"}</span>
+                          <button class="expand"
+                                  title="Pick this specific attempt"
+                                  @click=${() => this._pickAttempt(g, o)}>
+                            ${o.kind === "running" ? "Reattach" : "Reopen"}
+                          </button>
+                        </div>
+                      `)}
+                    </div>
+                  ` : null}
+                `;
+              })}
             </div>
           </section>
         ` : null}

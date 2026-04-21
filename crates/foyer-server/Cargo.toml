@@ -24,6 +24,14 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 local-ip-address = "0.6"
 uuid = { version = "1", features = ["v4"] }
 axum = { version = "0.7", features = ["ws"] }
+# TLS: pure-Rust via rustls. `axum-server` feature `tls-rustls`
+# replaces `axum::serve` on the listening side; it uses `rustls` +
+# `ring` under the hood — both static-link cleanly against musl
+# (no openssl/libssl/libcrypto, no glibc dep). `default-features =
+# false` would drop rustls-default crypto provider selection, so
+# we keep defaults here and let the rustls ecosystem pick `ring`.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls-pemfile = "2"
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 # M6a audio egress pipeline: libopus bindings + rubato resampler.
 audiopus = { workspace = true }

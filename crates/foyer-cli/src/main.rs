@@ -67,6 +67,19 @@ enum Command {
         /// `launcher.jail`. Pass an empty string to opt out of jailing.
         #[arg(long)]
         jail: Option<PathBuf>,
+
+        /// PEM-encoded TLS certificate (chain). Enables HTTPS / WSS
+        /// when supplied together with `--tls-key`. Required for
+        /// mobile browsers on LAN IPs — AudioWorklet (used by the
+        /// mixer's Listen button) only loads in a secure context.
+        /// Self-signed certs work; the browser shows a one-time
+        /// warning that the user accepts.
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+
+        /// PEM-encoded TLS private key matching `--tls-cert`.
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
     },
     /// Print the resolved config and exit.
     Backends,
@@ -132,11 +145,22 @@ async fn main() -> Result<()> {
             list_shims,
             web_root,
             jail,
+            tls_cert,
+            tls_key,
         } => {
             if list_shims {
                 return list_available_shims();
             }
-            serve(config, backend, project, listen, socket, web_root, jail).await
+            let tls = match (tls_cert, tls_key) {
+                (Some(cert), Some(key)) => Some(foyer_server::TlsConfig { cert, key }),
+                (None, None) => None,
+                // clap's `requires` enforces pairing at parse time,
+                // so this branch is unreachable in practice. Guard
+                // belt-and-braces in case the flag schema ever
+                // loosens.
+                _ => anyhow::bail!("--tls-cert and --tls-key must be passed together"),
+            };
+            serve(config, backend, project, listen, socket, web_root, jail, tls).await
         }
     }
 }
@@ -256,6 +280,7 @@ async fn serve(
     socket: Option<PathBuf>,
     web_root: Option<PathBuf>,
     jail_override: Option<PathBuf>,
+    tls: Option<foyer_server::TlsConfig>,
 ) -> Result<()> {
     // Resolve backend: CLI override wins, then config default.
     let backend = match backend_override.as_deref() {
@@ -292,6 +317,7 @@ async fn serve(
         listen,
         web_root,
         jail_root: jail.clone(),
+        tls,
     };
 
     // Build the initial backend. For Ardour with an explicit --socket the

@@ -383,7 +383,15 @@ pub struct OrphanInfo {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket: Option<String>,
+    /// Unix epoch seconds when the shim first wrote the registry
+    /// entry. Used by the UI to group duplicate entries for the
+    /// same project (e.g. multiple crashes before the user
+    /// dismissed) and show "N attempts" metadata.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub started_at: u64,
 }
+
+fn is_zero_u64(n: &u64) -> bool { *n == 0 }
 
 /// Metadata for a single backend entry in the sidecar's config — what
 /// the picker UI needs to render a "pick a DAW" dropdown.

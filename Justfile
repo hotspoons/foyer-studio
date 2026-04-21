@@ -33,8 +33,65 @@ check: fmt-check clippy test
 # Audio/MIDI engine backend: JACK/Pipewire" and the LaunchBackend swap
 # fails. The `jack-dummy` recipe is idempotent — no-op if jackd is
 # already up, so chaining is cheap.
-run *args: jack-dummy shim-check
-    cargo run --bin foyer -- serve {{args}}
+#
+# LAN access: pass `listen=0.0.0.0:3838` to bind all interfaces
+# instead of loopback. Example:
+#     just run listen=0.0.0.0:3838
+# Then browse from another machine at http://<host-lan-ip>:3838/.
+# `just run` defaults to 127.0.0.1:3838 (loopback only) since that's
+# the safe local-development story — no auth on the WS surface means
+# binding 0.0.0.0 exposes the DAW to anyone on the LAN.
+run listen='127.0.0.1:3838' *args: jack-dummy shim-check
+    cargo run --bin foyer -- serve --listen {{listen}} {{args}}
+
+# Convenience: bind all interfaces so another computer on the LAN
+# can reach the sidecar. Equivalent to `just run listen=0.0.0.0:3838`.
+run-lan *args: jack-dummy shim-check
+    cargo run --bin foyer -- serve --listen 0.0.0.0:3838 {{args}}
+
+# Same as run-lan, but with HTTPS via a self-signed cert so the
+# sidecar is reachable from mobile browsers. Browsers gate
+# AudioWorklet (used by the Listen button) on a secure context —
+# plain HTTP on a LAN IP makes the Listen button error out on
+# phones. This recipe generates a throwaway cert in
+# `~/.local/share/foyer/tls/` covering both the container's LAN
+# IPs and `localhost`, then boots foyer with `--tls-cert/--tls-key`.
+#
+# Accept the self-signed warning once on each device — subsequent
+# loads are fine. The cert is tied to the host's LAN IPs at
+# generation time; if your address changes, re-run this recipe to
+# refresh.
+run-lan-tls *args: jack-dummy shim-check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tls_dir="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/tls"
+    mkdir -p "$tls_dir"
+    cert="$tls_dir/dev.pem"
+    key="$tls_dir/dev-key.pem"
+    if [ ! -f "$cert" ] || [ ! -f "$key" ]; then
+        echo "Generating self-signed cert at $tls_dir/"
+        # Collect the host's LAN IPs so the cert's SAN covers them —
+        # browsers reject CN-only certs for IP-literal URLs.
+        san_lines=("DNS:localhost" "IP:127.0.0.1" "IP:::1")
+        for ip in $(hostname -I 2>/dev/null); do
+            case "$ip" in
+                127.*|172.17.*|172.18.*|172.19.*|172.20.*) continue ;;
+            esac
+            san_lines+=("IP:$ip")
+        done
+        san_joined=$(IFS=,; echo "${san_lines[*]}")
+        openssl req -x509 -newkey rsa:2048 -nodes \
+            -days 365 \
+            -keyout "$key" -out "$cert" \
+            -subj "/CN=foyer-dev" \
+            -addext "subjectAltName=$san_joined" \
+            2>/dev/null
+        echo "SAN: $san_joined"
+    fi
+    cargo run --bin foyer -- serve \
+        --listen 0.0.0.0:3838 \
+        --tls-cert "$cert" --tls-key "$key" \
+        {{args}}
 
 # Launch with the stub (dummy) backend explicitly — useful if config
 # default got changed and you just want the demo UI back. No JACK

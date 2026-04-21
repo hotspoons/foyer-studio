@@ -1015,6 +1015,12 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					const bool on = snap.value >= 0.5;
 					if (snap.id == "transport.playing") {
 						if (on) {
+							// Record user intent BEFORE calling transport_play —
+							// Ardour's TransportStateChange fires synchronously
+							// inside request_roll on this thread (event loop)
+							// in some cases, so the SignalBridge grace-window
+							// check needs the timestamp already set.
+							shim->signal_bridge ().note_user_play_request ();
 							PBD::warning << "foyer_shim: calling transport_play(false)" << endmsg;
 							shim->transport_play (false);
 						} else {
@@ -1713,7 +1719,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// ControlSet branch already uses so we get identical
 				// semantics whether the user clicks Play or triggers
 				// `transport.play` from the command palette.
-				if (id == "transport.play")        { shim->transport_play (false); }
+				if (id == "transport.play")        { shim->signal_bridge ().note_user_play_request (); shim->transport_play (false); }
 				else if (id == "transport.stop")   { shim->transport_stop (); }
 				else if (id == "transport.record") { shim->rec_enable_toggle (); }
 				else if (id == "transport.loop")   { shim->loop_toggle (); }

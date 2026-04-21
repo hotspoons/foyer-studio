@@ -79,6 +79,24 @@ pub struct Config {
     /// clients cannot browse the host's filesystem at all — `BrowsePath`
     /// returns an error.
     pub jail_root: Option<PathBuf>,
+    /// Optional TLS pair. When present, the server serves HTTPS (and
+    /// WSS for the WebSocket routes) instead of plain HTTP. Required
+    /// when exposing the sidecar over a LAN IP to mobile browsers —
+    /// AudioWorklet refuses to load outside a secure context, so the
+    /// mixer's Listen button just errors out on `http://<lan>:...`.
+    /// Self-signed certs work; browsers surface a one-time warning
+    /// the user accepts and then mark the origin as "trusted enough"
+    /// for Worklet + most APIs.
+    pub tls: Option<TlsConfig>,
+}
+
+/// Filesystem paths to a PEM-encoded certificate chain + private key.
+/// Loaded on startup; hot-reload isn't supported (an expired cert
+/// means the user restarts foyer-cli with fresh files).
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    pub cert: PathBuf,
+    pub key: PathBuf,
 }
 
 impl Default for Config {
@@ -87,6 +105,7 @@ impl Default for Config {
             listen: "127.0.0.1:3838".parse().unwrap(),
             web_root: None,
             jail_root: None,
+            tls: None,
         }
     }
 }
@@ -138,6 +157,10 @@ pub(crate) struct AppState {
     /// at `run()` time so the WS handler can include it in the client
     /// greeting for share-session URLs.
     pub(crate) listen_port: std::sync::atomic::AtomicU16,
+    /// True when the server is serving HTTPS (i.e. `Config::tls` was
+    /// set). Drives the scheme the client greeting advertises — a
+    /// mismatched scheme would hand out dead URLs.
+    pub(crate) tls_enabled: std::sync::atomic::AtomicBool,
     /// M6a audio egress hub. Holds live encoder pipelines keyed by
     /// `stream_id`; the `/ws/audio/:stream_id` route subscribes to
     /// its broadcasts. Shared across all connections.
@@ -313,6 +336,7 @@ impl Server {
             pump_handle: Mutex::new(None),
             jail: None,
             listen_port: std::sync::atomic::AtomicU16::new(0),
+            tls_enabled: std::sync::atomic::AtomicBool::new(false),
             audio_hub: Arc::new(audio::AudioHub::new()),
             sessions,
             orphans: RwLock::new(Vec::new()),
@@ -398,21 +422,46 @@ impl Server {
             router = router.fallback_service(ServeDir::new(root));
         }
 
-        let listener = tokio::net::TcpListener::bind(config.listen).await?;
         self.state
             .listen_port
             .store(config.listen.port(), std::sync::atomic::Ordering::Relaxed);
-        tracing::info!("foyer-server listening on http://{}", config.listen);
+        self.state
+            .tls_enabled
+            .store(config.tls.is_some(), std::sync::atomic::Ordering::Relaxed);
+
         // `into_make_service_with_connect_info` lets the WS handler
         // receive the caller's `SocketAddr` via `ConnectInfo` — the
         // `upgrade` fn uses that to decide whether a client is local
         // (loopback / link-local) or remote. Without this extractor the
         // handler would have no way to see the peer address.
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await?;
+        let service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+
+        if let Some(tls) = &config.tls {
+            // HTTPS / WSS path — required for mobile browsers on LAN
+            // IPs because AudioWorklet refuses to load outside a
+            // secure context. `axum-server` with `tls-rustls` uses
+            // pure-Rust rustls + ring under the hood; no libssl
+            // dependency, musl-clean.
+            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                &tls.cert,
+                &tls.key,
+            )
+            .await
+            .map_err(|e| ServerError::Io(std::io::Error::other(format!(
+                "load TLS pair (cert={}, key={}): {}",
+                tls.cert.display(),
+                tls.key.display(),
+                e
+            ))))?;
+            tracing::info!("foyer-server listening on https://{}", config.listen);
+            axum_server::bind_rustls(config.listen, tls_config)
+                .serve(service)
+                .await?;
+        } else {
+            let listener = tokio::net::TcpListener::bind(config.listen).await?;
+            tracing::info!("foyer-server listening on http://{}", config.listen);
+            axum::serve(listener, service).await?;
+        }
         Ok(())
     }
 }

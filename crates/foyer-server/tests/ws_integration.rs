@@ -22,7 +22,7 @@ async fn spin_server() -> (u16, tokio::task::JoinHandle<()>) {
     let port = free_port().await;
     let addr = format!("127.0.0.1:{port}").parse().unwrap();
     let server = Server::new(StubBackend::new());
-    let cfg = Config {
+    let cfg = Config { tls: None,
         listen: addr,
         web_root: None,
         jail_root: None,
