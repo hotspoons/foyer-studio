@@ -390,6 +390,17 @@ pub enum Command {
     DeleteRegion {
         id: EntityId,
     },
+    /// Clone `source_region_id` into a new region on the same track,
+    /// starting at `at_samples`. If `length_samples` is `None` the
+    /// clone adopts the source's length. Carries over MIDI notes
+    /// AND extra_xml (so Foyer sequencer layouts duplicate too).
+    /// Emits a `RegionsList` echo for the track on success.
+    DuplicateRegion {
+        source_region_id: EntityId,
+        at_samples: u64,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        length_samples: Option<u64>,
+    },
     /// Ask for decimated peaks for `region_id` at the given resolution. The
     /// sidecar rounds the request to the nearest cached tier.
     ListWaveform {
@@ -490,6 +501,16 @@ pub enum Command {
     DeleteNote {
         region_id: EntityId,
         note_id: EntityId,
+    },
+    /// Replace every note in a MIDI region with the provided list in
+    /// one atomic operation (single undo entry on the host). Used by
+    /// the server's sequencer regeneration path — the backend
+    /// expands a `SequencerLayout` into notes and ships them here,
+    /// so the shim can swap them wholesale instead of firing N
+    /// individual `DeleteNote` + M `AddNote` commands.
+    ReplaceRegionNotes {
+        region_id: EntityId,
+        notes: Vec<MidiNote>,
     },
     /// Insert a program/bank change event into a MIDI region. The shim
     /// builds an Ardour `Evoral::PatchChange` at `start_ticks` on

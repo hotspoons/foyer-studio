@@ -28,15 +28,19 @@ pub use id::EntityId;
 pub use io::{IoDirection, IoPort};
 pub use message::{BackendInfo, Command, ControlUpdate, Envelope, Event, Patch, Seq};
 pub use midi::{
-    default_gm_drum_rows, MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, SequencerCell,
-    SequencerLayout, SequencerRow,
+    default_gm_drum_rows, expand_sequencer_layout, sequencer_layout_length_ticks,
+    ArrangementSlot, MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, SequencerCell,
+    SequencerLayout, SequencerPattern, SequencerRow,
 };
 pub use plugin::{PluginCatalogEntry, PluginFormat, PluginPreset, PluginRole};
 pub use session::{
     Bus, Group, GroupPatch, PluginInstance, Send, Session, Track, TrackKind, TrackPatch, Transport,
 };
 pub use timeline::{Region, RegionPatch, TimelineMeta, WaveformPeaks, WaveformRequest};
-pub use value::{ControlKind, ControlValue, Parameter, ScaleCurve};
+pub use value::{
+    AutomationLane, AutomationMode, AutomationPoint, ControlKind, ControlValue, Parameter,
+    ScaleCurve,
+};
 
 /// Current wire-schema version. Major bump = breaking; minor = additive.
 pub const SCHEMA_VERSION: (u16, u16) = (0, 2);

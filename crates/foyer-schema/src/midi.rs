@@ -125,9 +125,56 @@ pub struct SequencerCell {
     pub velocity: u8,
 }
 
+/// One named beat pattern — a (rowIdx, stepIdx, velocity) cell list
+/// the user authored. Patterns are reused across the song timeline
+/// via `ArrangementSlot`s: a pattern can play at any bar zero or
+/// more times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequencerPattern {
+    /// Stable id within the region. Frontend assigns; shim treats
+    /// as opaque.
+    pub id: String,
+    /// Display name — "Verse", "Chorus", "Fill", etc.
+    pub name: String,
+    /// Optional CSS color for the arrangement-grid block + the
+    /// pattern label. Picks a default when empty.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub color: Option<String>,
+    /// Cells populated in this pattern. Empty cells = silence.
+    #[serde(default)]
+    pub cells: Vec<SequencerCell>,
+    /// Free-form notes for this pattern (Alt-drag in pitched mode).
+    #[serde(default)]
+    pub free_notes: Vec<MidiNote>,
+}
+
+/// One slot on the song timeline — "play pattern X starting at
+/// bar Y". Each slot occupies `pattern_steps` (one bar's worth of)
+/// steps from its `bar`. Multiple slots can stack (different
+/// patterns at the same bar layer their notes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArrangementSlot {
+    pub pattern_id: String,
+    pub bar: u32,
+    /// Optional row in the arrangement grid (Hydrogen-style: rows
+    /// usually map 1:1 with patterns, but the user can stack a
+    /// pattern on multiple rows for visual separation). Defaults
+    /// to whatever row the editor was on when placing.
+    #[serde(default)]
+    pub arrangement_row: u32,
+}
+
 /// Beat-sequencer layout attached to a MIDI region. All fields
-/// default to sensible values so partial payloads from the shim
-/// (e.g. an old-format region that only sets `steps`) still parse.
+/// default to sensible values so partial payloads (e.g. legacy v1
+/// blobs that only carry `cells` at the top level) still parse.
+///
+/// Two-level organization:
+///   * `patterns` — named cell-grids the user authored.
+///   * `arrangement` — when each pattern plays in the song.
+///
+/// Migration: if `patterns` is empty but `cells` is non-empty
+/// (legacy v1 layout), `expand_sequencer_layout` synthesizes a
+/// single "Pattern 1" containing those cells, played at bar 0.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SequencerLayout {
     #[serde(default = "sequencer_default_version")]
@@ -136,23 +183,34 @@ pub struct SequencerLayout {
     /// length semantics. The typed schema is the same either way.
     #[serde(default = "sequencer_default_mode")]
     pub mode: String,
-    /// Steps per beat (1/4 = 1, 1/8 = 2, 1/16 = 4, 1/32 = 8). The
-    /// grid holds `steps` columns spanning a whole pattern length.
+    /// Steps per beat (1/4 = 1, 1/8 = 2, 1/16 = 4, 1/32 = 8).
     #[serde(default = "sequencer_default_resolution")]
     pub resolution: u32,
-    /// Total number of columns in the grid. Matched to the region's
-    /// length on the shim side — the grid is laid out to fill it.
-    #[serde(default = "sequencer_default_steps")]
-    pub steps: u32,
-    /// Row definitions, top-to-bottom as displayed.
+    /// Number of cells per pattern (one bar at this resolution).
+    #[serde(default = "sequencer_default_steps", alias = "steps")]
+    pub pattern_steps: u32,
+    /// Row definitions, top-to-bottom as displayed (shared by all
+    /// patterns).
     #[serde(default)]
     pub rows: Vec<SequencerRow>,
-    /// Populated cells only — empty positions are implied off.
+    /// Named patterns the user can arrange. Empty for v1 legacy
+    /// layouts (handled at expand-time).
+    #[serde(default)]
+    pub patterns: Vec<SequencerPattern>,
+    /// Song timeline: which pattern plays at which bar.
+    #[serde(default)]
+    pub arrangement: Vec<ArrangementSlot>,
+    /// Legacy v1 per-cell field — read-only on v2 layouts. New
+    /// layouts populate `patterns` instead. Kept on the struct so
+    /// old saved blobs round-trip cleanly.
     #[serde(default)]
     pub cells: Vec<SequencerCell>,
+    /// Legacy v1 free-form notes. Same migration story.
+    #[serde(default)]
+    pub free_notes: Vec<MidiNote>,
 }
 
-fn sequencer_default_version() -> u32 { 1 }
+fn sequencer_default_version() -> u32 { 2 }
 fn sequencer_default_mode() -> String { "drum".into() }
 fn sequencer_default_resolution() -> u32 { 4 }
 fn sequencer_default_steps() -> u32 { 16 }
@@ -160,13 +218,140 @@ fn sequencer_default_steps() -> u32 { 16 }
 impl Default for SequencerLayout {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             mode: "drum".into(),
             resolution: 4,
-            steps: 16,
+            pattern_steps: 16,
             rows: default_gm_drum_rows(),
+            patterns: vec![SequencerPattern {
+                id: "p1".into(),
+                name: "Pattern 1".into(),
+                color: Some("#7c5cff".into()),
+                cells: Vec::new(),
+                free_notes: Vec::new(),
+            }],
+            arrangement: vec![ArrangementSlot {
+                pattern_id: "p1".into(),
+                bar: 0,
+                arrangement_row: 0,
+            }],
             cells: Vec::new(),
+            free_notes: Vec::new(),
         }
+    }
+}
+
+/// Expand a SequencerLayout into the MIDI notes the region should
+/// contain. Pure function — no IO, no backend calls. Called by the
+/// sidecar on every `SetSequencerLayout` to regenerate the region's
+/// note list, so a sequencer-owned region's notes are always a
+/// deterministic function of its layout metadata (Rich's redesign
+/// ask on 2026-04-21: sequencer state *drives* note generation,
+/// not the other way around).
+///
+/// * `ppqn` is the project's ticks-per-quarter (always 960 in
+///   Ardour as of 9.x; pulled from session state if that ever
+///   changes).
+/// * Cells whose row index falls outside the declared rows array
+///   are silently dropped — they'd be stale data from an earlier
+///   layout.
+///
+/// Free-form notes on the layout (ad-hoc piano-roll-style
+/// placements in "pitched" mode) are emitted alongside the cell
+/// grid. That lets pitched mode carry notes the grid can't
+/// represent (off-grid starts, arbitrary lengths).
+pub fn expand_sequencer_layout(layout: &SequencerLayout, ppqn: u32) -> Vec<MidiNote> {
+    let ppqn = ppqn.max(1);
+    let resolution = layout.resolution.max(1);
+    let step_ticks = (ppqn / resolution) as u64;
+    let note_ticks = ((step_ticks as f64) * 0.9).round().max(1.0) as u64;
+    let pattern_steps = layout.pattern_steps.max(1);
+    let bar_ticks = (pattern_steps as u64) * step_ticks;
+
+    // Migration: a legacy v1 layout has top-level `cells` but no
+    // `patterns` / `arrangement`. Synthesize a single pattern from
+    // those cells, played at bar 0, so the same expander handles
+    // both shapes. Always owned storage so the borrow checker is
+    // happy across the migration / passthrough branches.
+    let (patterns_owned, arrangement_owned): (Vec<SequencerPattern>, Vec<ArrangementSlot>) =
+        if !layout.patterns.is_empty() {
+            let arr = if layout.arrangement.is_empty() {
+                // v2 layout but no arrangement — default to playing
+                // the first pattern at bar 0 so the user hears
+                // something even before they touch the song grid.
+                vec![ArrangementSlot {
+                    pattern_id: layout.patterns[0].id.clone(),
+                    bar: 0,
+                    arrangement_row: 0,
+                }]
+            } else {
+                layout.arrangement.clone()
+            };
+            (layout.patterns.clone(), arr)
+        } else if !layout.cells.is_empty() || !layout.free_notes.is_empty() {
+            (
+                vec![SequencerPattern {
+                    id: "p1".into(),
+                    name: "Pattern 1".into(),
+                    color: None,
+                    cells: layout.cells.clone(),
+                    free_notes: layout.free_notes.clone(),
+                }],
+                vec![ArrangementSlot {
+                    pattern_id: "p1".into(),
+                    bar: 0,
+                    arrangement_row: 0,
+                }],
+            )
+        } else {
+            return Vec::new();
+        };
+    let patterns = &patterns_owned[..];
+    let arrangement = &arrangement_owned[..];
+
+    let mut out: Vec<MidiNote> = Vec::new();
+    for slot in arrangement {
+        let Some(pat) = patterns.iter().find(|p| p.id == slot.pattern_id) else { continue };
+        let bar_offset = (slot.bar as u64) * bar_ticks;
+        for cell in &pat.cells {
+            let row = cell.row as usize;
+            let Some(row_def) = layout.rows.get(row) else { continue };
+            if row_def.muted { continue; }
+            if layout.rows.iter().any(|r| r.soloed) && !row_def.soloed { continue; }
+            let start = bar_offset + (cell.step as u64) * step_ticks;
+            let id_str = format!("note.seq.{}.{}.{}.{}", slot.bar, slot.pattern_id, cell.row, cell.step);
+            out.push(MidiNote {
+                id: EntityId::new(id_str),
+                pitch: row_def.pitch,
+                velocity: cell.velocity.max(1),
+                start_ticks: start,
+                length_ticks: note_ticks,
+                channel: row_def.channel,
+            });
+        }
+        for (i, n) in pat.free_notes.iter().enumerate() {
+            let mut cloned = n.clone();
+            cloned.start_ticks = bar_offset + n.start_ticks;
+            cloned.id = EntityId::new(format!("note.seq.free.{}.{}.{i}", slot.bar, slot.pattern_id));
+            out.push(cloned);
+        }
+    }
+    out
+}
+
+/// Compute the region length in ticks needed to hold the entire
+/// arrangement. Returns 0 if there's no arrangement at all.
+pub fn sequencer_layout_length_ticks(layout: &SequencerLayout, ppqn: u32) -> u64 {
+    let ppqn = ppqn.max(1);
+    let resolution = layout.resolution.max(1);
+    let step_ticks = (ppqn / resolution) as u64;
+    let pattern_steps = layout.pattern_steps.max(1);
+    let bar_ticks = (pattern_steps as u64) * step_ticks;
+    let last_bar = layout.arrangement.iter().map(|s| s.bar).max();
+    match last_bar {
+        Some(b) => (b as u64 + 1) * bar_ticks,
+        None if !layout.cells.is_empty() => bar_ticks,  // legacy v1
+        None => 0,
     }
 }
 

@@ -749,12 +749,87 @@ async fn dispatch_command(
             }
         }
 
+        Command::DuplicateRegion { source_region_id, at_samples, length_samples } => {
+            if let Err(e) = state.backend().await
+                .duplicate_region(source_region_id, at_samples, length_samples).await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "duplicate_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
         Command::SetSequencerLayout { region_id, layout } => {
-            if let Err(e) = state.backend().await.set_sequencer_layout(region_id, layout).await {
+            // Three-phase: (1) persist the layout metadata on the
+            // host (writes into the region's `_extra_xml`),
+            // (2) resize the region to fit the arrangement extent
+            // so the song timeline reflects pattern placements,
+            // (3) expand the layout into notes and ship a single
+            // ReplaceRegionNotes so the region's MIDI matches.
+            //
+            // Keeping generation server-side per Rich's 2026-04-21
+            // redesign: layout is the source of truth; notes (and
+            // length) are derived. Every connected client sees the
+            // same notes because they all reconcile off the same
+            // `RegionUpdated` echo from the shim.
+            let notes = foyer_schema::expand_sequencer_layout(&layout, 960);
+            // Region length = arrangement extent in ticks → samples
+            // at the session's sample rate. We don't know the SR
+            // here for sure (each backend may answer differently);
+            // use a tempo-aware conversion via 480 ticks/quarter
+            // standard PPQN at 120 bpm = 4 ticks per ms = 4
+            // samples/ms at 1 kHz; for MIDI ticks → audio samples
+            // we let the shim handle the conversion since it knows
+            // the session's tempo map. Pass the tick count through
+            // a special-cased RegionPatch the shim interprets.
+            let length_ticks = foyer_schema::sequencer_layout_length_ticks(&layout, 960);
+            if let Err(e) = state.backend().await.set_sequencer_layout(region_id.clone(), layout).await {
                 broadcast_event(
                     state,
                     Event::Error {
                         code: "set_sequencer_layout_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+            // Best-effort resize. Tick-to-sample lives in the shim;
+            // pass the tick count under a separate field in the
+            // RegionPatch so the shim's UpdateRegion handler can
+            // convert with the live tempo map. UpdateRegion
+            // currently takes `length_samples` only — until the
+            // schema gains `length_ticks`, the frontend's job is to
+            // size the pattern in seconds and let the user adjust
+            // via the timeline. For now we log the desired length
+            // so it shows up in diagnostics; native resize lands
+            // alongside `length_ticks` schema support.
+            tracing::debug!(
+                "sequencer regenerate: region={region_id:?} notes={} length_ticks={length_ticks}",
+                notes.len(),
+            );
+            if let Err(e) = state.backend().await.replace_region_notes(region_id, notes).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "replace_region_notes_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::ReplaceRegionNotes { region_id, notes } => {
+            if let Err(e) = state.backend().await.replace_region_notes(region_id, notes).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "replace_region_notes_failed".into(),
                         message: e.to_string(),
                     },
                 )

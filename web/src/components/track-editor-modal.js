@@ -239,15 +239,48 @@ export class TrackEditorModal extends LitElement {
               ></foyer-track-strip>
             </div>
           </div>
-          <div class="section">
-            <h3>Routing</h3>
-            <div class="row">
-              <label style="color:var(--color-text-muted);font-size:11px">
-                Bus / group assignment lands once the shim exposes it (tracked in
-                TODO.md "busses and groups — need to support this").
-              </label>
-            </div>
-          </div>
+          ${this._renderRoutingSection(t)}
+        </div>
+      </div>
+    `;
+  }
+
+  _renderRoutingSection(t) {
+    const session = window.__foyer?.store?.state?.session;
+    const allTracks = session?.tracks || [];
+    const busses = allTracks.filter((tt) => tt.kind === "bus" || tt.kind === "master");
+    const sends = t.sends || [];
+    const groupName = t.group_id
+      ? (session?.groups || []).find((g) => g.id === t.group_id)?.name || t.group_id
+      : null;
+    return html`
+      <div class="section">
+        <h3>Routing</h3>
+        <div class="row">
+          <label>Group</label>
+          <span style="color:var(--color-text);font-size:11px">${groupName || "—"}</span>
+        </div>
+        <div class="row" style="flex-direction:column;align-items:stretch;gap:6px">
+          <label>Sends → bus</label>
+          ${sends.length === 0 ? html`
+            <span style="color:var(--color-text-muted);font-size:11px">
+              No sends on this track.
+            </span>
+          ` : sends.map((s) => {
+            const target = allTracks.find((tt) => tt.id === s.target_track);
+            return html`
+              <div style="display:flex;justify-content:space-between;font-size:11px;background:var(--color-surface-elevated);padding:4px 8px;border-radius:4px">
+                <span>${target?.name || s.target_track}</span>
+                <span style="color:var(--color-text-muted)">${s.pre_fader ? "pre" : "post"}</span>
+              </div>
+            `;
+          })}
+          <span style="color:var(--color-text-muted);font-size:10px">
+            ${busses.length} bus${busses.length === 1 ? "" : "es"} available.
+            Add/remove/level edits land once the shim exposes
+            <code>AddSend</code>/<code>RemoveSend</code>/<code>SetSendLevel</code>
+            commands (schema gap as of 2026-04-21).
+          </span>
         </div>
       </div>
     `;

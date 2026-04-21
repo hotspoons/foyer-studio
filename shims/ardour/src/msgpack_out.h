@@ -90,6 +90,11 @@ std::vector<std::uint8_t> encode_track_meters_from_routes (
 std::vector<std::uint8_t> encode_plugin_presets_listed (
     ARDOUR::Session&, const std::string& plugin_id);
 
+/// Encode `Event::PluginsList { entries }` — the catalog of every
+/// plugin Ardour's PluginManager has scanned. Answers
+/// `Command::ListPlugins`.
+std::vector<std::uint8_t> encode_plugins_list ();
+
 /// Encode `Event::AudioEgressStarted { stream_id }`. Sent after the
 /// shim has installed a master tap — the HostBackend awaits this
 /// ACK to resolve its `open_egress` oneshot.

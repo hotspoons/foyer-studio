@@ -141,6 +141,24 @@ std::shared_ptr<ARDOUR::PluginInsert> find_plugin_insert_by_foyer_id (
 std::vector<PluginPresetDesc> list_plugin_presets (
 	ARDOUR::Session&, const std::string& plugin_id);
 
+/// Catalog entry — one installed plugin Ardour's PluginManager
+/// knows about. Matches `foyer_schema::PluginCatalogEntry`.
+struct PluginCatalogDesc {
+	std::string id;          ///< unique opaque id (Ardour PluginInfo::unique_id)
+	std::string name;
+	std::string format;      ///< "lv2" / "vst3" / "vst2" / "au" / "ladspa" / "lua" / "internal"
+	std::string role;        ///< "instrument" / "effect" / "generator" / "analyzer" / "utility"
+	std::string vendor;
+	std::string uri;         ///< the URI passed to AddPlugin (LV2 URI / VST3 path)
+	std::vector<std::string> tags;
+};
+
+/// Walk Ardour's PluginManager and build a flat catalog of every
+/// plugin it has scanned. This is what powers Foyer's "Insert
+/// plugin" picker — we don't replicate Ardour's plugin scan; we
+/// just surface what it found.
+std::vector<PluginCatalogDesc> list_plugin_catalog ();
+
 /// Apply a preset to a plugin by its URI. Returns `false` if the
 /// plugin or preset id can't be resolved or `load_preset` failed.
 bool load_plugin_preset (
@@ -174,17 +192,34 @@ struct SequencerCellDesc {
 	std::uint8_t  velocity = 100;
 };
 
-/// Beat-sequencer layout — matches `foyer_schema::SequencerLayout`.
-/// Stored verbatim inside the owning region's `_extra_xml`; when
-/// present the piano-roll client flips to read-only and the beat
-/// sequencer owns the region's note list.
+/// One named pattern. Mirrors `foyer_schema::SequencerPattern`.
+struct SequencerPatternDesc {
+	std::string id;
+	std::string name;
+	std::string color;
+	std::vector<SequencerCellDesc> cells;
+};
+
+/// One arrangement slot. Mirrors `foyer_schema::ArrangementSlot`.
+struct SequencerSlotDesc {
+	std::string   pattern_id;
+	std::uint32_t bar = 0;
+	std::uint32_t arrangement_row = 0;
+};
+
+/// Beat-sequencer layout — matches `foyer_schema::SequencerLayout`
+/// (v2). v1 layouts read with empty `patterns` + populated `cells`
+/// and are migrated at expand time.
 struct SequencerLayoutDesc {
-	std::uint32_t version = 1;
+	std::uint32_t version = 2;
 	std::string   mode = "drum";
 	std::uint32_t resolution = 4;
-	std::uint32_t steps = 16;
-	std::vector<SequencerRowDesc>  rows;
-	std::vector<SequencerCellDesc> cells;
+	std::uint32_t pattern_steps = 16;
+	std::vector<SequencerRowDesc>     rows;
+	std::vector<SequencerPatternDesc> patterns;
+	std::vector<SequencerSlotDesc>    arrangement;
+	// v1 carry-through.
+	std::vector<SequencerCellDesc>    cells;
 	bool          present = false;   // false = region has no layout
 };
 

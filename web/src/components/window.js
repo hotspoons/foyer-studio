@@ -35,6 +35,28 @@ import { icon } from "../icons.js";
 const STORAGE_PREFIX = "foyer.window:";
 const MIN_W = 320;
 const MIN_H = 200;
+const CHROME_FALLBACK_PX = 100;
+
+/**
+ * Measure the height of Foyer's top chrome — the area covered by
+ * the main menu + transport bar that sits at z-index 1300+ above
+ * floating windows. Used by `_clampToViewport` to keep window title
+ * bars below the chrome where the user can grab them. Probes a few
+ * known DOM hooks; falls back to a sensible default if nothing
+ * matches (single-page-app fragments where the chrome hasn't
+ * mounted yet).
+ */
+function measureChromeTop() {
+  for (const sel of ["foyer-main-menu", "foyer-nav-bar", ".app-chrome-top"]) {
+    const el = document.querySelector(sel);
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      const bottom = rect.top + rect.height;
+      if (bottom > 0 && bottom < 400) return Math.ceil(bottom);
+    }
+  }
+  return CHROME_FALLBACK_PX;
+}
 
 function loadBounds(key) {
   if (!key) return null;
@@ -215,12 +237,29 @@ export class FoyerWindow extends LitElement {
   }
 
   _clampToViewport() {
+    // Window-rescue (Rich's 2026-04-21 ask): the title bar must
+    // always be reachable. Two failure modes we've actually seen:
+    //   1. Drag puts the title above the viewport.
+    //   2. The app's top chrome (main menu + transport bar at
+    //      z-index 1300) covers the title because the window's
+    //      `y` is below the chrome height.
+    // Measure the chrome height dynamically — fall back to 100px
+    // if no element matches. The result becomes the minimum y.
+    const chromeTop = measureChromeTop();
     const maxX = Math.max(0, window.innerWidth  - 80);
-    const maxY = Math.max(0, window.innerHeight - 40);
+    const maxY = Math.max(chromeTop, window.innerHeight - 40);
     this._x = Math.min(Math.max(-this._w + 80, this._x), maxX);
-    this._y = Math.min(Math.max(0, this._y), maxY);
+    this._y = Math.min(Math.max(chromeTop, this._y), maxY);
     this._w = Math.max(MIN_W, Math.min(this._w, window.innerWidth));
-    this._h = Math.max(MIN_H, Math.min(this._h, window.innerHeight));
+    this._h = Math.max(MIN_H, Math.min(this._h, window.innerHeight - chromeTop));
+  }
+
+  /** Resize-rescue: any time the user drags a resize handle, also
+   *  re-clamp so the title bar can't get pushed under the app
+   *  chrome by a clipping resize. Called from the resize move/up
+   *  handlers below. */
+  _rescueOnResize() {
+    this._clampToViewport();
   }
 
   _persist() {

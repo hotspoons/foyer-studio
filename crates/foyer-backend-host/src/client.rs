@@ -19,8 +19,8 @@ use foyer_ipc::{
 };
 use foyer_schema::{
     AudioFormat, AudioSource, Command, EntityId, Envelope, Event, LatencyReport, MidiNote,
-    MidiNotePatch, PatchChange, PatchChangePatch, PluginPreset, Region, RegionPatch,
-    SequencerLayout, Session, TimelineMeta, Track, TrackPatch, SCHEMA_VERSION,
+    MidiNotePatch, PatchChange, PatchChangePatch, PluginCatalogEntry, PluginPreset, Region,
+    RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch, SCHEMA_VERSION,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -91,6 +91,11 @@ struct Shared {
     /// In-flight list_plugin_presets requests, keyed by plugin id.
     /// Resolved by the reader task on `Event::PluginPresetsListed`.
     pending_presets: Mutex<HashMap<EntityId, Vec<oneshot::Sender<Vec<PluginPreset>>>>>,
+    /// In-flight list_plugins requests. The shim's PluginsList event
+    /// has no correlation id — every pending awaiter resolves to
+    /// the same catalog. Concurrent requests just share the same
+    /// answer, which is fine for a catalog query.
+    pending_plugins_list: Mutex<Vec<oneshot::Sender<Vec<PluginCatalogEntry>>>>,
     /// Cache of known regions, keyed by region id. Populated from every
     /// `RegionsList` / `RegionUpdated` event; drained on `RegionRemoved`.
     /// Used to look up `source_path` when the sidecar needs to decode
@@ -142,6 +147,7 @@ impl HostClient {
             pending_delete_region: Mutex::new(HashMap::new()),
             pending_update_track: Mutex::new(HashMap::new()),
             pending_presets: Mutex::new(HashMap::new()),
+            pending_plugins_list: Mutex::new(Vec::new()),
             regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
             disconnected: AtomicBool::new(false),
@@ -362,6 +368,18 @@ impl HostClient {
         timeout(rx, "update_region").await
     }
 
+    pub async fn duplicate_region(
+        &self,
+        source_region_id: EntityId,
+        at_samples: u64,
+        length_samples: Option<u64>,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::DuplicateRegion {
+            source_region_id, at_samples, length_samples,
+        })
+        .await
+    }
+
     pub async fn delete_region(&self, id: EntityId) -> Result<EntityId, ClientError> {
         let (tx, rx) = oneshot::channel();
         self.shared
@@ -430,11 +448,26 @@ impl HostClient {
         .await
     }
 
+    pub async fn replace_region_notes(
+        &self,
+        region_id: EntityId,
+        notes: Vec<MidiNote>,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::ReplaceRegionNotes { region_id, notes }).await
+    }
+
     pub async fn undo(&self) -> Result<(), ClientError> {
         self.send_command(Command::Undo).await
     }
     pub async fn redo(&self) -> Result<(), ClientError> {
         self.send_command(Command::Redo).await
+    }
+
+    pub async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared.pending_plugins_list.lock().await.push(tx);
+        self.send_command(Command::ListPlugins).await?;
+        timeout(rx, "list_plugins").await
     }
 
     pub async fn list_plugin_presets(
@@ -723,6 +756,14 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                         for w in waiters {
                             let _ = w.send(track_id.clone());
                         }
+                    }
+                }
+                Event::PluginsList { entries } => {
+                    let waiters: Vec<_> = std::mem::take(
+                        &mut *shared.pending_plugins_list.lock().await,
+                    );
+                    for w in waiters {
+                        let _ = w.send(entries.clone());
                     }
                 }
                 Event::PluginPresetsListed { plugin_id, presets } => {

@@ -7,6 +7,52 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::EntityId;
+
+// ─── Automation ──────────────────────────────────────────────────────
+//
+// Per-control time-varying value lists. One AutomationLane per
+// `AutomationControl` on a route/plugin/track; the shim exposes them
+// alongside the static `Parameter` list once it walks
+// `Stripable::automation_control_iter()`.
+//
+// Schema only this pass — the shim read/write side, the write
+// commands, and the lane UI all land in a follow-up. Carrying the
+// types now so the wire shape is stable when the implementation
+// arrives.
+
+/// Single automation point. `value` is in the same scale as the
+/// underlying `Parameter` (post-curve), matching what `ControlSet`
+/// expects for the same `control_id`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutomationPoint {
+    pub time_samples: u64,
+    pub value: f64,
+}
+
+/// Playback mode for an automation lane. Mirrors Ardour's
+/// `AutomationList::AutoState` (Off/Manual/Play/Write/Touch/Latch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationMode {
+    Off,
+    Manual,
+    Play,
+    Write,
+    Touch,
+    Latch,
+}
+
+/// One automation lane attached to a Parameter. Empty `points` is a
+/// valid lane — the user just hasn't drawn anything yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutomationLane {
+    /// The `Parameter.id` this lane drives (e.g. `track.<id>.gain`).
+    pub control_id: EntityId,
+    pub mode: AutomationMode,
+    pub points: Vec<AutomationPoint>,
+}
+
 /// What kind of control this parameter exposes to the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

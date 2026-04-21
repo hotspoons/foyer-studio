@@ -52,7 +52,8 @@ pub fn default_daw_actions() -> Vec<Action> {
 
         // ── Track ───────────────────────────────────────────────
         mk("track.add_audio", "Add Audio Track", ActionCategory::Track, Some("plus"), None),
-        mk("track.add_bus", "Add Bus", ActionCategory::Track, Some("plus"), None),
+        mk("track.add_midi",  "Add MIDI Track",  ActionCategory::Track, Some("plus"), None),
+        mk("track.add_bus",  "Add Bus",         ActionCategory::Track, Some("plus"), None),
         mk("track.freeze", "Freeze Track", ActionCategory::Track, Some("snowflake"), None),
 
         // ── View ────────────────────────────────────────────────

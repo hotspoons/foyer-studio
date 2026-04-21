@@ -32,7 +32,11 @@ export class PluginPickerModal extends LitElement {
 
   static styles = css`
     :host {
-      position: fixed; inset: 0; z-index: 900;
+      /* Above any open foyer-window (1000 / 1400 maximized) so the
+       * picker appears in front when launched from the MIDI manager.
+       * Rich's report 2026-04-21: picker rendered behind the
+       * manager window because it was at z:900. */
+      position: fixed; inset: 0; z-index: 1500;
       display: flex; align-items: center; justify-content: center;
       background: rgba(0, 0, 0, 0.55);
       backdrop-filter: blur(3px);

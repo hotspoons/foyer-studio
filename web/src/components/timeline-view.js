@@ -477,13 +477,22 @@ export class TimelineView extends LitElement {
       import("./window.js"),
     ]).then(([, winMod]) => {
       const seq = document.createElement("foyer-beat-sequencer");
-      seq.regionId   = region?.id || "";
-      seq.regionName = region?.name || "";
-      seq.notes      = Array.isArray(region?.notes) ? region.notes : [];
-      seq.layout     = region?.foyer_sequencer || null;
       const trackId  = region?.track_id;
+      const bindRegion = (r) => {
+        seq.regionId     = r?.id || "";
+        seq.regionName   = r?.name || "";
+        seq.notes        = Array.isArray(r?.notes) ? r.notes : [];
+        seq.layout       = r?.foyer_sequencer || null;
+        seq.trackId      = trackId || "";
+        seq.trackRegions = this._regionsByTrack[trackId] || [];
+      };
+      bindRegion(region);
       const onUpdate = () => {
         const list = this._regionsByTrack[trackId] || [];
+        // Keep the arrangement strip fresh — always push the
+        // latest list. Also hunt for the currently-bound region
+        // and refresh its notes/layout without rebinding.
+        seq.trackRegions = list;
         const fresh = list.find((r) => r.id === seq.regionId);
         if (fresh) {
           seq.notes  = Array.isArray(fresh.notes) ? fresh.notes : [];
@@ -491,6 +500,13 @@ export class TimelineView extends LitElement {
         }
       };
       this.addEventListener("foyer:regions-updated", onUpdate);
+      // Arrangement strip click → rebind the editor to the picked
+      // region without tearing the window down.
+      seq.addEventListener("sequencer-switch-region", (ev) => {
+        const list = this._regionsByTrack[trackId] || [];
+        const next = list.find((r) => r.id === ev.detail?.regionId);
+        if (next) bindRegion(next);
+      });
       winMod.openWindow({
         title: `Beat — ${region?.name || region?.id || "region"}`,
         icon: "queue-list",
@@ -795,6 +811,18 @@ export class TimelineView extends LitElement {
   _onWheel(ev) {
     const dy = ev.deltaY;
     if (!dy) return;
+    // Wheel over the sticky lane-head column should scroll the
+    // track list vertically — Rich's report 2026-04-21: "should do
+    // vertical scrolling, not timeline zoom" when the pointer is
+    // over the labels. Hold Shift to override and zoom from the
+    // lane-head (matches "modifier to scroll a long list" ask).
+    const overHead = !!ev.target?.closest?.(".lane-head");
+    if (overHead && !ev.shiftKey) {
+      // Default: let the .scroll container's native vertical scroll
+      // handle this. We don't preventDefault, so the browser
+      // forwards the wheel to the scroll ancestor.
+      return;
+    }
     if (ev.altKey || ev.ctrlKey) {
       // Vertical (lane-height) zoom. Find the lane the pointer is over.
       const lane = ev.target?.closest?.(".lane");

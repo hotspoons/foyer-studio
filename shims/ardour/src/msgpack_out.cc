@@ -638,16 +638,17 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	}
 	if (r.sequencer.present) {
 		o.str ("foyer_sequencer");
-		// SequencerLayout { version, mode, resolution, steps, rows, cells }
-		o.map (6);
-		o.str ("version");    o.u (r.sequencer.version);
-		o.str ("mode");       o.str (r.sequencer.mode);
-		o.str ("resolution"); o.u (r.sequencer.resolution);
-		o.str ("steps");      o.u (r.sequencer.steps);
+		// SequencerLayout v2 { version, mode, resolution,
+		// pattern_steps, rows, patterns, arrangement, cells (v1
+		// carry-through) }.
+		o.map (8);
+		o.str ("version");       o.u (r.sequencer.version);
+		o.str ("mode");          o.str (r.sequencer.mode);
+		o.str ("resolution");    o.u (r.sequencer.resolution);
+		o.str ("pattern_steps"); o.u (r.sequencer.pattern_steps);
 		o.str ("rows");
 		o.array (r.sequencer.rows.size ());
 		for (auto const& row : r.sequencer.rows) {
-			// SequencerRow { pitch, label, channel, color?, muted, soloed }
 			std::size_t mn = 5; // pitch, label, channel, muted, soloed
 			const bool emit_color = !row.color.empty ();
 			if (emit_color) ++mn;
@@ -659,6 +660,34 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 			o.str ("muted");   o.b (row.muted);
 			o.str ("soloed");  o.b (row.soloed);
 		}
+		o.str ("patterns");
+		o.array (r.sequencer.patterns.size ());
+		for (auto const& p : r.sequencer.patterns) {
+			std::size_t pn = 3; // id, name, cells
+			const bool emit_color = !p.color.empty ();
+			if (emit_color) ++pn;
+			o.map (pn);
+			o.str ("id");   o.str (p.id);
+			o.str ("name"); o.str (p.name);
+			if (emit_color) { o.str ("color"); o.str (p.color); }
+			o.str ("cells");
+			o.array (p.cells.size ());
+			for (auto const& c : p.cells) {
+				o.map (3);
+				o.str ("row");      o.u (c.row);
+				o.str ("step");     o.u (c.step);
+				o.str ("velocity"); o.u (c.velocity);
+			}
+		}
+		o.str ("arrangement");
+		o.array (r.sequencer.arrangement.size ());
+		for (auto const& s : r.sequencer.arrangement) {
+			o.map (3);
+			o.str ("pattern_id");      o.str (s.pattern_id);
+			o.str ("bar");             o.u (s.bar);
+			o.str ("arrangement_row"); o.u (s.arrangement_row);
+		}
+		// v1 cells carry-through for sessions saved by the old shim.
 		o.str ("cells");
 		o.array (r.sequencer.cells.size ());
 		for (auto const& c : r.sequencer.cells) {
@@ -719,6 +748,41 @@ encode_region_updated (Session& session, const std::string& region_id)
 		o.str ("type");   o.str ("region_updated");
 		o.str ("region");
 		emit_region_map (o, d);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_plugins_list ()
+{
+	auto entries = schema_map::list_plugin_catalog ();
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");      o.str ("event");
+		o.str ("type");     o.str ("plugins_list");
+		o.str ("entries");
+		o.array (entries.size ());
+		for (auto const& e : entries) {
+			// Foyer schema: PluginCatalogEntry { id, name, format,
+			// role, vendor?, uri, tags? }. Keep field count
+			// matching the actual emitted keys to stay valid msgpack.
+			std::size_t n = 5;  // id, name, format, role, uri
+			const bool emit_vendor = !e.vendor.empty ();
+			const bool emit_tags   = !e.tags.empty ();
+			if (emit_vendor) ++n;
+			if (emit_tags)   ++n;
+			o.map (n);
+			o.str ("id");     o.str (e.id);
+			o.str ("name");   o.str (e.name);
+			o.str ("format"); o.str (e.format);
+			o.str ("role");   o.str (e.role);
+			o.str ("uri");    o.str (e.uri);
+			if (emit_vendor) { o.str ("vendor"); o.str (e.vendor); }
+			if (emit_tags) {
+				o.str ("tags");
+				o.array (e.tags.size ());
+				for (auto const& t : e.tags) o.str (t);
+			}
+		}
 	});
 }
 

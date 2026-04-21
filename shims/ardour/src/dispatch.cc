@@ -17,6 +17,7 @@
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
 #include "ardour/playlist.h"
+#include "ardour/region_factory.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
 #include "ardour/plugin_manager.h"
@@ -220,6 +221,9 @@ struct DecodedCmd
 		ClearSequencerLayout,
 		AudioIngressOpen,
 		AudioIngressClose,
+		DuplicateRegion,
+		ReplaceRegionNotes,
+		ListPlugins,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
@@ -290,6 +294,25 @@ struct DecodedCmd
 	// stash a full SequencerLayoutDesc here to hand straight to
 	// schema_map::set_sequencer_layout.
 	schema_map::SequencerLayoutDesc seq_layout;
+
+	// DuplicateRegion payload.
+	std::string   dup_source_id;
+	std::uint64_t dup_at_samples = 0;
+	bool          dup_has_length = false;
+	std::uint64_t dup_length_samples = 0;
+
+	// ReplaceRegionNotes payload — parsed into a vector so the
+	// handler can feed it straight into a single NoteDiffCommand.
+	// We reuse DecodedCmd as the decoder's output type throughout
+	// the file, so the vector lives here.
+	struct DecodedNote {
+		std::uint8_t  pitch = 0;
+		std::uint8_t  velocity = 100;
+		std::uint8_t  channel = 0;
+		std::uint64_t start_ticks = 0;
+		std::uint64_t length_ticks = 0;
+	};
+	std::vector<DecodedNote> replace_notes;
 };
 
 // Read an int64 that may be positive or negative on the wire —
@@ -398,15 +421,32 @@ read_seq_row (In& in, schema_map::SequencerLayoutDesc& layout)
 	return true;
 }
 
-// Parse one SequencerCell sub-map into an entry on `layout.cells`.
+// Forward decl — pre-existing v1 sites still call this. Body
+// resolves to the generic helper after `read_one_cell` is defined.
+[[maybe_unused]] static bool read_seq_cell (In& in, schema_map::SequencerLayoutDesc& layout);
+
+// Read a msgpack array header. Returns false if the next value
+// isn't an array.
 static bool
-read_seq_cell (In& in, schema_map::SequencerLayoutDesc& layout)
+read_array_header (In& in, std::size_t& count)
 {
-	std::size_t n = 0;
-	if (!in.read_map_header (n)) return false;
+	if (in.p >= in.end) return false;
+	std::uint8_t b = in.peek ();
+	if ((b & 0xf0) == 0x90) { in.take_u8 (); count = b & 0x0f; return true; }
+	if (b == 0xdc)          { in.take_u8 (); count = in.take_be16 (); return true; }
+	if (b == 0xdd)          { in.take_u8 (); count = in.take_be32 (); return true; }
+	return false;
+}
+
+// One cell map → push into `dest`.
+static bool
+read_one_cell (In& in, std::vector<schema_map::SequencerCellDesc>& dest)
+{
+	std::size_t m = 0;
+	if (!in.read_map_header (m)) return false;
 	schema_map::SequencerCellDesc cell;
 	std::uint64_t v = 0;
-	for (std::size_t i = 0; i < n; ++i) {
+	for (std::size_t j = 0; j < m; ++j) {
 		std::string k;
 		if (!in.read_str (k)) return false;
 		if (k == "row") {
@@ -422,7 +462,72 @@ read_seq_cell (In& in, schema_map::SequencerLayoutDesc& layout)
 			if (!in.skip_value ()) return false;
 		}
 	}
-	layout.cells.push_back (cell);
+	dest.push_back (cell);
+	return true;
+}
+
+// Definition of the v1-compat forward decl. Just delegates.
+static bool
+read_seq_cell (In& in, schema_map::SequencerLayoutDesc& layout)
+{
+	return read_one_cell (in, layout.cells);
+}
+
+// One Pattern map (id, name, color, cells, free_notes) → push.
+static bool
+read_one_pattern (In& in, schema_map::SequencerLayoutDesc& layout)
+{
+	std::size_t m = 0;
+	if (!in.read_map_header (m)) return false;
+	schema_map::SequencerPatternDesc pat;
+	for (std::size_t j = 0; j < m; ++j) {
+		std::string k;
+		if (!in.read_str (k)) return false;
+		if (k == "id") {
+			if (!in.read_str (pat.id)) return false;
+		} else if (k == "name") {
+			if (!in.read_str (pat.name)) return false;
+		} else if (k == "color") {
+			if (!in.read_str (pat.color)) return false;
+		} else if (k == "cells") {
+			std::size_t cn = 0;
+			if (!read_array_header (in, cn)) return false;
+			for (std::size_t i = 0; i < cn; ++i) {
+				if (!read_one_cell (in, pat.cells)) return false;
+			}
+		} else {
+			if (!in.skip_value ()) return false;
+		}
+	}
+	layout.patterns.push_back (std::move (pat));
+	return true;
+}
+
+// One ArrangementSlot map → push.
+static bool
+read_one_slot (In& in, schema_map::SequencerLayoutDesc& layout)
+{
+	std::size_t m = 0;
+	if (!in.read_map_header (m)) return false;
+	schema_map::SequencerSlotDesc slot;
+	for (std::size_t j = 0; j < m; ++j) {
+		std::string k;
+		if (!in.read_str (k)) return false;
+		if (k == "pattern_id") {
+			if (!in.read_str (slot.pattern_id)) return false;
+		} else if (k == "bar") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			slot.bar = static_cast<std::uint32_t> (v);
+		} else if (k == "arrangement_row") {
+			std::uint64_t v = 0;
+			if (!in.read_u64 (v)) return false;
+			slot.arrangement_row = static_cast<std::uint32_t> (v);
+		} else {
+			if (!in.skip_value ()) return false;
+		}
+	}
+	layout.arrangement.push_back (slot);
 	return true;
 }
 
@@ -448,34 +553,81 @@ read_sequencer_layout (In& in, schema_map::SequencerLayoutDesc& layout)
 			std::uint64_t v = 0;
 			if (!in.read_u64 (v)) return false;
 			layout.resolution = static_cast<std::uint32_t> (v);
-		} else if (k == "steps") {
+		} else if (k == "pattern_steps" || k == "steps") {
 			std::uint64_t v = 0;
 			if (!in.read_u64 (v)) return false;
-			layout.steps = static_cast<std::uint32_t> (v);
+			layout.pattern_steps = static_cast<std::uint32_t> (v);
 		} else if (k == "rows") {
 			std::size_t rn = 0;
-			// Array header, then `rn` row maps.
-			std::uint8_t b = in.peek ();
-			if ((b & 0xf0) == 0x90) { in.take_u8 (); rn = b & 0x0f; }
-			else if (b == 0xdc)     { in.take_u8 (); rn = in.take_be16 (); }
-			else if (b == 0xdd)     { in.take_u8 (); rn = in.take_be32 (); }
-			else return false;
+			if (!read_array_header (in, rn)) return false;
 			for (std::size_t j = 0; j < rn; ++j) {
 				if (!read_seq_row (in, layout)) return false;
 			}
 		} else if (k == "cells") {
 			std::size_t cn = 0;
-			std::uint8_t b = in.peek ();
-			if ((b & 0xf0) == 0x90) { in.take_u8 (); cn = b & 0x0f; }
-			else if (b == 0xdc)     { in.take_u8 (); cn = in.take_be16 (); }
-			else if (b == 0xdd)     { in.take_u8 (); cn = in.take_be32 (); }
-			else return false;
+			if (!read_array_header (in, cn)) return false;
 			for (std::size_t j = 0; j < cn; ++j) {
-				if (!read_seq_cell (in, layout)) return false;
+				if (!read_one_cell (in, layout.cells)) return false;
+			}
+		} else if (k == "patterns") {
+			std::size_t pn = 0;
+			if (!read_array_header (in, pn)) return false;
+			for (std::size_t j = 0; j < pn; ++j) {
+				if (!read_one_pattern (in, layout)) return false;
+			}
+		} else if (k == "arrangement") {
+			std::size_t sn = 0;
+			if (!read_array_header (in, sn)) return false;
+			for (std::size_t j = 0; j < sn; ++j) {
+				if (!read_one_slot (in, layout)) return false;
 			}
 		} else {
 			if (!in.skip_value ()) return false;
 		}
+	}
+	return true;
+}
+
+// Parse the `notes` array of a ReplaceRegionNotes command into
+// out.replace_notes. Each element is a MidiNote map; we skip `id`
+// (the shim assigns fresh Evoral event ids) and `channel` when
+// absent (defaults to 0).
+static bool
+read_replace_notes_array (In& in, DecodedCmd& out)
+{
+	std::size_t n = 0;
+	std::uint8_t b = in.peek ();
+	if ((b & 0xf0) == 0x90) { in.take_u8 (); n = b & 0x0f; }
+	else if (b == 0xdc)     { in.take_u8 (); n = in.take_be16 (); }
+	else if (b == 0xdd)     { in.take_u8 (); n = in.take_be32 (); }
+	else return false;
+	out.replace_notes.reserve (n);
+	for (std::size_t i = 0; i < n; ++i) {
+		std::size_t m = 0;
+		if (!in.read_map_header (m)) return false;
+		DecodedCmd::DecodedNote nd;
+		for (std::size_t j = 0; j < m; ++j) {
+			std::string k;
+			if (!in.read_str (k)) return false;
+			std::uint64_t v = 0;
+			if (k == "pitch") {
+				if (!in.read_u64 (v)) return false;
+				nd.pitch = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+			} else if (k == "velocity") {
+				if (!in.read_u64 (v)) return false;
+				nd.velocity = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+			} else if (k == "channel") {
+				if (!in.read_u64 (v)) return false;
+				nd.channel = static_cast<std::uint8_t> (v & 0x0f);
+			} else if (k == "start_ticks") {
+				if (!in.read_u64 (nd.start_ticks)) return false;
+			} else if (k == "length_ticks") {
+				if (!in.read_u64 (nd.length_ticks)) return false;
+			} else {
+				if (!in.skip_value ()) return false;
+			}
+		}
+		out.replace_notes.push_back (nd);
 	}
 	return true;
 }
@@ -630,6 +782,24 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!read_pc_fields (in, out)) return out;
 				} else if (k == "patch_change_id") {
 					if (!in.read_str (out.id)) return out;
+				} else if (k == "source_region_id") {
+					if (!in.read_str (out.dup_source_id)) return out;
+				} else if (k == "at_samples") {
+					if (!in.read_u64 (out.dup_at_samples)) return out;
+				} else if (k == "length_samples") {
+					// Top-level length_samples is DuplicateRegion's
+					// optional length override. UpdateRegion sends
+					// `length_samples` inside a nested `patch` map
+					// which goes through read_region_patch_or_note,
+					// so there's no collision here.
+					if (!in.read_u64 (out.dup_length_samples)) return out;
+					out.dup_has_length = true;
+				} else if (k == "notes") {
+					// Top-level `notes` array → ReplaceRegionNotes
+					// payload. (MidiNote inside AddNote arrives
+					// under `note`, not `notes`, so there's no
+					// collision.)
+					if (!read_replace_notes_array (in, out)) return out;
 				} else if (k == "layout") {
 					if (!read_sequencer_layout (in, out.seq_layout)) return out;
 				} else if (k == "value") {
@@ -740,6 +910,9 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "clear_sequencer_layout") out.kind = DecodedCmd::Kind::ClearSequencerLayout;
 			else if (cmd_type == "audio_ingress_open")  out.kind = DecodedCmd::Kind::AudioIngressOpen;
 			else if (cmd_type == "audio_ingress_close") out.kind = DecodedCmd::Kind::AudioIngressClose;
+			else if (cmd_type == "duplicate_region")    out.kind = DecodedCmd::Kind::DuplicateRegion;
+			else if (cmd_type == "replace_region_notes") out.kind = DecodedCmd::Kind::ReplaceRegionNotes;
+			else if (cmd_type == "list_plugins")        out.kind = DecodedCmd::Kind::ListPlugins;
 			else if (cmd_type == "audio_stream_open"
 			    ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
 			else if (cmd_type == "audio_stream_close"
@@ -1176,6 +1349,108 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			});
 			break;
 		}
+		case DecodedCmd::Kind::ListPlugins: {
+			// PluginManager scans run on the main thread and the
+			// catalog is read-only after that — safe to walk from
+			// the event-loop here without `call_slot`. But emit on
+			// the event loop anyway so we don't race the IPC writer.
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
+				auto bytes = msgpack_out::encode_plugins_list ();
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ReplaceRegionNotes: {
+			// `track_id` holds the region id (decoder reuse).
+			if (cmd.track_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.track_id);
+				if (!hit.region) return;
+				auto mr = std::dynamic_pointer_cast<ARDOUR::MidiRegion> (hit.region);
+				if (!mr) return;
+				auto model = mr->model ();
+				if (!model) return;
+				// Build a single NoteDiffCommand that removes every
+				// existing note then adds the new list. Ardour
+				// bundles this into one undo entry — the whole
+				// sequencer regeneration is reversible as a unit.
+				auto* diff = model->new_note_diff_command ("foyer replace notes");
+				{
+					auto lock = model->read_lock ();
+					for (auto const& existing : model->notes ()) {
+						if (existing) diff->remove (existing);
+					}
+				}
+				for (auto const& nd : snap.replace_notes) {
+					auto note = std::make_shared<Evoral::Note<Temporal::Beats>> (
+						nd.channel,
+						Temporal::Beats::ticks (static_cast<std::int64_t> (nd.start_ticks)),
+						Temporal::Beats::ticks (static_cast<std::int64_t> (nd.length_ticks > 0 ? nd.length_ticks : 240)),
+						nd.pitch,
+						nd.velocity);
+					diff->add (note);
+				}
+				model->apply_diff_command_as_commit (shim->session (), diff);
+				auto bytes = msgpack_out::encode_region_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::DuplicateRegion: {
+			if (cmd.dup_source_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.dup_source_id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: duplicate_region: unknown source: "
+					             << snap.dup_source_id << endmsg;
+					return;
+				}
+				// Find the owning playlist so we can add the clone.
+				std::shared_ptr<ARDOUR::Playlist> playlist;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					auto track = std::dynamic_pointer_cast<Track> (r);
+					if (!track) continue;
+					auto pl = track->playlist ();
+					if (pl && pl->region_by_id (hit.region->id ())) {
+						playlist = pl; break;
+					}
+				}
+				if (!playlist) {
+					PBD::warning << "foyer_shim: duplicate_region: source not on any playlist" << endmsg;
+					return;
+				}
+				// `RegionFactory::create(shared<const Region>, announce)`
+				// clones the region AND copies `_extra_xml` (the copy
+				// ctor in region.cc:474-477 does `new XMLNode(*other)` on
+				// the extra_xml tree). That's why duplicating a beat-
+				// sequencer region carries the layout across for free.
+				PBD::PropertyList plist;
+				auto clone = ARDOUR::RegionFactory::create (
+					std::shared_ptr<const ARDOUR::Region> (hit.region),
+					true /* announce */, false /* fork */);
+				if (!clone) {
+					PBD::warning << "foyer_shim: duplicate_region: RegionFactory returned null" << endmsg;
+					return;
+				}
+				if (snap.dup_has_length) {
+					clone->set_length (Temporal::timecnt_t::from_samples (
+						static_cast<Temporal::samplepos_t> (snap.dup_length_samples)));
+				}
+				playlist->add_region (clone, Temporal::timepos_t (
+					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+				shim->session ().set_dirty ();
+				// Playlist's RegionAdded signal fires an echo; we
+				// don't emit one manually here.
+			});
+			break;
+		}
 		case DecodedCmd::Kind::AudioIngressOpen:
 		case DecodedCmd::Kind::AudioIngressClose: {
 			// Honest stub — a real impl needs a new shim class
@@ -1360,6 +1635,22 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					    std::string (),
 					    ARDOUR::PresentationInfo::AudioBus,
 					    ARDOUR::PresentationInfo::max_order);
+				}
+				else if (id == "track.add_midi") {
+					// 1-channel MIDI track, no instrument plugin yet
+					// (user picks one via the MIDI manager). strict_io
+					// off so the user can chain effects post-instrument.
+					session.new_midi_track (
+					    ARDOUR::ChanCount (ARDOUR::DataType::MIDI, 1),
+					    ARDOUR::ChanCount (ARDOUR::DataType::AUDIO, 2),
+					    false /* strict_io */,
+					    std::shared_ptr<ARDOUR::PluginInfo> () /* instrument */,
+					    nullptr /* preset */,
+					    std::shared_ptr<ARDOUR::RouteGroup> (),
+					    1, std::string (),
+					    ARDOUR::PresentationInfo::max_order,
+					    ARDOUR::Normal,
+					    true  /* input_auto_connect */);
 				}
 				else if (id == "track.freeze") {
 					PBD::warning << "foyer_shim: track.freeze not yet wired" << endmsg;

@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmRx, PcmTx};
 use foyer_schema::{
     AudioFormat, AudioSource, Command, ControlValue, EntityId, LatencyReport, MidiNote,
-    MidiNotePatch, PatchChange, PatchChangePatch, PluginPreset, Region, RegionPatch,
-    SequencerLayout, Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    MidiNotePatch, PatchChange, PatchChangePatch, PluginCatalogEntry, PluginPreset, Region,
+    RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 
 mod waveform;
@@ -201,6 +201,18 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn duplicate_region(
+        &self,
+        source_region_id: EntityId,
+        at_samples: u64,
+        length_samples: Option<u64>,
+    ) -> Result<(), BackendError> {
+        self.client
+            .duplicate_region(source_region_id, at_samples, length_samples)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn update_track(
         &self,
         id: EntityId,
@@ -246,11 +258,27 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn replace_region_notes(
+        &self,
+        region_id: EntityId,
+        notes: Vec<MidiNote>,
+    ) -> Result<(), BackendError> {
+        self.client
+            .replace_region_notes(region_id, notes)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn undo(&self) -> Result<(), BackendError> {
         self.client.undo().await.map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn redo(&self) -> Result<(), BackendError> {
         self.client.redo().await.map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {
+        self.client.list_plugins().await
+            .map_err(|e| BackendError::Other(e.to_string()))
     }
 
     async fn list_plugin_presets(

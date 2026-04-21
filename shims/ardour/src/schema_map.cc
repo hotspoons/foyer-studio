@@ -14,6 +14,7 @@
 #include "ardour/playlist.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
+#include "ardour/plugin_manager.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
 #include "ardour/route_group.h"
@@ -416,17 +417,18 @@ static SequencerLayoutDesc
 read_sequencer_from_region (const Region& r)
 {
 	SequencerLayoutDesc out;
-	// `extra_xml(name, add_if_missing=false)` returns nullptr if the
-	// region has no "Foyer" extra node yet.
 	XMLNode* foyer = const_cast<Region&> (r).extra_xml ("Foyer");
 	if (!foyer) return out;
 	XMLNode* seq = foyer->child ("Sequencer");
 	if (!seq) return out;
 	out.present = true;
-	seq->get_property ("version",    out.version);
-	seq->get_property ("mode",       out.mode);
-	seq->get_property ("resolution", out.resolution);
-	seq->get_property ("steps",      out.steps);
+	seq->get_property ("version",       out.version);
+	seq->get_property ("mode",          out.mode);
+	seq->get_property ("resolution",    out.resolution);
+	// Accept legacy "steps" attribute alongside the v2 name.
+	if (!seq->get_property ("pattern_steps", out.pattern_steps)) {
+		seq->get_property ("steps", out.pattern_steps);
+	}
 	for (XMLNode* rn : seq->children ("Row")) {
 		if (!rn) continue;
 		SequencerRowDesc row;
@@ -441,6 +443,7 @@ read_sequencer_from_region (const Region& r)
 		row.channel = static_cast<std::uint8_t> (c & 0x0f);
 		out.rows.push_back (std::move (row));
 	}
+	// v1 top-level cells (legacy migration carry-through).
 	for (XMLNode* cn : seq->children ("Cell")) {
 		if (!cn) continue;
 		SequencerCellDesc cell;
@@ -451,21 +454,48 @@ read_sequencer_from_region (const Region& r)
 		cell.velocity = static_cast<std::uint8_t> (std::min<std::uint32_t> (v, 127));
 		out.cells.push_back (cell);
 	}
+	// v2 patterns + arrangement.
+	for (XMLNode* pn : seq->children ("Pattern")) {
+		if (!pn) continue;
+		SequencerPatternDesc pat;
+		pn->get_property ("id",    pat.id);
+		pn->get_property ("name",  pat.name);
+		pn->get_property ("color", pat.color);
+		for (XMLNode* cn : pn->children ("Cell")) {
+			if (!cn) continue;
+			SequencerCellDesc cell;
+			std::uint32_t v = 100;
+			cn->get_property ("row",      cell.row);
+			cn->get_property ("step",     cell.step);
+			cn->get_property ("velocity", v);
+			cell.velocity = static_cast<std::uint8_t> (std::min<std::uint32_t> (v, 127));
+			pat.cells.push_back (cell);
+		}
+		out.patterns.push_back (std::move (pat));
+	}
+	for (XMLNode* sn : seq->children ("Slot")) {
+		if (!sn) continue;
+		SequencerSlotDesc slot;
+		sn->get_property ("pattern_id",      slot.pattern_id);
+		sn->get_property ("bar",             slot.bar);
+		sn->get_property ("arrangement_row", slot.arrangement_row);
+		out.arrangement.push_back (slot);
+	}
 	return out;
 }
 
 // Build a fresh `<Foyer><Sequencer>` XML subtree from a typed
 // layout. Returns an owned XMLNode*; caller hands it to
-// `region->add_extra_xml` which takes ownership by copying.
+// `region->add_extra_xml` which takes ownership.
 static XMLNode*
 sequencer_to_xml (const SequencerLayoutDesc& layout)
 {
 	XMLNode* foyer = new XMLNode ("Foyer");
 	XMLNode* seq   = foyer->add_child ("Sequencer");
-	seq->set_property ("version",    layout.version);
-	seq->set_property ("mode",       layout.mode);
-	seq->set_property ("resolution", layout.resolution);
-	seq->set_property ("steps",      layout.steps);
+	seq->set_property ("version",       layout.version);
+	seq->set_property ("mode",          layout.mode);
+	seq->set_property ("resolution",    layout.resolution);
+	seq->set_property ("pattern_steps", layout.pattern_steps);
 	for (auto const& r : layout.rows) {
 		XMLNode* rn = seq->add_child ("Row");
 		rn->set_property ("pitch",   static_cast<std::uint32_t> (r.pitch));
@@ -475,11 +505,32 @@ sequencer_to_xml (const SequencerLayoutDesc& layout)
 		if (r.muted)  rn->set_property ("muted",  true);
 		if (r.soloed) rn->set_property ("soloed", true);
 	}
-	for (auto const& c : layout.cells) {
-		XMLNode* cn = seq->add_child ("Cell");
-		cn->set_property ("row",      c.row);
-		cn->set_property ("step",     c.step);
-		cn->set_property ("velocity", static_cast<std::uint32_t> (c.velocity));
+	// v1 carry-through cells (only when patterns is empty).
+	if (layout.patterns.empty ()) {
+		for (auto const& c : layout.cells) {
+			XMLNode* cn = seq->add_child ("Cell");
+			cn->set_property ("row",      c.row);
+			cn->set_property ("step",     c.step);
+			cn->set_property ("velocity", static_cast<std::uint32_t> (c.velocity));
+		}
+	}
+	for (auto const& p : layout.patterns) {
+		XMLNode* pn = seq->add_child ("Pattern");
+		pn->set_property ("id",   p.id);
+		pn->set_property ("name", p.name);
+		if (!p.color.empty ()) pn->set_property ("color", p.color);
+		for (auto const& c : p.cells) {
+			XMLNode* cn = pn->add_child ("Cell");
+			cn->set_property ("row",      c.row);
+			cn->set_property ("step",     c.step);
+			cn->set_property ("velocity", static_cast<std::uint32_t> (c.velocity));
+		}
+	}
+	for (auto const& s : layout.arrangement) {
+		XMLNode* sn = seq->add_child ("Slot");
+		sn->set_property ("pattern_id",      s.pattern_id);
+		sn->set_property ("bar",             s.bar);
+		sn->set_property ("arrangement_row", s.arrangement_row);
 	}
 	return foyer;
 }
@@ -584,12 +635,45 @@ set_sequencer_layout (Session& session, const std::string& region_id, const Sequ
 {
 	auto hit = find_region (session, region_id);
 	if (!hit.region) return false;
-	// `add_extra_xml` replaces any previously-stored node of the same
-	// name — exactly what we want for an idempotent set. The region
-	// takes ownership by copying (see `Stateful::add_extra_xml`).
+	// IMPORTANT: `add_extra_xml` internally calls
+	// `_extra_xml->add_child_nocopy(node)` which stores the raw
+	// pointer in Ardour's XML tree — Ardour takes ownership. We
+	// must NOT delete the node afterwards (dangling child pointer
+	// → session-save traverses freed memory → the Foyer block
+	// silently gets dropped from the serialized .ardour file).
 	XMLNode* node = sequencer_to_xml (layout);
 	hit.region->add_extra_xml (*node);
-	delete node;
+
+	// Resize the region to fit the arrangement extent. Each bar
+	// is `pattern_steps` cells × (PPQN / resolution) ticks. The
+	// last_bar across all arrangement slots determines the total
+	// length. We do the conversion here (not in the sidecar) so
+	// the tempo-aware Beats → samples math lives where the live
+	// tempo map is.
+	std::uint32_t last_bar_plus_one = 0;
+	for (auto const& slot : layout.arrangement) {
+		if (slot.bar + 1 > last_bar_plus_one) last_bar_plus_one = slot.bar + 1;
+	}
+	if (last_bar_plus_one == 0 && !layout.cells.empty ()) {
+		// v1 legacy layout — single implicit pattern at bar 0.
+		last_bar_plus_one = 1;
+	}
+	if (last_bar_plus_one > 0) {
+		const std::uint32_t res = std::max<std::uint32_t> (layout.resolution, 1);
+		const std::uint32_t pat_steps = std::max<std::uint32_t> (layout.pattern_steps, 1);
+		const std::int64_t step_ticks = 960 / static_cast<std::int64_t> (res);
+		const std::int64_t bar_ticks  = static_cast<std::int64_t> (pat_steps) * step_ticks;
+		const std::int64_t total_ticks = static_cast<std::int64_t> (last_bar_plus_one) * bar_ticks;
+		auto length = Temporal::timecnt_t (
+		    Temporal::Beats::ticks (total_ticks),
+		    hit.region->position ());
+		hit.region->set_length (length);
+	}
+
+	// `add_extra_xml` doesn't run through the PropertyChange
+	// bookkeeping — flip the dirty flag manually so the next save
+	// catches our write.
+	session.set_dirty ();
 	return true;
 }
 
@@ -598,12 +682,66 @@ clear_sequencer_layout (Session& session, const std::string& region_id)
 {
 	auto hit = find_region (session, region_id);
 	if (!hit.region) return false;
-	// `Stateful` doesn't expose a removal API, so we replace with an
-	// empty placeholder. The region-updated echo will then show no
-	// `<Sequencer>` child and the UI flips back to piano-roll mode.
-	XMLNode empty ("Foyer");
-	hit.region->add_extra_xml (empty);
+	// `Stateful` doesn't expose a removal API, so we replace with
+	// an empty placeholder that `extra_xml("Foyer")` can still
+	// find (returns a childless node → UI flips back to piano-
+	// roll). Don't delete — Ardour owns it via add_child_nocopy.
+	XMLNode* empty = new XMLNode ("Foyer");
+	hit.region->add_extra_xml (*empty);
+	session.set_dirty ();
 	return true;
+}
+
+static const char*
+plugin_format_label (ARDOUR::PluginType t)
+{
+	switch (t) {
+		case ARDOUR::AudioUnit:   return "au";
+		case ARDOUR::LADSPA:      return "ladspa";
+		case ARDOUR::LV2:         return "lv2";
+		case ARDOUR::Windows_VST: return "vst2";
+		case ARDOUR::LXVST:       return "vst2";
+		case ARDOUR::MacVST:      return "vst2";
+		case ARDOUR::Lua:         return "lua";
+		case ARDOUR::VST3:        return "vst3";
+	}
+	return "internal";
+}
+
+std::vector<PluginCatalogDesc>
+list_plugin_catalog ()
+{
+	std::vector<PluginCatalogDesc> out;
+	auto& mgr = ARDOUR::PluginManager::instance ();
+	// `get_all_plugins` is private — walk each format's public list
+	// directly. The frontend re-sorts the catalog by role / name for
+	// presentation, so the per-format ordering here is fine.
+	auto append = [&out] (const ARDOUR::PluginInfoList& list) {
+		for (auto const& info : list) {
+			if (!info) continue;
+			PluginCatalogDesc d;
+			d.id     = info->unique_id;
+			d.name   = info->name;
+			d.format = plugin_format_label (info->type);
+			d.role   = info->is_instrument () ? "instrument" : "effect";
+			d.vendor = info->creator;
+			// `unique_id` doubles as the URI Foyer's AddPlugin
+			// command echoes back — same round-trip for every
+			// plugin format Ardour supports.
+			d.uri    = info->unique_id;
+			if (!info->category.empty ()) d.tags.push_back (info->category);
+			out.push_back (std::move (d));
+		}
+	};
+	append (mgr.lv2_plugin_info ());
+	append (mgr.vst3_plugin_info ());
+	append (mgr.windows_vst_plugin_info ());
+	append (mgr.lxvst_plugin_info ());
+	append (mgr.mac_vst_plugin_info ());
+	append (mgr.au_plugin_info ());
+	append (mgr.ladspa_plugin_info ());
+	append (mgr.lua_plugin_info ());
+	return out;
 }
 
 std::shared_ptr<PluginInsert>

@@ -196,6 +196,17 @@ pub trait Backend: Send + Sync + 'static {
         Err(BackendError::Other("delete_region not supported".into()))
     }
 
+    /// Duplicate an existing region onto the same track at a new time
+    /// position. Used by the beat sequencer's arrangement "+" button.
+    async fn duplicate_region(
+        &self,
+        _source_region_id: EntityId,
+        _at_samples: u64,
+        _length_samples: Option<u64>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("duplicate_region not supported".into()))
+    }
+
     // ─── MIDI note edits ────────────────────────────────────────────────
     //
     // The backend is fire-and-forget: it accepts the command and relies
@@ -226,6 +237,16 @@ pub trait Backend: Send + Sync + 'static {
         _note_id: EntityId,
     ) -> Result<(), BackendError> {
         Err(BackendError::Other("delete_midi_note not supported".into()))
+    }
+
+    /// Replace every note in the region with `notes` in one atomic
+    /// op. The shim bundles this as a single undo step.
+    async fn replace_region_notes(
+        &self,
+        _region_id: EntityId,
+        _notes: Vec<MidiNote>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("replace_region_notes not supported".into()))
     }
 
     async fn add_patch_change(

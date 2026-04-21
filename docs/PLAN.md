@@ -185,8 +185,31 @@ movement.
 - Simple relay chat for multiple users
 - Floating dialogs like midi roll/editor, plugin editor, plugin config, ettc. should be a different class of window that can be, as a whole displayed and managed separately from core tiles, and have like a separate minimize/move/restore cycle from the main window manager. So you could lay out all of your overlay controls, then hide *all* of them to a dock, then restore the dock for all of them to have them 
 - Channel grouping and bussing - works on back end but no way to edit on front end
+---
+
+- @Foyer Studio/sessions/at the casino/at the casino.ardour#1465-1531  - looks like it is saving now! The format is a little weird - we should be saving sequences, then arranging the sequences on a grid like hydrogen, then using that to generate notes for the region as a regular midi region.
+
+This is creating new regions for each beat - this ain't the thing to do, all of the sequences and arrangements needs to be metadata that drove the generation of the region. Any time we update the sequences and arrangements for the sequences, we should *regenerate* the midi notes for the whole region. You should be able to convert a sequencer track to a regular midi track and hand-edit things on the piano roll, but not the other way around - a sequencer track should auto-generate the midi data.
+
+The piano roll idea - you kind of missed that - basically instead of a fixed grid of drums, if you are using a regular instrument but still want to create an arrangement using the sequencer paradigm, allow a 16 beat or what ever piano roll instead of drum grid, with the option for ad-hoc placement and length of notes instead of to the grid via an alt drag or something like that
+
+It would be awesome if we could have the midi generation happen in the foyer back end, triggered by sending state from the sequencer on the front end. This is where we will truly go on our own for design, but it should be a back end item so events emit on multiple connected clients
+- Plugiin editor needs some work too, I don't see any plugins listed for selection even though it found the one for the black pearl drumkit multi we used for a virtual instrument on one track, so I can't change the instrument. The add instrument dialog appears under the midi setup  panel - this should probably be just inline in the midi form, not a separate panel
+- Mousewheel over track labels in timeline should do vertical scrolling, not timeline zoom. Also need a modifer to be able to mousewheel and scroll down in the larger list
+- Can't add midi tracks, only busses and audio
+- Busses seem to be hooked up, we need a UI for them now
+- MCP tools in foyer Rust API for primary DAW functionality, plus novel things like spectral analyzers, histograms, audio snippets for models that support audio, beats sequencer / looping addon, MIDI editing, and other things that a clanker can use to aid with production
+- Automation still missing on tracks!
+
+
 
 ---
 
-- MCP tools in foyer Rust API for primary DAW functionality, plus novel things like spectral analyzers, histograms, audio snippets for models that support audio, beats sequencer / looping addon, MIDI editing, and other things that a clanker can use to aid with production
-- Automation still missing per track!
+
+Multi-track add/delete: schema has no CreateTrack / DeleteTrack — that's its own vertical slice (schema + backend trait + host client + shim Session::new_audio_track / Session::remove_route wiring).
+96/192 kHz shim-side: shim delivers at Ardour's session rate with no resampling. For true end-to-end high rates, either set Ardour's session rate to match or land a resampler in the shim (speex-resampler would be the obvious choice).
+Browser→DAW ingress: the shim command now rejects cleanly instead of hanging. Needs a SidecarInputPort class parallel to MasterTap (Decision 24 has the sketch). ~200–400 lines of RT-disciplined Ardour C++.
+
+
+- More polish on the beats
+- Add region in midi channel context menu (should add region at point where right clicked)
