@@ -72,16 +72,12 @@ export class TimelineView extends LitElement {
       cursor: pointer;
     }
     .toolbar button:hover { color: var(--color-text); border-color: var(--color-accent); }
-    /* Lit's shadow DOM doesn't inherit Tailwind's global
-     * `* { box-sizing: border-box }`. The default content-box model
-     * makes any element with both `width: Npx` and padding/border
-     * visually wider than N — which threw off the lane-head ↔
-     * timeline alignment (the head was 140px wide on paper but
-     * 163px visually, so 0s on the ruler ended up covered by the
-     * head's opaque background). Force border-box throughout the
-     * component so widths actually mean what they say.
-     */
-    *, *::before, *::after { box-sizing: border-box; }
+    /* Force border-box throughout this component. Tailwind sets it
+       globally on the document, but Lit shadow DOM doesn't inherit
+       that — so width:140px + padding + border was producing a
+       163px-wide lane-head while regions positioned at 140px got
+       covered by its opaque background. */
+    :host, *, *::before, *::after { box-sizing: border-box; }
     .scroll { flex: 1; overflow: auto; }
     .grid { position: relative; min-width: 100%; }
     .ruler {

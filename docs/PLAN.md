@@ -206,11 +206,18 @@ It would be awesome if we could have the midi generation happen in the foyer bac
 ---
 
 
+
+- More polish on the beats - The add pattern button should be above the patterns boxes, the arrangement box should be resizable veritcally with vertical overflow, the preset beat kit we detected should be able to add additional beats (pick from piano roll, name the custom drum, should get placed in the note sequence). Have a checkbox to enable/disable audio preview in all piano rolls so when you click a note or drum, as long as the channel is unmuted and bussed to output (not disk only). Add ability to drag up/down the velocity for beats on the sequencer (need to show colored velocity markers with multiple beats per note if there is overlap, see screenshot)
+- Add "add region" in midi channel context menu (should add region at point where right clicked)
+- Alt drag for adhoc placement of beats and notes in quantized grid, alt drag resize of notes too
+- Presets manager on beat loops (with option to import/export as $name.fybt or something json or yaml, look at persisting in ardour config if there are any extensible config sections for the DAW as a whole) - for now store in browser storage
+- Add disk (play) and in (monitor) option on the mixer
+
+
+Please follow-up on these:
+
 Multi-track add/delete: schema has no CreateTrack / DeleteTrack — that's its own vertical slice (schema + backend trait + host client + shim Session::new_audio_track / Session::remove_route wiring).
 96/192 kHz shim-side: shim delivers at Ardour's session rate with no resampling. For true end-to-end high rates, either set Ardour's session rate to match or land a resampler in the shim (speex-resampler would be the obvious choice).
 Browser→DAW ingress: the shim command now rejects cleanly instead of hanging. Needs a SidecarInputPort class parallel to MasterTap (Decision 24 has the sketch). ~200–400 lines of RT-disciplined Ardour C++.
 
-
-- More polish on the beats
-- Add region in midi channel context menu (should add region at point where right clicked)
-- Alt drag for adhoc placement of beats and notes in quantized grid
+And review context and find any incomplete items and write up a new plan document with everything left to do based on instructions so far.
