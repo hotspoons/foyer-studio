@@ -4,6 +4,7 @@ import { icon } from "../icons.js";
 import { cycleTheme, getTheme, onThemeChange, THEME_META } from "../theme.js";
 import { promptText } from "./prompt-modal.js";
 import { showShareModal } from "./share-modal.js";
+import { AudioIngress } from "../viz/audio-ingress.js";
 import "./main-menu.js";
 import "./session-switcher.js";
 
@@ -15,6 +16,7 @@ export class StatusBar extends LitElement {
     _peers: { state: true, type: Array },
     _layoutTick: { state: true, type: Number },
     _greeting: { state: true, type: Object },
+    _ingressing: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -158,6 +160,20 @@ export class StatusBar extends LitElement {
       background: var(--color-warning);
       box-shadow: 0 0 6px color-mix(in oklab, var(--color-warning) 60%, transparent);
     }
+    .ingress-chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: transparent; border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm); color: var(--color-text-muted);
+      padding: 2px 8px; font: inherit; font-size: 10px;
+      letter-spacing: 0.06em; text-transform: uppercase;
+      cursor: pointer; transition: all 0.15s ease;
+    }
+    .ingress-chip.on {
+      color: var(--color-danger);
+      border-color: color-mix(in oklab, var(--color-danger) 50%, transparent);
+      background: color-mix(in oklab, var(--color-danger) 10%, transparent);
+    }
+    .ingress-chip:hover { border-color: var(--color-accent); }
   `;
 
   constructor() {

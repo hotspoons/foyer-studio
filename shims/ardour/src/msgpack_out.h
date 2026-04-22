@@ -103,6 +103,15 @@ std::vector<std::uint8_t> encode_audio_egress_started (std::uint32_t stream_id);
 /// Encode `Event::AudioEgressStopped { stream_id }`.
 std::vector<std::uint8_t> encode_audio_egress_stopped (std::uint32_t stream_id);
 
+/// Encode `Event::AudioIngressOpened { stream_id, source, format }`.
+/// Sent after the shim registers a soft input port. The HostBackend's
+/// `pending_ingress` oneshot resolves on receipt.
+std::vector<std::uint8_t> encode_audio_ingress_opened (
+    std::uint32_t stream_id, std::uint32_t sample_rate, std::uint32_t channels);
+
+/// Encode `Event::AudioIngressClosed { stream_id }`.
+std::vector<std::uint8_t> encode_audio_ingress_closed (std::uint32_t stream_id);
+
 } // namespace ArdourSurface::msgpack_out
 
 #endif

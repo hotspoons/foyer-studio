@@ -661,6 +661,35 @@ encode_audio_egress_stopped (std::uint32_t stream_id)
 	});
 }
 
+std::vector<std::uint8_t>
+encode_audio_ingress_opened (std::uint32_t stream_id, std::uint32_t sample_rate, std::uint32_t channels)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (5);
+		o.str ("dir");          o.str ("event");
+		o.str ("type");         o.str ("audio_ingress_opened");
+		o.str ("stream_id");    o.u (stream_id);
+		o.str ("source");
+		o.map (1);
+		o.str ("kind");         o.str ("virtual_input");
+		o.str ("format");
+		o.map (2);
+		o.str ("sample_rate");  o.u (sample_rate);
+		o.str ("channels");     o.u (channels);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_audio_ingress_closed (std::uint32_t stream_id)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");       o.str ("event");
+		o.str ("type");      o.str ("audio_ingress_closed");
+		o.str ("stream_id"); o.u (stream_id);
+	});
+}
+
 namespace {
 
 // Emit a single `Region` struct map. The size is variable because three of

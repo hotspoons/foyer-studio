@@ -112,6 +112,8 @@ set(ARDOUR_INCLUDES
   "${FOYER_ARDOUR_SOURCE}/libs/libltc/ltc"
   "${FOYER_ARDOUR_SOURCE}/libs/libltc"
   "${FOYER_ARDOUR_SOURCE}/libs/fst"
+  # zita-resampler/vmresampler.h is included by ardour/audio_port.h
+  "${FOYER_ARDOUR_SOURCE}/libs/zita-resampler"
 )
 
 # ── System dependencies ────────────────────────────────────────
@@ -151,6 +153,7 @@ add_library(foyer_shim SHARED
   src/schema_map.cc
   src/msgpack_out.cc
   src/master_tap.cc
+  src/shim_input_port.cc
   src/session_uuid.cc
 )
 

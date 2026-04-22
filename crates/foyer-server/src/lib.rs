@@ -14,6 +14,7 @@ mod audio;
 mod audio_opus;
 mod audio_ws;
 mod dev;
+mod ingress_ws;
 mod files;
 mod jail;
 pub mod orphans;
@@ -25,6 +26,7 @@ pub use jail::{Jail, JailError};
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -32,7 +34,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use foyer_backend::Backend;
+use foyer_backend::{Backend, PcmTx};
 use foyer_schema::{BackendInfo, EntityId, Envelope, Event, SCHEMA_VERSION};
 
 use crate::sessions::SessionRegistry;
@@ -165,6 +167,12 @@ pub(crate) struct AppState {
     /// `stream_id`; the `/ws/audio/:stream_id` route subscribes to
     /// its broadcasts. Shared across all connections.
     pub(crate) audio_hub: Arc<audio::AudioHub>,
+    /// M6b ingress senders. Keyed by `stream_id`; browser pushes
+    /// binary PCM to `/ws/ingress/:stream_id`, and the task there
+    /// forwards frames into this `mpsc::Sender`. Dropping the entry
+    /// (on `AudioIngressClose` or server restart) closes the channel
+    /// and the backend tears the sink down from its side.
+    pub(crate) ingress_senders: Mutex<HashMap<u32, PcmTx>>,
     /// Multi-session registry. Holds every currently-open session
     /// keyed by its UUID; each has its own backend Arc + event pump.
     /// `add_session`/`close_session` on this registry broadcasts
@@ -338,6 +346,7 @@ impl Server {
             listen_port: std::sync::atomic::AtomicU16::new(0),
             tls_enabled: std::sync::atomic::AtomicBool::new(false),
             audio_hub: Arc::new(audio::AudioHub::new()),
+            ingress_senders: Mutex::new(HashMap::new()),
             sessions,
             orphans: RwLock::new(Vec::new()),
             focus_session_id: RwLock::new(None),
@@ -396,6 +405,7 @@ impl Server {
         let mut router = Router::new()
             .route("/ws", get(ws::upgrade))
             .route("/ws/audio/:stream_id", get(audio_ws::upgrade))
+            .route("/ws/ingress/:stream_id", get(ingress_ws::upgrade))
             .route("/files/*path", get(files::serve_file))
             .route("/console", get(console_tail))
             .route("/qr", get(qr_svg));

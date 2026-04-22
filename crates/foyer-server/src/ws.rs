@@ -467,17 +467,58 @@ async fn dispatch_command(
                 }
             }
         }
+        Command::AudioIngressOpen {
+            stream_id,
+            source,
+            format,
+        } => {
+            match state
+                .backend()
+                .await
+                .open_ingress(stream_id, source.clone(), format)
+                .await
+            {
+                Ok(tx) => {
+                    state.ingress_senders.lock().await.insert(stream_id, tx);
+                    broadcast_event(
+                        state,
+                        Event::AudioIngressOpened {
+                            stream_id,
+                            source,
+                            format,
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "ingress_open_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::AudioIngressClose { stream_id } => {
+            // Dropping the sender from the registry closes the mpsc
+            // channel; the backend's ingress loop exits and the port
+            // (or stub capture) tears down from its side.
+            state.ingress_senders.lock().await.remove(&stream_id);
+            broadcast_event(state, Event::AudioIngressClosed { stream_id }).await;
+        }
         Command::AudioEgressStart { .. }
         | Command::AudioEgressStop { .. }
-        | Command::AudioIngressOpen { .. }
-        | Command::AudioIngressClose { .. }
         | Command::LatencyProbe { .. } => {
-            // M6 territory — acknowledge with an error so the tester UI sees it.
+            // M6 egress/latency territory — acknowledge with an error so
+            // the tester UI sees it. Ingress above is now wired.
             broadcast_event(
                 state,
                 Event::Error {
                     code: "not_implemented".into(),
-                    message: "audio commands land in M6".into(),
+                    message: "audio command not yet wired".into(),
                 },
             )
             .await;

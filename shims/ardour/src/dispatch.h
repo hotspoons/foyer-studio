@@ -18,6 +18,7 @@ namespace ArdourSurface {
 
 class FoyerShim;
 class MasterTap;
+class ShimInputPort;
 
 class Dispatcher
 {
@@ -29,8 +30,8 @@ public:
 	/// marshals the command onto the shim's event loop.
 	void on_control_frame (const std::vector<std::uint8_t>&);
 
-	/// Called from the IPC thread for each inbound Audio frame. For M3 this
-	/// is a no-op (ingress routing lands in M6b).
+	/// Called from the IPC thread for each inbound Audio frame.
+	/// Routes ingress audio into the matching ShimInputPort ring buffer.
 	void on_audio_frame (const std::vector<std::uint8_t>&);
 
 private:
@@ -43,6 +44,11 @@ private:
 	// thread both touch it.
 	std::mutex _taps_mx;
 	std::map<std::uint32_t, std::shared_ptr<MasterTap>> _taps;
+
+	// Active ingress ports keyed by stream_id. Guarded by _ingress_mx
+	// because IPC reader and event-loop threads both touch it.
+	std::mutex _ingress_mx;
+	std::map<std::uint32_t, std::unique_ptr<ShimInputPort>> _ingress_ports;
 };
 
 } // namespace ArdourSurface

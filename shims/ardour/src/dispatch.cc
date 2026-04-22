@@ -40,6 +40,7 @@
 #include "master_tap.h"
 #include "msgpack_out.h"
 #include "schema_map.h"
+#include "shim_input_port.h"
 #include "surface.h"
 
 using namespace ARDOUR;
@@ -242,9 +243,10 @@ struct DecodedCmd
 	std::string preset_id;    // Command::LoadPluginPreset (preset URI)
 	double value = 0.0;
 
-	// Audio stream fields (AudioStreamOpen / Close).
+	// Audio stream fields (AudioStreamOpen / Close / IngressOpen).
 	std::uint32_t audio_stream_id  = 0;
-	std::string   audio_source;       // "master" | "track.<id>" | "monitor"
+	std::string   audio_source;       // "master" | "track.<id>" | "monitor" | "virtual_input"
+	std::string   audio_source_name;  // name from VirtualInput { name: ... }
 	std::uint32_t audio_channels     = 2;
 	std::uint32_t audio_sample_rate  = 48000;
 
@@ -895,6 +897,8 @@ decode (const std::vector<std::uint8_t>& buf)
 								out.audio_source = v;
 							} else if (kk == "id") {
 								if (!in.read_str (out.track_id)) return out;
+							} else if (kk == "name") {
+								if (!in.read_str (out.audio_source_name)) return out;
 							} else {
 								if (!in.skip_value ()) return out;
 							}
@@ -1046,9 +1050,23 @@ Dispatcher::Dispatcher (FoyerShim& s)
 Dispatcher::~Dispatcher () = default;
 
 void
-Dispatcher::on_audio_frame (const std::vector<std::uint8_t>&)
+Dispatcher::on_audio_frame (const std::vector<std::uint8_t>& payload)
 {
-	// M6b territory — drop frames for now.
+	// Unpack stream_id (u32 LE) + interleaved f32 PCM.
+	if (payload.size () < 4) return;
+	const std::uint32_t stream_id =
+	      (static_cast<std::uint32_t> (payload[0]))
+	    | (static_cast<std::uint32_t> (payload[1]) << 8)
+	    | (static_cast<std::uint32_t> (payload[2]) << 16)
+	    | (static_cast<std::uint32_t> (payload[3]) << 24);
+
+	std::lock_guard<std::mutex> lk (_ingress_mx);
+	auto it = _ingress_ports.find (stream_id);
+	if (it != _ingress_ports.end () && it->second) {
+		const float* samples = reinterpret_cast<const float*> (payload.data () + 4);
+		const std::size_t n_floats = (payload.size () - 4) / sizeof (float);
+		it->second->push_audio (samples, n_floats);
+	}
 }
 
 void
@@ -1643,23 +1661,43 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			});
 			break;
 		}
-		case DecodedCmd::Kind::AudioIngressOpen:
+		case DecodedCmd::Kind::AudioIngressOpen: {
+			const std::uint32_t sid   = cmd.audio_stream_id;
+			const std::uint32_t ch    = cmd.audio_channels;
+			const std::uint32_t sr    = cmd.audio_sample_rate;
+			std::string         name  = cmd.audio_source_name.empty ()
+			                            ? std::to_string (sid) : cmd.audio_source_name;
+			// Use a conservative frame size if the command didn't carry one.
+			const std::uint32_t fsize = 960; // ~20 ms @ 48 kHz
+
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, sid, name, ch, sr, fsize, this] () {
+				try {
+					auto port = std::make_unique<ShimInputPort> (
+					    *shim, sid, name, ch, sr, fsize);
+					{
+						std::lock_guard<std::mutex> lk (this->_ingress_mx);
+						this->_ingress_ports[sid] = std::move (port);
+					}
+					auto ack = msgpack_out::encode_audio_ingress_opened (sid, sr, ch);
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
+				} catch (const std::exception& e) {
+					PBD::error << "foyer_shim: [ingress] open failed: " << e.what () << endmsg;
+				}
+			});
+			break;
+		}
 		case DecodedCmd::Kind::AudioIngressClose: {
-			// Honest stub — a real impl needs a new shim class
-			// (mirror of MasterTap but for input): register a soft
-			// input port via `session.engine().register_input_port`,
-			// own a non-RT ring buffer fed by the sidecar's IPC audio
-			// drain, and pull into the port's `AudioBuffer` on each
-			// RT cycle. That's ~200-400 lines of Ardour C++ + careful
-			// RT discipline (same shape as master_tap.cc). Decision
-			// 24 in docs/DECISIONS.md spells out the approach.
-			//
-			// Surface a clean error so the sidecar's latency-probe
-			// / ingress negotiation unwinds cleanly instead of
-			// hanging waiting for an AudioIngressOpened event that
-			// never comes.
-			PBD::warning << "foyer_shim: audio_ingress_open/close not implemented yet; "
-			             << "ignoring (see Decision 24)" << endmsg;
+			const std::uint32_t sid = cmd.audio_stream_id;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, sid, this] () {
+				{
+					std::lock_guard<std::mutex> lk (this->_ingress_mx);
+					this->_ingress_ports.erase (sid);
+				}
+				auto ack = msgpack_out::encode_audio_ingress_closed (sid);
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
+			});
 			break;
 		}
 		case DecodedCmd::Kind::SetSequencerLayout: {
