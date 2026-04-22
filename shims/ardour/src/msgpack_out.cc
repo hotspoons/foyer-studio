@@ -27,6 +27,7 @@
 #include <sstream>
 
 #include "ardour/automation_control.h"
+#include "ardour/automation_list.h"
 #include "ardour/meter.h"
 #include "ardour/monitor_control.h"
 #include "ardour/region.h"
@@ -36,6 +37,7 @@
 #include "ardour/stripable.h"
 #include "ardour/track.h"
 #include "ardour/types.h"
+#include "evoral/ControlList.h"
 #include "pbd/controllable.h"
 #include "temporal/tempo.h"
 #include "temporal/timeline.h"
@@ -48,6 +50,21 @@ using namespace PBD;
 namespace ArdourSurface::msgpack_out {
 
 namespace {
+
+// Convert Ardour's AutoState enum to the lowercase strings the Rust
+// schema's `AutomationMode` deserializes. Unknown / off falls to
+// "off" so the UI doesn't paint a lane it can't drive.
+const char* automation_mode_str (ARDOUR::AutoState s)
+{
+	switch (s) {
+		case ARDOUR::Play:   return "play";
+		case ARDOUR::Write:  return "write";
+		case ARDOUR::Touch:  return "touch";
+		case ARDOUR::Latch:  return "latch";
+		case ARDOUR::Off:
+		default:             return "off";
+	}
+}
 
 // ---------------- low-level msgpack primitives ----------------
 
@@ -399,10 +416,28 @@ encode_session_snapshot (Session& session,
 			std::vector<schema_map::PluginDesc> plugins;
 			std::shared_ptr<AutomationControl> rec_ctl;
 			std::shared_ptr<ARDOUR::MonitorControl> mon_ctl;
+			// Well-known automation-lane sources. Lanes without a
+			// real AutomationList get dropped; the UI treats "no
+			// list" as "host doesn't expose automation for this
+			// control" rather than "empty lane".
+			struct LaneSrc {
+				std::string                         control_id;
+				std::shared_ptr<AutomationControl>  ac;
+			};
+			std::vector<LaneSrc> lane_srcs;
 			if (it != route_by_id.end ()) {
 				plugins = schema_map::enumerate_plugins (it->second);
 				rec_ctl = it->second->rec_enable_control ();
 				mon_ctl = it->second->monitoring_control ();
+				auto const& r = it->second;
+				lane_srcs.push_back ({ s.self_id + ".gain", r->gain_control () });
+				lane_srcs.push_back ({ s.self_id + ".pan",  r->pan_azimuth_control () });
+				lane_srcs.push_back ({ s.self_id + ".mute", r->mute_control () });
+				lane_srcs.push_back ({ s.self_id + ".solo", r->solo_control () });
+			}
+			std::size_t lane_count = 0;
+			for (auto const& l : lane_srcs) {
+				if (l.ac && l.ac->alist ()) ++lane_count;
 			}
 
 			// Base track shape is 9 fields (id, name, kind, color,
@@ -414,6 +449,7 @@ encode_session_snapshot (Session& session,
 			if (rec_ctl) ++track_fields;
 			if (mon_ctl) ++track_fields;
 			if (!plugins.empty ()) ++track_fields;
+			if (lane_count > 0) ++track_fields;
 
 			o.map (track_fields);
 			o.str ("id");   o.str (s.self_id);
@@ -457,6 +493,41 @@ encode_session_snapshot (Session& session,
 					o.str ("params");
 					o.array (pd.params.size ());
 					for (auto const& p : pd.params) emit_param_full (p);
+				}
+			}
+
+			// Automation lanes for the well-known track controls. Each
+			// lane gets `{ control_id, mode, points }` with points as
+			// `{ time_samples, value }` pairs read from the underlying
+			// AutomationList under its reader lock.
+			if (lane_count > 0) {
+				o.str ("automation_lanes");
+				o.array (lane_count);
+				for (auto const& l : lane_srcs) {
+					if (!l.ac) continue;
+					auto alist = l.ac->alist ();
+					if (!alist) continue;
+					std::vector<std::pair<std::uint64_t, double>> pts;
+					{
+						PBD::RWLock::ReaderLock lm (alist->lock ());
+						for (auto const* ev : alist->events ()) {
+							if (!ev) continue;
+							const auto sp = ev->when.samples ();
+							pts.emplace_back (
+							    static_cast<std::uint64_t> (std::max<Temporal::samplepos_t> (sp, 0)),
+							    ev->value);
+						}
+					}
+					o.map (3);
+					o.str ("control_id"); o.str (l.control_id);
+					o.str ("mode");       o.str (automation_mode_str (alist->automation_state ()));
+					o.str ("points");
+					o.array (pts.size ());
+					for (auto const& p : pts) {
+						o.map (2);
+						o.str ("time_samples"); o.u (p.first);
+						o.str ("value");        o.f64 (p.second);
+					}
 				}
 			}
 		}

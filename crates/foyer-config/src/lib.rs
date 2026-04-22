@@ -56,8 +56,31 @@ pub struct Config {
     pub default_backend: String,
     #[serde(default)]
     pub launcher: LauncherConfig,
+    /// Optional server settings — listen address + TLS pair. CLI flags
+    /// still win when present; this is the "I always want LAN-HTTPS
+    /// when I launch this install" fallback.
+    #[serde(default)]
+    pub server: ServerConfig,
     #[serde(default)]
     pub backends: Vec<BackendConfig>,
+}
+
+/// Network config for the sidecar's HTTP/WS surface. Both fields
+/// optional; unset leaves the CLI defaults (`127.0.0.1:3838`, no TLS).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// Bind address like `"0.0.0.0:3838"`. Overrides the CLI default
+    /// but is still overridable with `--listen` on the command line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    /// Path to a PEM-encoded TLS certificate chain. When set together
+    /// with `tls_key`, the server runs HTTPS / WSS. Self-signed certs
+    /// work for LAN use — see `just run-lan-tls`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert: Option<PathBuf>,
+    /// Path to a PEM-encoded TLS private key matching `tls_cert`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key: Option<PathBuf>,
 }
 
 fn default_version() -> u32 { CONFIG_SCHEMA_VERSION }
@@ -201,6 +224,7 @@ pub fn seed_default() -> Config {
             jail: default_launcher_jail(),
             recent: Vec::new(),
         },
+        server: ServerConfig::default(),
         backends,
     }
 }

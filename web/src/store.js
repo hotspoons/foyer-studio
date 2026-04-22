@@ -43,6 +43,17 @@ export class Store extends EventTarget {
       // reattach to, or crashed shims the user can dismiss / reopen.
       // One-shot list (cleared as the user resolves each).
       orphans: [],
+      // Set of track ids whose regions include at least one active
+      // beat-sequencer layout (`foyer_sequencer.active !== false`).
+      // Populated from `regions_list` / `region_updated` events so
+      // anything that renders tracks (mixer strips, timeline lane
+      // kind) can mark them with a SEQ chip without having to
+      // re-walk the per-track region list itself.
+      sequencerTrackIds: new Set(),
+      // Latest known regions per track. Kept so UI surfaces that
+      // don't own their own region state (mixer strip chips,
+      // agent tools) can query without a dedicated subscription.
+      regionsByTrack: new Map(),
     };
     this._peerPruneInterval = null;
     if (typeof window !== "undefined") {
@@ -124,6 +135,23 @@ export class Store extends EventTarget {
   /** Current value for a control ID, or undefined if unknown. */
   get(id) {
     return this.state.controls.get(id);
+  }
+
+  /** Recompute `sequencerTrackIds` from the regions map. Called on
+   *  every region mutation so both the mixer and the timeline can
+   *  read a cheap Set.has() instead of re-walking per render. */
+  _recomputeSequencerTracks() {
+    const next = new Set();
+    for (const [tid, list] of this.state.regionsByTrack) {
+      for (const r of list || []) {
+        const layout = r?.foyer_sequencer;
+        if (layout && layout.active !== false) {
+          next.add(tid);
+          break;
+        }
+      }
+    }
+    this.state.sequencerTrackIds = next;
   }
 
   // ── multi-session helpers ───────────────────────────────────────
@@ -354,6 +382,39 @@ export class Store extends EventTarget {
         this.state.orphans = Array.isArray(body.orphans) ? body.orphans : [];
         this.dispatchEvent(new CustomEvent("orphans"));
         this._emit();
+        break;
+      }
+      case "regions_list": {
+        const list = Array.isArray(body.regions) ? body.regions : [];
+        this.state.regionsByTrack.set(body.track_id, list);
+        this._recomputeSequencerTracks();
+        this._emit();
+        break;
+      }
+      case "region_updated": {
+        const r = body.region;
+        if (!r) break;
+        const list = this.state.regionsByTrack.get(r.track_id) || [];
+        const idx = list.findIndex((x) => x.id === r.id);
+        const copy = list.slice();
+        if (idx >= 0) copy[idx] = r;
+        else copy.push(r);
+        this.state.regionsByTrack.set(r.track_id, copy);
+        this._recomputeSequencerTracks();
+        this._emit();
+        break;
+      }
+      case "region_removed": {
+        const tid = body.track_id;
+        const list = this.state.regionsByTrack.get(tid);
+        if (list) {
+          this.state.regionsByTrack.set(
+            tid,
+            list.filter((r) => r.id !== body.region_id),
+          );
+          this._recomputeSequencerTracks();
+          this._emit();
+        }
         break;
       }
       default:

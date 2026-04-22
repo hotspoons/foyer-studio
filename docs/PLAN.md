@@ -231,13 +231,6 @@ It would be awesome if we could have the midi generation happen in the foyer bac
 - ~~Justfile `kill-daws` foot-gun~~ (2026-04-22) — Recipe used to `pgrep -x foyer` which matched the CLI binary itself, taking out the sidecar. Split into `kill-daws` (Ardour only, sweeps dead-pid registry entries) and `kill-all` (full reset including the `foyer` process). `kill-daws` also scrubs sessions-dir JSONs whose pids are dead so the welcome screen doesn't render ghost "crashed" entries after a hard kill.
 
 
-## Remaining from the session lifecycle slice
-
-- Wire the "already-open-by-path" short-circuit: `Command::LaunchProject` should check `SessionRegistry::find_by_path(canonical_path)` and `SelectSession` to it when a match exists instead of spawning a second shim.
-- Orphan *reattach* (Ardour process still running, we just lost the sidecar): implement by letting `HostBackend::connect(socket_path)` be driven from the reattach handler, bypassing the CLI spawner's launch-and-wait step.
-- Session → Recent menu entry: today recents only surface in the welcome screen. Add the submenu to `main-menu.js` so opening a recent doesn't require closing the active session first.
-- New-session creation: the welcome screen's "New session…" is stubbed pending a shim command. Needs `CreateEmptySession { path, template? }` in the schema + a `session.new_session()` call on the Ardour side.
-- Per-connection session selection: `Command::SelectSession` currently sets a sidecar-wide focus. For multi-browser-window scenarios (pop-out into a second monitor), each WS connection should track its own `current_session_id`. Threading that through `dispatch_command` is mechanical but touches every handler.
 
 
 Please follow-up on these:
@@ -246,5 +239,16 @@ Multi-track add/delete: schema has no CreateTrack / DeleteTrack — that's its o
 96/192 kHz shim-side: shim delivers at Ardour's session rate with no resampling. For true end-to-end high rates, either set Ardour's session rate to match or land a resampler in the shim (speex-resampler would be the obvious choice).
 Browser→DAW ingress: the shim command now rejects cleanly instead of hanging. Needs a SidecarInputPort class parallel to MasterTap (Decision 24 has the sketch). ~200–400 lines of RT-disciplined Ardour C++.
 
-And review context and find any incomplete items and write up a new plan document with everything left to do based on instructions so far.
+Double clicking on tracks should open the track editor. For midi tracks we should have the rest of the context menu available above the fold so can can three-click access midi editors or midi functions
+Also if it is a sequencer-driven track, it would be cool to see it marked like that in the strips instead of just midi (like midi(seq) or something)
+Let's plan to start automation, this is a big one we'll need
 
+And review context and find any incomplete items and write up a new plan document with everything left to do based on instructions so far. Look at these too: 
+
+## Remaining from the session lifecycle slice
+
+- Wire the "already-open-by-path" short-circuit: `Command::LaunchProject` should check `SessionRegistry::find_by_path(canonical_path)` and `SelectSession` to it when a match exists instead of spawning a second shim.
+- Orphan *reattach* (Ardour process still running, we just lost the sidecar): implement by letting `HostBackend::connect(socket_path)` be driven from the reattach handler, bypassing the CLI spawner's launch-and-wait step.
+- Session → Recent menu entry: today recents only surface in the welcome screen. Add the submenu to `main-menu.js` so opening a recent doesn't require closing the active session first.
+- New-session creation: the welcome screen's "New session…" is stubbed pending a shim command. Needs `CreateEmptySession { path, template? }` in the schema + a `session.new_session()` call on the Ardour side.
+- Per-connection session selection: `Command::SelectSession` currently sets a sidecar-wide focus. For multi-browser-window scenarios (pop-out into a second monitor), each WS connection should track its own `current_session_id`. Threading that through `dispatch_command` is mechanical but touches every handler.

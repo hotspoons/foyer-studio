@@ -144,6 +144,18 @@ RUN git lfs install --system
 
 USER vscode
 
+# Pre-create XDG base-dir paths owned by vscode. Without this, bind mounts
+# in devcontainer.json whose targets are under /home/vscode/.local/ cause
+# Docker (running as root) to auto-create the missing parents as root:root,
+# which then blocks tools like opencode from mkdir'ing sibling state dirs
+# (e.g. ~/.local/state) at runtime.
+RUN mkdir -p \
+      /home/vscode/.local/share \
+      /home/vscode/.local/state \
+      /home/vscode/.local/bin \
+      /home/vscode/.cache \
+      /home/vscode/.config
+
 # Install Rust via rustup (stable) + extra components useful for development.
 ENV RUSTUP_HOME=/home/vscode/.rustup \
     CARGO_HOME=/home/vscode/.cargo \

@@ -85,6 +85,7 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
         group_id: None,
         inputs: vec![],
         outputs: vec![],
+        automation_lanes: vec![],
     }
 }
 

@@ -27,6 +27,11 @@ rustc --version
 cargo --version
 
 #######################
+# opencode CLI
+#######################
+curl -fsSL https://opencode.ai/install | bash
+
+#######################
 # Optional user post-install hook
 #######################
 DEVCONTAINER_USER_POST_SCRIPT_FILE=".devcontainer/.user-post-install.sh"

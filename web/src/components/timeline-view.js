@@ -15,6 +15,7 @@ import { LitElement, html, css } from "lit";
 import { WaveformCache } from "../layout/waveform-cache.js";
 import "../viz/waveform-gl.js";
 import "./midi-strip.js";
+import "./automation-lane.js";
 import "../viz/viz-picker.js";
 import { scrollbarStyles } from "../shared-styles.js";
 import { showContextMenu } from "./context-menu.js";
@@ -146,7 +147,20 @@ export class TimelineView extends LitElement {
       border-left-color: var(--color-accent);
     }
     .lane-name { font-size: 11px; font-weight: 600; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .lane-kind { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-text-muted); }
+    .lane-kind {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--color-text-muted);
+      display: inline-flex; align-items: center; gap: 5px;
+    }
+    .seq-chip {
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: color-mix(in oklab, var(--color-accent) 24%, transparent);
+      color: var(--color-accent);
+    }
     .lane-controls {
       display: flex;
       gap: 3px;
@@ -186,6 +200,21 @@ export class TimelineView extends LitElement {
       border-color: var(--color-danger, #d04040);
       color: var(--color-danger, #d04040);
     }
+    .lane-ctl-btn.on.auto {
+      background: color-mix(in oklab, var(--color-accent-2, #22d3ee) 35%, transparent);
+      border-color: var(--color-accent-2, #22d3ee);
+      color: var(--color-accent-2, #22d3ee);
+    }
+    .automation-stack {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      flex-direction: column;
+      pointer-events: auto;
+      z-index: 1;
+    }
+    .automation-stack foyer-automation-lane { width: 100%; }
     .region {
       position: absolute;
       top: 4px; bottom: 4px;
@@ -443,19 +472,13 @@ export class TimelineView extends LitElement {
     ev.stopPropagation();
     const items = [
       { heading: track.name },
-      {
-        label: "Track editor…",
-        icon: "adjustments-horizontal",
-        action: () => import("./track-editor-modal.js")
-                        .then((m) => m.openTrackEditor(track.id)),
-      },
     ];
+    // MIDI-specific actions land at the TOP of the menu so
+    // three-click access (right-click → read → click) hits the
+    // piano roll / beat sequencer without scanning past track-
+    // editor items. Track editor stays reachable but moves below
+    // the MIDI-specific block.
     if (track.kind === "midi") {
-      items.push({
-        label: "Add region at playhead",
-        icon: "plus",
-        action: () => this._addRegionAtPlayhead(track),
-      });
       items.push({
         label: "Open piano roll…",
         icon: "sparkles",
@@ -467,12 +490,40 @@ export class TimelineView extends LitElement {
         action: () => this._openBeatSequencerForTrack(track),
       });
       items.push({
+        label: "Add region at playhead",
+        icon: "plus",
+        action: () => this._addRegionAtPlayhead(track),
+      });
+      items.push({
         label: "MIDI patches & banks…",
         icon: "queue-list",
         action: () => this._openMidiManager(track),
       });
+      items.push({ separator: true });
     }
+    items.push({
+      label: "Track editor…",
+      icon: "adjustments-horizontal",
+      action: () => import("./track-editor-modal.js")
+                      .then((m) => m.openTrackEditor(track.id)),
+    });
     showContextMenu(ev, items);
+  }
+
+  _isSequencerTrack(trackId) {
+    const ids = window.__foyer?.store?.state?.sequencerTrackIds;
+    return ids ? ids.has(trackId) : false;
+  }
+
+  _automationOpen(trackId) {
+    if (!this._autoOpen) this._autoOpen = new Set();
+    return this._autoOpen.has(trackId);
+  }
+  _toggleAutomation(trackId) {
+    if (!this._autoOpen) this._autoOpen = new Set();
+    if (this._autoOpen.has(trackId)) this._autoOpen.delete(trackId);
+    else this._autoOpen.add(trackId);
+    this.requestUpdate();
   }
 
   _addRegionAtPlayhead(track) {
@@ -859,10 +910,15 @@ export class TimelineView extends LitElement {
       <div class="lane ${selected ? "selected" : ""}" style="height:${h}px"
            @contextmenu=${(e) => this._onLaneContext(e, track)}>
         <div class="lane-head" style="height:${h}px"
+             title="Click to select · double-click for track editor · right-click for more"
              @click=${(e) => this._onLaneHeadClick(e, track.id)}
+             @dblclick=${(e) => { e.stopPropagation();
+                   import("./track-editor-modal.js").then((m) => m.openTrackEditor(track.id)); }}
              @contextmenu=${(e) => this._onLaneHeadContext(e, track)}>
           <div class="lane-name" title=${track.name}>${track.name}</div>
-          <div class="lane-kind">${track.kind}</div>
+          <div class="lane-kind">
+            ${track.kind}${this._isSequencerTrack(track.id) ? html`<span class="seq-chip" title="Active beat-sequencer region">SEQ</span>` : null}
+          </div>
           <div class="lane-controls">
             <div class="lane-ctl-btn mute ${muted ? "on" : ""}"
                  title="Mute (${muted ? "on" : "off"})"
@@ -875,8 +931,26 @@ export class TimelineView extends LitElement {
                    title="Record arm (${armed ? "on" : "off"})"
                    @click=${(e) => { e.stopPropagation(); this._toggleTrackBool(track.record_arm?.id); }}>R</div>
             ` : null}
+            ${(track.automation_lanes && track.automation_lanes.length > 0) ? html`
+              <div class="lane-ctl-btn auto ${this._automationOpen(track.id) ? "on" : ""}"
+                   title="Show / hide automation lanes"
+                   @click=${(e) => { e.stopPropagation(); this._toggleAutomation(track.id); }}>A</div>
+            ` : null}
           </div>
         </div>
+        ${this._automationOpen(track.id) && track.automation_lanes?.length ? html`
+          <div class="automation-stack" style="left:${HEAD_WIDTH}px">
+            ${track.automation_lanes.map((lane) => html`
+              <foyer-automation-lane
+                .lane=${lane}
+                .totalSamples=${this._timeline?.length_samples || 0}
+                .pxPerSec=${this._zoom}
+                .sampleRate=${sr}
+                .color=${track.color || ""}
+              ></foyer-automation-lane>
+            `)}
+          </div>
+        ` : null}
         ${regions.map(r => {
           const leftPx = HEAD_WIDTH + (r.start_samples / sr) * this._zoom;
           const widthPx = Math.max(10, (r.length_samples / sr) * this._zoom);

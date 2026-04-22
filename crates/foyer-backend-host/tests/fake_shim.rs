@@ -128,6 +128,7 @@ fn fake_session() -> Session {
             group_id: None,
             inputs: vec![],
             outputs: vec![],
+            automation_lanes: vec![],
         }],
         groups: vec![],
         dirty: false,

@@ -45,9 +45,11 @@ enum Command {
         #[arg(long)]
         project: Option<PathBuf>,
 
-        /// Address to listen on.
-        #[arg(long, default_value = "127.0.0.1:3838")]
-        listen: SocketAddr,
+        /// Address to listen on. Overrides `server.listen` from
+        /// config.yaml when set; falls back to that value, else the
+        /// built-in `127.0.0.1:3838` default.
+        #[arg(long)]
+        listen: Option<SocketAddr>,
 
         /// Explicit shim socket path. Only honored with `kind=ardour`.
         /// If omitted and `--project` is set, the configured executable
@@ -151,14 +153,33 @@ async fn main() -> Result<()> {
             if list_shims {
                 return list_available_shims();
             }
-            let tls = match (tls_cert, tls_key) {
+            // TLS: CLI pair > config.yaml pair > none. CLI flags
+            // must appear together; clap's `requires` enforces that
+            // at parse time. Config.yaml must supply both paths to
+            // enable TLS; one without the other is a config error.
+            let tls = match (tls_cert.clone(), tls_key.clone()) {
                 (Some(cert), Some(key)) => Some(foyer_server::TlsConfig { cert, key }),
-                (None, None) => None,
-                // clap's `requires` enforces pairing at parse time,
-                // so this branch is unreachable in practice. Guard
-                // belt-and-braces in case the flag schema ever
-                // loosens.
+                (None, None) => match (&config.server.tls_cert, &config.server.tls_key) {
+                    (Some(cert), Some(key)) => Some(foyer_server::TlsConfig {
+                        cert: cert.clone(),
+                        key: key.clone(),
+                    }),
+                    (None, None) => None,
+                    _ => anyhow::bail!(
+                        "config.yaml server.tls_cert and server.tls_key must be set together"
+                    ),
+                },
                 _ => anyhow::bail!("--tls-cert and --tls-key must be passed together"),
+            };
+            // Listen: CLI flag > config.yaml server.listen > default.
+            let listen = if let Some(l) = listen {
+                l
+            } else if let Some(cfg_listen) = config.server.listen.as_deref() {
+                cfg_listen
+                    .parse::<SocketAddr>()
+                    .with_context(|| format!("config.yaml server.listen = {cfg_listen:?}"))?
+            } else {
+                "127.0.0.1:3838".parse().unwrap()
             };
             serve(config, backend, project, listen, socket, web_root, jail, tls).await
         }

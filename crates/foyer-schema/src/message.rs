@@ -803,6 +803,7 @@ mod tests {
             group_id: None,
             inputs: vec![],
             outputs: vec![],
+            automation_lanes: vec![],
         };
         let patch = Patch::TrackAdded { track: Box::new(t) };
         let j = serde_json::to_string(&patch).unwrap();

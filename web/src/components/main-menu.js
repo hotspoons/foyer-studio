@@ -8,6 +8,7 @@ import { getTransportPref, toggleTransportPref } from "../transport-settings.js"
 import { showProjectPicker } from "./project-picker-modal.js";
 import { openSettings } from "./settings-modal.js";
 import { promptText } from "./prompt-modal.js";
+import { load as loadRecents, forget as forgetRecent, touch as touchRecent, clearAll as clearRecents } from "../recents.js";
 
 // Category → menu label + order. Categories not listed are skipped.
 const MENU_ORDER = [
@@ -97,6 +98,39 @@ export class MainMenu extends LitElement {
     }
     .item:hover .shortcut { color: rgba(255,255,255,0.85); }
     .item.disabled { opacity: 0.4; cursor: default; }
+    .item.has-sub { position: relative; }
+    .sub-dropdown {
+      position: absolute;
+      top: -4px;
+      left: 100%;
+      min-width: 260px;
+      max-width: 420px;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      box-shadow: var(--shadow-panel);
+      padding: 4px;
+      border-radius: var(--radius-md);
+      z-index: 610;
+    }
+    .sub-dropdown .item { max-width: 100%; }
+    .sub-dropdown .item .label {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sub-dropdown .item .forget {
+      background: transparent;
+      border: 0;
+      color: rgba(255,255,255,0.5);
+      font-family: var(--font-sans);
+      font-size: 14px; line-height: 1;
+      padding: 0 4px;
+      cursor: pointer;
+    }
+    .sub-dropdown .item:hover .forget { color: rgba(255,255,255,0.85); }
+    .sub-dropdown .sep {
+      height: 1px;
+      background: var(--color-border);
+      margin: 4px 0;
+    }
 
     .btn.launch {
       display: inline-flex; align-items: center;
@@ -363,9 +397,68 @@ export class MainMenu extends LitElement {
               </div>
             `;
           })}
+          ${cat === "session" ? this._renderRecentSubmenu() : null}
         </div>
       ` : null}
     `;
+  }
+
+  /** Client-side "Open Recent" cascade appended to the Session menu.
+   *  Reads the per-browser recents list (recents.js) and turns each
+   *  entry into a LaunchProject dispatch. Recents are tracked by
+   *  `SessionOpened` in the store, so opening an entry here
+   *  automatically promotes it to the top next time the menu opens. */
+  _renderRecentSubmenu() {
+    const recents = loadRecents();
+    if (recents.length === 0) {
+      return html`
+        <div class="item disabled" style="opacity:0.55">
+          <span style="width:14px"></span>
+          <span class="label">Open Recent…</span>
+          <span class="shortcut">empty</span>
+        </div>
+      `;
+    }
+    return html`
+      <div class="item has-sub"
+           @mouseenter=${(e) => { this._recentOpen = true; this.requestUpdate(); }}
+           @mouseleave=${(e) => { this._recentOpen = false; this.requestUpdate(); }}>
+        <span style="width:14px"></span>
+        <span class="label">Open Recent…</span>
+        <span class="shortcut">▸</span>
+        ${this._recentOpen ? html`
+          <div class="sub-dropdown">
+            ${recents.map((r) => html`
+              <div class="item" title=${r.path}
+                   @click=${(e) => { e.stopPropagation(); this._openRecent(r); }}>
+                <span style="width:14px"></span>
+                <span class="label">${r.name || r.path}</span>
+                <button class="forget"
+                        title="Forget this entry"
+                        @click=${(e) => { e.stopPropagation(); forgetRecent(r.path); this.requestUpdate(); }}>×</button>
+              </div>
+            `)}
+            <div class="sep"></div>
+            <div class="item" @click=${(e) => { e.stopPropagation(); clearRecents(); this.requestUpdate(); }}>
+              <span style="width:14px"></span>
+              <span class="label" style="color:var(--color-danger,#ef4444)">Clear list</span>
+            </div>
+          </div>
+        ` : null}
+      </div>
+    `;
+  }
+
+  _openRecent(entry) {
+    this._openMenu = "";
+    this._recentOpen = false;
+    if (!entry?.path) return;
+    touchRecent(entry);
+    window.__foyer?.ws?.send({
+      type: "launch_project",
+      backend_id: entry.backend_id || "ardour",
+      project_path: entry.path,
+    });
   }
 
   _menuLeftFor(cat) {

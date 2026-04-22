@@ -85,15 +85,19 @@
         "timonwong.shellcheck",
         "skellock.just",
         "ms-vscode.cpptools",
-        "anthropic.claude-code"
+        "anthropic.claude-code",
+        "sst-dev.opencode"
       ]
     }
   },
-  "initializeCommand": "sh -c 'mkdir -p \"$HOME/.claude\" && touch \"$HOME/.claude.json\"'",
+  "initializeCommand": "sh -c 'mkdir -p \"$HOME/.claude\" \"$HOME/.local/share/opencode\" \"$HOME/.local/state/opencode\" \"$HOME/.config/opencode\" && touch \"$HOME/.claude.json\"'",
   "onCreateCommand": "bash .devcontainer/post-create.sh",
   "mounts": [
     "source=${localWorkspaceFolder}/../ardour,target=/workspaces/ardour,type=bind,consistency=cached",
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude.json,target=/home/vscode/.claude.json,type=bind",
-    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/home/vscode/.claude,type=bind"
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/home/vscode/.claude,type=bind",
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.local/share/opencode,target=/home/vscode/.local/share/opencode,type=bind",
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.local/state/opencode,target=/home/vscode/.local/state/opencode,type=bind",
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.config/opencode,target=/home/vscode/.config/opencode,type=bind"
   ]
 }

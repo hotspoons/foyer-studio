@@ -115,6 +115,16 @@ export class TrackStrip extends LitElement {
       letter-spacing: 0.12em;
       color: var(--color-text-muted);
       text-align: center;
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+    }
+    .seq-chip {
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: color-mix(in oklab, var(--color-accent) 24%, transparent);
+      color: var(--color-accent);
     }
     .row {
       display: flex;
@@ -275,11 +285,20 @@ export class TrackStrip extends LitElement {
                  @blur=${(e) => this._commitRename(e.currentTarget.value)}>
         `
         : html`
-          <div class="name" style=${nameStyle} title="${t.name} — right-click for options"
-               @dblclick=${() => this._startRename()}
+          <!-- Double-click now opens the full track editor (2026-04-23
+               polish ask). Rename moved to single-click on an already-
+               selected strip OR via the context menu's Rename item. -->
+          <div class="name" style=${nameStyle}
+               title="${t.name} — double-click to open editor · right-click for options"
+               @click=${(e) => this._onNameClick(e)}
+               @dblclick=${(e) => { e.stopPropagation(); openTrackEditor(t.id); }}
                @contextmenu=${(e) => this._onContextMenu(e)}>${t.name}</div>
         `}
-      ${d.showKind ? html`<div class="kind">${t.kind}</div>` : null}
+      ${d.showKind ? html`
+        <div class="kind">
+          ${t.kind}${this._isSequencer() ? html`<span class="seq-chip" title="This track has an active beat-sequencer region">SEQ</span>` : null}
+        </div>
+      ` : null}
       ${d.plugins ? html`
         <foyer-plugin-strip
           .plugins=${t.plugins || []}
@@ -434,6 +453,28 @@ export class TrackStrip extends LitElement {
 
   _startRename() {
     this._renaming = true;
+  }
+
+  /** Single-click on the name: if the strip is already selected,
+   *  start inline rename. Otherwise select the strip (don't rename
+   *  on the click that SELECTS — that matches Finder/Nautilus, and
+   *  avoids renaming every time the user picks a track). */
+  /** True if this track has at least one region with an active
+   *  beat-sequencer layout — drives the SEQ chip on the strip. */
+  _isSequencer() {
+    const ids = window.__foyer?.store?.state?.sequencerTrackIds;
+    return ids ? ids.has(this.track?.id) : false;
+  }
+
+  _onNameClick(ev) {
+    ev.stopPropagation();
+    if (!this.track?.id) return;
+    const store = window.__foyer?.store;
+    if (store?.isTrackSelected?.(this.track.id)) {
+      this._startRename();
+    } else {
+      store?.selectTrack?.(this.track.id, "replace");
+    }
   }
 
   _onRenameKey(ev) {

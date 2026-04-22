@@ -79,6 +79,13 @@ pub struct Track {
     pub inputs: Vec<IoPort>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub outputs: Vec<IoPort>,
+    /// Automation lanes attached to this track's well-known controls
+    /// (gain / pan / mute / solo). Plugin-parameter lanes live on
+    /// the PluginInstance. Empty vec = no automation read yet (or
+    /// host doesn't expose any). Phase A is read-only; writes land
+    /// via dedicated commands in Phase B.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub automation_lanes: Vec<crate::AutomationLane>,
 }
 
 /// Group / submix metadata. Purely a display + drag-affinity hint for
@@ -302,6 +309,7 @@ mod tests {
                 group_id: None,
                 inputs: vec![],
                 outputs: vec![],
+                automation_lanes: vec![],
             }],
             groups: vec![],
             dirty: false,

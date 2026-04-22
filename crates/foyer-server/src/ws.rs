@@ -509,6 +509,53 @@ async fn dispatch_command(
             let path = project_path
                 .as_deref()
                 .map(std::path::Path::new);
+            // "Already open by path" short-circuit. If the user clicks
+            // Open on a project whose path matches an already-
+            // registered session, focus that session instead of
+            // spawning a second Ardour process. Match against BOTH
+            // the raw jail-relative string the client sent (which is
+            // what swap_backend stored verbatim) and the canonical
+            // absolute form — that way future callers that store an
+            // absolute path still match.
+            if let Some(raw) = project_path.as_deref() {
+                let canonical = path
+                    .and_then(|p| p.canonicalize().ok())
+                    .and_then(|c| c.to_str().map(String::from));
+                let mut existing = state.sessions.find_by_path(raw).await;
+                if existing.is_none() {
+                    if let Some(c) = canonical.as_deref() {
+                        existing = state.sessions.find_by_path(c).await;
+                    }
+                }
+                if let Some(existing_id) = existing {
+                    tracing::info!(
+                        "launch_project: {raw} already open as {existing_id:?} — focusing"
+                    );
+                    *state.focus_session_id.write().await = Some(existing_id.clone());
+                    if let Some(be) = state.sessions.backend(&existing_id).await {
+                        *state.backend.write().await = be;
+                    }
+                    // Emit a session list refresh + snapshot so the
+                    // client repaints without a round-trip.
+                    let sessions = state.sessions.list().await;
+                    broadcast_event(state, Event::SessionList { sessions }).await;
+                    if let Ok(snap) = state.backend().await.snapshot().await {
+                        let out = Envelope {
+                            schema: SCHEMA_VERSION,
+                            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+                            origin: Some("backend".into()),
+                            session_id: Some(existing_id),
+                            body: Event::SessionSnapshot {
+                                session: Box::new(snap),
+                            },
+                        };
+                        *state.cached_snapshot.write().await = Some(out.clone());
+                        state.ring.write().await.push(out.clone());
+                        let _ = state.tx.send(out);
+                    }
+                    return Ok(());
+                }
+            }
             match spawner.launch(&backend_id, path).await {
                 Ok(new_backend) => {
                     // swap_backend synthesizes a session UUID when
