@@ -486,6 +486,7 @@ async fn dispatch_command(
                             stream_id,
                             source,
                             format,
+                            port_name: None,
                         },
                     )
                     .await;

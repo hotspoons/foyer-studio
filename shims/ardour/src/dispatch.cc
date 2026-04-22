@@ -1727,11 +1727,13 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				try {
 					auto port = std::make_unique<ShimInputPort> (
 					    *shim, sid, name, ch, sr, fsize);
+					std::string engine_port_name;
 					{
 						std::lock_guard<std::mutex> lk (this->_ingress_mx);
 						this->_ingress_ports[sid] = std::move (port);
+						engine_port_name = this->_ingress_ports.at (sid)->engine_port_name ();
 					}
-					auto ack = msgpack_out::encode_audio_ingress_opened (sid, sr, ch, name);
+					auto ack = msgpack_out::encode_audio_ingress_opened (sid, sr, ch, name, engine_port_name);
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
 				} catch (const std::exception& e) {
 					PBD::error << "foyer_shim: [ingress] open failed: " << e.what () << endmsg;

@@ -3,6 +3,10 @@
 // Pipeline per the M6a spec (see crates/foyer-server/src/audio.rs):
 //
 //   /ws/audio/:stream_id  ──►  per-packet parser  ──►  AudioDecoder
+
+// Set to true only when diagnosing audio routing; each line fires
+// at 1 Hz (worklet stats) or every 50 packets (~10 Hz per stream).
+const VERBOSE = false;
 //                                                        │
 //                                                        ▼  deinterleave
 //                                                postMessage(transfer)
@@ -179,12 +183,13 @@ export class AudioListener {
     this.workletNode.port.onmessage = (ev) => {
       const m = ev.data;
       if (m && m.kind === "stats") {
-        // One-per-second line — cheap enough to always log.
-        console.info(
-          `[audio-listener] worklet stats — buffered=${m.buffered} ` +
-          `written=${m.written} read=${m.read} ` +
-          `underruns=${m.underruns} overruns=${m.overruns}`,
-        );
+        if (VERBOSE) {
+          console.info(
+            `[audio-listener] worklet stats — buffered=${m.buffered} ` +
+            `written=${m.written} read=${m.read} ` +
+            `underruns=${m.underruns} overruns=${m.overruns}`,
+          );
+        }
       }
     };
     this.workletNode.connect(this.ctx.destination);
@@ -291,7 +296,7 @@ export class AudioListener {
     // Helps distinguish "audio never arrives" from "audio arrives but
     // isn't audible" (a common AudioContext-suspended footgun).
     this._pktCount = (this._pktCount || 0) + 1;
-    if (this._pktCount <= 5 || this._pktCount % 500 === 0) {
+    if (VERBOSE && (this._pktCount <= 5 || this._pktCount % 500 === 0)) {
       console.info(
         `[audio-listener] pkt #${this._pktCount} bytes=${buf.byteLength} ctx=${this.ctx?.state}`,
       );
@@ -337,7 +342,7 @@ export class AudioListener {
 
   _playDecoded(audioData) {
     if (!this.ctx) return;
-    if (!this._decodedLogged) {
+    if (VERBOSE && !this._decodedLogged) {
       this._decodedLogged = true;
       // Also ask the decoder for its allocation sizes per plane.
       // For an "f32" interleaved format we expect
@@ -406,7 +411,7 @@ export class AudioListener {
       // zero-crossing) — retain until the half-freq/half-amp bug
       // is nailed down; cheap to keep running once fixed.
       this._packetsSeen = (this._packetsSeen || 0) + 1;
-      if (this._packetsSeen === 3) {
+      if (VERBOSE && this._packetsSeen === 3) {
         const dump = [0, 10, 27, 54, 81, 100, 200, 500, 800, 959]
           .map((i) => `[${i}]=${ch0[i]?.toFixed?.(4) ?? "?"}`)
           .join(" ");
@@ -422,7 +427,7 @@ export class AudioListener {
           `  scratch.length = ${src.length}`,
         );
       }
-      if (this._packetsSeen % 50 === 0) {
+      if (VERBOSE && this._packetsSeen % 50 === 0) {
         let peak = 0;
         let zc = 0;
         let prev = ch0[0];

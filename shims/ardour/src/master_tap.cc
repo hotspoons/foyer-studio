@@ -1,6 +1,10 @@
 /*
  * Foyer Studio — Ardour shim: master-bus audio tap implementation.
  */
+
+// Set to false to silence the 2 Hz steady-state stats log.
+static constexpr bool LOG_STEADY_STATE_STATS = false;
+
 #include "master_tap.h"
 
 #include <chrono>
@@ -230,18 +234,14 @@ MasterTap::drain_loop ()
 		const auto now = std::chrono::steady_clock::now ();
 		if (now - last_log >= std::chrono::seconds (2)) {
 			last_log = now;
-			const auto r = _run_calls.load ();
-			const auto s = _silence_calls.load ();
-			const auto w = _samples_written.load ();
-			const auto t = _samples_sent.load ();
-			PBD::warning << "foyer_shim: [audio] stream_id=" << _stream_id
-			             << " run=" << r
-			             << " silence=" << s
-			             << " written=" << w
-			             << " sent=" << t
-			             << " ring_read=" << _ring->read_space ()
-			             << " ring_write_space=" << _ring->write_space ()
-			             << endmsg;
+			if constexpr (LOG_STEADY_STATE_STATS) {
+				const auto r = _run_calls.load ();
+				const auto s = _silence_calls.load ();
+				const auto w = _samples_written.load ();
+				const auto t = _samples_sent.load ();
+				PBD::warning << "foyer_shim: [audio] stream_id=" << _stream_id
+				             << " run=" << r << endmsg;
+			}
 		}
 
 		const std::size_t avail = _ring->read_space ();

@@ -3,6 +3,13 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
+rust_log_default := "info"
+rust_log_verbose := "foyer_server=debug"
+
+rust-log debug:
+    #!/usr/bin/env bash
+    if [ "{{debug}}" == "true" ]; then echo "{{rust_log_verbose}}"; else echo "{{rust_log_default}}"; fi
+
 # --- rust ---
 build:
     cargo build --workspace --all-targets
@@ -37,17 +44,30 @@ check: fmt-check clippy test
 # LAN access: pass `listen=0.0.0.0:3838` to bind all interfaces
 # instead of loopback. Example:
 #     just run listen=0.0.0.0:3838
-# Then browse from another machine at http://<host-lan-ip>:3838/.
 # `just run` defaults to 127.0.0.1:3838 (loopback only) since that's
 # the safe local-development story — no auth on the WS surface means
 # binding 0.0.0.0 exposes the DAW to anyone on the LAN.
-run listen='127.0.0.1:3838' *args: jack-dummy shim-check
-    cargo run --bin foyer -- serve --listen {{listen}} {{args}}
+# Pass `debug=true` to enable verbose logging:
+#     just run debug=true
+run listen='127.0.0.1:3838' debug='false' *args: jack-dummy shim-check
+    #!/usr/bin/env bash
+    source /dev/stdin <<'EOF'
+    rust_log() {
+        if [ "{{debug}}" == "true" ]; then echo "foyer_server=debug"; else echo "info"; fi
+    }
+    EOF
+    RUST_LOG=$(rust_log) cargo run --bin foyer -- serve --listen {{listen}} {{args}}
 
 # Convenience: bind all interfaces so another computer on the LAN
-# can reach the sidecar. Equivalent to `just run listen=0.0.0.0:3838`.
-run-lan *args: jack-dummy shim-check
-    cargo run --bin foyer -- serve --listen 0.0.0.0:3838 {{args}}
+# instead of loopback. Equivalent to `just run listen=0.0.0.0:3838`.
+run-lan debug='false' *args: jack-dummy shim-check
+    #!/usr/bin/env bash
+    source /dev/stdin <<'EOF'
+    rust_log() {
+        if [ "{{debug}}" == "true" ]; then echo "foyer_server=debug"; else echo "info"; fi
+    }
+    EOF
+    RUST_LOG=$(rust_log) cargo run --bin foyer -- serve --listen 0.0.0.0:3838 {{args}}
 
 # Same as run-lan, but with HTTPS via a self-signed cert so the
 # sidecar is reachable from mobile browsers. Browsers gate
@@ -61,7 +81,7 @@ run-lan *args: jack-dummy shim-check
 # loads are fine. The cert is tied to the host's LAN IPs at
 # generation time; if your address changes, re-run this recipe to
 # refresh.
-run-lan-tls *args: jack-dummy shim-check
+run-lan-tls *args='': jack-dummy shim-check
     #!/usr/bin/env bash
     set -euo pipefail
     tls_dir="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/tls"

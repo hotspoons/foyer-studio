@@ -46,6 +46,9 @@ public:
 	~ShimInputPort ();
 
 	std::uint32_t stream_id () const { return _stream_id; }
+	/// Engine-level port name after registration (what IO::connect
+	/// wants). Empty string if registration failed.
+	const std::string& engine_port_name () const { return _engine_port_name; }
 
 	/// Push interleaved f32 samples from the IPC audio frame handler.
 	void push_audio (const float* samples, std::size_t n_samples);
@@ -64,6 +67,7 @@ private:
 	std::uint32_t        _frame_size;
 
 	std::shared_ptr<ARDOUR::AudioPort>      _port;
+	std::string                             _engine_port_name;
 	std::unique_ptr<PBD::RingBuffer<float>> _ring;
 
 	std::thread         _drain_thread;

@@ -29,6 +29,11 @@ export class AudioIngress {
     this._source = null;
     this._workletNode = null;
     this._awaitingAck = null;
+    this._enginePortName = ""; // set after AudioIngressOpened ack
+  }
+
+  get enginePortName() {
+    return this._enginePortName;
   }
 
   async start() {
@@ -110,6 +115,7 @@ export class AudioIngress {
     if (this._ctx && this._ctx.state !== "closed") {
       try { await this._ctx.close(); } catch {}
     }
+    this._enginePortName = "";
     this.ws.send({ type: "audio_ingress_close", stream_id: this.streamId });
   }
 
@@ -118,6 +124,9 @@ export class AudioIngress {
       const onEnv = (ev) => {
         const body = ev.detail?.body;
         if (body?.type === "audio_ingress_opened" && body.stream_id === streamId) {
+          if (body.port_name) {
+            this._enginePortName = body.port_name;
+          }
           cleanup();
           resolve(body);
         }

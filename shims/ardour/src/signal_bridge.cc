@@ -4,6 +4,10 @@
  * Hooks Ardour's signals and funnels them into outgoing Envelope<Event>
  * frames. Also calls into `schema_map` for structural snapshot emission.
  */
+
+// Set to false to silence per-cycle TICK log (30 Hz steady state noise).
+static constexpr bool LOG_TRANSPORT_TICK = false;
+
 #include "signal_bridge.h"
 
 #include <chrono>
@@ -83,13 +87,13 @@ SignalBridge::tick_loop ()
 
 		if (++log_counter >= 30) {
 			log_counter = 0;
-			PBD::warning << "foyer_shim: TICK playing=" << playing
-			             << " sample=" << sample
-			             << " rolling=" << session.transport_rolling ()
-			             << " stopped=" << session.transport_stopped ()
-			             << " rec_enabled=" << session.get_record_enabled ()
-			             << " actively_rec=" << session.actively_recording ()
-			             << " (last_emitted_sample=" << last_logged_sample << ")" << endmsg;
+			if constexpr (LOG_TRANSPORT_TICK) {
+				PBD::warning << "foyer_shim: TICK playing=" << playing
+				             << " sample=" << sample
+				             << " rolling=" << session.transport_rolling ()
+				             << " stopped=" << session.transport_stopped ()
+				     << endmsg;
+			}
 		}
 
 		// Per-tick peak-meter readout runs unconditionally at ~30 Hz

@@ -288,10 +288,10 @@ export class TrackEditorModal extends LitElement {
       this._micState = "error";
       return;
     }
-    // AudioIngress doesn't expose the port name directly; the shim
-    // registers it as `foyer:ingress-browser-<streamId>`. Use the
-    // same naming rule as shim_input_port.cc.
-    const portName = `foyer:ingress-browser-${ingress.streamId}`;
+    // AudioIngress.start() resolves after the shim acks `audio_ingress_opened`
+    // with the actual engine-level port name (e.g. `foyer-ingress-browser-123`).
+    // Read that from the ingress object — don't hardcode the port name here.
+    const portName = ingress.enginePortName;
     TRACK_MICS.set(this.trackId, { ingress, portName });
     this._setTrackInput(portName);
     this._micState = "active";

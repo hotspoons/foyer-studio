@@ -179,7 +179,7 @@ impl AudioHub {
                             }
                             prev = v;
                         }
-                        tracing::info!(
+                        tracing::debug!(
                             "audio hub stream {stream_id} chunk #{chunks_seen} pre-encode ch0 \
                              peak={peak:.4} zeroXings={zero_xings} \
                              (expect 18 for 440 Hz / 9 for 220 Hz per 960-sample frame)"
@@ -212,7 +212,7 @@ impl AudioHub {
                     let _ = tx_for_task.send(pkt);
                 }
             }
-            tracing::info!("audio hub: encode loop for stream {stream_id} exited");
+            tracing::debug!("audio hub: encode loop for stream {stream_id} exited");
         });
 
         streams.insert(

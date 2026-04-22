@@ -36,23 +36,29 @@ ShimInputPort::ShimInputPort (FoyerShim& shim,
 	_ring = std::make_unique<PBD::RingBuffer<float>> (ring_samples);
 
 	auto engine = AudioEngine::instance ();
-	std::string port_name = "foyer:ingress-" + name;
-	// NB: register_OUTPUT_port, not input. In JACK/Ardour parlance,
-	// a port that *produces* audio for others to read is an output
-	// port. Track inputs (which have IsInput) can only connect to
-	// output ports. Registering this as IsInput would mean two
-	// IsInput endpoints trying to connect — JACK rejects that and
-	// IO::connect returns non-zero (and audio never flows).
-	auto port = engine->register_output_port (DataType::AUDIO, port_name, false /* async */, PortFlags (0));
+	// Port names supplied to `register_output_port` must NOT contain a
+	// `:` — Ardour treats a pre-colon portion as a client/backend name
+	// and `Port::connect_internal` then forwards the non-relative form
+	// to the engine backend. If the prefix doesn't match a registered
+	// client, `port_engine.connect()` fails with -1 and no audio flows.
+	// We register a bare name (`foyer-ingress-<stream>`) and let
+	// Ardour/the backend namespace it under its own client; the full
+	// engine-level name is read back from `_port->name()` and sent to
+	// the frontend via the AudioIngressOpened ack.
+	const std::string bare_name = "foyer-ingress-" + name;
+	auto port = engine->register_output_port (DataType::AUDIO, bare_name, false /* async */, PortFlags (0));
 	_port = std::dynamic_pointer_cast<AudioPort> (port);
 
 	if (_port) {
+		_engine_port_name = _port->name ();
 		PBD::warning << "foyer_shim: [ingress] port registered (OUTPUT) stream_id=" << _stream_id
-		             << " name=" << port_name << " channels=" << _channels
+		             << " bare_name=" << bare_name
+		             << " engine_name=" << _engine_port_name
+		             << " channels=" << _channels
 		             << " sample_rate=" << _sample_rate << endmsg;
 		_drain_thread = std::thread (&ShimInputPort::drain_loop, this);
 	} else {
-		PBD::error << "foyer_shim: [ingress] failed to register audio port " << port_name << endmsg;
+		PBD::error << "foyer_shim: [ingress] failed to register audio port " << bare_name << endmsg;
 	}
 }
 

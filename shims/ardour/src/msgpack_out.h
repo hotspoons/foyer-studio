@@ -118,7 +118,7 @@ std::vector<std::uint8_t> encode_audio_egress_stopped (std::uint32_t stream_id);
 /// and rmp-serde rejects the whole frame if the field is absent.
 std::vector<std::uint8_t> encode_audio_ingress_opened (
     std::uint32_t stream_id, std::uint32_t sample_rate, std::uint32_t channels,
-    const std::string& source_name);
+    const std::string& source_name, const std::string& engine_port_name);
 
 /// Encode `Event::AudioIngressClosed { stream_id }`.
 std::vector<std::uint8_t> encode_audio_ingress_closed (std::uint32_t stream_id);

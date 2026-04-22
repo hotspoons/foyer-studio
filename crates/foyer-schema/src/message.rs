@@ -115,6 +115,14 @@ pub enum Event {
         stream_id: u32,
         source: AudioSource,
         format: AudioFormat,
+        /// Engine-level port name the shim actually registered (e.g.
+        /// `ardour:foyer-ingress-browser-123`). The client needs this
+        /// to patch a track's `input_port` — deriving it from the
+        /// command's `name` doesn't work because the engine prepends
+        /// its own client prefix on registration. Optional for
+        /// back-compat with older shims.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        port_name: Option<String>,
     },
     AudioIngressClosed {
         stream_id: u32,

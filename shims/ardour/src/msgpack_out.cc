@@ -824,10 +824,12 @@ encode_audio_egress_stopped (std::uint32_t stream_id)
 
 std::vector<std::uint8_t>
 encode_audio_ingress_opened (std::uint32_t stream_id, std::uint32_t sample_rate,
-                             std::uint32_t channels, const std::string& source_name)
+                             std::uint32_t channels, const std::string& source_name,
+                             const std::string& engine_port_name)
 {
+	const bool have_port_name = !engine_port_name.empty ();
 	return envelope_event ([&] (Out& o) {
-		o.map (5);
+		o.map (have_port_name ? 6 : 5);
 		o.str ("dir");          o.str ("event");
 		o.str ("type");         o.str ("audio_ingress_opened");
 		o.str ("stream_id");    o.u (stream_id);
@@ -845,6 +847,9 @@ encode_audio_ingress_opened (std::uint32_t stream_id, std::uint32_t sample_rate,
 		o.str ("channels");     o.u (channels);
 		o.str ("format");       o.str ("f32_le");
 		o.str ("frame_size");   o.u (960);  // 20 ms @ 48 kHz, matches ShimInputPort default
+		if (have_port_name) {
+			o.str ("port_name"); o.str (engine_port_name);
+		}
 	});
 }
 
