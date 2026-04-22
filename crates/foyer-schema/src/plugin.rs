@@ -15,6 +15,8 @@ pub enum PluginFormat {
     Vst2,
     Vst3,
     Au,
+    Ladspa,
+    Lua,
     Internal,
     Other,
 }

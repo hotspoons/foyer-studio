@@ -1000,6 +1000,78 @@ async fn dispatch_command(
             }
         }
 
+        // ─── automation lane edit (Phase B) ─────────────────────────
+        Command::SetAutomationMode { lane_id, mode } => {
+            if let Err(e) = state.backend().await.set_automation_mode(lane_id, mode).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "set_automation_mode_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::AddAutomationPoint { lane_id, point } => {
+            if let Err(e) = state.backend().await.add_automation_point(lane_id, point).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "add_automation_point_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::UpdateAutomationPoint {
+            lane_id,
+            original_time_samples,
+            new_time_samples,
+            value,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .update_automation_point(lane_id, original_time_samples, new_time_samples, value)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "update_automation_point_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::DeleteAutomationPoint { lane_id, time_samples } => {
+            if let Err(e) = state.backend().await.delete_automation_point(lane_id, time_samples).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "delete_automation_point_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::ReplaceAutomationLane { lane_id, points } => {
+            if let Err(e) = state.backend().await.replace_automation_lane(lane_id, points).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "replace_automation_lane_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
         Command::ListPluginPresets { plugin_id } => {
             match state.backend().await.list_plugin_presets(plugin_id.clone()).await {
                 Ok(presets) => {

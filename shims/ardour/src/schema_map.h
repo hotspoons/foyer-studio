@@ -303,6 +303,14 @@ struct RegionHit {
 };
 RegionHit find_region (ARDOUR::Session&, const std::string& region_id);
 
+/// Given a Foyer control id like `track.<pbd>.gain`, find the owning
+/// AutomationControl so automation-lane edits can call `alist()`.
+std::shared_ptr<PBD::Controllable> resolve_automation_control (ARDOUR::Session&, const std::string& control_id);
+
+/// Recover the track id (`track.<pbd>`) from a control id. Used to
+/// re-emit `track_updated` after automation edits.
+std::string track_id_for_control (ARDOUR::Session&, const std::string& control_id);
+
 } // namespace ArdourSurface::schema_map
 
 #endif

@@ -184,10 +184,12 @@ export class TrackStrip extends LitElement {
     window.__foyer?.store?.addEventListener("selection", this._onSelection);
     this._syncSelected();
     this.addEventListener("click", this._onStripClick);
+    this.addEventListener("dblclick", this._onStripDblClick);
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("selection", this._onSelection);
     this.removeEventListener("click", this._onStripClick);
+    this.removeEventListener("dblclick", this._onStripDblClick);
     super.disconnectedCallback();
   }
   _syncSelected() {
@@ -212,6 +214,18 @@ export class TrackStrip extends LitElement {
     if (ev.shiftKey) mode = "extend";
     else if (ev.ctrlKey || ev.metaKey) mode = "toggle";
     window.__foyer?.store?.selectTrack(this.track.id, mode);
+  };
+
+  _onStripDblClick = (ev) => {
+    // Same protection as click: don't fire when the user double-clicked
+    // an interactive child (fader reset, toggle, etc.).
+    const tag = (ev.target?.tagName || "").toLowerCase();
+    if (["foyer-fader", "foyer-toggle", "foyer-meter", "foyer-plugin-strip", "input", "button"].includes(tag)) {
+      return;
+    }
+    const cls = ev.target?.classList;
+    if (cls && (cls.contains("name") || cls.contains("name-input") || cls.contains("channel-resize"))) return;
+    if (this.track?.id) openTrackEditor(this.track.id);
   };
 
   willUpdate(changed) {
@@ -285,13 +299,9 @@ export class TrackStrip extends LitElement {
                  @blur=${(e) => this._commitRename(e.currentTarget.value)}>
         `
         : html`
-          <!-- Double-click now opens the full track editor (2026-04-23
-               polish ask). Rename moved to single-click on an already-
-               selected strip OR via the context menu's Rename item. -->
           <div class="name" style=${nameStyle}
-               title="${t.name} — double-click to open editor · right-click for options"
+               title="${t.name} — click to select · right-click for options"
                @click=${(e) => this._onNameClick(e)}
-               @dblclick=${(e) => { e.stopPropagation(); openTrackEditor(t.id); }}
                @contextmenu=${(e) => this._onContextMenu(e)}>${t.name}</div>
         `}
       ${d.showKind ? html`

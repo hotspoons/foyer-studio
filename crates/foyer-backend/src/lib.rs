@@ -300,6 +300,45 @@ pub trait Backend: Send + Sync + 'static {
         Err(BackendError::Other("clear_sequencer_layout not supported".into()))
     }
 
+    // ─── automation lanes ───────────────────────────────────────────────
+    async fn set_automation_mode(
+        &self,
+        _lane_id: EntityId,
+        _mode: foyer_schema::AutomationMode,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("set_automation_mode not supported".into()))
+    }
+    async fn add_automation_point(
+        &self,
+        _lane_id: EntityId,
+        _point: foyer_schema::AutomationPoint,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("add_automation_point not supported".into()))
+    }
+    async fn update_automation_point(
+        &self,
+        _lane_id: EntityId,
+        _original_time_samples: u64,
+        _new_time_samples: u64,
+        _value: f64,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("update_automation_point not supported".into()))
+    }
+    async fn delete_automation_point(
+        &self,
+        _lane_id: EntityId,
+        _time_samples: u64,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("delete_automation_point not supported".into()))
+    }
+    async fn replace_automation_lane(
+        &self,
+        _lane_id: EntityId,
+        _points: Vec<foyer_schema::AutomationPoint>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("replace_automation_lane not supported".into()))
+    }
+
     // ─── plugin presets ─────────────────────────────────────────────────
     async fn list_plugin_presets(
         &self,

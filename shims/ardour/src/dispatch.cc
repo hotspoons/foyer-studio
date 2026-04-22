@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 
+#include "ardour/automation_control.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
 #include "ardour/midi_source.h"
@@ -227,6 +228,11 @@ struct DecodedCmd
 		CreateRegion,
 		ReplaceRegionNotes,
 		ListPlugins,
+		SetAutomationMode,
+		AddAutomationPoint,
+		UpdateAutomationPoint,
+		DeleteAutomationPoint,
+		ReplaceAutomationLane,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
@@ -323,6 +329,20 @@ struct DecodedCmd
 		std::uint64_t length_ticks = 0;
 	};
 	std::vector<DecodedNote> replace_notes;
+
+	// Automation lane edit payloads (Phase B).
+	std::string   lane_id;
+	std::string   auto_mode;               // SetAutomationMode
+	std::uint64_t auto_orig_time = 0;      // UpdateAutomationPoint
+	std::uint64_t auto_new_time  = 0;      // UpdateAutomationPoint
+	bool          has_auto_orig_time = false;
+	bool          has_auto_new_time  = false;
+	struct DecodedAutoPoint {
+		std::uint64_t time_samples = 0;
+		double        value = 0.0;
+	};
+	DecodedAutoPoint auto_point;           // AddAutomationPoint / DeleteAutomationPoint
+	std::vector<DecodedAutoPoint> auto_points; // ReplaceAutomationLane
 };
 
 // Read an int64 that may be positive or negative on the wire —
@@ -908,6 +928,59 @@ decode (const std::vector<std::uint8_t>& buf)
 					std::string p;
 					if (!in.read_str (p)) return out;
 					out.id = p;
+				} else if (k == "lane_id") {
+					if (!in.read_str (out.lane_id)) return out;
+				} else if (k == "mode") {
+					if (!in.read_str (out.auto_mode)) return out;
+				} else if (k == "point") {
+					// AddAutomationPoint { lane_id, point: { time_samples, value } }
+					std::size_t pm = 0;
+					if (!in.read_map_header (pm)) return out;
+					for (std::size_t pi = 0; pi < pm; ++pi) {
+						std::string pk;
+						if (!in.read_str (pk)) return out;
+						if (pk == "time_samples") {
+							if (!in.read_u64 (out.auto_point.time_samples)) return out;
+						} else if (pk == "value") {
+							if (!in.read_f64 (out.auto_point.value)) return out;
+						} else {
+							if (!in.skip_value ()) return out;
+						}
+					}
+				} else if (k == "original_time_samples") {
+					if (!in.read_u64 (out.auto_orig_time)) return out;
+					out.has_auto_orig_time = true;
+				} else if (k == "new_time_samples") {
+					if (!in.read_u64 (out.auto_new_time)) return out;
+					out.has_auto_new_time = true;
+				} else if (k == "time_samples") {
+					if (!in.read_u64 (out.auto_point.time_samples)) return out;
+				} else if (k == "points") {
+					// ReplaceAutomationLane { lane_id, points: [ { time_samples, value } ... ] }
+					std::size_t pn = 0;
+					std::uint8_t b = in.peek ();
+					if ((b & 0xf0) == 0x90) { in.take_u8 (); pn = b & 0x0f; }
+					else if (b == 0xdc)     { in.take_u8 (); pn = in.take_be16 (); }
+					else if (b == 0xdd)     { in.take_u8 (); pn = in.take_be32 (); }
+					else return out;
+					out.auto_points.reserve (pn);
+					for (std::size_t qi = 0; qi < pn; ++qi) {
+						std::size_t m = 0;
+						if (!in.read_map_header (m)) return out;
+						DecodedCmd::DecodedAutoPoint pt;
+						for (std::size_t j = 0; j < m; ++j) {
+							std::string ptk;
+							if (!in.read_str (ptk)) return out;
+							if (ptk == "time_samples") {
+								if (!in.read_u64 (pt.time_samples)) return out;
+							} else if (ptk == "value") {
+								if (!in.read_f64 (pt.value)) return out;
+							} else {
+								if (!in.skip_value ()) return out;
+							}
+						}
+						out.auto_points.push_back (pt);
+					}
 				} else {
 					if (!in.skip_value ()) return out;
 				}
@@ -940,9 +1013,14 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "duplicate_region")    out.kind = DecodedCmd::Kind::DuplicateRegion;
 			else if (cmd_type == "create_region")       out.kind = DecodedCmd::Kind::CreateRegion;
 			else if (cmd_type == "replace_region_notes") out.kind = DecodedCmd::Kind::ReplaceRegionNotes;
-			else if (cmd_type == "list_plugins")        out.kind = DecodedCmd::Kind::ListPlugins;
-			else if (cmd_type == "audio_stream_open"
-			    ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
+            else if (cmd_type == "list_plugins")        out.kind = DecodedCmd::Kind::ListPlugins;
+            else if (cmd_type == "set_automation_mode")   out.kind = DecodedCmd::Kind::SetAutomationMode;
+            else if (cmd_type == "add_automation_point")  out.kind = DecodedCmd::Kind::AddAutomationPoint;
+            else if (cmd_type == "update_automation_point") out.kind = DecodedCmd::Kind::UpdateAutomationPoint;
+            else if (cmd_type == "delete_automation_point") out.kind = DecodedCmd::Kind::DeleteAutomationPoint;
+            else if (cmd_type == "replace_automation_lane") out.kind = DecodedCmd::Kind::ReplaceAutomationLane;
+            else if (cmd_type == "audio_stream_open"
+                ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
 			else if (cmd_type == "audio_stream_close"
 			    ||   cmd_type == "audio_egress_stop")   out.kind = DecodedCmd::Kind::AudioStreamClose;
 			else if (cmd_type.rfind ("audio_", 0) == 0) out.kind = DecodedCmd::Kind::Audio;
@@ -1384,10 +1462,8 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			break;
 		}
 		case DecodedCmd::Kind::ListPlugins: {
-			// PluginManager scans run on the main thread and the
-			// catalog is read-only after that — safe to walk from
-			// the event-loop here without `call_slot`. But emit on
-			// the event loop anyway so we don't race the IPC writer.
+			// PluginManager scans may still be empty if Ardour hasn't
+			// finished its startup scan — force a refresh if so.
 			FoyerShim* shim = &_shim;
 			_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
 				auto bytes = msgpack_out::encode_plugins_list ();
@@ -2051,6 +2127,112 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				             << " tap removed" << endmsg;
 				auto ack = msgpack_out::encode_audio_egress_stopped (stream_id);
 				shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SetAutomationMode: {
+			if (cmd.lane_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
+				    schema_map::resolve_automation_control (shim->session (), snap.lane_id));
+				if (!ac) {
+					PBD::warning << "foyer_shim: set_automation_mode: unknown lane " << snap.lane_id << endmsg;
+					return;
+				}
+				auto alist = ac->alist ();
+				if (!alist) return;
+				ARDOUR::AutoState st = ARDOUR::Off;
+				if      (snap.auto_mode == "play")   st = ARDOUR::Play;
+				else if (snap.auto_mode == "write")  st = ARDOUR::Write;
+				else if (snap.auto_mode == "touch")  st = ARDOUR::Touch;
+				else if (snap.auto_mode == "latch")  st = ARDOUR::Latch;
+				else if (snap.auto_mode == "manual") st = ARDOUR::Off; // UI calls Off "manual"
+				alist->set_automation_state (st);
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::AddAutomationPoint: {
+			if (cmd.lane_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
+				    schema_map::resolve_automation_control (shim->session (), snap.lane_id));
+				if (!ac) return;
+				auto alist = ac->alist ();
+				if (!alist) return;
+				alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_point.time_samples)), snap.auto_point.value);
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::UpdateAutomationPoint: {
+			if (cmd.lane_id.empty () || !cmd.has_auto_orig_time) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
+				    schema_map::resolve_automation_control (shim->session (), snap.lane_id));
+				if (!ac) return;
+				auto alist = ac->alist ();
+				if (!alist) return;
+				// Erase by (time, value) then re-add at new time. This avoids
+				// iterator-constness hassles with std::list under reader lock.
+				alist->erase (
+					Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_orig_time)),
+					snap.auto_point.value);
+				alist->add (
+					Temporal::timepos_t (static_cast<Temporal::samplepos_t> (
+					    snap.has_auto_new_time ? snap.auto_new_time : snap.auto_orig_time)),
+					snap.auto_point.value);
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::DeleteAutomationPoint: {
+			if (cmd.lane_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
+				    schema_map::resolve_automation_control (shim->session (), snap.lane_id));
+				if (!ac) return;
+				auto alist = ac->alist ();
+				if (!alist) return;
+				alist->erase (
+					Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_point.time_samples)),
+					snap.auto_point.value);
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ReplaceAutomationLane: {
+			if (cmd.lane_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
+				    schema_map::resolve_automation_control (shim->session (), snap.lane_id));
+				if (!ac) return;
+				auto alist = ac->alist ();
+				if (!alist) return;
+				{
+					PBD::RWLock::WriterLock lm (alist->lock ());
+					alist->clear ();
+					for (auto const& pt : snap.auto_points) {
+						alist->fast_simple_add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (pt.time_samples)), pt.value);
+					}
+				}
+				alist->mark_dirty ();
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;
 		}

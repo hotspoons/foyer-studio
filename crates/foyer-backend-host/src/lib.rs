@@ -22,9 +22,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmRx, PcmTx};
 use foyer_schema::{
-    AudioFormat, AudioSource, Command, ControlValue, EntityId, LatencyReport, MidiNote,
-    MidiNotePatch, PatchChange, PatchChangePatch, PluginCatalogEntry, PluginPreset, Region,
-    RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    AudioFormat, AudioSource, AutomationMode, AutomationPoint, Command, ControlValue, EntityId,
+    LatencyReport, MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, PluginCatalogEntry,
+    PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch,
+    WaveformPeaks,
 };
 
 mod waveform;
@@ -350,6 +351,49 @@ impl Backend for HostBackend {
         region_id: EntityId,
     ) -> Result<(), BackendError> {
         self.client.clear_sequencer_layout(region_id).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn set_automation_mode(
+        &self,
+        lane_id: EntityId,
+        mode: AutomationMode,
+    ) -> Result<(), BackendError> {
+        self.client.set_automation_mode(lane_id, mode).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn add_automation_point(
+        &self,
+        lane_id: EntityId,
+        point: AutomationPoint,
+    ) -> Result<(), BackendError> {
+        self.client.add_automation_point(lane_id, point).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn update_automation_point(
+        &self,
+        lane_id: EntityId,
+        original_time_samples: u64,
+        new_time_samples: u64,
+        value: f64,
+    ) -> Result<(), BackendError> {
+        self.client.update_automation_point(lane_id, original_time_samples, new_time_samples, value).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn delete_automation_point(
+        &self,
+        lane_id: EntityId,
+        time_samples: u64,
+    ) -> Result<(), BackendError> {
+        self.client.delete_automation_point(lane_id, time_samples).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn replace_automation_lane(
+        &self,
+        lane_id: EntityId,
+        points: Vec<AutomationPoint>,
+    ) -> Result<(), BackendError> {
+        self.client.replace_automation_lane(lane_id, points).await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 

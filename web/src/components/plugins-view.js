@@ -141,6 +141,8 @@ export class PluginsView extends LitElement {
             <option value="vst3">VST3</option>
             <option value="vst2">VST2</option>
             <option value="au">AU</option>
+            <option value="ladspa">LADSPA</option>
+            <option value="lua">Lua</option>
             <option value="internal">Internal</option>
           </select>
         </label>

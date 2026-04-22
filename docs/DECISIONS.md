@@ -1367,4 +1367,74 @@ sidecar-keyed UUID map would misidentify sessions across
 `mv /path/to/session`, across users sharing a project folder,
 and across machine swaps. The identity would also reset every
 time the sidecar's config dir got cleared. Storing identity in
-the project file itself avoids every one of those.
+
+---
+
+## 31. Automation lane surface: inline under the track, not a standalone tile
+
+**Date:** 2026-04-23
+
+**Decision.** Phase B renders automation lanes inline beneath each
+track in the timeline (toggle via the "A" lane-control button), not
+as a separate "Automation View" tile or both. If bulk editing
+becomes painful we can add a dedicated tile later; the component
+(`foyer-automation-lane`) is already self-contained and reusable.
+
+**Alternatives:** Separate automation-only tile (Reaper-style); both
+surfaces simultaneously (Ardour-style).
+
+**Why.** Inline keeps the track↔automation temporal alignment
+implicit — no need to scroll two views in sync. The "A" toggle is
+low-friction for quick tweaks. A separate tile only wins when users
+edit 10+ lanes at once, which we can add if requested without
+breaking the inline path.
+
+---
+
+## 32. Automation edit commands: discrete ops, not full lane diff
+
+**Date:** 2026-04-23
+
+**Decision.** Phase B exposes five discrete commands (`SetAutomationMode`,
+`AddAutomationPoint`, `UpdateAutomationPoint`, `DeleteAutomationPoint`,
+`ReplaceAutomationLane`) rather than a single `AutomationDiff` that
+carries before/after snapshots. The shim maps each to Ardour's
+`AutomationList::{add, erase, clear, set_automation_state}` directly.
+
+**Alternatives:** One `AutomationDiff { lane_id, before, after }`
+command with shim-side diff → simpler protocol, harder to group
+into undoable steps. Client-side optimistic updates with full-lane
+re-upload on every edit.
+
+**Why.** Discrete ops map 1-to-1 to Ardour's undo system via
+ ` AutomationList::memento_command` later, and they let the frontend
+optimistically insert a single point without redrawing the entire
+lane. `ReplaceAutomationLane` is the escape hatch for bulk paste /
+pencil-tool edits that touch many points at once.
+
+---
+
+## 33. Plugin format enum variants must stay in sync between C++ shim and Rust schema
+
+**Date:** 2026-04-23
+
+**Decision.** The Rust `PluginFormat` enum (`crates/foyer-schema/src/plugin.rs`)
+and the C++ `plugin_format_label()` helper (`shims/ardour/src/schema_map.cc`)
+must carry the same set of supported format strings. When Ardour's
+`PluginManager` produces a format the Rust side does not recognize (e.g.
+`"ladspa"`), the entire `PluginsList` msgpack frame fails deserialization
+(unknown variant), which causes the `list_plugins` command to time out and
+the plugin picker to stay empty.
+
+**Alternatives:** Make the Rust side fall back to `Other` on unknown strings
+(via `#[serde(other)]` or a custom deserializer); have the C++ shim map
+unknown formats to `"other"` before serialization.
+
+**Why.** Explicit enum variants preserve type safety on the Rust side and
+make the catalog filter dropdowns in the frontend exact (users can filter
+by "LADSPA" rather than a generic "Other" bucket). The cost of adding a
+new variant is one line on each side, which is trivial when caught early
+and painful when discovered in production. The real fix is a CI check or
+generated bindings that derive the enum from a single source of truth.
+Until then, we rely on manual vigilance and the error log
+`bad control frame: unknown variant 'ladspa'` as a tell-tale signal.

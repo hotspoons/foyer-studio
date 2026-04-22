@@ -56,10 +56,33 @@ export class TrackEditorModal extends LitElement {
       border: 1px solid var(--color-border);
     }
     header .close { display: none; }
-    .body {
-      padding: 14px 18px; overflow-y: auto;
-      display: flex; flex-direction: column; gap: 14px;
-      flex: 1; min-height: 0;
+    .content {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+    .form-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .strip-panel {
+      flex: 0 0 auto;
+      width: 180px;
+      border-left: 1px solid var(--color-border);
+      background: var(--color-surface-muted);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+    }
+    .strip-panel foyer-track-strip {
+      width: 160px;
+      flex: 0 0 auto;
     }
     .section { display: flex; flex-direction: column; gap: 6px; }
     .section h3 {
@@ -96,20 +119,7 @@ export class TrackEditorModal extends LitElement {
       display: flex; align-items: center; justify-content: center;
       color: var(--color-text-muted); font-size: 10px;
     }
-    .strip-slot {
-      display: flex;
-      justify-content: center;
-      align-items: stretch;
-      padding: 12px;
-      background: var(--color-surface-muted);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-      min-height: 260px;
-    }
-    .strip-slot foyer-track-strip {
-      width: 160px;
-      flex: 0 0 160px;
-    }
+
     footer {
       padding: 10px 18px;
       border-top: 1px solid var(--color-border);
@@ -196,50 +206,49 @@ export class TrackEditorModal extends LitElement {
           <span style="font-size:10px;color:var(--color-text-muted);letter-spacing:0.08em;text-transform:uppercase">${t.kind}</span>
           <button class="close" @click=${this._close}>${icon("x-mark", 16)}</button>
         </header>
-        <div class="body">
-          <div class="section">
-            <h3>Name</h3>
-            <div class="row">
-              <input type="text" autofocus .value=${t.name}
-                     @change=${(e) => this._commitName(e.currentTarget.value)}
-                     @keydown=${(e) => { if (e.key === "Enter") this._commitName(e.currentTarget.value); }}>
-            </div>
-          </div>
-          <div class="section">
-            <h3>Color</h3>
-            <div class="row">
-              <div class="swatch-row">
-                ${COLOR_PALETTE.map((c) => html`
-                  <button class="swatch-btn ${color === c.hex ? "active" : ""}"
-                          style="background:${c.hex}"
-                          title=${c.label}
-                          @click=${() => this._patch({ color: c.hex })}></button>
-                `)}
-                <button class="swatch-btn clear"
-                        title="Clear color"
-                        @click=${() => this._patch({ color: "" })}>×</button>
+        <div class="content">
+          <div class="form-body">
+            <div class="section">
+              <h3>Name</h3>
+              <div class="row">
+                <input type="text" autofocus .value=${t.name}
+                       @change=${(e) => this._commitName(e.currentTarget.value)}
+                       @keydown=${(e) => { if (e.key === "Enter") this._commitName(e.currentTarget.value); }}>
               </div>
             </div>
-          </div>
-          <div class="section">
-            <h3>Comment</h3>
-            <div class="row">
-              <textarea placeholder="Notes about this track — not wired to the backend yet."
-                        .value=${t.comment || ""}
-                        @change=${(e) => this._patch({ comment: e.currentTarget.value })}></textarea>
+            <div class="section">
+              <h3>Color</h3>
+              <div class="row">
+                <div class="swatch-row">
+                  ${COLOR_PALETTE.map((c) => html`
+                    <button class="swatch-btn ${color === c.hex ? "active" : ""}"
+                            style="background:${c.hex}"
+                            title=${c.label}
+                            @click=${() => this._patch({ color: c.hex })}></button>
+                  `)}
+                  <button class="swatch-btn clear"
+                          title="Clear color"
+                          @click=${() => this._patch({ color: "" })}>×</button>
+                </div>
+              </div>
             </div>
-          </div>
-          <div class="section">
-            <h3>Mixer strip</h3>
-            <div class="strip-slot">
-              <foyer-track-strip
-                .track=${t}
-                .density=${DENSITIES.normal}
-                .widthMode=${"absolute"}
-              ></foyer-track-strip>
+            <div class="section">
+              <h3>Comment</h3>
+              <div class="row">
+                <textarea placeholder="Notes about this track — not wired to the backend yet."
+                          .value=${t.comment || ""}
+                          @change=${(e) => this._patch({ comment: e.currentTarget.value })}></textarea>
+              </div>
             </div>
+            ${this._renderRoutingSection(t)}
           </div>
-          ${this._renderRoutingSection(t)}
+          <div class="strip-panel">
+            <foyer-track-strip
+              .track=${t}
+              .density=${DENSITIES.normal}
+              .widthMode=${"absolute"}
+            ></foyer-track-strip>
+          </div>
         </div>
       </div>
     `;

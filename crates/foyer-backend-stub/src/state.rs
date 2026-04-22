@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 
 use foyer_backend::BackendError;
-use foyer_schema::{ControlUpdate, ControlValue, EntityId, Parameter, Session, Track, TrackPatch};
+use foyer_schema::{
+    AutomationLane, AutomationMode, AutomationPoint, ControlUpdate, ControlValue, EntityId,
+    Parameter, Session, Track, TrackPatch,
+};
 
 use crate::fixtures;
 
@@ -204,5 +207,85 @@ impl StubState {
             }
         }
         None
+    }
+
+    // ─── automation lane helpers ───────────────────────────────────────
+
+    fn find_lane_mut(&mut self, lane_id: &EntityId) -> Option<&mut AutomationLane> {
+        for track in &mut self.session.tracks {
+            for lane in &mut track.automation_lanes {
+                if lane.control_id == *lane_id {
+                    return Some(lane);
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn set_automation_mode(
+        &mut self,
+        lane_id: &EntityId,
+        mode: AutomationMode,
+    ) -> Result<(), BackendError> {
+        let lane = self.find_lane_mut(lane_id)
+            .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
+        lane.mode = mode;
+        Ok(())
+    }
+
+    pub(crate) fn add_automation_point(
+        &mut self,
+        lane_id: &EntityId,
+        point: AutomationPoint,
+    ) -> Result<(), BackendError> {
+        let lane = self.find_lane_mut(lane_id)
+            .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
+        lane.points.push(point);
+        lane.points.sort_by_key(|p| p.time_samples);
+        Ok(())
+    }
+
+    pub(crate) fn update_automation_point(
+        &mut self,
+        lane_id: &EntityId,
+        original_time_samples: u64,
+        new_time_samples: u64,
+        value: f64,
+    ) -> Result<(), BackendError> {
+        let lane = self.find_lane_mut(lane_id)
+            .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
+        let pt = lane.points.iter_mut()
+            .find(|p| p.time_samples == original_time_samples)
+            .ok_or_else(|| BackendError::Other(format!("point not found at {original_time_samples}")))?;
+        pt.time_samples = new_time_samples;
+        pt.value = value;
+        lane.points.sort_by_key(|p| p.time_samples);
+        Ok(())
+    }
+
+    pub(crate) fn delete_automation_point(
+        &mut self,
+        lane_id: &EntityId,
+        time_samples: u64,
+    ) -> Result<(), BackendError> {
+        let lane = self.find_lane_mut(lane_id)
+            .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
+        let old_len = lane.points.len();
+        lane.points.retain(|p| p.time_samples != time_samples);
+        if lane.points.len() == old_len {
+            return Err(BackendError::Other(format!("point not found at {time_samples}")));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replace_automation_lane(
+        &mut self,
+        lane_id: &EntityId,
+        points: Vec<AutomationPoint>,
+    ) -> Result<(), BackendError> {
+        let lane = self.find_lane_mut(lane_id)
+            .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
+        lane.points = points;
+        Ok(())
     }
 }

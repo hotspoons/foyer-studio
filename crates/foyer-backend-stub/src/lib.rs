@@ -330,6 +330,47 @@ impl Backend for StubBackend {
         Ok(updated)
     }
 
+    async fn set_automation_mode(
+        &self,
+        lane_id: EntityId,
+        mode: foyer_schema::AutomationMode,
+    ) -> Result<(), BackendError> {
+        self.state.lock().await.set_automation_mode(&lane_id, mode)
+    }
+    async fn add_automation_point(
+        &self,
+        lane_id: EntityId,
+        point: foyer_schema::AutomationPoint,
+    ) -> Result<(), BackendError> {
+        self.state.lock().await.add_automation_point(&lane_id, point)
+    }
+    async fn update_automation_point(
+        &self,
+        lane_id: EntityId,
+        original_time_samples: u64,
+        new_time_samples: u64,
+        value: f64,
+    ) -> Result<(), BackendError> {
+        self.state
+            .lock()
+            .await
+            .update_automation_point(&lane_id, original_time_samples, new_time_samples, value)
+    }
+    async fn delete_automation_point(
+        &self,
+        lane_id: EntityId,
+        time_samples: u64,
+    ) -> Result<(), BackendError> {
+        self.state.lock().await.delete_automation_point(&lane_id, time_samples)
+    }
+    async fn replace_automation_lane(
+        &self,
+        lane_id: EntityId,
+        points: Vec<foyer_schema::AutomationPoint>,
+    ) -> Result<(), BackendError> {
+        self.state.lock().await.replace_automation_lane(&lane_id, points)
+    }
+
     async fn update_region(
         &self,
         id: EntityId,

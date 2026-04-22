@@ -966,7 +966,21 @@ encode_track_updated (Session& session, const std::string& track_id)
 
 	auto plugins = schema_map::enumerate_plugins (route);
 	auto rec_ctl = route->rec_enable_control ();
-		auto mon_ctl = route->monitoring_control ();
+	auto mon_ctl = route->monitoring_control ();
+
+	struct LaneSrc {
+		std::string                        control_id;
+		std::shared_ptr<AutomationControl> ac;
+	};
+	std::vector<LaneSrc> lane_srcs;
+	lane_srcs.push_back ({ matched.self_id + ".gain", route->gain_control () });
+	lane_srcs.push_back ({ matched.self_id + ".pan",  route->pan_azimuth_control () });
+	lane_srcs.push_back ({ matched.self_id + ".mute", route->mute_control () });
+	lane_srcs.push_back ({ matched.self_id + ".solo", route->solo_control () });
+	std::size_t lane_count = 0;
+	for (auto const& l : lane_srcs) {
+		if (l.ac && l.ac->alist ()) ++lane_count;
+	}
 
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
@@ -976,8 +990,9 @@ encode_track_updated (Session& session, const std::string& track_id)
 
 		std::size_t track_fields = 9; // +1 for peak_meter
 		if (rec_ctl) ++track_fields;
-			if (mon_ctl) ++track_fields;
+		if (mon_ctl) ++track_fields;
 		if (!plugins.empty ()) ++track_fields;
+		if (lane_count > 0) ++track_fields;
 
 		o.map (track_fields);
 		o.str ("id");   o.str (matched.self_id);
@@ -1026,6 +1041,37 @@ encode_track_updated (Session& session, const std::string& track_id)
 					o.str ("label"); o.str (p.label);
 					o.str ("scale"); o.str (p.scale);
 					o.str ("value"); o.f64 (p.value);
+				}
+			}
+		}
+
+		if (lane_count > 0) {
+			o.str ("automation_lanes");
+			o.array (lane_count);
+			for (auto const& l : lane_srcs) {
+				if (!l.ac) continue;
+				auto alist = l.ac->alist ();
+				if (!alist) continue;
+				std::vector<std::pair<std::uint64_t, double>> pts;
+				{
+					PBD::RWLock::ReaderLock lm (alist->lock ());
+					for (auto const* ev : alist->events ()) {
+						if (!ev) continue;
+						const auto sp = ev->when.samples ();
+						pts.emplace_back (
+						    static_cast<std::uint64_t> (std::max<Temporal::samplepos_t> (sp, 0)),
+						    ev->value);
+					}
+				}
+				o.map (3);
+				o.str ("control_id"); o.str (l.control_id);
+				o.str ("mode");       o.str (automation_mode_str (alist->automation_state ()));
+				o.str ("points");
+				o.array (pts.size ());
+				for (auto const& p : pts) {
+					o.map (2);
+					o.str ("time_samples"); o.u (p.first);
+					o.str ("value");        o.f64 (p.second);
 				}
 			}
 		}

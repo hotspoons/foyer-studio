@@ -546,6 +546,52 @@ impl HostClient {
         self.send_command(Command::ClearSequencerLayout { region_id }).await
     }
 
+    pub async fn set_automation_mode(
+        &self,
+        lane_id: EntityId,
+        mode: foyer_schema::AutomationMode,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::SetAutomationMode { lane_id, mode }).await
+    }
+    pub async fn add_automation_point(
+        &self,
+        lane_id: EntityId,
+        point: foyer_schema::AutomationPoint,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::AddAutomationPoint { lane_id, point }).await
+    }
+    pub async fn update_automation_point(
+        &self,
+        lane_id: EntityId,
+        original_time_samples: u64,
+        new_time_samples: u64,
+        value: f64,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::UpdateAutomationPoint {
+            lane_id,
+            original_time_samples,
+            new_time_samples,
+            value,
+        }).await
+    }
+    pub async fn delete_automation_point(
+        &self,
+        lane_id: EntityId,
+        time_samples: u64,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::DeleteAutomationPoint {
+            lane_id,
+            time_samples,
+        }).await
+    }
+    pub async fn replace_automation_lane(
+        &self,
+        lane_id: EntityId,
+        points: Vec<foyer_schema::AutomationPoint>,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::ReplaceAutomationLane { lane_id, points }).await
+    }
+
     pub async fn update_track(
         &self,
         id: EntityId,

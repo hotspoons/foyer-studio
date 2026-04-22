@@ -29,6 +29,7 @@
 // follow-on once the shim emits the events.
 
 import { LitElement, html, css } from "lit";
+import { icon } from "../icons.js";
 
 // Parameter kinds the shim emits where "discrete or enumerated" is
 // true — these are the ones most likely to be the synth's patch /

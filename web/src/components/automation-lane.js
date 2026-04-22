@@ -1,4 +1,4 @@
-// Automation lane — read-only polyline renderer for Phase A.
+// Automation lane — read-only polyline renderer for Phase A, editable for Phase B.
 //
 // Takes an `AutomationLane` from `track.automation_lanes` and paints
 // its points against the timeline's px-per-sample scale. The lane
@@ -6,20 +6,20 @@
 // so a point at `time_samples = N` lines up with the waveform at
 // sample N.
 //
-// Phase A is read-only. The playhead-driven dot comes for free: we
-// subscribe to the underlying `control_id` and plot a moving circle
-// at the interpolated value whenever the parameter changes. No edit
-// affordances yet.
+// Phase B interactions:
+//   · Click empty space → add a point.
+//   · Drag a point → move time + value.
+//   · Right-click a point → delete.
+//   · Click mode chip → cycle Off → Play → Write → Touch → Latch → Off.
 //
-// Phase B (edit) will reuse this render path and add pointer handlers
-// for add/move/delete of points. Scaffolding is already sized for
-// that — `_pointAtX`, `_xForSample`, `_yForValue` are the hooks.
+// Commands fire via `window.__foyer.ws.send({ type: "...", ... })`.
 
 import { LitElement, html, css } from "lit";
 import { ControlController } from "../store.js";
 
 const LANE_HEIGHT = 48;
 const PAD_Y = 4;
+const HIT_RADIUS = 6;
 
 /** Lane label + range hints per control id. Keeps the Y-axis mapping
  *  sane without having to round-trip the Parameter.range field. Extra
@@ -31,6 +31,8 @@ const LANE_META = {
   solo:  { label: "Solo", min: 0,   max: 1, unit: "",   color: "#f87171" },
 };
 
+const MODE_CYCLE = ["off", "play", "write", "touch", "latch"];
+
 function metaFor(controlId) {
   const suffix = String(controlId || "").split(".").pop();
   return LANE_META[suffix] || { label: suffix || "param", min: 0, max: 1, unit: "", color: "var(--color-accent)" };
@@ -38,15 +40,10 @@ function metaFor(controlId) {
 
 export class AutomationLane extends LitElement {
   static properties = {
-    /** The AutomationLane payload — { control_id, mode, points }. */
     lane: { attribute: false },
-    /** Total timeline length in samples (for x-axis scaling). */
     totalSamples: { type: Number, attribute: "total-samples" },
-    /** px-per-second zoom from the parent timeline. */
     pxPerSec: { type: Number, attribute: "px-per-sec" },
-    /** Session sample rate — needed to turn time_samples into seconds. */
     sampleRate: { type: Number, attribute: "sample-rate" },
-    /** Optional track color for the stroke tint. */
     color: { type: String },
     _liveValue: { state: true, type: Number },
   };
@@ -60,6 +57,7 @@ export class AutomationLane extends LitElement {
       border-top: 1px solid color-mix(in oklab, var(--color-border) 50%, transparent);
       overflow: hidden;
       font-family: var(--font-sans);
+      user-select: none;
     }
     .label {
       position: absolute;
@@ -69,7 +67,7 @@ export class AutomationLane extends LitElement {
       text-transform: uppercase;
       color: var(--color-text-muted);
       pointer-events: none;
-      z-index: 1;
+      z-index: 2;
     }
     .label .mode {
       margin-left: 6px;
@@ -78,14 +76,30 @@ export class AutomationLane extends LitElement {
       background: color-mix(in oklab, var(--color-accent) 20%, transparent);
       color: var(--color-accent);
       font-size: 8px;
+      cursor: pointer;
+      pointer-events: auto;
+      user-select: none;
     }
     .label .mode.off { background: transparent; color: var(--color-text-muted); }
+    .label .reset {
+      margin-left: 6px;
+      padding: 0 5px;
+      border-radius: 3px;
+      background: color-mix(in oklab, var(--color-danger) 20%, transparent);
+      color: var(--color-danger);
+      font-size: 8px;
+      cursor: pointer;
+      pointer-events: auto;
+      user-select: none;
+      opacity: 0.7;
+      transition: opacity 0.1s;
+    }
+    .label .reset:hover { opacity: 1; }
     svg {
       position: absolute;
       inset: 0;
       width: 100%;
       height: 100%;
-      pointer-events: none;
     }
     svg .grid {
       stroke: color-mix(in oklab, var(--color-border) 50%, transparent);
@@ -96,20 +110,31 @@ export class AutomationLane extends LitElement {
       stroke: var(--lane-color, var(--color-accent, #7c5cff));
       stroke-width: 1.5;
       fill: none;
+      pointer-events: stroke;
     }
     svg .area {
       fill: var(--lane-color, var(--color-accent, #7c5cff));
       fill-opacity: 0.12;
+      pointer-events: none;
     }
     svg .point {
       fill: var(--lane-color, var(--color-accent, #7c5cff));
       stroke: var(--color-surface);
       stroke-width: 1;
+      cursor: grab;
+      pointer-events: all;
     }
+    svg .point:hover { r: 5; }
+    svg .point:active { cursor: grabbing; }
     svg .live {
       fill: #fff;
       stroke: var(--lane-color, var(--color-accent, #7c5cff));
       stroke-width: 2;
+      pointer-events: none;
+    }
+    svg .hit-surface {
+      fill: transparent;
+      pointer-events: all;
     }
   `;
 
@@ -122,6 +147,7 @@ export class AutomationLane extends LitElement {
     this.color = "";
     this._liveValue = null;
     this._controlCtl = null;
+    this._drag = null;
   }
 
   updated(changed) {
@@ -134,9 +160,20 @@ export class AutomationLane extends LitElement {
     }
   }
 
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._endDrag();
+  }
+
+  // ─── coordinate helpers ───────────────────────────────────────────
+
   _xForSample(sample) {
     const sr = this.sampleRate || 48_000;
     return (sample / sr) * (this.pxPerSec || 60);
+  }
+  _sampleForX(x) {
+    const sr = this.sampleRate || 48_000;
+    return Math.round((x / (this.pxPerSec || 60)) * sr);
   }
   _yForValue(v) {
     const m = metaFor(this.lane?.control_id);
@@ -145,42 +182,169 @@ export class AutomationLane extends LitElement {
     const usable = LANE_HEIGHT - PAD_Y * 2;
     return LANE_HEIGHT - PAD_Y - norm * usable;
   }
+  _valueForY(y) {
+    const m = metaFor(this.lane?.control_id);
+    const norm = (LANE_HEIGHT - PAD_Y - y) / Math.max(0.0001, LANE_HEIGHT - PAD_Y * 2);
+    const clamped = Math.max(0, Math.min(1, norm));
+    return m.min + clamped * (m.max - m.min);
+  }
+
+  // ─── hit testing ──────────────────────────────────────────────────
+
+  _nearestPoint(clientX) {
+    const rect = this.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const pts = Array.isArray(this.lane?.points) ? this.lane.points : [];
+    let best = null;
+    let bestDist = Infinity;
+    for (const p of pts) {
+      const px = this._xForSample(p.time_samples || 0);
+      const d = Math.abs(px - x);
+      if (d < bestDist) { bestDist = d; best = p; }
+    }
+    return { point: best, dist: bestDist };
+  }
+
+  // ─── interaction handlers ─────────────────────────────────────────
+
+  _onPointerDown(ev) {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    const { point, dist } = this._nearestPoint(ev.clientX);
+    if (point && dist <= HIT_RADIUS) {
+      this._startDrag(ev, point);
+    } else {
+      this._addPointAt(ev);
+    }
+  }
+
+  _startDrag(ev, point) {
+    this._drag = {
+      original: { ...point },
+      current: point,
+      startX: ev.clientX,
+      startY: ev.clientY,
+    };
+    window.addEventListener("pointermove", this._onMove);
+    window.addEventListener("pointerup", this._onUp);
+  }
+
+  _onMove = (ev) => {
+    if (!this._drag) return;
+    const d = this._drag;
+    const rect = this.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    const y = ev.clientY - rect.top;
+    d.current.time_samples = Math.max(0, Math.min(this.totalSamples, this._sampleForX(x)));
+    d.current.value = this._valueForY(y);
+    this.requestUpdate();
+  };
+
+  _onUp = (_ev) => {
+    if (!this._drag) return;
+    const d = this._drag;
+    const sameTime = d.current.time_samples === d.original.time_samples;
+    const sameValue = Math.abs(d.current.value - d.original.value) < 0.0001;
+    if (!sameTime || !sameValue) {
+      this._sendCommand("update_automation_point", {
+        lane_id: this.lane.control_id,
+        original_time_samples: d.original.time_samples,
+        new_time_samples: d.current.time_samples,
+        value: d.current.value,
+      });
+    }
+    this._endDrag();
+  };
+
+  _endDrag() {
+    this._drag = null;
+    window.removeEventListener("pointermove", this._onMove);
+    window.removeEventListener("pointerup", this._onUp);
+    this.requestUpdate();
+  }
+
+  _addPointAt(ev) {
+    const rect = this.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    const y = ev.clientY - rect.top;
+    const time = Math.max(0, Math.min(this.totalSamples, this._sampleForX(x)));
+    const value = this._valueForY(y);
+    this._sendCommand("add_automation_point", {
+      lane_id: this.lane.control_id,
+      point: { time_samples: time, value },
+    });
+  }
+
+  _onContextMenu(ev) {
+    ev.preventDefault();
+    const { point, dist } = this._nearestPoint(ev.clientX);
+    if (point && dist <= HIT_RADIUS) {
+      this._sendCommand("delete_automation_point", {
+        lane_id: this.lane.control_id,
+        time_samples: point.time_samples,
+      });
+    }
+  }
+
+  _cycleMode() {
+    const cur = String(this.lane?.mode || "off").toLowerCase();
+    const idx = MODE_CYCLE.indexOf(cur);
+    const next = MODE_CYCLE[(idx + 1) % MODE_CYCLE.length];
+    this._sendCommand("set_automation_mode", {
+      lane_id: this.lane.control_id,
+      mode: next,
+    });
+  }
+
+  _confirmReset() {
+    const count = Array.isArray(this.lane?.points) ? this.lane.points.length : 0;
+    if (count === 0) return;
+    const confirmed = window.confirm(
+      `Clear all ${count} automation point${count === 1 ? "" : "s"} for ${metaFor(this.lane.control_id).label}?`
+    );
+    if (confirmed) {
+      this._sendCommand("replace_automation_lane", {
+        lane_id: this.lane.control_id,
+        points: [],
+      });
+    }
+  }
+
+  _sendCommand(type, body) {
+    const ws = window.__foyer?.ws;
+    if (ws) ws.send({ type, ...body });
+  }
+
+  // ─── render ───────────────────────────────────────────────────────
 
   render() {
     const lane = this.lane;
     if (!lane) return html``;
     const m = metaFor(lane.control_id);
     const mode = lane.mode || "off";
-    const points = Array.isArray(lane.points) ? lane.points : [];
+    const pts = Array.isArray(lane.points) ? lane.points : [];
+    const sorted = [...pts].sort((a, b) => (a.time_samples || 0) - (b.time_samples || 0));
     const color = this.color || m.color;
 
-    // Build the polyline d-string. Even when there are zero points
-    // we still paint the label/mode chip — the lane's value is
-    // "whatever the static Parameter says", so show a flat line at
-    // that current value if the control is live.
-    const liveV = this._liveValue ?? (points.length > 0 ? points[0].value : (m.min + m.max) / 2);
+    const liveV = this._liveValue ?? (sorted.length > 0 ? sorted[0].value : (m.min + m.max) / 2);
     let linePath = "";
     let areaPath = "";
     const y0 = this._yForValue(m.min);
-    if (points.length === 0) {
+    if (sorted.length === 0) {
       const y = this._yForValue(liveV);
       linePath = `M 0 ${y} L ${this._xForSample(this.totalSamples)} ${y}`;
       areaPath = `M 0 ${y} L ${this._xForSample(this.totalSamples)} ${y} L ${this._xForSample(this.totalSamples)} ${y0} L 0 ${y0} Z`;
     } else {
       const parts = [];
       const areaParts = [];
-      const sorted = [...points].sort((a, b) => (a.time_samples || 0) - (b.time_samples || 0));
       const first = sorted[0];
       const last = sorted[sorted.length - 1];
-      const x0 = 0;
       const yFirst = this._yForValue(first.value);
-      parts.push(`M ${x0} ${yFirst}`);
-      areaParts.push(`M ${x0} ${y0} L ${x0} ${yFirst}`);
+      parts.push(`M 0 ${yFirst}`);
+      areaParts.push(`M 0 ${y0} L 0 ${yFirst}`);
       for (const p of sorted) {
-        const x = this._xForSample(p.time_samples || 0);
-        const y = this._yForValue(p.value);
-        parts.push(`L ${x} ${y}`);
-        areaParts.push(`L ${x} ${y}`);
+        parts.push(`L ${this._xForSample(p.time_samples || 0)} ${this._yForValue(p.value)}`);
+        areaParts.push(`L ${this._xForSample(p.time_samples || 0)} ${this._yForValue(p.value)}`);
       }
       const xEnd = this._xForSample(this.totalSamples);
       const yLast = this._yForValue(last.value);
@@ -190,25 +354,36 @@ export class AutomationLane extends LitElement {
       areaPath = areaParts.join(" ");
     }
 
-    // Live playhead dot: sample the control's current value (which
-    // flows in via control_update events) and drop a circle at the
-    // current x = playhead. The x-position comes from the transport
-    // position if the store has it.
     const store = window.__foyer?.store;
     const posSamples = Number(store?.get?.("transport.position") ?? 0);
     const liveX = this._xForSample(posSamples);
     const liveY = this._yForValue(liveV);
 
+    const hasPoints = Array.isArray(this.lane?.points) && this.lane.points.length > 0;
+
     return html`
       <div class="label" style="--lane-color:${color}">
         ${m.label}
-        <span class="mode ${mode === "off" ? "off" : ""}">${mode.toUpperCase()}</span>
+        <span class="mode ${mode === "off" ? "off" : ""}"
+              @click=${(e) => { e.stopPropagation(); this._cycleMode(); }}>
+          ${mode.toUpperCase()}
+        </span>
+        ${hasPoints ? html`
+          <span class="reset"
+                title="Clear all automation points"
+                @click=${(e) => { e.stopPropagation(); this._confirmReset(); }}>
+            CLR
+          </span>
+        ` : null}
       </div>
-      <svg style="--lane-color:${color}">
+      <svg style="--lane-color:${color}"
+           @pointerdown=${this._onPointerDown}
+           @contextmenu=${this._onContextMenu}>
+        <rect class="hit-surface" width="100%" height="100%" />
         <line class="grid" x1="0" x2="100%" y1="${y0}" y2="${y0}" />
         <path class="area" d="${areaPath}" />
         <path class="line" d="${linePath}" />
-        ${points.map((p) => html`
+        ${sorted.map((p) => html`
           <circle class="point"
                   cx="${this._xForSample(p.time_samples || 0)}"
                   cy="${this._yForValue(p.value)}"

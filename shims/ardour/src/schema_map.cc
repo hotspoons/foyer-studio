@@ -746,10 +746,28 @@ list_plugin_catalog ()
 {
 	std::vector<PluginCatalogDesc> out;
 	auto& mgr = ARDOUR::PluginManager::instance ();
+
+	// If every list is empty, Ardour hasn't scanned (or its cache is
+	// stale/empty). Kick a refresh and re-read. This is the common
+	// case on first dev-container boot where no Ardour GUI has ever
+	// run its startup scan.
+	bool all_empty = true;
+	auto check_empty = [&all_empty] (const ARDOUR::PluginInfoList& list) {
+		for (auto const& info : list) { if (info) { all_empty = false; break; } }
+	};
+	check_empty (mgr.lv2_plugin_info ());
+	check_empty (mgr.vst3_plugin_info ());
+	check_empty (mgr.ladspa_plugin_info ());
+	if (all_empty) {
+		PBD::warning << "foyer_shim: plugin catalog empty — triggering refresh" << endmsg;
+		mgr.refresh ();
+	}
+
 	// `get_all_plugins` is private — walk each format's public list
 	// directly. The frontend re-sorts the catalog by role / name for
 	// presentation, so the per-format ordering here is fine.
-	auto append = [&out] (const ARDOUR::PluginInfoList& list) {
+	auto append = [&out] (const char* label, const ARDOUR::PluginInfoList& list) {
+		std::size_t count = 0;
 		for (auto const& info : list) {
 			if (!info) continue;
 			PluginCatalogDesc d;
@@ -764,16 +782,19 @@ list_plugin_catalog ()
 			d.uri    = info->unique_id;
 			if (!info->category.empty ()) d.tags.push_back (info->category);
 			out.push_back (std::move (d));
+			++count;
 		}
+		PBD::warning << "foyer_shim: plugin catalog " << label << " count=" << count << endmsg;
 	};
-	append (mgr.lv2_plugin_info ());
-	append (mgr.vst3_plugin_info ());
-	append (mgr.windows_vst_plugin_info ());
-	append (mgr.lxvst_plugin_info ());
-	append (mgr.mac_vst_plugin_info ());
-	append (mgr.au_plugin_info ());
-	append (mgr.ladspa_plugin_info ());
-	append (mgr.lua_plugin_info ());
+	append ("lv2",     mgr.lv2_plugin_info ());
+	append ("vst3",    mgr.vst3_plugin_info ());
+	append ("win_vst", mgr.windows_vst_plugin_info ());
+	append ("lx_vst",  mgr.lxvst_plugin_info ());
+	append ("mac_vst", mgr.mac_vst_plugin_info ());
+	append ("au",      mgr.au_plugin_info ());
+	append ("ladspa",  mgr.ladspa_plugin_info ());
+	append ("lua",     mgr.lua_plugin_info ());
+	PBD::info << "foyer_shim: plugin catalog total=" << out.size () << endmsg;
 	return out;
 }
 
@@ -849,6 +870,49 @@ find_region (Session& session, const std::string& region_id)
 		}
 	}
 	return hit;
+}
+
+std::shared_ptr<PBD::Controllable>
+resolve_automation_control (Session& session, const std::string& control_id)
+{
+	// resolve returns a Controllable; AutomationControl inherits from it.
+	return resolve (session, control_id);
+}
+
+std::string
+track_id_for_control (Session& session, const std::string& control_id)
+{
+	// Format: track.<pbd-id>.<field>  or  plugin.<pi-id>...
+	if (control_id.rfind ("track.", 0) == 0) {
+		auto last_dot = control_id.rfind ('.');
+		if (last_dot != std::string::npos && last_dot > 6) {
+			return control_id.substr (0, last_dot);
+		}
+	}
+	// Plugin params: find which route hosts the plugin.
+	if (control_id.rfind ("plugin.", 0) == 0) {
+		const std::string suffix_param = ".param.";
+		auto param_pos = control_id.rfind (suffix_param);
+		if (param_pos != std::string::npos) {
+			std::string pid = control_id.substr (7, param_pos - 7);
+			std::shared_ptr<RouteList const> routes = safe_get_routes (session);
+			for (auto const& r : *routes) {
+				if (!r) continue;
+				for (uint32_t i = 0; ; ++i) {
+					auto proc = r->nth_plugin (i);
+					if (!proc) break;
+					auto pi = std::dynamic_pointer_cast<PluginInsert> (proc);
+					if (!pi) continue;
+					std::ostringstream o; o << pi->id ();
+					if (o.str () == pid) {
+						std::ostringstream trk; trk << r->id ();
+						return "track." + trk.str ();
+					}
+				}
+			}
+		}
+	}
+	return {};
 }
 
 } // namespace ArdourSurface::schema_map

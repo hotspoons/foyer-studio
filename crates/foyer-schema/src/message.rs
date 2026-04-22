@@ -697,6 +697,30 @@ pub enum Command {
     /// Re-apply the most recently undone step.
     Redo,
 
+    // ───── automation (Phase B) ─────────────────────────────────────────
+    SetAutomationMode {
+        lane_id: EntityId,
+        mode: crate::value::AutomationMode,
+    },
+    AddAutomationPoint {
+        lane_id: EntityId,
+        point: crate::value::AutomationPoint,
+    },
+    UpdateAutomationPoint {
+        lane_id: EntityId,
+        original_time_samples: u64,
+        new_time_samples: u64,
+        value: f64,
+    },
+    DeleteAutomationPoint {
+        lane_id: EntityId,
+        time_samples: u64,
+    },
+    ReplaceAutomationLane {
+        lane_id: EntityId,
+        points: Vec<crate::value::AutomationPoint>,
+    },
+
     // ───── transport ────────────────────────────────────────────────────
     /// Move the playhead to the given sample position. Distinct from
     /// setting `transport.position` via `ControlSet` because it carries
