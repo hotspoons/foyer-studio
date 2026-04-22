@@ -320,8 +320,8 @@ jack-dummy:
     # 9p filesystem hiccups and cross-VM scheduling jitter don't
     # trigger xruns. Drop to 256 or 128 on bare-metal Linux for
     # real tracking-grade latency.
-    echo "Starting jackd -R -d dummy @ 48 kHz, 1024-sample buffer (~21 ms)…"
-    jackd -R -P 10 -d dummy -r 48000 -p 1024 > /tmp/jackd.log 2>&1 &
+    echo "Starting jackd -R -d dummy @ 48 kHz, 720-sample buffer (~30 ms)…”
+    jackd -R -P 10 -d dummy -r 48000 -p 720 -n default > /tmp/jackd.log 2>&1 &
     # Poll for process + short settle time. jackd clients block on
     # connect until the server is actually ready, so we don't need
     # to sniff the log — existence + a beat is enough.
