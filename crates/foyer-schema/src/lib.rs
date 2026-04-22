@@ -25,7 +25,7 @@ pub use audio::{
 };
 pub use fs::{FsEntry, FsEntryKind, PathListing};
 pub use id::EntityId;
-pub use io::{IoDirection, IoPort};
+pub use io::{EnginePort, IoDirection, IoPort};
 pub use message::{
     BackendInfo, Command, ControlUpdate, Envelope, Event, OrphanInfo, Patch, Seq, SessionInfo,
 };

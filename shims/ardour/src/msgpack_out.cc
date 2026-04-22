@@ -26,12 +26,20 @@
 
 #include <sstream>
 
+#include "ardour/audio_port.h"
+#include "ardour/audioengine.h"
 #include "ardour/automation_control.h"
 #include "ardour/automation_list.h"
+#include "ardour/delivery.h"
+#include "ardour/gain_control.h"
+#include "ardour/internal_send.h"
 #include "ardour/meter.h"
 #include "ardour/monitor_control.h"
+#include "ardour/port_manager.h"
+#include "ardour/processor.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
+#include "ardour/send.h"
 #include "ardour/session.h"
 #include "ardour/source.h"
 #include "ardour/stripable.h"
@@ -50,6 +58,98 @@ using namespace PBD;
 namespace ArdourSurface::msgpack_out {
 
 namespace {
+
+// A single aux send on a route, shaped for the schema's `Send` struct.
+struct SendDesc {
+	std::string id;              // "send.<processor-pbd-id>"
+	std::string target_track;    // "track.<route-pbd-id>" of the bus
+	double      level = 1.0;     // linear gain (0.0 .. ~2.0)
+	bool        pre_fader = false;
+};
+
+// Walk a route's processor chain, collecting every aux / internal send
+// that targets another route. We ignore monitor/foldback/surround sends
+// since they don't have a bus target the user picks from the session.
+static std::vector<SendDesc>
+enumerate_sends (const std::shared_ptr<ARDOUR::Route>& route)
+{
+	std::vector<SendDesc> out;
+	if (!route) return out;
+	route->foreach_processor ([&] (std::weak_ptr<ARDOUR::Processor> wp) {
+		auto p = wp.lock ();
+		if (!p) return;
+		auto isnd = std::dynamic_pointer_cast<ARDOUR::InternalSend> (p);
+		if (!isnd) return;
+		auto target = isnd->target_route ();
+		if (!target) return;
+		SendDesc d;
+		{
+			std::ostringstream tmp;
+			tmp << p->id ();
+			d.id = "send." + tmp.str ();
+		}
+		{
+			std::ostringstream tmp;
+			tmp << target->id ();
+			d.target_track = "track." + tmp.str ();
+		}
+		auto gc = isnd->gain_control ();
+		if (gc) d.level = gc->get_value ();
+		// Pre/post-fader is determined by processor-chain placement
+		// (before or after the Amp), not by Role. Determining that
+		// requires knowing the Amp's index in the chain; leave false
+		// for now — the UI shows the flag but doesn't rely on it for
+		// audio correctness.
+		d.pre_fader = false;
+		out.push_back (std::move (d));
+	});
+	return out;
+}
+
+// Best-effort bus_assign inference: walk the track's main output ports,
+// look at their connections, and if they resolve to a single sibling
+// route's input ports, report that route's foyer id. Returns empty
+// string if there's no unique bus target (e.g. connected to master, or
+// to multiple buses, or unconnected).
+static std::string
+infer_bus_assign (const std::shared_ptr<ARDOUR::Route>& route,
+                  const std::vector<std::shared_ptr<ARDOUR::Route>>& all_routes)
+{
+	if (!route) return {};
+	auto out_io = route->output ();
+	if (!out_io || out_io->n_ports ().n_audio () == 0) return {};
+	// Build a quick map of "engine port name → owning route id" over
+	// every route's audio inputs. One pass, then lookups are trivial.
+	std::map<std::string, std::string> port_to_route;
+	for (auto const& r : all_routes) {
+		if (!r || r == route) continue;
+		auto in_io = r->input ();
+		if (!in_io) continue;
+		const uint32_t n = in_io->n_ports ().n_audio ();
+		for (uint32_t ch = 0; ch < n; ++ch) {
+			auto port = in_io->audio (ch);
+			if (!port) continue;
+			std::ostringstream tmp;
+			tmp << "track." << r->id ();
+			port_to_route[port->name ()] = tmp.str ();
+		}
+	}
+	std::string target_id;
+	const uint32_t n_out = out_io->n_ports ().n_audio ();
+	for (uint32_t ch = 0; ch < n_out; ++ch) {
+		auto port = out_io->audio (ch);
+		if (!port) continue;
+		std::vector<std::string> conns;
+		port->get_connections (conns);
+		for (auto const& c : conns) {
+			auto it = port_to_route.find (c);
+			if (it == port_to_route.end ()) continue;
+			if (target_id.empty ()) target_id = it->second;
+			else if (target_id != it->second) return {}; // ambiguous → none
+		}
+	}
+	return target_id;
+}
 
 // Convert Ardour's AutoState enum to the lowercase strings the Rust
 // schema's `AutomationMode` deserializes. Unknown / off falls to
@@ -425,6 +525,9 @@ encode_session_snapshot (Session& session,
 				std::shared_ptr<AutomationControl>  ac;
 			};
 			std::vector<LaneSrc> lane_srcs;
+			std::vector<std::pair<std::string, std::string>> input_ports; // { port_name, id }
+			std::vector<SendDesc> sends;
+			std::string bus_assign;
 			if (it != route_by_id.end ()) {
 				plugins = schema_map::enumerate_plugins (it->second);
 				rec_ctl = it->second->rec_enable_control ();
@@ -434,6 +537,20 @@ encode_session_snapshot (Session& session,
 				lane_srcs.push_back ({ s.self_id + ".pan",  r->pan_azimuth_control () });
 				lane_srcs.push_back ({ s.self_id + ".mute", r->mute_control () });
 				lane_srcs.push_back ({ s.self_id + ".solo", r->solo_control () });
+				auto io = r->input ();
+				if (io && io->n_ports ().n_audio () > 0) {
+					const uint32_t n_audio = io->n_ports ().n_audio ();
+					for (uint32_t ch = 0; ch < n_audio; ++ch) {
+						auto port = io->audio (ch);
+						if (port) {
+							std::ostringstream pid;
+							pid << s.self_id << ".input." << ch;
+							input_ports.emplace_back (port->name (), pid.str ());
+						}
+					}
+				}
+				sends      = enumerate_sends (r);
+				bus_assign = infer_bus_assign (r, routes);
 			}
 			std::size_t lane_count = 0;
 			for (auto const& l : lane_srcs) {
@@ -450,6 +567,9 @@ encode_session_snapshot (Session& session,
 			if (mon_ctl) ++track_fields;
 			if (!plugins.empty ()) ++track_fields;
 			if (lane_count > 0) ++track_fields;
+			if (!input_ports.empty ()) ++track_fields;
+			if (!sends.empty ()) ++track_fields;
+			if (!bus_assign.empty ()) ++track_fields;
 
 			o.map (track_fields);
 			o.str ("id");   o.str (s.self_id);
@@ -479,6 +599,47 @@ encode_session_snapshot (Session& session,
 					(v == ARDOUR::MonitorCue)   ? "cue"   : "auto";
 				o.str ("monitoring");
 				o.str (lbl);
+			}
+			if (!input_ports.empty ()) {
+				o.str ("inputs");
+				o.array (input_ports.size ());
+				for (auto const& p : input_ports) {
+					o.map (5);
+					o.str ("id");
+					o.str (p.second);
+					o.str ("name");
+					o.str (p.first);
+					o.str ("direction");
+					o.str ("input");
+					o.str ("channels");
+					o.u (1);
+					o.str ("is_midi");
+					o.b (false);
+				}
+			}
+
+			if (!bus_assign.empty ()) {
+				o.str ("bus_assign");
+				o.str (bus_assign);
+			}
+
+			if (!sends.empty ()) {
+				o.str ("sends");
+				o.array (sends.size ());
+				for (auto const& sd : sends) {
+					o.map (4);
+					o.str ("id");           o.str (sd.id);
+					o.str ("target_track"); o.str (sd.target_track);
+					o.str ("level");
+					// Emit as a Parameter { id, kind, label, scale, value }.
+					o.map (5);
+					o.str ("id");    o.str (sd.id + ".level");
+					o.str ("kind");  o.str ("continuous");
+					o.str ("label"); o.str ("Send");
+					o.str ("scale"); o.str ("linear");
+					o.str ("value"); o.f64 (sd.level);
+					o.str ("pre_fader"); o.b (sd.pre_fader);
+				}
 			}
 
 			if (!plugins.empty ()) {
@@ -662,7 +823,8 @@ encode_audio_egress_stopped (std::uint32_t stream_id)
 }
 
 std::vector<std::uint8_t>
-encode_audio_ingress_opened (std::uint32_t stream_id, std::uint32_t sample_rate, std::uint32_t channels)
+encode_audio_ingress_opened (std::uint32_t stream_id, std::uint32_t sample_rate,
+                             std::uint32_t channels, const std::string& source_name)
 {
 	return envelope_event ([&] (Out& o) {
 		o.map (5);
@@ -670,12 +832,19 @@ encode_audio_ingress_opened (std::uint32_t stream_id, std::uint32_t sample_rate,
 		o.str ("type");         o.str ("audio_ingress_opened");
 		o.str ("stream_id");    o.u (stream_id);
 		o.str ("source");
-		o.map (1);
-		o.str ("kind");         o.str ("virtual_input");
-		o.str ("format");
 		o.map (2);
+		o.str ("kind");         o.str ("virtual_input");
+		o.str ("name");         o.str (source_name);
+		o.str ("format");
+		// AudioFormat fields: sample_rate, channels, format (SampleFormat
+		// enum — "f32_le" is the only variant), frame_size, codec (opt).
+		// All four non-optional fields are required by rmp-serde; drop
+		// any and the whole event is rejected with "missing field ...".
+		o.map (4);
 		o.str ("sample_rate");  o.u (sample_rate);
 		o.str ("channels");     o.u (channels);
+		o.str ("format");       o.str ("f32_le");
+		o.str ("frame_size");   o.u (960);  // 20 ms @ 48 kHz, matches ShimInputPort default
 	});
 }
 
@@ -870,6 +1039,63 @@ encode_region_updated (Session& session, const std::string& region_id)
 }
 
 std::vector<std::uint8_t>
+encode_ports_listed (const std::string& direction)
+{
+	// `direction`: "source" → IsOutput (readable), "sink" → IsInput
+	// (writable), anything else → both. We emit audio + midi in one
+	// pass so the client gets a single round-trip.
+	auto engine = AudioEngine::instance ();
+	struct Row {
+		std::string name;
+		std::string dir; // "source" | "sink"
+		bool is_physical = false;
+		bool is_midi     = false;
+	};
+	std::vector<Row> rows;
+
+	auto push = [&] (DataType type, PortFlags flag, const char* dir_tag, bool is_midi) {
+		if (!engine) return;
+		std::vector<std::string> names;
+		engine->get_ports (std::string (), type, flag, names);
+		rows.reserve (rows.size () + names.size ());
+		for (auto const& n : names) {
+			Row r;
+			r.name        = n;
+			r.dir         = dir_tag;
+			r.is_physical = engine->port_is_physical (n);
+			r.is_midi     = is_midi;
+			rows.push_back (std::move (r));
+		}
+	};
+
+	const bool want_source = (direction != "sink");
+	const bool want_sink   = (direction != "source");
+	if (want_source) {
+		push (DataType::AUDIO, IsOutput, "source", false);
+		push (DataType::MIDI,  IsOutput, "source", true);
+	}
+	if (want_sink) {
+		push (DataType::AUDIO, IsInput, "sink", false);
+		push (DataType::MIDI,  IsInput, "sink", true);
+	}
+
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");   o.str ("event");
+		o.str ("type");  o.str ("ports_listed");
+		o.str ("ports");
+		o.array (rows.size ());
+		for (auto const& r : rows) {
+			o.map (4);
+			o.str ("name");        o.str (r.name);
+			o.str ("direction");   o.str (r.dir);
+			o.str ("is_physical"); o.b (r.is_physical);
+			o.str ("is_midi");     o.b (r.is_midi);
+		}
+	});
+}
+
+std::vector<std::uint8_t>
 encode_plugins_list ()
 {
 	auto entries = schema_map::list_plugin_catalog ();
@@ -1011,6 +1237,33 @@ encode_track_updated (Session& session, const std::string& track_id)
 		if (l.ac && l.ac->alist ()) ++lane_count;
 	}
 
+	// Collect input ports so the routing dropdown stays in sync after
+	// input_port patches (same shape as the snapshot path).
+	std::vector<std::pair<std::string, std::string>> input_ports;
+	auto io = route->input ();
+	if (io && io->n_ports ().n_audio () > 0) {
+		const uint32_t n_audio = io->n_ports ().n_audio ();
+		for (uint32_t ch = 0; ch < n_audio; ++ch) {
+			auto port = io->audio (ch);
+			if (port) {
+				std::ostringstream pid;
+				pid << matched.self_id << ".input." << ch;
+				input_ports.emplace_back (port->name (), pid.str ());
+			}
+		}
+	}
+
+	// Routing: sends + inferred bus assignment. `infer_bus_assign`
+	// needs the full route list to resolve engine-port names back to
+	// owner routes, so take a safe snapshot up front.
+	std::vector<std::shared_ptr<Route>> all_routes;
+	{
+		std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
+		all_routes.assign (routes->begin (), routes->end ());
+	}
+	std::vector<SendDesc> sends      = enumerate_sends (route);
+	std::string           bus_assign = infer_bus_assign (route, all_routes);
+
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
 		o.str ("dir");   o.str ("event");
@@ -1022,6 +1275,9 @@ encode_track_updated (Session& session, const std::string& track_id)
 		if (mon_ctl) ++track_fields;
 		if (!plugins.empty ()) ++track_fields;
 		if (lane_count > 0) ++track_fields;
+		if (!input_ports.empty ()) ++track_fields;
+		if (!sends.empty ()) ++track_fields;
+		if (!bus_assign.empty ()) ++track_fields;
 
 		o.map (track_fields);
 		o.str ("id");   o.str (matched.self_id);
@@ -1071,6 +1327,42 @@ encode_track_updated (Session& session, const std::string& track_id)
 					o.str ("scale"); o.str (p.scale);
 					o.str ("value"); o.f64 (p.value);
 				}
+			}
+		}
+
+		if (!input_ports.empty ()) {
+			o.str ("inputs");
+			o.array (input_ports.size ());
+			for (auto const& p : input_ports) {
+				o.map (5);
+				o.str ("id");        o.str (p.second);
+				o.str ("name");      o.str (p.first);
+				o.str ("direction"); o.str ("input");
+				o.str ("channels");  o.u (1);
+				o.str ("is_midi");   o.b (false);
+			}
+		}
+
+		if (!bus_assign.empty ()) {
+			o.str ("bus_assign");
+			o.str (bus_assign);
+		}
+
+		if (!sends.empty ()) {
+			o.str ("sends");
+			o.array (sends.size ());
+			for (auto const& sd : sends) {
+				o.map (4);
+				o.str ("id");           o.str (sd.id);
+				o.str ("target_track"); o.str (sd.target_track);
+				o.str ("level");
+				o.map (5);
+				o.str ("id");    o.str (sd.id + ".level");
+				o.str ("kind");  o.str ("continuous");
+				o.str ("label"); o.str ("Send");
+				o.str ("scale"); o.str ("linear");
+				o.str ("value"); o.f64 (sd.level);
+				o.str ("pre_fader"); o.b (sd.pre_fader);
 			}
 		}
 

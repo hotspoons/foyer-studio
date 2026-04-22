@@ -1438,3 +1438,56 @@ and painful when discovered in production. The real fix is a CI check or
 generated bindings that derive the enum from a single source of truth.
 Until then, we rely on manual vigilance and the error log
 `bad control frame: unknown variant 'ladspa'` as a tell-tale signal.
+
+---
+
+## 34. Routing and bussing wire-format — input_port + bus_assign via UpdateTrack, sends via dedicated commands
+
+**Date:** 2026-04-22
+
+**Decision.** End-to-end routing splits across two wire shapes:
+
+1. Track input port and output bus assignment piggyback on `UpdateTrack`'s
+   `TrackPatch` — new optional fields `input_port: Option<String>` and
+   `bus_assign: Option<EntityId>`. Both are `""`-clears semantics: `Some("")`
+   restores Ardour's default auto-connect (input) or master routing (output);
+   `Some("foyer:ingress-...")` / `Some("track.<bus-id>")` wires to a specific
+   target. The shim's `UpdateTrack` handler applies these via
+   `IO::disconnect_all()` + `IO::connect(port, target)` and echoes
+   `TrackUpdated` so clients see the refreshed `inputs` / `bus_assign`.
+2. Aux sends get dedicated `AddSend { track_id, target_track_id, pre_fader }`,
+   `RemoveSend { send_id }`, `SetSendLevel { send_id, level }` commands.
+   The shim calls `Route::add_aux_send(target, nullptr)` to create an
+   InternalSend, `Route::remove_processor(proc)` to delete, and
+   `Send::gain_control()->set_value()` for level changes.
+3. Available engine ports are discovered via a one-shot `ListPorts { direction }`
+   command answered by `PortsListed { ports }`. The shim enumerates
+   `AudioEngine::get_ports()` with `IsOutput` (source) / `IsInput` (sink)
+   filters; the frontend requests `direction: "source"` to populate the
+   track input dropdown.
+
+**Alternatives.** (a) One generic `SetPortConnection { endpoint_id, port_name }`
+command covering both input and output routing — rejected because it'd need
+a second concept for "bus target by route id, not port name". (b) Model
+sends as plugins using `AddPlugin` — rejected because the schema's
+`PluginInstance` shape doesn't carry `target_track` / `level` cleanly, and
+sends have distinct lifecycle semantics (no URI, no preset list, no GUI).
+
+**Why.** Combining input/bus routing with `UpdateTrack` lets the client
+atomically change multiple track properties in one round-trip (name +
+input + bus at once). Sends stay separate because they're list-structured
+(a track has N sends, not one), and giving them their own commands keeps
+the patch shape flat. `ListPorts` is a separate command rather than
+embedded in the snapshot because the port universe changes mid-session
+(plugging in a USB mic, opening a browser ingress) and embedding it would
+bloat every snapshot with state the UI only needs when the routing
+dropdown opens.
+
+**Shape gotcha.** `TrackPatch::bus_assign` used to live only in the patch
+(no corresponding `Track::bus_assign`), which meant the shim could accept
+the command but the client had no field to display the resulting state.
+Adding `Track::bus_assign: Option<EntityId>` closes that loop. The shim
+infers its value by walking the track's main output port connections at
+snapshot time and resolving them back to a sibling route id — if that
+lookup is ambiguous (connected to master, multiple buses, or unconnected),
+the field stays `None`.

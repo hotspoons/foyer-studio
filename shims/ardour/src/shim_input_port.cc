@@ -37,15 +37,22 @@ ShimInputPort::ShimInputPort (FoyerShim& shim,
 
 	auto engine = AudioEngine::instance ();
 	std::string port_name = "foyer:ingress-" + name;
-	auto port = engine->register_input_port (DataType::AUDIO, port_name, false /* async */, PortFlags (0));
+	// NB: register_OUTPUT_port, not input. In JACK/Ardour parlance,
+	// a port that *produces* audio for others to read is an output
+	// port. Track inputs (which have IsInput) can only connect to
+	// output ports. Registering this as IsInput would mean two
+	// IsInput endpoints trying to connect — JACK rejects that and
+	// IO::connect returns non-zero (and audio never flows).
+	auto port = engine->register_output_port (DataType::AUDIO, port_name, false /* async */, PortFlags (0));
 	_port = std::dynamic_pointer_cast<AudioPort> (port);
 
 	if (_port) {
-		PBD::warning << "foyer_shim: [ingress] port registered stream_id=" << _stream_id
-		             << " name=" << port_name << " channels=" << _channels << endmsg;
+		PBD::warning << "foyer_shim: [ingress] port registered (OUTPUT) stream_id=" << _stream_id
+		             << " name=" << port_name << " channels=" << _channels
+		             << " sample_rate=" << _sample_rate << endmsg;
 		_drain_thread = std::thread (&ShimInputPort::drain_loop, this);
 	} else {
-		PBD::error << "foyer_shim: [ingress] failed to register audio port" << endmsg;
+		PBD::error << "foyer_shim: [ingress] failed to register audio port " << port_name << endmsg;
 	}
 }
 
@@ -76,6 +83,15 @@ ShimInputPort::push_audio (const float* samples, std::size_t n_samples)
 	std::size_t to_write = std::min (n_samples, space);
 	if (to_write > 0) {
 		_ring->write (samples, to_write);
+	}
+	// One-line diagnostic on the first delivery — helps confirm the
+	// browser → sidecar → shim data path works, independent of the
+	// port-buffer write race discussed in drain_loop().
+	if (!_logged_first_push && to_write > 0) {
+		_logged_first_push = true;
+		PBD::warning << "foyer_shim: [ingress] first audio chunk received stream_id=" << _stream_id
+		             << " n_samples=" << n_samples << " written=" << to_write
+		             << " dropped=" << (n_samples - to_write) << endmsg;
 	}
 	_wake_cv.notify_one ();
 }

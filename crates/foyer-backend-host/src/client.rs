@@ -18,9 +18,9 @@ use foyer_ipc::{
     Control,
 };
 use foyer_schema::{
-    AudioFormat, AudioSource, Command, EntityId, Envelope, Event, LatencyReport, MidiNote,
-    MidiNotePatch, PatchChange, PatchChangePatch, PluginCatalogEntry, PluginPreset, Region,
-    RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch, SCHEMA_VERSION,
+    AudioFormat, AudioSource, Command, EnginePort, EntityId, Envelope, Event, LatencyReport,
+    MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, PluginCatalogEntry, PluginPreset,
+    Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch, SCHEMA_VERSION,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -96,6 +96,11 @@ struct Shared {
     /// the same catalog. Concurrent requests just share the same
     /// answer, which is fine for a catalog query.
     pending_plugins_list: Mutex<Vec<oneshot::Sender<Vec<PluginCatalogEntry>>>>,
+    /// In-flight `list_ports` requests. Same shared-answer pattern as
+    /// `pending_plugins_list`: the shim's PortsListed event has no
+    /// correlation id, so every concurrent awaiter resolves to the
+    /// same snapshot.
+    pending_ports_list: Mutex<Vec<oneshot::Sender<Vec<EnginePort>>>>,
     /// Cache of known regions, keyed by region id. Populated from every
     /// `RegionsList` / `RegionUpdated` event; drained on `RegionRemoved`.
     /// Used to look up `source_path` when the sidecar needs to decode
@@ -148,6 +153,7 @@ impl HostClient {
             pending_update_track: Mutex::new(HashMap::new()),
             pending_presets: Mutex::new(HashMap::new()),
             pending_plugins_list: Mutex::new(Vec::new()),
+            pending_ports_list: Mutex::new(Vec::new()),
             regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
             disconnected: AtomicBool::new(false),
@@ -485,6 +491,40 @@ impl HostClient {
         timeout(rx, "list_plugins").await
     }
 
+    pub async fn list_ports(
+        &self,
+        direction: Option<String>,
+    ) -> Result<Vec<EnginePort>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared.pending_ports_list.lock().await.push(tx);
+        self.send_command(Command::ListPorts { direction }).await?;
+        timeout(rx, "list_ports").await
+    }
+
+    pub async fn add_send(
+        &self,
+        track_id: EntityId,
+        target_track_id: EntityId,
+        pre_fader: bool,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::AddSend {
+            track_id,
+            target_track_id,
+            pre_fader,
+        })
+        .await
+    }
+    pub async fn remove_send(&self, send_id: EntityId) -> Result<(), ClientError> {
+        self.send_command(Command::RemoveSend { send_id }).await
+    }
+    pub async fn set_send_level(
+        &self,
+        send_id: EntityId,
+        level: f64,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::SetSendLevel { send_id, level }).await
+    }
+
     pub async fn list_plugin_presets(
         &self,
         plugin_id: EntityId,
@@ -590,6 +630,14 @@ impl HostClient {
         points: Vec<foyer_schema::AutomationPoint>,
     ) -> Result<(), ClientError> {
         self.send_command(Command::ReplaceAutomationLane { lane_id, points }).await
+    }
+
+    pub async fn set_track_input(
+        &self,
+        track_id: EntityId,
+        port_name: Option<String>,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::SetTrackInput { track_id, port_name }).await
     }
 
     pub async fn update_track(
@@ -825,6 +873,14 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     );
                     for w in waiters {
                         let _ = w.send(entries.clone());
+                    }
+                }
+                Event::PortsListed { ports } => {
+                    let waiters: Vec<_> = std::mem::take(
+                        &mut *shared.pending_ports_list.lock().await,
+                    );
+                    for w in waiters {
+                        let _ = w.send(ports.clone());
                     }
                 }
                 Event::PluginPresetsListed { plugin_id, presets } => {

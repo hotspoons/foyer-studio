@@ -141,6 +141,7 @@ export class Mixer extends LitElement {
     this._widthMode = s.widthMode;
     this._widthOverrides = s.widthOverrides || {};
     this._listening = false;
+    this._applyingListenPref = false;
     /** @type {AudioListener | null} */
     this._listener = null;
   }
@@ -194,7 +195,15 @@ export class Mixer extends LitElement {
   }
 
   _applyListenPref(isLocal) {
-    if (this._listening) return;
+    // `_listening` flips true only after start() resolves. Between
+    // the `new AudioListener` call and that resolution we have a
+    // second in-flight, so guard with `_applyingListenPref` to stop
+    // rapid `session_opened` / `backend_swapped` replays from
+    // stacking up concurrent listener starts (each overwrote
+    // `_listener` and orphaned the previous one mid-handshake,
+    // which is what the "monitoring keeps turning off" regression
+    // was really observing).
+    if (this._listening || this._applyingListenPref) return;
     const saved = localStorage.getItem("foyer.listen.master");
     let wantOn;
     if (saved === "1") wantOn = true;
@@ -202,9 +211,10 @@ export class Mixer extends LitElement {
     else if (isLocal === null) return; // no pref + no greeting yet — wait
     else wantOn = !isLocal;
     if (wantOn) {
-      // Fire once but don't await — the mixer's ready flag is more
-      // important than catching the listen Promise here.
-      this._toggleListen().catch(() => {});
+      this._applyingListenPref = true;
+      this._toggleListen(true)
+        .catch(() => {})
+        .finally(() => { this._applyingListenPref = false; });
     }
   }
 
@@ -234,7 +244,7 @@ export class Mixer extends LitElement {
     );
   };
 
-  _toggleListen = async () => {
+  _toggleListen = async (silent = false) => {
     if (this._listening) {
       try { await this._listener?.stop(); } catch {}
       this._listener = null;
@@ -270,14 +280,19 @@ export class Mixer extends LitElement {
       console.error("[mixer] listen failed:", e);
       this._listener = null;
       this._listening = false;
-      import("./confirm-modal.js").then(({ confirmAction }) => {
-        confirmAction({
-          title: "Listen failed",
-          message: `Couldn't start the master-out listener:\n\n${e.message}`,
-          confirmLabel: "OK",
-          cancelLabel: "Close",
+      // Only nag with a dialog on explicit user clicks. Auto-restore
+      // paths (page refresh, session switch) pass silent=true so a
+      // stale saved pref doesn't pop a modal on every refresh.
+      if (!silent) {
+        import("./confirm-modal.js").then(({ confirmAction }) => {
+          confirmAction({
+            title: "Listen failed",
+            message: `Couldn't start the master-out listener:\n\n${e.message}`,
+            confirmLabel: "OK",
+            cancelLabel: "Close",
+          });
         });
-      });
+      }
     }
   };
 

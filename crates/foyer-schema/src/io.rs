@@ -52,6 +52,28 @@ pub struct IoPort {
     pub is_midi: bool,
 }
 
+/// One audio/midi port as seen by the host audio engine (JACK, CoreAudio,
+/// ALSA, …). Distinct from [`IoPort`] which is bound to a track's input
+/// or output slot — this describes the engine-level endpoints that a
+/// track input or output can be *connected to*. Returned from
+/// [`crate::Command::ListPorts`] so clients can populate routing
+/// dropdowns with the set of ports that actually exist in the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnginePort {
+    /// Engine-level name, e.g. `"system:capture_1"`,
+    /// `"foyer:ingress-browser-12345"`, `"Bus 1/audio_in 1"`. This is
+    /// the string the shim passes to `IO::connect`.
+    pub name: String,
+    /// `"source"` = port produces audio (Ardour's `IsOutput` — something
+    /// a track's input connects to). `"sink"` = port consumes audio
+    /// (Ardour's `IsInput` — something a track's output connects to).
+    pub direction: String,
+    #[serde(default)]
+    pub is_physical: bool,
+    #[serde(default)]
+    pub is_midi: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

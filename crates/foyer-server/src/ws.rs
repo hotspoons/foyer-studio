@@ -656,6 +656,85 @@ async fn dispatch_command(
                 }
             }
         }
+        Command::SetTrackInput { track_id, port_name } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_track_input(track_id, port_name)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "set_track_input_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::ListPorts { direction } => {
+            match state.backend().await.list_ports(direction).await {
+                Ok(ports) => {
+                    broadcast_event(state, Event::PortsListed { ports }).await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "list_ports_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::AddSend {
+            track_id,
+            target_track_id,
+            pre_fader,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .add_send(track_id, target_track_id, pre_fader)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "add_send_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::RemoveSend { send_id } => {
+            if let Err(e) = state.backend().await.remove_send(send_id).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "remove_send_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::SetSendLevel { send_id, level } => {
+            if let Err(e) = state.backend().await.set_send_level(send_id, level).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "set_send_level_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
         // Plugin lifecycle — HostBackend forwards the Command::AddPlugin /
         // RemovePlugin to the shim which runs it against `Route::add_processor`
         // / `Route::remove_processor` on the event loop.

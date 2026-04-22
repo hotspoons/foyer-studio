@@ -126,6 +126,7 @@ fn fake_session() -> Session {
             plugins: vec![],
             peak_meter: None,
             group_id: None,
+            bus_assign: None,
             inputs: vec![],
             outputs: vec![],
             automation_lanes: vec![],

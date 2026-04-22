@@ -11,9 +11,9 @@ use crate::{
     audio::{AudioTransport, IceCandidate, SdpPayload},
     midi::{MidiNote, MidiNotePatch},
     session::{Group, GroupPatch, Track, TrackPatch},
-    Action, AudioFormat, AudioSource, ControlValue, EntityId, LatencyReport, PathListing,
-    PluginCatalogEntry, PluginInstance, PluginPreset, Region, RegionPatch, Session, TimelineMeta,
-    WaveformPeaks,
+    Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, LatencyReport,
+    PathListing, PluginCatalogEntry, PluginInstance, PluginPreset, Region, RegionPatch, Session,
+    TimelineMeta, WaveformPeaks,
 };
 
 /// Monotonic, server-assigned sequence number. Drops/out-of-order packets are detected
@@ -146,6 +146,13 @@ pub enum Event {
     /// Reply to `Command::ListPlugins`.
     PluginsList {
         entries: Vec<PluginCatalogEntry>,
+    },
+    /// Reply to `Command::ListPorts`. Contains the engine-level ports
+    /// the shim enumerated (post-filter if the command specified a
+    /// direction). Order is shim-provided — typically physical first,
+    /// then session-owned, then foreign.
+    PortsListed {
+        ports: Vec<EnginePort>,
     },
     /// Reply to `Command::BrowsePath`.
     PathListed {
@@ -689,6 +696,47 @@ pub enum Command {
         region_id: EntityId,
     },
 
+    /// Route a track's audio input to a named port. `port_name = None`
+    /// restores default auto-connect. Shim calls `IO::disconnect()` then
+    /// `IO::connect(port, port_name)` on the track's input.
+    SetTrackInput {
+        track_id: EntityId,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        port_name: Option<String>,
+    },
+
+    /// Enumerate the engine-level audio/MIDI ports the shim can see.
+    /// Clients use the result to populate routing dropdowns (track
+    /// input, bus assign, etc). `direction` filters: `Some("source")`
+    /// returns readable ports (hardware mic ins, `foyer:ingress-*`,
+    /// other apps' outputs); `Some("sink")` returns writable ports
+    /// (hardware outs, other apps' inputs); `None` returns everything.
+    /// Answered with [`Event::PortsListed`].
+    ListPorts {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        direction: Option<String>,
+    },
+
+    /// Attach an internal aux send from `track_id` to `target_track_id`
+    /// (a bus). `pre_fader` places the send before the track's fader
+    /// processor. The shim calls `Route::add_aux_send` and echoes a
+    /// [`Event::TrackUpdated`] so clients see the new `sends` entry.
+    AddSend {
+        track_id: EntityId,
+        target_track_id: EntityId,
+        #[serde(default)]
+        pre_fader: bool,
+    },
+    /// Remove a previously-added aux send.
+    RemoveSend {
+        send_id: EntityId,
+    },
+    /// Set the gain of an aux send. `level` is linear (0.0 .. ~2.0).
+    SetSendLevel {
+        send_id: EntityId,
+        level: f64,
+    },
+
     // ───── session undo / redo ──────────────────────────────────────────
     /// Pop one step off the session's undo stack. In Ardour this is
     /// `Session::undo(1)`; other hosts should behave equivalently
@@ -825,6 +873,7 @@ mod tests {
             plugins: vec![],
             peak_meter: None,
             group_id: None,
+            bus_assign: None,
             inputs: vec![],
             outputs: vec![],
             automation_lanes: vec![],

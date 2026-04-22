@@ -70,6 +70,7 @@ private:
 	std::atomic<bool>   _stop { false };
 	std::mutex          _wake_mx;
 	std::condition_variable _wake_cv;
+	bool                _logged_first_push = false;
 };
 
 } // namespace ArdourSurface

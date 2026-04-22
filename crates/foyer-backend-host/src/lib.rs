@@ -22,10 +22,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmRx, PcmTx};
 use foyer_schema::{
-    AudioFormat, AudioSource, AutomationMode, AutomationPoint, Command, ControlValue, EntityId,
-    LatencyReport, MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, PluginCatalogEntry,
-    PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch,
-    WaveformPeaks,
+    AudioFormat, AudioSource, AutomationMode, AutomationPoint, Command, ControlValue, EnginePort,
+    EntityId, LatencyReport, MidiNote, MidiNotePatch, PatchChange, PatchChangePatch,
+    PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta,
+    Track, TrackPatch, WaveformPeaks,
 };
 
 mod waveform;
@@ -235,6 +235,55 @@ impl Backend for HostBackend {
     ) -> Result<Track, BackendError> {
         self.client
             .update_track(id, patch)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn set_track_input(
+        &self,
+        track_id: EntityId,
+        port_name: Option<String>,
+    ) -> Result<(), BackendError> {
+        self.client
+            .set_track_input(track_id, port_name)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn list_ports(
+        &self,
+        direction: Option<String>,
+    ) -> Result<Vec<EnginePort>, BackendError> {
+        self.client
+            .list_ports(direction)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn add_send(
+        &self,
+        track_id: EntityId,
+        target_track_id: EntityId,
+        pre_fader: bool,
+    ) -> Result<(), BackendError> {
+        self.client
+            .add_send(track_id, target_track_id, pre_fader)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn remove_send(&self, send_id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .remove_send(send_id)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn set_send_level(
+        &self,
+        send_id: EntityId,
+        level: f64,
+    ) -> Result<(), BackendError> {
+        self.client
+            .set_send_level(send_id, level)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }

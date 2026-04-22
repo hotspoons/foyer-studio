@@ -95,6 +95,13 @@ std::vector<std::uint8_t> encode_plugin_presets_listed (
 /// `Command::ListPlugins`.
 std::vector<std::uint8_t> encode_plugins_list ();
 
+/// Encode `Event::PortsListed { ports }` — the engine-level audio/MIDI
+/// port set the shim can see. Answers `Command::ListPorts`. Direction
+/// filter: `"source"` → ports that produce audio (hardware ins,
+/// `foyer:ingress-*`, other apps' outputs); `"sink"` → ports that
+/// consume audio (hardware outs, other apps' inputs); `""` → all.
+std::vector<std::uint8_t> encode_ports_listed (const std::string& direction);
+
 /// Encode `Event::AudioEgressStarted { stream_id }`. Sent after the
 /// shim has installed a master tap — the HostBackend awaits this
 /// ACK to resolve its `open_egress` oneshot.
@@ -105,9 +112,13 @@ std::vector<std::uint8_t> encode_audio_egress_stopped (std::uint32_t stream_id);
 
 /// Encode `Event::AudioIngressOpened { stream_id, source, format }`.
 /// Sent after the shim registers a soft input port. The HostBackend's
-/// `pending_ingress` oneshot resolves on receipt.
+/// `pending_ingress` oneshot resolves on receipt. `source_name` echoes
+/// the name from the triggering `AudioIngressOpen` command — required
+/// because the schema's `AudioSource::VirtualInput` carries `{ name }`
+/// and rmp-serde rejects the whole frame if the field is absent.
 std::vector<std::uint8_t> encode_audio_ingress_opened (
-    std::uint32_t stream_id, std::uint32_t sample_rate, std::uint32_t channels);
+    std::uint32_t stream_id, std::uint32_t sample_rate, std::uint32_t channels,
+    const std::string& source_name);
 
 /// Encode `Event::AudioIngressClosed { stream_id }`.
 std::vector<std::uint8_t> encode_audio_ingress_closed (std::uint32_t stream_id);

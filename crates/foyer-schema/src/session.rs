@@ -72,6 +72,13 @@ pub struct Track {
     /// (Ardour RouteGroup, Reaper track folder, etc.).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub group_id: Option<EntityId>,
+    /// The bus this track's main output feeds into. `None` means
+    /// "default" (master or whatever the host does by default);
+    /// `Some("track.<bus-id>")` means the track's main output is wired
+    /// to that bus's input. Editable via
+    /// `UpdateTrack { patch: { bus_assign: Some(...) } }`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bus_assign: Option<EntityId>,
     /// Addressable I/O ports. `inputs` are where the track records from
     /// (mic/instrument routing); `outputs` are where its signal goes
     /// post-fader. Clients use these as targets for remote streaming.
@@ -122,6 +129,12 @@ pub struct TrackPatch {
     /// Maps to Ardour's `MonitorChoice`. `None` leaves the setting alone.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub monitoring: Option<String>,
+    /// Re-route the track's audio input to a named port. `Some("")`
+    /// clears custom routing and restores default auto-connect.
+    /// `Some("foyer:ingress-...")` wires the track to a browser
+    /// ingress stream. `None` leaves input routing untouched.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub input_port: Option<String>,
 }
 
 /// Patch set for [`Command::UpdateGroup`]. Same `None`-leaves-unchanged
@@ -307,6 +320,7 @@ mod tests {
                 plugins: vec![],
                 peak_meter: Some(EntityId::new("track.abc.meter")),
                 group_id: None,
+                bus_assign: None,
                 inputs: vec![],
                 outputs: vec![],
                 automation_lanes: vec![],

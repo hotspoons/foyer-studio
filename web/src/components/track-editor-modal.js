@@ -13,6 +13,14 @@ import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import "./track-strip.js";
 import { DENSITIES } from "../mixer-density.js";
+import { AudioIngress } from "../viz/audio-ingress.js";
+
+// Global registry of per-track browser-mic ingresses. Keyed by track
+// id so the lifecycle survives modal open/close (closing the editor
+// shouldn't mute the mic — that'd stop a recording mid-take). Keyed
+// by track id so reopening the modal re-shows the "connected" state.
+//   trackId → { ingress: AudioIngress, portName: string }
+const TRACK_MICS = (globalThis.__foyerTrackMics ||= new Map());
 
 const COLOR_PALETTE = [
   { label: "Red",    hex: "#c04040" },
@@ -30,6 +38,9 @@ export class TrackEditorModal extends LitElement {
   static properties = {
     trackId: { type: String, attribute: "track-id" },
     _tick:   { state: true, type: Number },
+    _ports:  { state: true },
+    _micState: { state: true },   // "idle" | "starting" | "active" | "error"
+    _micError: { state: true },
   };
 
   static styles = css`
@@ -93,7 +104,61 @@ export class TrackEditorModal extends LitElement {
     .row {
       display: flex; align-items: center; gap: 10px;
     }
-    .row label { font-size: 12px; color: var(--color-text); flex: 0 0 120px; }
+    .row label { font-size: 12px; color: var(--color-text); flex: 0 0 90px; }
+    .row.stacked { flex-direction: column; align-items: stretch; gap: 4px; }
+    .row.stacked > label { flex: 0 0 auto; }
+    select.fld {
+      flex: 1;
+      background: var(--color-surface-elevated);
+      color: var(--color-text);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      padding: 4px 8px;
+      font: inherit; font-size: 12px;
+    }
+    .send-row {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px;
+      background: var(--color-surface-elevated);
+      padding: 4px 8px; border-radius: 4px;
+    }
+    .send-row .target { flex: 0 0 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .send-row input[type="range"] { flex: 1; min-width: 0; }
+    .send-row .num { color: var(--color-text-muted); min-width: 32px; text-align: right; }
+    .send-row .mode { color: var(--color-text-muted); }
+    .send-row .rm {
+      background: transparent;
+      border: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+      padding: 0 6px; border-radius: var(--radius-sm);
+      font: inherit; font-size: 10px; cursor: pointer;
+    }
+    .refresh {
+      align-self: flex-start;
+      background: transparent;
+      border: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+      padding: 2px 6px; border-radius: var(--radius-sm);
+      font: inherit; font-size: 10px; cursor: pointer;
+    }
+    .mic-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--color-surface-elevated);
+      color: var(--color-text);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      padding: 4px 10px;
+      font: inherit; font-size: 12px;
+      cursor: pointer;
+    }
+    .mic-btn:hover:not([disabled]) { border-color: var(--color-accent); }
+    .mic-btn[disabled] { opacity: 0.6; cursor: progress; }
+    .mic-btn.on {
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      border-color: transparent;
+      color: #fff;
+    }
+    .hint { color: var(--color-text-muted); font-size: 10px; }
     input[type="text"], textarea {
       flex: 1;
       background: var(--color-surface-elevated);
@@ -144,20 +209,93 @@ export class TrackEditorModal extends LitElement {
     super();
     this.trackId = "";
     this._tick = 0;
+    this._ports = [];
+    this._micState = "idle";
+    this._micError = "";
     this._keyHandler = (ev) => { if (ev.key === "Escape") this._close(); };
     this._storeHandler = () => this._tick++;
+    // Watch envelope traffic for the PortsListed reply so the Input
+    // dropdown stays fresh, and refresh the list whenever an ingress
+    // port opens/closes (could be another client, or our own Use-mic
+    // button) so the dropdown shows the new port without a click.
+    this._onEnvelope = (ev) => {
+      const body = ev.detail?.body;
+      if (body?.type === "ports_listed") {
+        this._ports = body.ports || [];
+      } else if (body?.type === "audio_ingress_opened"
+              || body?.type === "audio_ingress_closed") {
+        this._requestPorts();
+      }
+    };
   }
 
   connectedCallback() {
     super.connectedCallback();
     document.addEventListener("keydown", this._keyHandler);
     window.__foyer?.store?.addEventListener("change", this._storeHandler);
+    window.__foyer?.ws?.addEventListener?.("envelope", this._onEnvelope);
+    // Restore mic state if this track already has a live ingress
+    // (modal was closed and reopened).
+    if (TRACK_MICS.has(this.trackId)) this._micState = "active";
+    // Kick off a list_ports request — the shim replies with
+    // ports_listed which we stash into this._ports. Source-only
+    // filter: we only route track inputs *from* readable ports.
+    this._requestPorts();
   }
   disconnectedCallback() {
     document.removeEventListener("keydown", this._keyHandler);
     window.__foyer?.store?.removeEventListener("change", this._storeHandler);
+    window.__foyer?.ws?.removeEventListener?.("envelope", this._onEnvelope);
     super.disconnectedCallback();
   }
+
+  _requestPorts() {
+    window.__foyer?.ws?.send?.({ type: "list_ports", direction: "source" });
+  }
+
+  _toggleBrowserMic = async () => {
+    // Active → disconnect: close our owned ingress (if any) and
+    // clear the track's input_port so Ardour re-auto-connects.
+    // If the track is pointed at a foyer:ingress port we didn't
+    // open (e.g., another client's), just unwire the track — we
+    // don't own the ingress's lifecycle.
+    const live = TRACK_MICS.get(this.trackId);
+    const t    = this._track();
+    const curr = (t?.inputs?.[0]?.name) || "";
+    if (live || curr.startsWith("foyer:")) {
+      if (live) {
+        try { await live.ingress.stop(); } catch {}
+        TRACK_MICS.delete(this.trackId);
+      }
+      this._setTrackInput("");
+      this._micState = "idle";
+      return;
+    }
+    // Idle → start. AudioIngress.start() resolves after the shim
+    // acks `audio_ingress_opened`, so by the time we patch the
+    // track the port already exists in Ardour's engine.
+    this._micState = "starting";
+    this._micError = "";
+    const ingress = new AudioIngress({
+      ws: window.__foyer?.ws,
+      baseUrl: location.origin.replace(/^http/, "ws"),
+    });
+    try {
+      await ingress.start();
+    } catch (e) {
+      console.error("[track-editor] mic ingress failed:", e);
+      this._micError = e?.message || String(e);
+      this._micState = "error";
+      return;
+    }
+    // AudioIngress doesn't expose the port name directly; the shim
+    // registers it as `foyer:ingress-browser-<streamId>`. Use the
+    // same naming rule as shim_input_port.cc.
+    const portName = `foyer:ingress-browser-${ingress.streamId}`;
+    TRACK_MICS.set(this.trackId, { ingress, portName });
+    this._setTrackInput(portName);
+    this._micState = "active";
+  };
 
   _close() {
     this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
@@ -173,6 +311,48 @@ export class TrackEditorModal extends LitElement {
       type: "update_track",
       id: this.trackId,
       patch,
+    });
+  }
+
+  _setTrackInput(portName) {
+    // Use UpdateTrack with input_port patch rather than the standalone
+    // SetTrackInput command — the shim's UpdateTrack handler routes
+    // input_port through IO::connect/disconnect_all and emits a
+    // TrackUpdated echo that carries the refreshed inputs list.
+    window.__foyer?.ws?.send({
+      type: "update_track",
+      id: this.trackId,
+      patch: { input_port: portName || "" },
+    });
+  }
+
+  _setBusAssign(busId) {
+    window.__foyer?.ws?.send({
+      type: "update_track",
+      id: this.trackId,
+      patch: { bus_assign: busId || "" },
+    });
+  }
+
+  _addSend(targetTrackId) {
+    if (!targetTrackId) return;
+    window.__foyer?.ws?.send({
+      type: "add_send",
+      track_id: this.trackId,
+      target_track_id: targetTrackId,
+      pre_fader: false,
+    });
+  }
+
+  _removeSend(sendId) {
+    window.__foyer?.ws?.send({ type: "remove_send", send_id: sendId });
+  }
+
+  _setSendLevel(sendId, level) {
+    window.__foyer?.ws?.send({
+      type: "set_send_level",
+      send_id: sendId,
+      level: Number(level),
     });
   }
 
@@ -257,42 +437,186 @@ export class TrackEditorModal extends LitElement {
   _renderRoutingSection(t) {
     const session = window.__foyer?.store?.state?.session;
     const allTracks = session?.tracks || [];
-    const busses = allTracks.filter((tt) => tt.kind === "bus" || tt.kind === "master");
+    // Master isn't a user-selectable bus target (that's the default
+    // destination); sending to yourself is also nonsensical, filter.
+    const busses = allTracks.filter(
+      (tt) => (tt.kind === "bus" || tt.kind === "master") && tt.id !== t.id,
+    );
+    const sendableBuses = busses.filter((tt) => tt.kind === "bus");
     const sends = t.sends || [];
     const groupName = t.group_id
       ? (session?.groups || []).find((g) => g.id === t.group_id)?.name || t.group_id
       : null;
+
+    // Input dropdown: the currently-wired input port is the track's
+    // first input's name; the picker surface is the shim-enumerated
+    // engine ports filtered to the subset that's actually useful as
+    // a track input source.
+    const inputs = t.inputs || [];
+    const currentInput = inputs.length > 0 ? inputs[0].name : "";
+    const { foyer: foyerPorts, hw: physPorts, tracks: trackPorts } =
+      this._curateInputPorts(t, allTracks);
+
+    const currentBus = t.bus_assign || "";
+    // Only buses not already in this track's send list are options
+    // for "Add send".
+    const existingTargets = new Set(sends.map((s) => s.target_track));
+    const addableBuses = sendableBuses.filter((b) => !existingTargets.has(b.id));
+
     return html`
       <div class="section">
         <h3>Routing</h3>
         <div class="row">
           <label>Group</label>
-          <span style="color:var(--color-text);font-size:11px">${groupName || "—"}</span>
+          <span class="hint" style="color:var(--color-text)">${groupName || "—"}</span>
         </div>
-        <div class="row" style="flex-direction:column;align-items:stretch;gap:6px">
-          <label>Sends → bus</label>
+        <div class="row">
+          <label>Input</label>
+          <select class="fld"
+            .value=${currentInput}
+            @change=${(e) => this._setTrackInput(e.currentTarget.value)}>
+            <option value="">Auto (default)</option>
+            ${foyerPorts.length > 0 ? html`
+              <optgroup label="Browser (foyer)">
+                ${foyerPorts.map((p) => html`<option value=${p.name}>${p.name}</option>`)}
+              </optgroup>` : null}
+            ${physPorts.length > 0 ? html`
+              <optgroup label="Hardware">
+                ${physPorts.map((p) => html`<option value=${p.name}>${p.name}</option>`)}
+              </optgroup>` : null}
+            ${trackPorts.length > 0 ? html`
+              <optgroup label="Other tracks">
+                ${trackPorts.map((p) => html`<option value=${p.name}>${p.name}</option>`)}
+              </optgroup>` : null}
+            ${(foyerPorts.length + physPorts.length + trackPorts.length) === 0 && currentInput ? html`
+              <option value=${currentInput}>${currentInput}</option>` : null}
+          </select>
+        </div>
+        ${this._renderMicRow(currentInput)}
+        ${t.kind === "audio" || t.kind === "midi" ? html`
+          <div class="row">
+            <label>Output bus</label>
+            <select class="fld"
+              .value=${currentBus}
+              @change=${(e) => this._setBusAssign(e.currentTarget.value)}>
+              <option value="">Master (default)</option>
+              ${busses.map((b) => html`<option value=${b.id}>${b.name}</option>`)}
+            </select>
+          </div>` : null}
+        <div class="row">
+          <label>Ports</label>
+          <button class="refresh" @click=${this._requestPorts}>Refresh port list</button>
+        </div>
+
+        <div class="row stacked" style="margin-top:8px">
+          <label style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--color-text-muted)">Sends</label>
           ${sends.length === 0 ? html`
-            <span style="color:var(--color-text-muted);font-size:11px">
-              No sends on this track.
-            </span>
-          ` : sends.map((s) => {
+            <span class="hint">No sends on this track.</span>` : null}
+          ${sends.map((s) => {
             const target = allTracks.find((tt) => tt.id === s.target_track);
+            const level = Number(s.level?.value ?? 1);
             return html`
-              <div style="display:flex;justify-content:space-between;font-size:11px;background:var(--color-surface-elevated);padding:4px 8px;border-radius:4px">
-                <span>${target?.name || s.target_track}</span>
-                <span style="color:var(--color-text-muted)">${s.pre_fader ? "pre" : "post"}</span>
-              </div>
-            `;
+              <div class="send-row">
+                <span class="target" title=${target?.name || s.target_track}>${target?.name || s.target_track}</span>
+                <input type="range" min="0" max="2" step="0.01"
+                       .value=${String(level)}
+                       @input=${(e) => this._setSendLevel(s.id, e.currentTarget.value)}>
+                <span class="num">${level.toFixed(2)}</span>
+                <span class="mode">${s.pre_fader ? "pre" : "post"}</span>
+                <button class="rm" title="Remove send" @click=${() => this._removeSend(s.id)}>×</button>
+              </div>`;
           })}
-          <span style="color:var(--color-text-muted);font-size:10px">
-            ${busses.length} bus${busses.length === 1 ? "" : "es"} available.
-            Add/remove/level edits land once the shim exposes
-            <code>AddSend</code>/<code>RemoveSend</code>/<code>SetSendLevel</code>
-            commands (schema gap as of 2026-04-21).
-          </span>
+          ${addableBuses.length > 0 ? html`
+            <select class="fld"
+              @change=${(e) => { this._addSend(e.currentTarget.value); e.currentTarget.value = ""; }}>
+              <option value="">Add send to bus…</option>
+              ${addableBuses.map((b) => html`<option value=${b.id}>${b.name}</option>`)}
+            </select>` : html`
+            <span class="hint">
+              ${sendableBuses.length === 0 ? "No user buses in this session — create one first." : "Already sending to every available bus."}
+            </span>`}
         </div>
       </div>
     `;
+  }
+
+  _renderMicRow(currentInput) {
+    const live    = TRACK_MICS.get(this.trackId);
+    // Button reads "Disconnect" if we own the ingress OR if the track
+    // is already wired to a foyer: port (another client may have
+    // hooked it up). The disconnect path handles both cases.
+    const micOn   = this._micState === "active"
+                 || !!live
+                 || (currentInput || "").startsWith("foyer:");
+    const starting = this._micState === "starting";
+    const label = starting
+      ? html`${icon("microphone", 14)} <span>Starting mic…</span>`
+      : micOn
+        ? html`${icon("microphone", 14)} <span>Disconnect browser mic</span>`
+        : html`${icon("microphone", 14)} <span>Use browser mic for this track</span>`;
+    const title = micOn
+      ? `Stop the browser mic ingress (${live?.portName || currentInput})`
+      : "Grant mic access and route this track's input to the browser capture";
+    return html`
+      <div class="row">
+        <label></label>
+        <button class="mic-btn ${micOn ? "on" : ""}"
+                ?disabled=${starting}
+                title=${title}
+                @click=${this._toggleBrowserMic}>
+          ${label}
+        </button>
+      </div>
+      ${this._micState === "error" ? html`
+        <div class="row">
+          <label></label>
+          <span class="hint" style="color:var(--color-danger,#c04040)">${this._micError || "Mic failed to start."}</span>
+        </div>` : null}
+    `;
+  }
+
+  // Trim the raw port list down to the subset that's actually useful
+  // as a track input source. Ardour's `IsOutput` port set is a firehose:
+  // it includes every track's `audio_out_N` (including this track's
+  // own — wiring that back into the input is a feedback loop), the
+  // master/monitor outputs, the click/LTC helper outputs, and so on.
+  // We partition into three UX buckets: foyer ingress, hardware
+  // capture, and other tracks' outputs (for pre-split / cue routing).
+  _curateInputPorts(track, allTracks) {
+    const ports = this._ports || [];
+    // Build a set of this track's own output port names so we can
+    // exclude them from "Other tracks" (pre-empt the self-feedback).
+    const ownOutputs = new Set((track.outputs || []).map((p) => p.name));
+    const trackNames = new Set(
+      allTracks.map((tt) => tt.name).filter(Boolean),
+    );
+    const foyer = [];
+    const hw = [];
+    const tracks = [];
+    for (const p of ports) {
+      if (!p?.name) continue;
+      const n = p.name;
+      if (n.startsWith("foyer:")) { foyer.push(p); continue; }
+      if (p.is_physical) { hw.push(p); continue; }
+      // Filter out Ardour's always-present helper outputs. These
+      // aren't useful as track inputs and just clutter the picker.
+      if (/^ardour:(Master|Monitor|Click|LTC-Out)\b/i.test(n)) continue;
+      if (n === "ardour:LTC-Out") continue;
+      if (ownOutputs.has(n)) continue;
+      // Keep track/bus outputs keyed as "ardour:<name>/audio_out_N".
+      // Drop anything that doesn't resolve to a route name the user
+      // can recognize — unknown internal ports are rarely useful.
+      const m = /^ardour:(.+?)\/audio_out/.exec(n);
+      if (m && trackNames.has(m[1])) {
+        // Skip this track's own outputs even if the name matches
+        // by string rather than port id.
+        if (m[1] === track.name) continue;
+        tracks.push(p);
+        continue;
+      }
+      // Everything else (MIDI ports, unrecognized helpers) gets dropped.
+    }
+    return { foyer, hw, tracks };
   }
 }
 customElements.define("foyer-track-editor-modal", TrackEditorModal);

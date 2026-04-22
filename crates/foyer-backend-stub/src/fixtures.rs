@@ -83,6 +83,7 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
         plugins: default_inserts_for(slug),
         peak_meter: Some(EntityId::new(format!("track.{slug}.meter"))),
         group_id: None,
+        bus_assign: None,
         inputs: vec![],
         outputs: vec![],
         automation_lanes: vec![],

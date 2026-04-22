@@ -4,7 +4,6 @@ import { icon } from "../icons.js";
 import { cycleTheme, getTheme, onThemeChange, THEME_META } from "../theme.js";
 import { promptText } from "./prompt-modal.js";
 import { showShareModal } from "./share-modal.js";
-import { AudioIngress } from "../viz/audio-ingress.js";
 import "./main-menu.js";
 import "./session-switcher.js";
 
@@ -16,7 +15,6 @@ export class StatusBar extends LitElement {
     _peers: { state: true, type: Array },
     _layoutTick: { state: true, type: Number },
     _greeting: { state: true, type: Object },
-    _ingressing: { state: true, type: Boolean },
   };
 
   static styles = css`

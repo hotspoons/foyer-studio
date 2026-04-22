@@ -14,9 +14,10 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use foyer_schema::{
-    Action, AudioFormat, AudioSource, ControlValue, EntityId, Event, LatencyReport, MidiNote,
-    MidiNotePatch, PatchChange, PatchChangePatch, PathListing, PluginCatalogEntry, PluginPreset,
-    Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, Event, LatencyReport,
+    MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, PathListing, PluginCatalogEntry,
+    PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch,
+    WaveformPeaks,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -402,6 +403,53 @@ pub trait Backend: Send + Sync + 'static {
     /// actually removed from the master route.
     async fn close_egress(&self, _stream_id: u32) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    /// Route a track's audio input to a named port (e.g. "foyer:ingress-123").
+    /// `port_name = None` restores default auto-connect. Emits `TrackUpdated`
+    /// so clients see the new `inputs` list.
+    async fn set_track_input(
+        &self,
+        _track_id: EntityId,
+        _port_name: Option<String>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("set_track_input not supported".into()))
+    }
+
+    /// Enumerate the engine-level ports the shim can see. `direction`:
+    /// `Some("source")` = readable ports, `Some("sink")` = writable,
+    /// `None` = both. Default returns an empty list so non-shim
+    /// backends (stub) don't advertise ports they can't route to.
+    async fn list_ports(
+        &self,
+        _direction: Option<String>,
+    ) -> Result<Vec<EnginePort>, BackendError> {
+        Ok(Vec::new())
+    }
+
+    /// Add an internal aux send from `track_id` → `target_track_id`
+    /// (which must be a bus). `pre_fader` places the send before the
+    /// track's own fader processor. Emits `TrackUpdated` so clients
+    /// see the new `sends` entry.
+    async fn add_send(
+        &self,
+        _track_id: EntityId,
+        _target_track_id: EntityId,
+        _pre_fader: bool,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("add_send not supported".into()))
+    }
+    /// Remove a previously-added aux send. Emits `TrackUpdated`.
+    async fn remove_send(&self, _send_id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("remove_send not supported".into()))
+    }
+    /// Set an aux send's linear gain (0.0 .. ~2.0).
+    async fn set_send_level(
+        &self,
+        _send_id: EntityId,
+        _level: f64,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("set_send_level not supported".into()))
     }
 
     async fn open_ingress(

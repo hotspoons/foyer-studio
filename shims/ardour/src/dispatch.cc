@@ -14,7 +14,11 @@
 #include <cstring>
 #include <string>
 
+#include "ardour/audio_port.h"
 #include "ardour/automation_control.h"
+#include "ardour/delivery.h"
+#include "ardour/gain_control.h"
+#include "ardour/internal_send.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
 #include "ardour/midi_source.h"
@@ -25,8 +29,10 @@
 #include "ardour/plugin_insert.h"
 #include "ardour/plugin_manager.h"
 #include "ardour/presentation_info.h"
+#include "ardour/processor.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
+#include "ardour/send.h"
 #include "ardour/session.h"
 #include "ardour/track.h"
 #include "evoral/Note.h"
@@ -234,6 +240,11 @@ struct DecodedCmd
 		UpdateAutomationPoint,
 		DeleteAutomationPoint,
 		ReplaceAutomationLane,
+		SetTrackInput,
+		ListPorts,
+		AddSend,
+		RemoveSend,
+		SetSendLevel,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
@@ -270,6 +281,8 @@ struct DecodedCmd
 	std::string   patch_bus_assign;
 	bool          has_patch_monitoring = false;
 	std::string   patch_monitoring;       // "auto"|"input"|"disk"|"cue"
+	bool          has_patch_input_port   = false;
+	std::string   patch_input_port;       // port name or "" to clear
 
 	// MIDI note fields — AddNote / UpdateNote / DeleteNote.
 	//  * region_id stored in `track_id` (reuse: the sidecar sends
@@ -331,6 +344,15 @@ struct DecodedCmd
 		std::uint64_t length_ticks = 0;
 	};
 	std::vector<DecodedNote> replace_notes;
+
+	// Routing / send mutation payloads.
+	// ListPorts → direction filter ("source" | "sink" | "" = all).
+	std::string   ports_direction;
+	// AddSend → track_id in `track_id`, target bus in `bus_assign`.
+	std::string   send_target_track;
+	bool          send_pre_fader = false;
+	// RemoveSend / SetSendLevel → send id in `id`.
+	double        send_level = 1.0;
 
 	// Automation lane edit payloads (Phase B).
 	std::string   lane_id;
@@ -751,6 +773,9 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 		} else if (pk == "monitoring") {
 			if (!in.read_str (out.patch_monitoring)) return false;
 			out.has_patch_monitoring = true;
+		} else if (pk == "input_port") {
+			if (!in.read_str (out.patch_input_port)) return false;
+			out.has_patch_input_port = true;
 		} else if (pk == "pitch") {
 			std::uint64_t v = 0;
 			if (!in.read_u64 (v)) return false;
@@ -868,6 +893,28 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.plugin_id)) return out;
 				} else if (k == "preset_id") {
 					if (!in.read_str (out.preset_id)) return out;
+				} else if (k == "port_name") {
+					// SetTrackInput { track_id, port_name }: stash in
+					// the same slot UpdateTrack's patch_input_port uses
+					// so the handler logic is shared.
+					if (!in.read_str (out.patch_input_port)) return out;
+					out.has_patch_input_port = true;
+				} else if (k == "direction") {
+					// ListPorts { direction: Option<String> }
+					if (!in.read_str (out.ports_direction)) return out;
+				} else if (k == "target_track_id") {
+					// AddSend { track_id, target_track_id, pre_fader }
+					if (!in.read_str (out.send_target_track)) return out;
+				} else if (k == "send_id") {
+					// RemoveSend / SetSendLevel — send id goes in `id`.
+					if (!in.read_str (out.id)) return out;
+				} else if (k == "pre_fader") {
+					// Bool tag for AddSend. msgpack bools are 0xc2/0xc3.
+					std::uint8_t b = in.take_u8 ();
+					out.send_pre_fader = (b == 0xc3);
+				} else if (k == "level") {
+					// SetSendLevel { send_id, level: f64 }
+					if (!in.read_f64 (out.send_level)) return out;
 				} else if (k == "stream_id") {
 					std::uint64_t v = 0;
 					if (!in.read_u64 (v)) return out;
@@ -1023,6 +1070,11 @@ decode (const std::vector<std::uint8_t>& buf)
             else if (cmd_type == "update_automation_point") out.kind = DecodedCmd::Kind::UpdateAutomationPoint;
             else if (cmd_type == "delete_automation_point") out.kind = DecodedCmd::Kind::DeleteAutomationPoint;
             else if (cmd_type == "replace_automation_lane") out.kind = DecodedCmd::Kind::ReplaceAutomationLane;
+            else if (cmd_type == "set_track_input")      out.kind = DecodedCmd::Kind::SetTrackInput;
+            else if (cmd_type == "list_ports")           out.kind = DecodedCmd::Kind::ListPorts;
+            else if (cmd_type == "add_send")             out.kind = DecodedCmd::Kind::AddSend;
+            else if (cmd_type == "remove_send")          out.kind = DecodedCmd::Kind::RemoveSend;
+            else if (cmd_type == "set_send_level")       out.kind = DecodedCmd::Kind::SetSendLevel;
             else if (cmd_type == "audio_stream_open"
                 ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
 			else if (cmd_type == "audio_stream_close"
@@ -1679,7 +1731,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						std::lock_guard<std::mutex> lk (this->_ingress_mx);
 						this->_ingress_ports[sid] = std::move (port);
 					}
-					auto ack = msgpack_out::encode_audio_ingress_opened (sid, sr, ch);
+					auto ack = msgpack_out::encode_audio_ingress_opened (sid, sr, ch, name);
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
 				} catch (const std::exception& e) {
 					PBD::error << "foyer_shim: [ingress] open failed: " << e.what () << endmsg;
@@ -1766,6 +1818,189 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			});
 			break;
 		}
+		case DecodedCmd::Kind::SetTrackInput: {
+			if (cmd.track_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				if (snap.track_id.rfind ("track.", 0) != 0) return;
+				const std::string sid = snap.track_id.substr (6);
+				std::shared_ptr<Route> route;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp;
+					tmp << r->id ();
+					if (tmp.str () == sid) { route = r; break; }
+				}
+				if (!route) {
+					PBD::warning << "foyer_shim: set_track_input: unknown track id: " << snap.track_id << endmsg;
+					return;
+				}
+				auto io = route->input ();
+				if (io && io->n_ports ().n_audio () > 0) {
+					auto port = io->audio (0);
+					if (port) {
+						port->disconnect_all ();
+						if (!snap.patch_input_port.empty ()) {
+							const int rv = io->connect (port, snap.patch_input_port);
+							if (rv != 0) {
+								PBD::error << "foyer_shim: set_track_input: connect("
+								           << port->name () << " → " << snap.patch_input_port
+								           << ") failed with rv=" << rv << endmsg;
+							} else {
+								PBD::warning << "foyer_shim: set_track_input: connected "
+								          << port->name () << " → " << snap.patch_input_port << endmsg;
+							}
+						}
+					}
+				}
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ListPorts: {
+			// Port enumeration hits the AudioEngine directly; it's safe
+			// off the event loop, but keep it on the slot for consistency
+			// with the other shim→session reads.
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto bytes = msgpack_out::encode_ports_listed (snap.ports_direction);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::AddSend: {
+			if (cmd.track_id.empty () || cmd.send_target_track.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto find_route = [&] (const std::string& foyer_id) -> std::shared_ptr<Route> {
+					if (foyer_id.rfind ("track.", 0) != 0) return {};
+					const std::string sid = foyer_id.substr (6);
+					std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+					for (auto const& r : *routes) {
+						if (!r) continue;
+						std::ostringstream tmp;
+						tmp << r->id ();
+						if (tmp.str () == sid) return r;
+					}
+					return {};
+				};
+				auto src    = find_route (snap.track_id);
+				auto target = find_route (snap.send_target_track);
+				if (!src || !target) {
+					PBD::warning << "foyer_shim: add_send: missing src/target: "
+					             << snap.track_id << " → " << snap.send_target_track << endmsg;
+					return;
+				}
+				// `before = nullptr` appends the send to the end of the
+				// processor chain; Ardour inserts it before the main outs.
+				int rv = src->add_aux_send (target, std::shared_ptr<Processor> ());
+				if (rv != 0) {
+					PBD::warning << "foyer_shim: add_send: add_aux_send returned " << rv << endmsg;
+				}
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::RemoveSend: {
+			if (cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				// Send id is "send.<processor-pbd-id>". Find the owning
+				// route by walking every processor list.
+				if (snap.id.rfind ("send.", 0) != 0) return;
+				const std::string pid = snap.id.substr (5);
+				std::shared_ptr<Route> owner;
+				std::shared_ptr<Processor> victim;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					r->foreach_processor ([&] (std::weak_ptr<Processor> wp) {
+						if (owner) return;
+						auto p = wp.lock ();
+						if (!p) return;
+						std::ostringstream tmp;
+						tmp << p->id ();
+						if (tmp.str () == pid) { owner = r; victim = p; }
+					});
+					if (owner) break;
+				}
+				if (!owner || !victim) {
+					PBD::warning << "foyer_shim: remove_send: unknown send id: " << snap.id << endmsg;
+					return;
+				}
+				std::ostringstream owner_id;
+				owner_id << "track." << owner->id ();
+				owner->remove_processor (victim);
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), owner_id.str ());
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SetSendLevel: {
+			if (cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				if (snap.id.rfind ("send.", 0) != 0) return;
+				const std::string pid = snap.id.substr (5);
+				std::shared_ptr<Route> owner;
+				std::shared_ptr<Processor> found;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					r->foreach_processor ([&] (std::weak_ptr<Processor> wp) {
+						if (found) return;
+						auto p = wp.lock ();
+						if (!p) return;
+						std::ostringstream tmp;
+						tmp << p->id ();
+						if (tmp.str () == pid) { owner = r; found = p; }
+					});
+					if (found) break;
+				}
+				if (!found) {
+					PBD::warning << "foyer_shim: set_send_level: unknown send id: " << snap.id << endmsg;
+					return;
+				}
+				auto snd = std::dynamic_pointer_cast<Send> (found);
+				if (!snd) {
+					auto isnd = std::dynamic_pointer_cast<InternalSend> (found);
+					snd = isnd;
+				}
+				if (!snd) {
+					PBD::warning << "foyer_shim: set_send_level: processor is not a Send" << endmsg;
+					return;
+				}
+				auto gc = snd->gain_control ();
+				if (gc) {
+					gc->set_value (snap.send_level, PBD::Controllable::NoGroup);
+				}
+				if (owner) {
+					std::ostringstream owner_id;
+					owner_id << "track." << owner->id ();
+					auto bytes = msgpack_out::encode_track_updated (shim->session (), owner_id.str ());
+					if (!bytes.empty ()) {
+						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+					}
+				}
+			});
+			break;
+		}
 		case DecodedCmd::Kind::UpdateTrack: {
 			if (cmd.id.empty ()) break;
 			DecodedCmd snap = cmd;
@@ -1808,8 +2043,69 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						                PBD::Controllable::NoGroup);
 					}
 				}
-				// group_id / bus_assign deferred — Ardour's RouteGroup API
-				// is stable but wiring it belongs with the group commands.
+				if (snap.has_patch_input_port) {
+					auto io = route->input ();
+					if (io && io->n_ports ().n_audio () > 0) {
+						auto port = io->audio (0);
+						if (port) {
+							port->disconnect_all ();
+							if (!snap.patch_input_port.empty ()) {
+								const int rv = io->connect (port, snap.patch_input_port);
+								if (rv != 0) {
+									PBD::error << "foyer_shim: update_track: connect("
+									           << port->name () << " → " << snap.patch_input_port
+									           << ") failed with rv=" << rv << endmsg;
+								} else {
+									PBD::warning << "foyer_shim: update_track: connected "
+									          << port->name () << " → " << snap.patch_input_port << endmsg;
+								}
+							}
+						}
+					}
+				}
+				if (snap.has_patch_bus_assign) {
+					// Re-route the track's main outputs: disconnect first
+					// audio output, then connect to the target bus's first
+					// audio input. Empty string restores default (no
+					// explicit connection, leaving whatever Ardour had).
+					auto out_io = route->output ();
+					if (out_io && out_io->n_ports ().n_audio () > 0) {
+						auto out_port = out_io->audio (0);
+						if (out_port) {
+							out_port->disconnect_all ();
+							if (!snap.patch_bus_assign.empty ()) {
+								// Resolve the bus route by foyer id
+								// ("track.<pbd-id>") and connect to its
+								// first audio input port name.
+								const std::string bsid =
+									snap.patch_bus_assign.rfind ("track.", 0) == 0
+									    ? snap.patch_bus_assign.substr (6)
+									    : snap.patch_bus_assign;
+								std::shared_ptr<Route> bus;
+								for (auto const& r : *routes) {
+									if (!r) continue;
+									std::ostringstream tmp;
+									tmp << r->id ();
+									if (tmp.str () == bsid) { bus = r; break; }
+								}
+								if (bus) {
+									auto bus_in = bus->input ();
+									if (bus_in && bus_in->n_ports ().n_audio () > 0) {
+										auto bus_port = bus_in->audio (0);
+										if (bus_port) {
+											out_io->connect (out_port, bus_port->name ());
+										}
+									}
+								} else {
+									PBD::warning << "foyer_shim: update_track: unknown bus id: "
+									             << snap.patch_bus_assign << endmsg;
+								}
+							}
+						}
+					}
+				}
+				// group_id deferred — Ardour's RouteGroup API is stable
+				// but wiring it belongs with the group commands.
 
 				auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.id);
 				if (!bytes.empty ()) {
