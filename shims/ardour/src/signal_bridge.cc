@@ -447,6 +447,11 @@ SignalBridge::snapshot_tracked_routes () const
 			out.push_back (std::move (r));
 		}
 	}
+	std::sort (out.begin (), out.end (),
+		[] (const std::shared_ptr<ARDOUR::Route>& a,
+		    const std::shared_ptr<ARDOUR::Route>& b) {
+			return a->presentation_info ().order () < b->presentation_info ().order ();
+		});
 	return out;
 }
 
