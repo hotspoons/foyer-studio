@@ -84,7 +84,7 @@ boundary and can be licensed separately from any one shim. See
 | Audio I/O schema (IoPort + WebRTC/WebSocket transport negotiation) | Shipping — wire types land; runtime stubs pending |
 | Audio egress test-tone path (sidecar synth → Opus / raw f32 → binary WS fan-out) | Shipping — listen button works against synth |
 | Audio egress real master tap (shim RT `Processor` + ring buffer + drain thread) | Shipping — real master-bus audio flows via host backend |
-| Out-of-tree shim build (CMake, no Ardour source edits, `ARDOUR_SURFACES_PATH`-installable) | Shipping — `just shim-cmake-build && just shim-install` |
+| Out-of-tree shim build (CMake, no Ardour source edits, `ARDOUR_SURFACES_PATH`-installable) | Shipping — `just shim build && just shim install` |
 | WebRTC audio forwarding (M6b ingress, M6c latency probe) | Schema ready; runtime pending |
 | Busses / groups / sends (schema fields + mixer UI) | Not yet |
 | Region fade-in / fade-out / trim-to-selection ops | Not yet |
@@ -100,7 +100,7 @@ installed. From the repo root:
 
 ```bash
 just tw-build                    # one-shot Tailwind build
-just run                         # serves stub → picker → Ardour on project click
+just run                         # run on 0.0.0.0 with soft preflight checks
 ```
 
 Then open <http://127.0.0.1:3838>. On a fresh box the sidecar boots in
@@ -119,11 +119,11 @@ Six tracks, realistic plugin params, synthesized regions and
 waveforms — useful for frontend work without the audio engine
 running.
 
-**Full Ardour path** (requires building Ardour 9 once, ~15 min cold):
+**Full Ardour path** (first run may build Ardour/shim once):
 
 ```bash
-just ardour-configure && just ardour-build
-just shim-build
+just ardour ensure
+just shim check
 ```
 
 After that, `just run` spawns Ardour via the shim as you pick projects.
@@ -131,8 +131,8 @@ After that, `just run` spawns Ardour via the shim as you pick projects.
 **Out-of-tree shim build** (no edits to Ardour's source):
 
 ```bash
-just shim-cmake-build                    # build libfoyer_shim.so
-just shim-install                        # → ~/.config/ardour9/surfaces/
+just shim build                          # build libfoyer_shim.so
+just shim install                        # → ~/.config/ardour9/surfaces/
 ```
 
 Ardour picks it up from `ARDOUR_SURFACES_PATH` at startup — same
@@ -264,9 +264,9 @@ and/or `~/.claude/.../memory/`.
 ## Building + testing
 
 ```bash
-cargo test --workspace           # 16 passing as of 2026-04-19
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all
+just test                        # Rust workspace tests
+just clippy                      # lint all targets with -D warnings
+cargo fmt --all                  # formatter stays a direct cargo command
 just tw-build                    # compile Tailwind (needed after CSS edits)
 ```
 
