@@ -17,6 +17,79 @@ FOYER_REPO="https://github.com/foyer-studio/foyer-studio.git"
 ARDOUR_REPO="https://github.com/hotspoons/zzz-forks-ardour.git"
 ARDOUR_BRANCH="foyer-studio-integration"
 ARDOUR_UPSTREAM="https://github.com/Ardour/ardour.git"
+EDITOR_CMD="${FOYER_WORKSPACE_EDITOR:-code}"
+
+print_usage() {
+    cat <<EOF
+Usage:
+  $0 [--editor <cmd>] [<target-directory> [workspace-name]]
+
+Options:
+  --editor <cmd>   VSCode-compatible CLI command to open the workspace
+                   (examples: code, cursor, codium)
+  -h, --help       Show this help
+
+Environment:
+  FOYER_WORKSPACE_EDITOR
+      Default VSCode-compatible command when --editor is not provided.
+
+Examples:
+  Fresh setup (clone both repos):
+    $0 ~/dev
+    $0 --editor cursor ~/dev my-workspace
+
+  Existing foyer-studio checkout:
+    FOYER_WORKSPACE_EDITOR=cursor ./scripts/bootstrap-workspace.sh
+EOF
+}
+
+POSITIONAL_ARGS=()
+while (($#)); do
+    case "$1" in
+        --editor)
+            if [ $# -lt 2 ]; then
+                echo "Missing value for --editor"
+                echo ""
+                print_usage
+                exit 1
+            fi
+            EDITOR_CMD="$2"
+            shift 2
+            ;;
+        --editor=*)
+            EDITOR_CMD="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        --)
+            shift
+            while (($#)); do
+                POSITIONAL_ARGS+=("$1")
+                shift
+            done
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            echo ""
+            print_usage
+            exit 1
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ "${#POSITIONAL_ARGS[@]}" -gt 2 ]; then
+    echo "Too many positional arguments."
+    echo ""
+    print_usage
+    exit 1
+fi
 
 # Clone ardour into $1 on the $ARDOUR_BRANCH branch, with upstream wired up.
 clone_ardour() {
@@ -35,13 +108,13 @@ echo ""
 
 open_workspace() {
     local workspace_file="$1"
-    if command -v code &> /dev/null; then
-        code "$workspace_file"
-        echo "✅ Opened workspace in VSCode: $workspace_file"
+    if command -v "$EDITOR_CMD" &> /dev/null; then
+        "$EDITOR_CMD" "$workspace_file"
+        echo "✅ Opened workspace with '$EDITOR_CMD': $workspace_file"
         echo ""
         echo "Click 'Reopen in Container' when prompted to start developing!"
     else
-        echo "VSCode 'code' command not found in PATH."
+        echo "Workspace opener '$EDITOR_CMD' not found in PATH."
         echo "Manually open: $workspace_file"
         echo ""
         echo "Then click 'Reopen in Container'."
@@ -84,22 +157,11 @@ if [ -f "$SCRIPT_DIR/../foyer-studio.code-workspace" ]; then
 fi
 
 # Fresh setup mode
-TARGET_DIR="${1:-}"
-WORKSPACE_NAME="${2:-foyer-workspace}"
+TARGET_DIR="${POSITIONAL_ARGS[0]:-}"
+WORKSPACE_NAME="${POSITIONAL_ARGS[1]:-foyer-workspace}"
 
 if [ -z "$TARGET_DIR" ]; then
-    echo "Usage: $0 <target-directory> [workspace-name]"
-    echo ""
-    echo "Examples:"
-    echo ""
-    echo "  Fresh setup (clone both repos):"
-    echo "    $0 ~/dev                    # Creates ~/dev/foyer-workspace"
-    echo "    $0 ~/dev my-workspace       # Creates ~/dev/my-workspace"
-    echo ""
-    echo "  From existing foyer-studio repo:"
-    echo "    cd /path/to/foyer-studio"
-    echo "    ./scripts/bootstrap-workspace.sh  # Clones ardour sibling if missing"
-    echo ""
+    print_usage
     exit 1
 fi
 
