@@ -254,6 +254,9 @@ struct DecodedCmd
 		DeleteTrack,
 		ReorderTracks,
 		SetLoopRange,
+		CreateGroup,
+		UpdateGroup,
+		DeleteGroup,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
@@ -367,6 +370,17 @@ struct DecodedCmd
 	std::uint64_t loop_end_samples = 0;
 	bool          has_loop_enabled = false;
 	bool          loop_enabled = false;
+
+	// Group CRUD payloads.
+	std::string   group_name;
+	std::string   group_color;
+	std::vector<std::string> group_members;
+	bool          has_group_patch_name = false;
+	std::string   group_patch_name;
+	bool          has_group_patch_color = false;
+	std::string   group_patch_color;
+	bool          has_group_patch_members = false;
+	std::vector<std::string> group_patch_members;
 
 	// Automation lane edit payloads (Phase B).
 	std::string   lane_id;
@@ -863,12 +877,13 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.id)) return out;
 				} else if (k == "source_region_id") {
 					if (!in.read_str (out.dup_source_id)) return out;
-				} else if (k == "name") {
-					// CreateRegion / top-level name field (no patch
-					// wrapper). Reused with patch_name so the shim
-					// can pick it up via existing storage.
-					if (!in.read_str (out.patch_name)) return out;
-					out.has_patch_name = true;
+			} else if (k == "name") {
+				// CreateRegion, SavePluginPreset, CreateGroup, etc.
+				std::string v;
+				if (!in.read_str (v)) return out;
+				out.group_name = v;
+				out.patch_name = v;
+				out.has_patch_name = true;
 				} else if (k == "kind") {
 					// CreateRegion's media-type selector ("midi" | "audio").
 					if (!in.read_str (out.create_kind)) return out;
@@ -1113,6 +1128,9 @@ decode (const std::vector<std::uint8_t>& buf)
             else if (cmd_type == "delete_track")         out.kind = DecodedCmd::Kind::DeleteTrack;
             else if (cmd_type == "reorder_tracks")       out.kind = DecodedCmd::Kind::ReorderTracks;
             else if (cmd_type == "set_loop_range")       out.kind = DecodedCmd::Kind::SetLoopRange;
+            else if (cmd_type == "create_group")         out.kind = DecodedCmd::Kind::CreateGroup;
+            else if (cmd_type == "update_group")         out.kind = DecodedCmd::Kind::UpdateGroup;
+            else if (cmd_type == "delete_group")         out.kind = DecodedCmd::Kind::DeleteGroup;
             else if (cmd_type == "audio_stream_open"
                 ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
 			else if (cmd_type == "audio_stream_close"
