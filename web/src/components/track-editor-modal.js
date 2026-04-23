@@ -12,6 +12,8 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import "./track-strip.js";
+import "./midi-manager.js";
+import { openPanEditor } from "./pan-editor-modal.js";
 import { DENSITIES } from "../mixer-density.js";
 import { AudioIngress } from "../viz/audio-ingress.js";
 
@@ -37,10 +39,12 @@ const COLOR_PALETTE = [
 export class TrackEditorModal extends LitElement {
   static properties = {
     trackId: { type: String, attribute: "track-id" },
+    initialTab: { attribute: false },
     _tick:   { state: true, type: Number },
     _ports:  { state: true },
     _micState: { state: true },   // "idle" | "starting" | "active" | "error"
     _micError: { state: true },
+    _tab: { state: true },
   };
 
   static styles = css`
@@ -67,6 +71,28 @@ export class TrackEditorModal extends LitElement {
       border: 1px solid var(--color-border);
     }
     header .close { display: none; }
+    .tabs {
+      display: inline-flex;
+      gap: 4px;
+      margin-left: 8px;
+    }
+    .tab {
+      background: transparent;
+      border: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+      padding: 2px 8px;
+      border-radius: var(--radius-sm);
+      font: inherit;
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .tab.active {
+      color: #fff;
+      border-color: transparent;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+    }
     .content {
       display: flex;
       flex: 1;
@@ -212,6 +238,7 @@ export class TrackEditorModal extends LitElement {
     this._ports = [];
     this._micState = "idle";
     this._micError = "";
+    this._tab = "editor";
     this._keyHandler = (ev) => { if (ev.key === "Escape") this._close(); };
     this._storeHandler = () => this._tick++;
     // Watch envelope traffic for the PortsListed reply so the Input
@@ -241,6 +268,8 @@ export class TrackEditorModal extends LitElement {
     // ports_listed which we stash into this._ports. Source-only
     // filter: we only route track inputs *from* readable ports.
     this._requestPorts();
+    const preferred = this.initialTab || this._loadLastTab();
+    if (preferred === "midi") this._tab = "midi";
   }
   disconnectedCallback() {
     document.removeEventListener("keydown", this._keyHandler);
@@ -299,6 +328,21 @@ export class TrackEditorModal extends LitElement {
 
   _close() {
     this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
+  }
+
+  _loadLastTab() {
+    try {
+      return localStorage.getItem("foyer.trackEditor.lastMidiTab") || "editor";
+    } catch {
+      return "editor";
+    }
+  }
+
+  _setTab(tab) {
+    this._tab = tab === "midi" ? "midi" : "editor";
+    try {
+      localStorage.setItem("foyer.trackEditor.lastMidiTab", this._tab);
+    } catch {}
   }
 
   _track() {
@@ -384,9 +428,21 @@ export class TrackEditorModal extends LitElement {
           ${color ? html`<span class="swatch" style="background:${color}"></span>` : null}
           <h2>${t.name}</h2>
           <span style="font-size:10px;color:var(--color-text-muted);letter-spacing:0.08em;text-transform:uppercase">${t.kind}</span>
+          ${t.kind === "midi" ? html`
+            <div class="tabs">
+              <button class="tab ${this._tab === "editor" ? "active" : ""}" @click=${() => this._setTab("editor")}>Track</button>
+              <button class="tab ${this._tab === "midi" ? "active" : ""}" @click=${() => this._setTab("midi")}>MIDI</button>
+            </div>
+          ` : null}
           <button class="close" @click=${this._close}>${icon("x-mark", 16)}</button>
         </header>
-        <div class="content">
+        ${t.kind === "midi" && this._tab === "midi" ? html`
+          <foyer-midi-manager
+            style="flex:1;min-height:0"
+            .trackId=${this.trackId}
+            .trackName=${t.name}
+          ></foyer-midi-manager>
+        ` : html`<div class="content">
           <div class="form-body">
             <div class="section">
               <h3>Name</h3>
@@ -429,7 +485,7 @@ export class TrackEditorModal extends LitElement {
               .widthMode=${"absolute"}
             ></foyer-track-strip>
           </div>
-        </div>
+        </div>`}
       </div>
     `;
   }
@@ -469,6 +525,10 @@ export class TrackEditorModal extends LitElement {
         <div class="row">
           <label>Group</label>
           <span class="hint" style="color:var(--color-text)">${groupName || "—"}</span>
+        </div>
+        <div class="row">
+          <label>Pan</label>
+          <button class="refresh" @click=${() => openPanEditor(t.id)}>Open pan editor…</button>
         </div>
         <div class="row">
           <label>Input</label>
@@ -621,10 +681,11 @@ export class TrackEditorModal extends LitElement {
 }
 customElements.define("foyer-track-editor-modal", TrackEditorModal);
 
-export function openTrackEditor(trackId) {
+export function openTrackEditor(trackId, options = {}) {
   if (!trackId) return () => {};
   const el = document.createElement("foyer-track-editor-modal");
   el.trackId = trackId;
+  el.initialTab = options.tab || "";
   return import("./window.js").then((m) => m.openWindow({
     title: "Track editor",
     icon: "adjustments-horizontal",

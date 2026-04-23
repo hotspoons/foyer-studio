@@ -191,6 +191,12 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Track, BackendError> {
         Err(BackendError::Other("update_track not supported".into()))
     }
+    async fn delete_track(&self, _id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("delete_track not supported".into()))
+    }
+    async fn reorder_tracks(&self, _ordered_ids: Vec<EntityId>) -> Result<(), BackendError> {
+        Err(BackendError::Other("reorder_tracks not supported".into()))
+    }
     /// Remove a region from its track. Returns the track id the region was
     /// on (so the server can emit `RegionRemoved { track_id, region_id }`).
     async fn delete_region(&self, _id: EntityId) -> Result<EntityId, BackendError> {
@@ -338,6 +344,15 @@ pub trait Backend: Send + Sync + 'static {
         _points: Vec<foyer_schema::AutomationPoint>,
     ) -> Result<(), BackendError> {
         Err(BackendError::Other("replace_automation_lane not supported".into()))
+    }
+
+    async fn set_loop_range(
+        &self,
+        _start_samples: u64,
+        _end_samples: u64,
+        _enabled: bool,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("set_loop_range not supported".into()))
     }
 
     // ─── plugin presets ─────────────────────────────────────────────────

@@ -11,8 +11,12 @@
 #include "dispatch.h"
 #include "signal_bridge.h"
 
+#include <algorithm>
 #include <cstring>
+#include <limits>
+#include <map>
 #include <string>
+#include <vector>
 
 #include "ardour/audio_port.h"
 #include "ardour/automation_control.h"
@@ -23,6 +27,7 @@
 #include "ardour/midi_region.h"
 #include "ardour/midi_source.h"
 #include "ardour/monitor_control.h"
+#include "ardour/location.h"
 #include "ardour/playlist.h"
 #include "ardour/region_factory.h"
 #include "ardour/plugin.h"
@@ -32,6 +37,7 @@
 #include "ardour/processor.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
+#include "ardour/route_group.h"
 #include "ardour/send.h"
 #include "ardour/session.h"
 #include "ardour/track.h"
@@ -245,6 +251,9 @@ struct DecodedCmd
 		AddSend,
 		RemoveSend,
 		SetSendLevel,
+		DeleteTrack,
+		ReorderTracks,
+		SetLoopRange,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
@@ -353,6 +362,11 @@ struct DecodedCmd
 	bool          send_pre_fader = false;
 	// RemoveSend / SetSendLevel → send id in `id`.
 	double        send_level = 1.0;
+	std::vector<std::string> ordered_track_ids;
+	std::uint64_t loop_start_samples = 0;
+	std::uint64_t loop_end_samples = 0;
+	bool          has_loop_enabled = false;
+	bool          loop_enabled = false;
 
 	// Automation lane edit payloads (Phase B).
 	std::string   lane_id;
@@ -915,6 +929,27 @@ decode (const std::vector<std::uint8_t>& buf)
 				} else if (k == "level") {
 					// SetSendLevel { send_id, level: f64 }
 					if (!in.read_f64 (out.send_level)) return out;
+				} else if (k == "ordered_ids") {
+					std::size_t n = 0;
+					std::uint8_t b = in.peek ();
+					if ((b & 0xf0) == 0x90) { in.take_u8 (); n = b & 0x0f; }
+					else if (b == 0xdc)     { in.take_u8 (); n = in.take_be16 (); }
+					else if (b == 0xdd)     { in.take_u8 (); n = in.take_be32 (); }
+					else return out;
+					out.ordered_track_ids.clear ();
+					out.ordered_track_ids.reserve (n);
+					for (std::size_t i = 0; i < n; ++i) {
+						std::string tid;
+						if (!in.read_str (tid)) return out;
+						out.ordered_track_ids.push_back (tid);
+					}
+				} else if (k == "start_samples") {
+					if (!in.read_u64 (out.loop_start_samples)) return out;
+				} else if (k == "end_samples") {
+					if (!in.read_u64 (out.loop_end_samples)) return out;
+				} else if (k == "enabled") {
+					if (!in.read_bool (out.loop_enabled)) return out;
+					out.has_loop_enabled = true;
 				} else if (k == "stream_id") {
 					std::uint64_t v = 0;
 					if (!in.read_u64 (v)) return out;
@@ -1075,6 +1110,9 @@ decode (const std::vector<std::uint8_t>& buf)
             else if (cmd_type == "add_send")             out.kind = DecodedCmd::Kind::AddSend;
             else if (cmd_type == "remove_send")          out.kind = DecodedCmd::Kind::RemoveSend;
             else if (cmd_type == "set_send_level")       out.kind = DecodedCmd::Kind::SetSendLevel;
+            else if (cmd_type == "delete_track")         out.kind = DecodedCmd::Kind::DeleteTrack;
+            else if (cmd_type == "reorder_tracks")       out.kind = DecodedCmd::Kind::ReorderTracks;
+            else if (cmd_type == "set_loop_range")       out.kind = DecodedCmd::Kind::SetLoopRange;
             else if (cmd_type == "audio_stream_open"
                 ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
 			else if (cmd_type == "audio_stream_close"
@@ -1191,7 +1229,15 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						PBD::warning << "foyer_shim: calling request_locate(" << snap.value << ")" << endmsg;
 						session.request_locate (static_cast<Temporal::samplepos_t> (snap.value));
 					} else if (snap.id == "transport.tempo") {
-						PBD::warning << "foyer_shim: transport.tempo set_control deferred (use TempoMap API)" << endmsg;
+						const double bpm = std::max (20.0, std::min (300.0, snap.value));
+						Temporal::TempoMap::WritableSharedPtr tmap (Temporal::TempoMap::write_copy ());
+						const Temporal::timepos_t pos (session.transport_sample ());
+						const Temporal::TempoMetric metric (tmap->metric_at (pos));
+						tmap->change_tempo (
+						    metric.get_editable_tempo (),
+						    Temporal::Tempo (bpm, bpm, 4.0));
+						Temporal::TempoMap::update (tmap);
+						PBD::warning << "foyer_shim: updated transport tempo to " << bpm << endmsg;
 					} else {
 						PBD::warning << "foyer_shim: transport id not handled: " << snap.id << endmsg;
 					}
@@ -2003,6 +2049,98 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			});
 			break;
 		}
+		case DecodedCmd::Kind::DeleteTrack: {
+			if (cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				if (snap.id.rfind ("track.", 0) != 0) return;
+				const std::string sid = snap.id.substr (6);
+				std::shared_ptr<Route> route;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp;
+					tmp << r->id ();
+					if (tmp.str () == sid) { route = r; break; }
+				}
+				if (!route) {
+					PBD::warning << "foyer_shim: delete_track: unknown track id: " << snap.id << endmsg;
+					return;
+				}
+				shim->session ().remove_route (route);
+				auto bytes = msgpack_out::encode_patch_reload ();
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ReorderTracks: {
+			if (cmd.ordered_track_ids.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				std::map<std::string, std::shared_ptr<Route>> by_sid;
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp;
+					tmp << r->id ();
+					by_sid[tmp.str ()] = r;
+				}
+				ARDOUR::PresentationInfo::order_t order = 0;
+				for (auto const& tid : snap.ordered_track_ids) {
+					const std::string sid = tid.rfind ("track.", 0) == 0 ? tid.substr (6) : tid;
+					auto it = by_sid.find (sid);
+					if (it == by_sid.end () || !it->second) continue;
+					it->second->set_presentation_order (order++);
+				}
+				// Keep any routes not listed in their existing relative order.
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp;
+					tmp << r->id ();
+					const std::string track_id = "track." + tmp.str ();
+					if (std::find (snap.ordered_track_ids.begin (), snap.ordered_track_ids.end (), track_id)
+					    != snap.ordered_track_ids.end ()) {
+						continue;
+					}
+					r->set_presentation_order (order++);
+				}
+				shim->session ().resort_routes ();
+				auto bytes = msgpack_out::encode_patch_reload ();
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SetLoopRange: {
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto& session = shim->session ();
+				auto* loc = session.locations () ? session.locations ()->auto_loop_location () : nullptr;
+				const Temporal::timepos_t start_pos (static_cast<Temporal::samplepos_t> (snap.loop_start_samples));
+				const Temporal::timepos_t end_pos   (static_cast<Temporal::samplepos_t> (snap.loop_end_samples));
+				if (!loc) {
+					auto flags = ARDOUR::Location::Flags (
+					    ARDOUR::Location::IsAutoLoop | ARDOUR::Location::IsHidden);
+					loc = new ARDOUR::Location (session, start_pos, end_pos, "Loop", flags);
+					session.locations ()->add (loc);
+					session.set_auto_loop_location (loc);
+				} else {
+					loc->set_start (start_pos, true);
+					loc->set_end (end_pos, true);
+				}
+				if (snap.has_loop_enabled) {
+					const bool looping = session.get_play_loop ();
+					if (looping != snap.loop_enabled) {
+						shim->loop_toggle ();
+					}
+				}
+				auto bytes = msgpack_out::encode_transport_state (session);
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
 		case DecodedCmd::Kind::UpdateTrack: {
 			if (cmd.id.empty ()) break;
 			DecodedCmd snap = cmd;
@@ -2106,12 +2244,44 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						}
 					}
 				}
-				// group_id deferred — Ardour's RouteGroup API is stable
-				// but wiring it belongs with the group commands.
+				bool group_changed = false;
+				if (snap.has_patch_group_id) {
+					// Accept either "group.<id>" (preferred schema id) or raw
+					// Ardour RouteGroup id for backward compatibility.
+					std::string gid = snap.patch_group_id;
+					if (gid.rfind ("group.", 0) == 0) gid = gid.substr (6);
+					std::shared_ptr<RouteGroup> target_group;
+					if (!gid.empty ()) {
+						for (auto const& rg : shim->session ().route_groups ()) {
+							if (!rg) continue;
+							std::ostringstream tmp;
+							tmp << rg->id ();
+							if (tmp.str () == gid) { target_group = rg; break; }
+						}
+						if (!target_group) {
+							PBD::warning << "foyer_shim: update_track: unknown group id: "
+							             << snap.patch_group_id << endmsg;
+						}
+					}
+					auto current_group = route->route_group ();
+					if (current_group && current_group != target_group) {
+						current_group->remove (route);
+						group_changed = true;
+					}
+					if (target_group && target_group != current_group) {
+						target_group->add (route);
+						group_changed = true;
+					}
+				}
 
-				auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.id);
-				if (!bytes.empty ()) {
+				if (group_changed) {
+					auto bytes = msgpack_out::encode_patch_reload ();
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				} else {
+					auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.id);
+					if (!bytes.empty ()) {
+						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+					}
 				}
 			});
 			break;
@@ -2517,15 +2687,42 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (!ac) return;
 				auto alist = ac->alist ();
 				if (!alist) return;
-				// Erase by (time, value) then re-add at new time. This avoids
-				// iterator-constness hassles with std::list under reader lock.
-				alist->erase (
-					Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_orig_time)),
-					snap.auto_point.value);
-				alist->add (
-					Temporal::timepos_t (static_cast<Temporal::samplepos_t> (
-					    snap.has_auto_new_time ? snap.auto_new_time : snap.auto_orig_time)),
-					snap.auto_point.value);
+				// Rebuild the lane around the point at `auto_orig_time`.
+				// Matching on (time,value) is fragile because the UI sends
+				// the *new* value; using nearest-time replacement avoids
+				// value-mismatch snap-back when dragging.
+				std::vector<std::pair<Temporal::samplepos_t, double>> pts;
+				{
+					PBD::RWLock::ReaderLock lm (alist->lock ());
+					pts.reserve (alist->events ().size ());
+					for (auto const* ev : alist->events ()) {
+						if (!ev) continue;
+						pts.emplace_back (ev->when.samples (), ev->value);
+					}
+				}
+				const Temporal::samplepos_t target =
+				    static_cast<Temporal::samplepos_t> (snap.auto_orig_time);
+				std::size_t best_idx = static_cast<std::size_t> (-1);
+				Temporal::samplepos_t best_dist = std::numeric_limits<Temporal::samplepos_t>::max ();
+				for (std::size_t i = 0; i < pts.size (); ++i) {
+					const auto cur = pts[i].first;
+					const auto dist = cur > target ? (cur - target) : (target - cur);
+					if (dist < best_dist) {
+						best_dist = dist;
+						best_idx = i;
+					}
+				}
+				const Temporal::samplepos_t new_time = static_cast<Temporal::samplepos_t> (
+				    snap.has_auto_new_time ? snap.auto_new_time : snap.auto_orig_time);
+				if (best_idx != static_cast<std::size_t> (-1)) {
+					pts[best_idx] = { new_time, snap.auto_point.value };
+				} else {
+					pts.push_back ({ new_time, snap.auto_point.value });
+				}
+				alist->clear ();
+				for (auto const& pt : pts) {
+					alist->add (Temporal::timepos_t (pt.first), pt.second);
+				}
 				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
@@ -2559,12 +2756,12 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (!ac) return;
 				auto alist = ac->alist ();
 				if (!alist) return;
-				{
-					PBD::RWLock::WriterLock lm (alist->lock ());
-					alist->clear ();
-					for (auto const& pt : snap.auto_points) {
-						alist->fast_simple_add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (pt.time_samples)), pt.value);
-					}
+				// Avoid fast_simple_add under a manually-held writer lock; using
+				// public mutators here has been markedly safer across Ardour
+				// builds when replacing the entire lane.
+				alist->clear ();
+				for (auto const& pt : snap.auto_points) {
+					alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (pt.time_samples)), pt.value);
 				}
 				alist->mark_dirty ();
 				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));

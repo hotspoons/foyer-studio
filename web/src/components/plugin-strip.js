@@ -68,9 +68,19 @@ export class PluginStrip extends LitElement {
       cursor: pointer;
       display: inline-flex; align-items: center;
     }
-    .row button.by { font-weight: 700; font-family: var(--font-mono); letter-spacing: 0.08em; }
+    .row button.by {
+      font-weight: 800;
+      font-family: var(--font-mono);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: color-mix(in oklab, var(--color-text) 35%, var(--color-accent-2));
+    }
     .row button:hover { color: var(--color-text); border-color: var(--color-border); }
-    .row.bypassed button.by { color: var(--color-warning); }
+    .row.bypassed button.by {
+      color: var(--color-warning);
+      border-color: color-mix(in oklab, var(--color-warning) 65%, transparent);
+      background: color-mix(in oklab, var(--color-warning) 22%, transparent);
+    }
     .slot {
       display: flex; align-items: center; justify-content: center;
       height: 13px;
@@ -230,6 +240,13 @@ export class PluginStrip extends LitElement {
   _onContextMenu(ev, p) {
     ev.preventDefault();
     ev.stopPropagation();
+    const tracks = window.__foyer?.store?.state?.session?.tracks || [];
+    const duplicateTargets = tracks
+      .filter((t) => t.id && t.id !== this.trackId)
+      .map((t) => ({
+        label: t.name,
+        action: () => this._duplicatePluginToTrack(p, t.id),
+      }));
     showContextMenu(ev, [
       { heading: p?.name || "Plugin" },
       {
@@ -242,6 +259,13 @@ export class PluginStrip extends LitElement {
         icon: "adjustments-horizontal",
         action: () => this._openTrackEditor(),
       },
+      ...(duplicateTargets.length ? [
+        {
+          label: "Duplicate to track",
+          icon: "document-duplicate",
+          submenu: duplicateTargets,
+        },
+      ] : []),
       { separator: true },
       {
         label: "Remove plugin",
@@ -255,6 +279,15 @@ export class PluginStrip extends LitElement {
   _removePlugin(p) {
     if (!p?.id) return;
     window.__foyer?.ws?.send({ type: "remove_plugin", plugin_id: p.id });
+  }
+
+  _duplicatePluginToTrack(plugin, targetTrackId) {
+    if (!plugin?.uri || !targetTrackId) return;
+    window.__foyer?.ws?.send({
+      type: "add_plugin",
+      track_id: targetTrackId,
+      plugin_uri: plugin.uri,
+    });
   }
 
   _openTrackEditor(ev) {

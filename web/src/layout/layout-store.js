@@ -197,7 +197,7 @@ export class LayoutStore extends EventTarget {
     }
     const w = Math.max(160, size?.w ?? 320);
     const h = Math.max(120, size?.h ?? 360);
-    this._pluginFloats.push({ plugin_id, w, h });
+    this._pluginFloats.push({ plugin_id, w, h, x: null, y: null });
     this._emit();
   }
 
@@ -217,6 +217,18 @@ export class LayoutStore extends EventTarget {
     if (entry.w === nw && entry.h === nh) return;
     entry.w = nw;
     entry.h = nh;
+    this._emit();
+  }
+
+  setPluginFloatPosition(plugin_id, x, y) {
+    const entry = this._pluginFloats.find((p) => p.plugin_id === plugin_id);
+    if (!entry) return;
+    const nx = Math.round(Number(x));
+    const ny = Math.round(Number(y));
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
+    if (entry.x === nx && entry.y === ny) return;
+    entry.x = nx;
+    entry.y = ny;
     this._emit();
   }
 

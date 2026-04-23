@@ -157,6 +157,29 @@ impl SessionRegistry {
         }
     }
 
+    /// Remove a session after its backend stream ended naturally.
+    /// Unlike `close()`, this does not abort the pump task because the
+    /// caller is the pump itself.
+    async fn close_after_disconnect(&self, id: &EntityId) -> Option<SessionInfo> {
+        let removed = self.sessions.write().await.remove(id);
+        match removed {
+            Some(entry) => {
+                let info = entry.to_info();
+                drop(entry.backend);
+                self.broadcast_event(Event::SessionClosed {
+                    session_id: id.clone(),
+                })
+                .await;
+                self.broadcast_event(Event::SessionList {
+                    sessions: self.list().await,
+                })
+                .await;
+                Some(info)
+            }
+            None => None,
+        }
+    }
+
     /// Look up a session by its canonical path. Used so opening the
     /// same project twice just raises the existing session instead of
     /// launching a second shim. Compares with a simple string equality
@@ -227,10 +250,8 @@ impl SessionRegistry {
 /// `session_id`. On graceful stream close (natural disconnect), emits
 /// `Event::BackendLost` + `Event::SessionClosed` so the UI can react.
 ///
-/// The pump does NOT remove the session from the registry on natural
-/// exit — that's `SessionRegistry::close()`'s job. If we removed from
-/// within the pump we'd race with an explicit close() happening at
-/// the same moment.
+/// When the stream exits naturally we remove the session entry so
+/// "already open by path" checks cannot focus a dead backend.
 async fn pump_session(
     backend: Arc<dyn Backend>,
     reg: Arc<SessionRegistry>,
@@ -271,6 +292,7 @@ async fn pump_session(
     };
     reg.ring.write().await.push(lost.clone());
     let _ = reg.tx.send(lost);
+    let _ = reg.close_after_disconnect(&session_id).await;
     Ok(())
 }
 

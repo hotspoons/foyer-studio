@@ -31,8 +31,8 @@ export class Keybinds {
     this._handler = (e) => this._onKey(e);
   }
 
-  install() { document.addEventListener("keydown", this._handler); }
-  uninstall() { document.removeEventListener("keydown", this._handler); }
+  install() { document.addEventListener("keydown", this._handler, true); }
+  uninstall() { document.removeEventListener("keydown", this._handler, true); }
 
   _mod(e) {
     const m = (() => { try { return localStorage.getItem(STORAGE_MOD); } catch { return null; } })();

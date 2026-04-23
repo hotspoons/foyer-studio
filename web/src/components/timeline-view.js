@@ -373,6 +373,8 @@ export class TimelineView extends LitElement {
     // out-of-order position packets causing visible playhead jump-back.
     this._lastTransportSeq = 0;
     this._lastSeekAtMs = 0;
+    this._recordingAnchorSamples = null;
+    this._transportDropStats = { stale_seq: 0, backward_jump: 0 };
   }
 
   _loadLaneHeights() {
@@ -404,7 +406,10 @@ export class TimelineView extends LitElement {
     // buttons on track heads depend on current control values). This is
     // coarse but timelines aren't re-rendered frequently and we don't
     // want to spin up a ControlController per track.
-    this._onStoreControl = () => this.requestUpdate();
+    this._onStoreControl = () => {
+      this._syncRecordingAnchor();
+      this.requestUpdate();
+    };
     this._onStoreSelection = () => this.requestUpdate();
     window.__foyer?.store?.addEventListener("control", this._onStoreControl);
     window.__foyer?.store?.addEventListener("selection", this._onStoreSelection);
@@ -507,8 +512,40 @@ export class TimelineView extends LitElement {
     this._lastSeekAtMs = Number(detail?.at_ms) || Date.now();
   }
 
+  _diagEnabled() {
+    try {
+      return localStorage.getItem("foyer.dev.transportDiag") === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  _noteTransportDrop(reason) {
+    const key = reason === "stale_seq" ? "stale_seq" : "backward_jump";
+    this._transportDropStats[key] = (this._transportDropStats[key] || 0) + 1;
+    if (this._diagEnabled()) this.requestUpdate();
+  }
+
+  _syncRecordingAnchor() {
+    const controls = window.__foyer?.store?.state?.controls;
+    const recording = !!controls?.get("transport.recording");
+    if (!recording) {
+      this._recordingAnchorSamples = null;
+      return;
+    }
+    if (this._recordingAnchorSamples != null) return;
+    const recStart = Number(controls?.get("transport.record_position"));
+    this._recordingAnchorSamples =
+      Number.isFinite(recStart) && recStart >= 0
+        ? recStart
+        : Math.max(0, this._playheadSamples);
+  }
+
   _shouldAcceptTransportPosition(next, seq) {
-    if (seq && seq < this._lastTransportSeq) return false;
+    if (seq && seq < this._lastTransportSeq) {
+      this._noteTransportDrop("stale_seq");
+      return false;
+    }
     const store = window.__foyer?.store;
     const controls = store?.state?.controls;
     const playing = !!controls?.get("transport.playing");
@@ -518,6 +555,7 @@ export class TimelineView extends LitElement {
     const jitterThreshold = 2400; // ~50ms @ 48kHz
 
     if (playing && !looping && backwardsBy > jitterThreshold && !seekRecent) {
+      this._noteTransportDrop("backward_jump");
       return false;
     }
 
@@ -596,7 +634,54 @@ export class TimelineView extends LitElement {
       action: () => import("./track-editor-modal.js")
                       .then((m) => m.openTrackEditor(track.id)),
     });
+    items.push({
+      label: "Move track up",
+      icon: "arrow-up",
+      action: () => this._moveTrackBy(track.id, -1),
+    });
+    items.push({
+      label: "Move track down",
+      icon: "arrow-down",
+      action: () => this._moveTrackBy(track.id, 1),
+    });
+    items.push({
+      label: "Delete track…",
+      icon: "trash",
+      tone: "danger",
+      action: () => this._deleteTracksFromContext(track.id),
+    });
     showContextMenu(ev, items);
+  }
+
+  _moveTrackBy(trackId, dir) {
+    const tracks = this.session?.tracks || [];
+    const idx = tracks.findIndex((t) => t.id === trackId);
+    if (idx < 0) return;
+    const next = idx + dir;
+    if (next < 0 || next >= tracks.length) return;
+    const order = tracks.map((t) => t.id);
+    [order[idx], order[next]] = [order[next], order[idx]];
+    window.__foyer?.ws?.send({ type: "reorder_tracks", ordered_ids: order });
+  }
+
+  async _deleteTracksFromContext(clickedTrackId) {
+    const store = window.__foyer?.store;
+    const selected = Array.from(store?.state?.selectedTrackIds || []);
+    const ids = selected.length ? selected : [clickedTrackId];
+    if (!ids.length) return;
+    const { confirmAction } = await import("./confirm-modal.js");
+    const ok = await confirmAction({
+      title: "Delete track",
+      message:
+        ids.length === 1
+          ? "Delete this track and all of its regions?"
+          : `Delete ${ids.length} selected tracks and all of their regions?`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
+    const ws = window.__foyer?.ws;
+    for (const id of ids) ws?.send({ type: "delete_track", id });
   }
 
   _isSequencerTrack(trackId) {
@@ -769,22 +854,7 @@ export class TimelineView extends LitElement {
   }
 
   _openMidiManager(track) {
-    Promise.all([
-      import("./midi-manager.js"),
-      import("./window.js"),
-    ]).then(([, winMod]) => {
-      const mgr = document.createElement("foyer-midi-manager");
-      mgr.trackId = track.id;
-      mgr.trackName = track.name;
-      winMod.openWindow({
-        title: `MIDI — ${track.name}`,
-        icon: "queue-list",
-        storageKey: "midi-manager",
-        content: mgr,
-        width: 720,
-        height: 520,
-      });
-    });
+    import("./track-editor-modal.js").then((m) => m.openTrackEditor(track.id, { tab: "midi" }));
   }
 
   // ── zoom stack ─────────────────────────────────────────────────────
@@ -824,6 +894,21 @@ export class TimelineView extends LitElement {
     this.updateComplete.then(() => {
       const sc = this.renderRoot.querySelector(".scroll");
       if (sc) sc.scrollLeft = snap.scrollLeft;
+    });
+    return true;
+  }
+
+  _setLoopToSelection() {
+    if (!this._selection) return false;
+    const ws = window.__foyer?.ws;
+    if (!ws) return false;
+    const a = Math.min(this._selection.startSamples, this._selection.endSamples);
+    const b = Math.max(this._selection.startSamples, this._selection.endSamples);
+    ws.send({
+      type: "set_loop_range",
+      start_samples: a,
+      end_samples: b,
+      enabled: true,
     });
     return true;
   }
@@ -948,10 +1033,26 @@ export class TimelineView extends LitElement {
                  this._zoom = Math.max(2, Math.min(4000, Math.round(2 * Math.pow(4000 / 2, t))));
                }}>
         <span>${this._zoom} px/s · tier=${pickTier(this._samplesPerPx())}</span>
+        ${this._selection ? html`
+          <button
+            @click=${() => this.zoomToSelection()}
+            title="Zoom to the current timeline selection"
+          >Zoom to selection</button>
+          <button
+            @click=${() => this._setLoopToSelection()}
+            title="Set loop start/end from current selection"
+          >Loop selection</button>
+        ` : null}
         <span style="flex:1"></span>
         <foyer-viz-picker></foyer-viz-picker>
         <button @click=${this._clearCache} title="Drop all cached peak files">Clear peak cache</button>
         <span>${totalSec.toFixed(1)}s · ${sr} Hz · wheel to zoom · Alt-wheel for lane height</span>
+        ${this._diagEnabled() ? html`
+          <span>
+            drops: seq=${this._transportDropStats.stale_seq || 0}
+            back=${this._transportDropStats.backward_jump || 0}
+          </span>
+        ` : null}
       </div>
       <div class="scroll" @wheel=${(e) => this._onWheel(e)}>
         <div class="grid" style="width:${gridWidth}px">
@@ -1003,8 +1104,10 @@ export class TimelineView extends LitElement {
   _recordingSpanPixels(controls) {
     if (!controls || !controls.get("transport.recording")) return null;
     const sr = this._timeline?.sample_rate || 48_000;
-    let recStart = controls.get("transport.record_position");
-    if (recStart == null) recStart = Math.max(0, this._playheadSamples - sr);
+    this._syncRecordingAnchor();
+    let recStart = this._recordingAnchorSamples;
+    if (!Number.isFinite(recStart)) recStart = controls.get("transport.record_position");
+    if (!Number.isFinite(recStart)) recStart = Math.max(0, this._playheadSamples - sr);
     const playhead = this._playheadSamples;
     const leftPx = HEAD_WIDTH + (Math.min(recStart, playhead) / sr) * this._zoom;
     const widthPx = Math.max(1, (Math.abs(playhead - recStart) / sr) * this._zoom);
@@ -1348,7 +1451,7 @@ export class TimelineView extends LitElement {
     const track = (this.session?.tracks || []).find((t) => t.id === region.track_id);
     if (!track) return;
     if (track.kind === "midi") {
-      if (region?.foyer_sequencer?.active !== false) this._openBeatSequencer(region);
+      if (region?.foyer_sequencer && region.foyer_sequencer.active !== false) this._openBeatSequencer(region);
       else this._openMidiEditor(region);
     }
   }

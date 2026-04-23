@@ -592,6 +592,16 @@ pub enum Command {
         id: EntityId,
         patch: TrackPatch,
     },
+    /// Delete a track by id. Backends should remove all regions/plugins
+    /// owned by the track and emit updated session state.
+    DeleteTrack {
+        id: EntityId,
+    },
+    /// Reorder tracks according to the provided id list.
+    /// Any track id omitted should keep relative order at the tail.
+    ReorderTracks {
+        ordered_ids: Vec<EntityId>,
+    },
     /// Create a new group / submix. Answered with `Event::GroupUpdated`.
     CreateGroup {
         name: String,
@@ -783,6 +793,14 @@ pub enum Command {
     /// "stop and seek" semantics on hosts that distinguish.
     Locate {
         samples: u64,
+    },
+    /// Set loop start/end from a timeline selection and optionally
+    /// enable looping in one command.
+    SetLoopRange {
+        start_samples: u64,
+        end_samples: u64,
+        #[serde(default)]
+        enabled: bool,
     },
 
     // ───── audio streaming negotiation ──────────────────────────────────

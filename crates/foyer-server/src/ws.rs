@@ -674,6 +674,30 @@ async fn dispatch_command(
                 }
             }
         }
+        Command::DeleteTrack { id } => {
+            if let Err(e) = state.backend().await.delete_track(id).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "delete_track_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::ReorderTracks { ordered_ids } => {
+            if let Err(e) = state.backend().await.reorder_tracks(ordered_ids).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "reorder_tracks_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
         Command::SetTrackInput { track_id, port_name } => {
             if let Err(e) = state
                 .backend()
@@ -866,6 +890,27 @@ async fn dispatch_command(
                     )
                     .await;
                 }
+            }
+        }
+        Command::SetLoopRange {
+            start_samples,
+            end_samples,
+            enabled,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_loop_range(start_samples, end_samples, enabled)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "set_loop_range_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
             }
         }
         Command::AudioStreamClose { stream_id } => {

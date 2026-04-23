@@ -67,7 +67,7 @@ export class PluginLayer extends LitElement {
       background: var(--color-surface-elevated);
       border-bottom: 1px solid var(--color-border);
       user-select: none;
-      cursor: default;
+      cursor: move;
     }
     header .label {
       flex: 1; min-width: 0;
@@ -171,11 +171,25 @@ export class PluginLayer extends LitElement {
     // Reserve a little margin on each side so plugin windows don't sit flush
     // against docked system windows.
     const pad = 8;
-    this._placed = packShelves(
-      this._entries.map((e) => ({ id: e.plugin_id, w: e.w, h: e.h })),
+    const manual = [];
+    const auto = [];
+    for (const e of this._entries) {
+      if (Number.isFinite(e.x) && Number.isFinite(e.y)) manual.push(e);
+      else auto.push(e);
+    }
+    const packed = packShelves(
+      auto.map((e) => ({ id: e.plugin_id, w: e.w, h: e.h })),
       { x: ws.left + pad, y: ws.top + pad, w: Math.max(0, ws.width - 2 * pad), h: Math.max(0, ws.height - 2 * pad) },
       { gap: 8 },
     );
+    const clampedManual = manual.map((e) => ({
+      id: e.plugin_id,
+      w: e.w,
+      h: e.h,
+      x: Math.max(ws.left + pad, Math.min((ws.right - pad) - e.w, e.x)),
+      y: Math.max(ws.top + pad, Math.min((ws.bottom - pad) - e.h, e.y)),
+    }));
+    this._placed = [...clampedManual, ...packed];
   }
 
   render() {
@@ -207,6 +221,8 @@ export class PluginLayer extends LitElement {
            @contextmenu=${(ev) => this._contextMenu(ev, p.id)}>
         <header>
           <span class="label">${label}</span>
+          <button title="Drag to move"
+                  @pointerdown=${(ev) => this._startDrag(ev, p)}>↕</button>
           <button title="Close plugin window"
                   @click=${() => this.store.closePluginFloat(p.id)}>
             ${icon("x-mark", 12)}
@@ -293,6 +309,28 @@ export class PluginLayer extends LitElement {
       const nw = Math.max(180, startW + (e.clientX - startX));
       const nh = Math.max(160, startH + (e.clientY - startY));
       this.store.setPluginFloatSize(placed.id, nw, nh);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  _startDrag(ev, placed) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const ox = placed.x;
+    const oy = placed.y;
+    const move = (e) => {
+      this.store.setPluginFloatPosition(
+        placed.id,
+        ox + (e.clientX - startX),
+        oy + (e.clientY - startY),
+      );
     };
     const up = () => {
       window.removeEventListener("pointermove", move);

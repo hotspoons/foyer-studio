@@ -39,6 +39,7 @@
 #include "ardour/processor.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
+#include "ardour/route_group.h"
 #include "ardour/send.h"
 #include "ardour/session.h"
 #include "ardour/source.h"
@@ -419,8 +420,8 @@ encode_session_snapshot (Session& session,
 		o.str ("type"); o.str ("session_snapshot");
 		o.str ("session");
 
-		// Session { schema_version, transport, tracks, dirty, meta }
-		o.map (5);
+		// Session { schema_version, transport, tracks, groups, dirty, meta }
+		o.map (6);
 		o.str ("schema_version"); o.array (2); o.u (0); o.u (1);
 
 		// Transport is a struct; map keys are Rust field names, values are Parameter structs.
@@ -509,6 +510,43 @@ encode_session_snapshot (Session& session,
 			}
 		};
 
+		o.str ("groups");
+		o.array (session.route_groups ().size ());
+		for (auto const& g : session.route_groups ()) {
+			if (!g) {
+				o.map (4);
+				o.str ("id"); o.str ("group.unknown");
+				o.str ("name"); o.str ("Group");
+				o.str ("color"); o.nil ();
+				o.str ("members"); o.array (0);
+				continue;
+			}
+			std::ostringstream gid;
+			gid << g->id ();
+			std::vector<std::string> members;
+			g->foreach_route ([&members] (std::shared_ptr<Route> const& r) {
+				if (!r) return;
+				std::ostringstream rid;
+				rid << r->id ();
+				members.push_back ("track." + rid.str ());
+			});
+			o.map (4);
+			o.str ("id"); o.str ("group." + gid.str ());
+			o.str ("name"); o.str (g->name ());
+			const std::uint32_t c = g->rgba ();
+			if (c != 0) {
+				char buf[8];
+				std::snprintf (buf, sizeof (buf), "#%02x%02x%02x",
+				               (c >> 24) & 0xff, (c >> 16) & 0xff, (c >> 8) & 0xff);
+				o.str ("color"); o.str (buf);
+			} else {
+				o.str ("color"); o.nil ();
+			}
+			o.str ("members");
+			o.array (members.size ());
+			for (auto const& m : members) o.str (m);
+		}
+
 		o.str ("tracks");
 		o.array (ids.size ());
 		for (auto const& s : ids) {
@@ -528,6 +566,7 @@ encode_session_snapshot (Session& session,
 			std::vector<std::pair<std::string, std::string>> input_ports; // { port_name, id }
 			std::vector<SendDesc> sends;
 			std::string bus_assign;
+			std::string group_id;
 			if (it != route_by_id.end ()) {
 				plugins = schema_map::enumerate_plugins (it->second);
 				rec_ctl = it->second->rec_enable_control ();
@@ -551,6 +590,11 @@ encode_session_snapshot (Session& session,
 				}
 				sends      = enumerate_sends (r);
 				bus_assign = infer_bus_assign (r, routes);
+				if (auto rg = r->route_group ()) {
+					std::ostringstream gid;
+					gid << rg->id ();
+					group_id = "group." + gid.str ();
+				}
 			}
 			std::size_t lane_count = 0;
 			for (auto const& l : lane_srcs) {
@@ -570,6 +614,7 @@ encode_session_snapshot (Session& session,
 			if (!input_ports.empty ()) ++track_fields;
 			if (!sends.empty ()) ++track_fields;
 			if (!bus_assign.empty ()) ++track_fields;
+			if (!group_id.empty ()) ++track_fields;
 
 			o.map (track_fields);
 			o.str ("id");   o.str (s.self_id);
@@ -621,6 +666,10 @@ encode_session_snapshot (Session& session,
 			if (!bus_assign.empty ()) {
 				o.str ("bus_assign");
 				o.str (bus_assign);
+			}
+			if (!group_id.empty ()) {
+				o.str ("group_id");
+				o.str (group_id);
 			}
 
 			if (!sends.empty ()) {
@@ -1268,6 +1317,12 @@ encode_track_updated (Session& session, const std::string& track_id)
 	}
 	std::vector<SendDesc> sends      = enumerate_sends (route);
 	std::string           bus_assign = infer_bus_assign (route, all_routes);
+	std::string           group_id;
+	if (auto rg = route->route_group ()) {
+		std::ostringstream gid;
+		gid << rg->id ();
+		group_id = "group." + gid.str ();
+	}
 
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
@@ -1283,6 +1338,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 		if (!input_ports.empty ()) ++track_fields;
 		if (!sends.empty ()) ++track_fields;
 		if (!bus_assign.empty ()) ++track_fields;
+		if (!group_id.empty ()) ++track_fields;
 
 		o.map (track_fields);
 		o.str ("id");   o.str (matched.self_id);
@@ -1351,6 +1407,10 @@ encode_track_updated (Session& session, const std::string& track_id)
 		if (!bus_assign.empty ()) {
 			o.str ("bus_assign");
 			o.str (bus_assign);
+		}
+		if (!group_id.empty ()) {
+			o.str ("group_id");
+			o.str (group_id);
 		}
 
 		if (!sends.empty ()) {

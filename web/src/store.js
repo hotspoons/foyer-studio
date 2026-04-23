@@ -59,6 +59,7 @@ export class Store extends EventTarget {
     this._lastTransportSeq = 0;
     this._lastTransportPos = 0;
     this._lastTransportSeekAt = 0;
+    this._transportDropStats = { stale_seq: 0, backward_jump: 0 };
     this._peerPruneInterval = null;
     if (typeof window !== "undefined") {
       this._peerPruneInterval = setInterval(() => this._prunePeers(), 3000);
@@ -504,7 +505,10 @@ export class Store extends EventTarget {
    */
   _applyTransportPosition(value, seq = 0) {
     const next = Number(value) || 0;
-    if (seq && seq < this._lastTransportSeq) return false;
+    if (seq && seq < this._lastTransportSeq) {
+      this._noteTransportDrop("stale_seq");
+      return false;
+    }
 
     const now = Date.now();
     const playing = !!this.state.controls.get("transport.playing");
@@ -519,6 +523,7 @@ export class Store extends EventTarget {
     const jitterThreshold = 2400; // ~50ms at 48kHz.
 
     if (playing && !looping && backwardsBy > jitterThreshold && !seekRecent) {
+      this._noteTransportDrop("backward_jump");
       return false;
     }
 
@@ -528,6 +533,25 @@ export class Store extends EventTarget {
       this._lastTransportPos = next;
     }
     return changed;
+  }
+
+  _noteTransportDrop(reason) {
+    const key = reason === "stale_seq" ? "stale_seq" : "backward_jump";
+    this._transportDropStats[key] = (this._transportDropStats[key] || 0) + 1;
+    if (!this._diagEnabled()) return;
+    this.dispatchEvent(
+      new CustomEvent("transport-diagnostics", {
+        detail: { ...this._transportDropStats },
+      }),
+    );
+  }
+
+  _diagEnabled() {
+    try {
+      return localStorage.getItem("foyer.dev.transportDiag") === "1";
+    } catch {
+      return false;
+    }
   }
 }
 

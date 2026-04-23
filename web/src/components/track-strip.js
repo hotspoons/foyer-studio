@@ -141,9 +141,9 @@ export class TrackStrip extends LitElement {
     }
     foyer-plugin-strip { flex: 0 0 auto; }
     .mon-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 2px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
       padding: 0 2px;
     }
     .monitor-stack {
@@ -168,6 +168,7 @@ export class TrackStrip extends LitElement {
       color: var(--color-text-muted);
       cursor: pointer;
       letter-spacing: 0.04em;
+      width: 100%;
     }
     .mon-btn:hover { color: var(--color-text); border-color: var(--color-accent); }
     .mon-btn.on {

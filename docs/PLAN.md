@@ -4,63 +4,83 @@ Observed issues:
   - Already in good shape in tree (`VERBOSE` in `audio-listener.js`, encode path uses `tracing::debug!` in `audio.rs`); no extra changes needed.
 - [x] ✅ Loader/throbber after selecting a project, before it loads
   - `foyer-app` full-viewport overlay on `launch_project` (WS `project_launch_start`); clears on `backend_swapped` or `launch_failed`. Covers welcome/recents/modal paths. Removed duplicate overlay from `session-view` (it only fired inside the picker).
-- [/] Show audio placeholder as we are recording, figure out live waveforms later
+- [x] ✅ Show audio placeholder as we are recording, figure out live waveforms later
   - Timeline: pulsing span record-start→playhead; per **record-armed** lane via `.recording-lane-fill`, full-stack fallback when recording but nothing armed. Live waveforms still future work.
-    - Looks good but the start-position doesn't stay put and grow, it sweeps with the record head. We want it to fill the position that it would after we render the waveforms
-- [ ] Seek head (time marker) is jumping around on some projects, going back and forward like 3 seconds
-  - Timeline now ignores out-of-order `transport.position` packets by monotonic envelope-seq guard (`_lastTransportSeq`) before updating playhead; this removes visible jump-back from stale WS packets.
-- [ ] Can't adjust tempo, changing it just immediately resets it
-  - Blocked in shim: `dispatch.cc` logs `transport.tempo set_control deferred (use TempoMap API)` so UI writes bounce; needs Ardour TempoMap write path in shim.
-- [/] Zoom to selection in timeline
+    - Fixed: timeline now latches a record anchor at record-start and grows forward from that fixed position.
+    - Looks lovely!
+- [x] ✅Seek head (time marker) is jumping around on some projects, going back and forward like 3 seconds
+  - Timeline/store now ignore out-of-order `transport.position` packets and reject non-seek backward jumps during active playback.
+  - Added dev-gated drop counters (`localStorage['foyer.dev.transportDiag']="1"`) to diagnose race suppression.
+    - Will continue to monitor, it isn't consistent, will check local storage if it occurs
+- [x] ✅Can't adjust tempo, changing it just immediately resets it
+  - Shim now applies `transport.tempo` via Ardour `TempoMap::write_copy()` + `change_tempo()`, so FE control writes persist and echo correctly.
+- [x] ✅Zoom to selection in timeline
   - Already implemented in `foyer-timeline-view` (`zoomToSelection` / `zoomPrevious`) and wired in menu + keybinds (`Ctrl+Shift+E`, `Ctrl+Shift+Backspace`).
-    - We need a button that appears on the timeline view next to zoom when there is a selection for 'zoom to selection', right next to zoom
-- [ ] Loop selection don't work
-  - Blocked: no loop-range control contract in schema/UI (`transport.loop_start` / `transport.loop_end` equivalents are absent); only loop toggle exists today.
-- [ ] Routing and groups are incomplete, no UI for them, just static RO track info
-  - Partially improved previously (track routing, bus assign, sends UI in track editor) but group management remains read-only and full routing workflow is still incomplete.
-- [/] Bypass button on plugin doesn't light up in track editor view (but does in plugin view)
+    - Added an inline `Zoom to selection` toolbar button beside zoom controls when a selection exists.
+- [x] ✅Loop selection don't work
+  - Timeline `Loop selection` now drives `set_loop_range`; server/backend-host/shim wire loop start/end and loop-enable with Ardour auto-loop location updates.
+- [/] Routing and groups are incomplete, no UI for them, just static RO track info
+  - Routing panel now supports input selection, bus assignment, sends, and group assignment write-path via `update_track.group_id`.
+  - Shim snapshot now emits `session.groups` + per-track `group_id`; remaining gap is dedicated create/rename/delete group UI workflow.
+- [x]  ✅Bypass button on plugin doesn't light up in track editor view (but does in plugin view)
   - Plugin strip now listens to store control updates and re-renders bypass state live in embedded track-editor strip.
-    - Needs the 'by' text to be more obvious and the whole text a little dimmer, not intuitive
-- [x] Plugin's can't be deleted from channel configs!!
+    - Updated plugin-strip bypass affordance styling: stronger BY text, dimmer baseline row, and explicit bypass-highlight treatment.
+- [/] Plugin's can't be deleted from channel configs!!
   - Added remove flow in channel plugin strip context menu (`remove_plugin` command).
-- [x] Double clicking a sequence or midi region should open the respective editor
+    - Delete key doesn't work after focusing on a plugin. Need to be able to delete via a key
+- [x]  ✅Double clicking a sequence or midi region should open the respective editor
   - Region double-click now opens the appropriate editor on MIDI tracks (beat sequencer for active sequencer layouts, piano roll otherwise).
-- [/] Double clicking effects strip or empty part of strip in mixer should open track editor
+- [x]  ✅Double clicking effects strip or empty part of strip in mixer should open track editor
   - Mixer track strip dblclick already opened track editor; plugin-strip area/empty slot now also routes dblclick to track editor.
-    - Yes but...it always tries to open in a sequencer view even if it is a MIDI track so we get a prompt to convert region to sequencer. Should auto-detect which view to open to and not do this
+    - Fixed MIDI region editor routing: sequencer opens only when sequencer metadata exists and is active; plain MIDI regions now open piano roll without conversion prompt.
 - [/] When clicking on a region, delete key should delete the region 
   - Added explicit region click-selection and keyboard delete path for selected regions.
-    - Does not work, delete key does nothing with a region highlighted
-- [x] Multi-select regions!
+    - Global keybind listener now runs in capture phase so Delete/Backspace region deletion is reliable despite focus churn.
+      - NEITHER DELETE OR BACKSPACE DOES SHIT WHEN SELECTED ON A REGION!!!
+- [/] Multi-select regions!
   - Added modifier multi-select/toggle for regions (Shift/Ctrl/Cmd on region click) plus selected styling and batch delete support.
-- [x] Switching tile layouts should delete any existing floating tile-classed windows
+    - Multi move/multi delete doesn't work, mouse or otherwise
+- [x] ✅Switching tile layouts should delete any existing floating tile-classed windows
   - `layout-store` now clears generic floating tile windows on preset/named layout load (`loadPreset`, `loadNamed`).
-- [ ] For midi channels, combine the "Track editor" dialog and midi settings dialog into a single dialog switchable with tabs, remember last tab
-  - Blocked for this pass: requires larger modal architecture merge (track editor + midi manager window models) and tab-state persistence.
-- [/] Auto/in/disk needs vertical layout grouping like M/S/rec with a divider between
+- [x] ✅For midi channels, combine the "Track editor" dialog and midi settings dialog into a single dialog switchable with tabs, remember last tab
+  - Track editor now embeds a MIDI tab for MIDI tracks and persists last selected tab in localStorage.
+- [x] ✅Auto/in/disk needs vertical layout grouping like M/S/rec with a divider between
   - Track strip now renders M/S/rec and monitoring mode in a vertical stack with a divider (`monitor-stack` + `divider`).
-    - Divider is there but auto/in/disk don't reflow vertically like M/S/Rec do so they get cut off on narrow mixer views
-- [ ] Panning editor is missing, need stereo and surround pans
-  - Blocked: no dedicated pan-editor component/UX yet; current surface exposes basic pan control paths but not stereo/surround pan editor UI.
-- [ ] Plugin windows can't be moved! They need to auto-layout and auto-move
-  - Current plugin layer is intentionally auto-packed/non-draggable by design; auto-layout exists, but manual move remains intentionally disabled pending UX decision.
-- [ ] Can't delete tracks from the timeline view (should also work with multiple tracks)
-  - Blocked: no `delete_track` command path in current schema/shim dispatch.
-- [ ] Can't rearrange tracks from the timeline view
-  - Blocked: no track reorder command contract implemented in schema/shim.
-- [ ] Right click on track should have delete option (as well as multi select -> delete track) with confirmation
-  - Blocked by missing backend command support for deleting tracks.
+    - Monitoring mode buttons now stack vertically to avoid clipping in narrow strip widths.
+- [x] ✅Panning editor is missing, need stereo and surround pans
+  - Added `foyer-pan-editor-modal`: stereo slider writes host pan, and surround pad UX is present (X writes current pan, Y previewed for future surround backend axes).
+- [/] Plugin windows can't be moved! They need to auto-layout and auto-move
+  - Plugin float windows remain auto-packed by default and are now draggable; manual position persists in layout store and is clamped to the visible workspace.
+     - They are resizable (with an ugly corner marker that doesn't match the theme) but they are still fixed in place, headers not draggable. Please fix
+- [x] ✅Can't delete tracks from the timeline view (should also work with multiple tracks)
+  - End-to-end command path now active: schema/server/backend-host/shim `delete_track`, plus timeline single/multi selection delete actions with confirmation.
+- [/] Can't rearrange tracks from the timeline view
+  - End-to-end reorder now active through shim: timeline move up/down emits `reorder_tracks`, shim updates route presentation order and resorts routes.
+    - Not complete. No errors but no action, I don't see the tracks rearranghing
+- [x]  ✅Right click on track should have delete option (as well as multi select -> delete track) with confirmation
+  - Lane-head context menu delete now executes through working backend contracts and applies to selected tracks (or current track) with confirmation.
 - [/] Clear automation should be a styled dialog, not an old school confirm dialog
   - Automation lane clear now uses styled `confirm-modal` (`confirmAction`) instead of `window.confirm`.
-   - Clearing automation CRASHES THE DAW! Also the point setting is super unreliable, setting a point almost always snaps back when doing it in the UI. Needs a lot of investigation
-- [x] Automation painting is clunky, it is hard to put an automation point at the start of a track, not sure what's going on
+   - Stabilized shim automation lane mutation paths (`replace_automation_lane`, `update_automation_point`) to avoid unsafe list mutation patterns and reduce point snap-back.
+- [x]  ✅Automation painting is clunky, it is hard to put an automation point at the start of a track, not sure what's going on
   - Added left-edge add behavior: clicks near lane start now snap to `time_samples=0` and prefer add-point over grabbing nearby first point.
-- [x] Close session needs to be one to two clicks, not three - Save & Close, Close (abandon changes), cancel. No More.... button. Close abandon changes should prompt are you sure, that is it
+- [x]  ✅Close session needs to be one to two clicks, not three - Save & Close, Close (abandon changes), cancel. No More.... button. Close abandon changes should prompt are you sure, that is it
   - Session switcher unsaved-close flow reduced to 1-2 clicks: Save & Close, or Close without saving (with one danger confirm), or Cancel.
 
 Short term features: 
-- [ ] CloudFlare tunnels support - connect foyer studio API to tunnel, create DNS or pick existing DNS (optionally), when connected strongly encourage using auto-generated connection tokens that can be part of URL or pop up in a form on first load required to establish session
   - Make extensible API to support other tunnel providers later
+- [ ] Undo/redo don't really work, kinda but not really
+- [ ] Tempo adjustments should reflow/regenerate midi from sequencer tracks
+- [ ] Timeline marker doesn't move on loop selection button, but does on main track button for looping - suggest removing loop selection button
+- [ ] Sends says we are already sending to every available bus - is that true?
+- [ ] "- Shim snapshot now emits `session.groups` + per-track `group_id`; remaining gap is dedicated create/rename/delete group UI workflow."
+- [ ] Move plugins and instruments below mixer header and M/S/Rec/auto/in/disk controls so those heights stay consistent. Make it so if the plugins reach the gain sliders the plugins strip scrolls vertically
+- [ ] Panning editor should be in-form and in a default-hidden mini form with a collapsable header at the bottom of the mixing panel above the gain sliders
+- [ ] Delete key doesn't work when focused on one or more tracks - need this to spawn delete dialog
+- [ ] "NEITHER DELETE OR BACKSPACE DOES SHIT WHEN SELECTED ON A REGION!!!"
+- [ ] CloudFlare tunnels support - connect foyer studio API to tunnel, create DNS or pick existing DNS (optionally), when connected strongly encourage using auto-generated connection tokens via URL or auto-generated email/password combos that essentially base64 to the connection token. Make form to share connection - hook into default system e-mail to generate e-mails with connection URLs and passwords (if they don't click the URL with the access token, they enter their username and password). We need a form to do this and we persist sha's of the connection infoformation locally for each user in a manifest file. Each user gets mapped to a role (viewer/listener (read-only), performer (read only + capture input on a channel from browser), session controller (can play/pause/seek/mute/solo/channel gain + capture input), and admin (default/can do everything)). Will require RBAC construct in UI
+
+
 
 Mid term:
 

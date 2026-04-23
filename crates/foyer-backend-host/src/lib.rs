@@ -238,6 +238,18 @@ impl Backend for HostBackend {
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
+    async fn delete_track(&self, id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::DeleteTrack { id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn reorder_tracks(&self, ordered_ids: Vec<EntityId>) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::ReorderTracks { ordered_ids })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
 
     async fn set_track_input(
         &self,
@@ -443,6 +455,21 @@ impl Backend for HostBackend {
         points: Vec<AutomationPoint>,
     ) -> Result<(), BackendError> {
         self.client.replace_automation_lane(lane_id, points).await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn set_loop_range(
+        &self,
+        start_samples: u64,
+        end_samples: u64,
+        enabled: bool,
+    ) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::SetLoopRange {
+                start_samples,
+                end_samples,
+                enabled,
+            })
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
