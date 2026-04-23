@@ -20,6 +20,22 @@ import { DIR } from "./tile-tree.js";
 
 const STORAGE_MOD = "foyer.keymap.mod";
 
+/** Walk shadow roots recursively to find a custom element. */
+function queryDeep(sel) {
+  const walk = (root) => {
+    const found = root.querySelector(sel);
+    if (found) return found;
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) {
+        const nested = walk(el.shadowRoot);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  };
+  return walk(document);
+}
+
 export class Keybinds {
   /**
    * @param {import("./layout-store.js").LayoutStore} store
@@ -61,7 +77,7 @@ export class Keybinds {
     // with regions in it, delete. Only fires when no modifier is
     // held so native delete in text inputs still works.
     if ((e.key === "Delete" || e.key === "Backspace") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-      const tl = document.querySelector("foyer-timeline-view");
+      const tl = queryDeep("foyer-timeline-view");
       const store = window.__foyer?.store;
       const selectedTracks = store?.state?.selectedTrackIds;
       // Region click-selection wins first.
@@ -77,15 +93,21 @@ export class Keybinds {
         tl.deleteSelection();
         return;
       }
-      // If tracks are selected, delete all regions on those tracks
+      // If tracks are selected, spawn delete-track confirm dialog
       if (selectedTracks && selectedTracks.size > 0) {
         e.preventDefault();
-        const byTrack = tl?._regionsByTrack || {};
-        for (const trackId of selectedTracks) {
-          for (const r of byTrack[trackId] || []) {
-            window.__foyer?.ws?.send({ type: "delete_region", id: r.id });
-          }
-        }
+        const ids = Array.from(selectedTracks);
+        import("../components/confirm-modal.js").then(({ confirmAction }) => {
+          confirmAction({
+            title: ids.length === 1 ? "Delete track" : `Delete ${ids.length} tracks`,
+            message: ids.length === 1 ? "Delete this track and all of its regions?" : `Delete ${ids.length} selected tracks and all of their regions?`,
+            confirmLabel: "Delete",
+            tone: "danger",
+          }).then((ok) => {
+            if (!ok) return;
+            for (const id of ids) window.__foyer?.ws?.send({ type: "delete_track", id });
+          });
+        });
         return;
       }
       // If nothing selected, check for a focused/clicked region via DOM
@@ -97,6 +119,7 @@ export class Keybinds {
         if (regionId) {
           window.__foyer?.ws?.send({ type: "delete_region", id: regionId });
         }
+        return;
       }
     }
 
@@ -143,14 +166,12 @@ export class Keybinds {
       // Both operate locally on the timeline, no backend round-trip.
       if (e.shiftKey && key === "e") {
         e.preventDefault();
-        const tl = document.querySelector("foyer-timeline-view");
-        tl?.zoomToSelection?.();
+        queryDeep("foyer-timeline-view")?.zoomToSelection?.();
         return;
       }
       if (e.shiftKey && (key === "backspace" || key === "delete")) {
         e.preventDefault();
-        const tl = document.querySelector("foyer-timeline-view");
-        tl?.zoomPrevious?.();
+        queryDeep("foyer-timeline-view")?.zoomPrevious?.();
         return;
       }
 

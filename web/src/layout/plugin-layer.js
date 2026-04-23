@@ -219,10 +219,8 @@ export class PluginLayer extends LitElement {
            data-plugin-id=${p.id}
            @pointerdown=${() => this.store.raisePluginFloat(p.id)}
            @contextmenu=${(ev) => this._contextMenu(ev, p.id)}>
-        <header>
+        <header @pointerdown=${(ev) => { if (ev.target?.closest?.("button")) return; this._startDrag(ev, p); }}>
           <span class="label">${label}</span>
-          <button title="Drag to move"
-                  @pointerdown=${(ev) => this._startDrag(ev, p)}>↕</button>
           <button title="Close plugin window"
                   @click=${() => this.store.closePluginFloat(p.id)}>
             ${icon("x-mark", 12)}

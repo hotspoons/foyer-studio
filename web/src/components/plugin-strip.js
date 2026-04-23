@@ -103,6 +103,16 @@ export class PluginStrip extends LitElement {
     this._dismissed = this._loadDismissed();
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
     this._onControl = () => this.requestUpdate();
+    this._focused = false;
+  }
+
+  _onKeyDown(e) {
+    if ((e.key === "Delete" || e.key === "Backspace") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      const p = this.plugins?.[0];
+      if (p) this._removePlugin(p);
+    }
   }
 
   connectedCallback() {
@@ -161,6 +171,10 @@ export class PluginStrip extends LitElement {
     const extra = Math.max(0, plugs.length - this.maxLines);
     const shown = plugs.slice(0, this.maxLines);
     return html`
+      <div tabindex="0" style="outline:none"
+           @keydown=${(e) => this._onKeyDown(e)}
+           @focus=${() => this._focused = true}
+           @blur=${() => this._focused = false}>
       ${this._errors.map((e) => html`
         <div class="row"
              style="background:color-mix(in oklab, var(--color-danger, #d04040) 24%, var(--color-surface-elevated));border-color:var(--color-danger, #d04040);color:#fff"
@@ -193,6 +207,7 @@ export class PluginStrip extends LitElement {
       ${extra > 0 ? html`<div class="empty">+${extra} more</div>` : null}
       <div class="slot" @click=${this._addSlot} @dblclick=${(ev) => this._openTrackEditor(ev)} title="Open plugin picker">
         ${icon("plus", 10)}
+      </div>
       </div>
     `;
   }

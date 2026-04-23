@@ -1198,7 +1198,8 @@ export class TimelineView extends LitElement {
           const regionSelected = this._selectedRegionIds.has(r.id);
           return html`
             <div class="region ${regionSelected ? "selected" : ""}" data-id=${r.id}
-                 style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px"
+                 tabindex="0"
+                 style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px;outline:none"
                  @pointerdown=${(e) => { this._onRegionPointerDown(e, r); this._startDrag(e, r, "move"); }}
                  @dblclick=${(e) => { e.stopPropagation(); this._openRegionEditor(r); }}
                  @contextmenu=${(e) => this._regionContextMenu(e, r)}>
