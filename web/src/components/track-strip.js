@@ -9,6 +9,7 @@ import "./plugin-strip.js";
 import { ControlController } from "../store.js";
 import { showContextMenu } from "./context-menu.js";
 import { openTrackEditor } from "./track-editor-modal.js";
+import { openPanEditor } from "./pan-editor-modal.js";
 
 // Curated palette for the "Set color" submenu. Close to DAW defaults so
 // colors carry some semantic weight (reds for drums, blues for bass,
@@ -45,6 +46,7 @@ export class TrackStrip extends LitElement {
     widthMode: { type: String },
     overrideWidth: { type: Number },
     _renaming: { state: true, type: Boolean },
+    _panOpen: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -297,6 +299,7 @@ export class TrackStrip extends LitElement {
     const solo = !!(this._soloCtl?.value ?? t.solo?.value);
     const rec  = !!(this._recCtl?.value  ?? t.record_arm?.value);
     const meterDb = Number(this._meterCtl?.value ?? -60);
+    const panVal = Number(window.__foyer?.store?.get(t.pan?.id) ?? t.pan?.value ?? 0);
 
     const swatchStyle = t.color
       ? `background:${t.color}`
@@ -358,6 +361,21 @@ export class TrackStrip extends LitElement {
             .trackId=${t.id}
             .trackName=${t.name}
           ></foyer-plugin-strip>
+        </div>
+      ` : null}
+      ${t.pan ? html`
+        <div style="flex:0 0 auto;display:flex;flex-direction:column;gap:4px;">
+          <button style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:9px;cursor:pointer;padding:2px 0;"
+                  @click=${() => this._panOpen = !this._panOpen}>Pan ${this._panOpen ? "▲" : "▼"}</button>
+          ${this._panOpen ? html`
+            <div style="display:flex;align-items:center;gap:4px;">
+              <span style="font-size:8px;color:var(--color-text-muted)">L</span>
+              <input type="range" min="-1" max="1" step="0.01" style="flex:1;min-width:0"
+                     .value=${String(panVal)}
+                     @input=${(e) => this._setPan(e.currentTarget.value)}>
+              <span style="font-size:8px;color:var(--color-text-muted)">R</span>
+            </div>
+          ` : null}
         </div>
       ` : null}
       <div class="body">
@@ -443,6 +461,11 @@ export class TrackStrip extends LitElement {
     if (!this.track?.gain?.id) return;
     const db = normToDb(norm);
     window.__foyer.ws.controlSet(this.track.gain.id, db);
+  }
+  _setPan(v) {
+    if (!this.track?.pan?.id) return;
+    const value = Math.max(-1, Math.min(1, Number(v) || 0));
+    window.__foyer.ws.controlSet(this.track.pan.id, value);
   }
   _setBool(id, v) {
     if (!id) return;

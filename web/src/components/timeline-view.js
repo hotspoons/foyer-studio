@@ -1038,10 +1038,6 @@ export class TimelineView extends LitElement {
             @click=${() => this.zoomToSelection()}
             title="Zoom to the current timeline selection"
           >Zoom to selection</button>
-          <button
-            @click=${() => this._setLoopToSelection()}
-            title="Set loop start/end from current selection"
-          >Loop selection</button>
         ` : null}
         <span style="flex:1"></span>
         <foyer-viz-picker></foyer-viz-picker>
