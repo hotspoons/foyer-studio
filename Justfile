@@ -157,13 +157,57 @@ configure *args:
     cargo run --bin foyer -- configure {{args}}
 
 # --- web (M4) ---
-# tailwind standalone binary lives in ./.bin/ after first run; committed artifact is web/styles/tw.build.css
-tw_bin := justfile_directory() + "/.bin/tailwindcss"
+# Tailwind uses the standalone binary under ./.bin/ (no Node toolchain).
+tw_bin_dir := justfile_directory() + "/.bin"
+tw_bin := tw_bin_dir + "/tailwindcss"
+tw_download_base := "https://github.com/tailwindlabs/tailwindcss/releases/latest/download"
 
-tw-build:
+tw-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BIN_DIR="{{tw_bin_dir}}"
+    BIN="{{tw_bin}}"
+    mkdir -p "$BIN_DIR"
+    if [ -x "$BIN" ]; then
+        echo "tw-install: using existing $BIN"
+        exit 0
+    fi
+
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64) arch="x64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *)
+            echo "tw-install: unsupported architecture: $arch"
+            exit 1
+            ;;
+    esac
+    case "$os" in
+        linux|darwin) ;;
+        *)
+            echo "tw-install: unsupported OS: $os"
+            exit 1
+            ;;
+    esac
+    url="{{tw_download_base}}/tailwindcss-$os-$arch"
+    echo "tw-install: downloading $url"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o "$BIN"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$BIN" "$url"
+    else
+        echo "tw-install: need curl or wget to download tailwindcss"
+        exit 1
+    fi
+    chmod +x "$BIN"
+    "$BIN" --help >/dev/null
+    echo "tw-install: installed $BIN"
+
+tw-build: tw-install
     {{tw_bin}} -i web/styles/tw.css -o web/styles/tw.build.css --minify
 
-tw-watch:
+tw-watch: tw-install
     {{tw_bin}} -i web/styles/tw.css -o web/styles/tw.build.css --watch
 
 # Keep committed CSS artifact fresh in new containers/checkouts.

@@ -613,17 +613,35 @@ export ARDOUR_SURFACES_PATH="$FOYER_SHIM_DIR${{ARDOUR_SURFACES_PATH:+:$ARDOUR_SU
 
 DIR={dir}
 NAME={name}
-SESSION_FILE="$DIR/$NAME.ardour"
+SESSION_DIR="$DIR"
+SESSION_FILE="$SESSION_DIR/$NAME.ardour"
 
 if [ ! -f "$SESSION_FILE" ]; then
-    mkdir -p "$DIR"
+    mkdir -p "$SESSION_DIR"
     for HELPER in "$TOP"/build/session_utils/ardour*-new_empty_session; do
         if [ -x "$HELPER" ]; then
-            echo "foyer: bootstrapping new session $DIR/$NAME via $HELPER" >&2
-            "$HELPER" "$DIR" "$NAME" || true
+            echo "foyer: bootstrapping new session $SESSION_DIR/$NAME via $HELPER" >&2
+            # Preferred form for older helper builds.
+            "$HELPER" "$SESSION_DIR" "$NAME" || true
+            if [ ! -f "$SESSION_FILE" ]; then
+                # Some helper builds expect a per-session directory.
+                ALT_DIR="$DIR/$NAME"
+                mkdir -p "$ALT_DIR"
+                "$HELPER" "$ALT_DIR" "$NAME" || true
+                if [ -f "$ALT_DIR/$NAME.ardour" ]; then
+                    SESSION_DIR="$ALT_DIR"
+                    SESSION_FILE="$SESSION_DIR/$NAME.ardour"
+                fi
+            fi
             break
         fi
     done
+fi
+
+if [ ! -f "$SESSION_FILE" ]; then
+    echo "foyer: ERROR failed to create session file $SESSION_FILE" >&2
+    echo "foyer: hint: run '$TOP/build/session_utils/ardour9-new_empty_session \"$SESSION_DIR\" \"$NAME\"' manually" >&2
+    exit 1
 fi
 
 if [ -f "$SESSION_FILE" ] && ! grep -q 'name="Foyer Studio Shim" active="1"' "$SESSION_FILE"; then
@@ -642,7 +660,7 @@ if [ -f "$SESSION_FILE" ] && ! grep -q 'name="Foyer Studio Shim" active="1"' "$S
     fi
 fi
 
-exec {exec} "$@" "$DIR" "$NAME""#,
+exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
             top = shell_escape(root.to_string_lossy().as_ref()),
             shim = shell_escape(shim.to_string_lossy().as_ref()),
             exec = shell_escape(resolved_exec.to_string_lossy().as_ref()),
