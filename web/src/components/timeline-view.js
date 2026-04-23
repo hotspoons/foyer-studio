@@ -1653,44 +1653,62 @@ export class TimelineView extends LitElement {
   _startDrag(ev, region, mode) {
     ev.preventDefault();
     ev.stopPropagation();
-    const el = this.renderRoot.querySelector(`.region[data-id="${region.id}"]`);
-    el?.classList.add("dragging");
+    const isMulti = this._selectedRegionIds.has(region.id) && this._selectedRegionIds.size > 1;
+    const movingIds = isMulti && mode === "move"
+      ? [...this._selectedRegionIds]
+      : [region.id];
+    const els = [];
+    for (const id of movingIds) {
+      const el = this.renderRoot.querySelector(`.region[data-id="${id}"]`);
+      if (el) { el.classList.add("dragging"); els.push(el); }
+    }
     const sr = this._timeline?.sample_rate || 48_000;
     const startX = ev.clientX;
-    const origStart = region.start_samples;
-    const origLen = region.length_samples;
     const pxPerSec = this._zoom;
     let lastSent = 0;
+
+    const origs = new Map();
+    for (const id of movingIds) {
+      const r = this._regionForId(id);
+      if (r) origs.set(id, { start: r.start_samples, len: r.length_samples });
+    }
 
     const move = (e) => {
       const dxPx = e.clientX - startX;
       const dxSamples = Math.round((dxPx / pxPerSec) * sr);
-      let patch = null;
-      const preview = { ...region };
-      if (mode === "move") {
-        preview.start_samples = Math.max(0, origStart + dxSamples);
-        patch = { start_samples: preview.start_samples };
-      } else if (mode === "resize-right") {
-        preview.length_samples = Math.max(4800, origLen + dxSamples);
-        patch = { length_samples: preview.length_samples };
-      } else if (mode === "resize-left") {
-        const newStart = Math.max(0, origStart + dxSamples);
-        const newLen = Math.max(4800, origLen - (newStart - origStart));
-        preview.start_samples = newStart;
-        preview.length_samples = newLen;
-        patch = { start_samples: newStart, length_samples: newLen };
-      }
-      this._patchRegionLocally(preview);
       const now = performance.now();
-      if (now - lastSent > 80) {
-        lastSent = now;
-        window.__foyer?.ws?.send({ type: "update_region", id: region.id, patch });
+      for (const id of movingIds) {
+        const o = origs.get(id);
+        if (!o) continue;
+        const r = this._regionForId(id);
+        if (!r) continue;
+        let patch = null;
+        const preview = { ...r };
+        if (mode === "move") {
+          preview.start_samples = Math.max(0, o.start + dxSamples);
+          patch = { start_samples: preview.start_samples };
+        } else if (mode === "resize-right") {
+          preview.length_samples = Math.max(4800, o.len + dxSamples);
+          patch = { length_samples: preview.length_samples };
+        } else if (mode === "resize-left") {
+          const newStart = Math.max(0, o.start + dxSamples);
+          const newLen = Math.max(4800, o.len - (newStart - o.start));
+          preview.start_samples = newStart;
+          preview.length_samples = newLen;
+          patch = { start_samples: newStart, length_samples: newLen };
+        }
+        this._patchRegionLocally(preview);
+        if (now - lastSent > 80) {
+          window.__foyer?.ws?.send({ type: "update_region", id, patch });
+        }
       }
+      if (now - lastSent > 80) lastSent = now;
     };
     const up = () => {
-      el?.classList.remove("dragging");
-      const r = this._regionForId(region.id);
-      if (r) {
+      for (const el of els) el.classList.remove("dragging");
+      for (const id of movingIds) {
+        const r = this._regionForId(id);
+        if (!r) continue;
         window.__foyer?.ws?.send({
           type: "update_region",
           id: r.id,
