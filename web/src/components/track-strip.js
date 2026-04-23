@@ -132,7 +132,8 @@ export class TrackStrip extends LitElement {
       justify-content: center;
       flex-wrap: wrap;
     }
-    .body { display: flex; gap: 6px; align-items: flex-end; justify-content: center; flex: 1 1 auto; min-height: 0; }
+    .body { display: flex; gap: 6px; align-items: flex-end; justify-content: center; flex: 0 0 auto; min-height: 0; }
+    .plugin-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
     .swatch {
       height: 3px;
       border-radius: 2px;
@@ -322,14 +323,6 @@ export class TrackStrip extends LitElement {
           ${t.kind}${this._isSequencer() ? html`<span class="seq-chip" title="This track has an active beat-sequencer region">SEQ</span>` : null}
         </div>
       ` : null}
-      ${d.plugins ? html`
-        <foyer-plugin-strip
-          .plugins=${t.plugins || []}
-          .maxLines=${d.pluginsLines}
-          .trackId=${t.id}
-          .trackName=${t.name}
-        ></foyer-plugin-strip>
-      ` : null}
       <div class="monitor-stack">
         <div class="row">
           <foyer-toggle tone="mute" label="M" .on=${mute} @input=${(e) => this._setBool(t.mute?.id, e.detail.value)}></foyer-toggle>
@@ -357,6 +350,16 @@ export class TrackStrip extends LitElement {
           </div>
         ` : null}
       </div>
+      ${d.plugins && (t.plugins || []).length ? html`
+        <div class="plugin-scroll">
+          <foyer-plugin-strip
+            .plugins=${t.plugins || []}
+            .maxLines=${d.pluginsLines}
+            .trackId=${t.id}
+            .trackName=${t.name}
+          ></foyer-plugin-strip>
+        </div>
+      ` : null}
       <div class="body">
         <foyer-fader
           .value=${gainNorm}

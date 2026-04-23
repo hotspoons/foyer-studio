@@ -2087,11 +2087,17 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					tmp << r->id ();
 					by_sid[tmp.str ()] = r;
 				}
+				PBD::warning << "foyer_shim: reorder_tracks: ids=";
+				for (auto const& x : snap.ordered_track_ids) PBD::warning << x << " ";
+				PBD::warning << endmsg;
 				ARDOUR::PresentationInfo::order_t order = 0;
 				for (auto const& tid : snap.ordered_track_ids) {
 					const std::string sid = tid.rfind ("track.", 0) == 0 ? tid.substr (6) : tid;
 					auto it = by_sid.find (sid);
-					if (it == by_sid.end () || !it->second) continue;
+					if (it == by_sid.end () || !it->second) {
+						PBD::warning << "foyer_shim: reorder: missing route for sid=" << sid << endmsg;
+						continue;
+					}
 					it->second->set_presentation_order (order++);
 				}
 				// Keep any routes not listed in their existing relative order.
