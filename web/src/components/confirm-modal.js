@@ -31,6 +31,8 @@ export class ConfirmModal extends LitElement {
     title:        { type: String },
     message:      { type: String },
     confirmLabel: { type: String },
+    altLabel:     { type: String },
+    altTone:      { type: String },
     cancelLabel:  { type: String },
     tone:         { type: String },
   };
@@ -174,9 +176,14 @@ export class ConfirmModal extends LitElement {
     this.title = "Confirm";
     this.message = "";
     this.confirmLabel = "OK";
+    this.altLabel = "";
+    this.altTone = "";
     this.cancelLabel = "Cancel";
     this.tone = "";
     this._resolve = null;
+    this._resultConfirm = true;
+    this._resultAlt = null;
+    this._resultCancel = false;
   }
 
   connectedCallback() {
@@ -214,6 +221,11 @@ export class ConfirmModal extends LitElement {
           <button class="btn" @click=${this._cancel}>
             ${this.cancelLabel}<span class="kbd">Esc</span>
           </button>
+          ${this.altLabel ? html`
+            <button class="btn ${this.altTone || ""}" @click=${this._alt}>
+              ${this.altLabel}
+            </button>
+          ` : null}
           <button class="btn ${toneClass}" @click=${this._commit}>
             ${this.confirmLabel}<span class="kbd">⏎</span>
           </button>
@@ -223,17 +235,20 @@ export class ConfirmModal extends LitElement {
   }
 
   _commit = () => {
-    const r = this._resolve;
-    this._resolve = null;
-    if (r) r(true);
-    this.remove();
+    this._finish(this._resultConfirm);
+  };
+  _alt = () => {
+    this._finish(this._resultAlt);
   };
   _cancel = () => {
+    this._finish(this._resultCancel);
+  };
+  _finish(result) {
     const r = this._resolve;
     this._resolve = null;
-    if (r) r(false);
+    if (r) r(result);
     this.remove();
-  };
+  }
 }
 customElements.define("foyer-confirm-modal", ConfirmModal);
 
@@ -247,8 +262,37 @@ export function confirmAction(options = {}) {
     el.title = options.title || "Confirm";
     el.message = options.message || "";
     el.confirmLabel = options.confirmLabel || "OK";
+    el.altLabel = "";
+    el.altTone = "";
     el.cancelLabel = options.cancelLabel || "Cancel";
     el.tone = options.tone || "";
+    el._resultConfirm = true;
+    el._resultAlt = null;
+    el._resultCancel = false;
+    el._resolve = resolve;
+    document.body.appendChild(el);
+  });
+}
+
+/**
+ * Open a 3-way confirm dialog. Resolves with:
+ *   - "confirm" on primary action
+ *   - "alt" on secondary action
+ *   - "cancel" on cancel / Esc / backdrop / close
+ */
+export function confirmChoice(options = {}) {
+  return new Promise((resolve) => {
+    const el = document.createElement("foyer-confirm-modal");
+    el.title = options.title || "Confirm";
+    el.message = options.message || "";
+    el.confirmLabel = options.confirmLabel || "OK";
+    el.altLabel = options.altLabel || "Other";
+    el.altTone = options.altTone || "";
+    el.cancelLabel = options.cancelLabel || "Cancel";
+    el.tone = options.tone || "";
+    el._resultConfirm = "confirm";
+    el._resultAlt = "alt";
+    el._resultCancel = "cancel";
     el._resolve = resolve;
     document.body.appendChild(el);
   });

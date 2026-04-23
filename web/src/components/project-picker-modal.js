@@ -18,6 +18,7 @@ import { LitElement, html, css } from "lit";
 
 import "./session-view.js";
 import { icon } from "../icons.js";
+import { launchProjectGuarded } from "../session-launch.js";
 
 export class ProjectPickerModal extends LitElement {
   static properties = {
@@ -233,8 +234,7 @@ export class ProjectPickerModal extends LitElement {
     const path = parent ? `${parent}/${name}` : name;
     const backendId = this._pickBackend();
     this._error = "";
-    window.__foyer?.ws?.send({
-      type: "launch_project",
+    launchProjectGuarded({
       backend_id: backendId,
       project_path: path,
     });

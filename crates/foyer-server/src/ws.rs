@@ -571,31 +571,48 @@ async fn dispatch_command(
                 }
                 if let Some(existing_id) = existing {
                     tracing::info!(
-                        "launch_project: {raw} already open as {existing_id:?} — focusing"
+                        "launch_project: {raw} already open as {existing_id:?} — probing backend health"
                     );
-                    *state.focus_session_id.write().await = Some(existing_id.clone());
                     if let Some(be) = state.sessions.backend(&existing_id).await {
-                        *state.backend.write().await = be;
+                        match be.snapshot().await {
+                            Ok(snap) => {
+                                // Healthy existing session: focus it.
+                                *state.focus_session_id.write().await = Some(existing_id.clone());
+                                *state.backend.write().await = be;
+
+                                // Emit a session list refresh + snapshot so the
+                                // client repaints without a round-trip.
+                                let sessions = state.sessions.list().await;
+                                broadcast_event(state, Event::SessionList { sessions }).await;
+                                let out = Envelope {
+                                    schema: SCHEMA_VERSION,
+                                    seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+                                    origin: Some("backend".into()),
+                                    session_id: Some(existing_id),
+                                    body: Event::SessionSnapshot {
+                                        session: Box::new(snap),
+                                    },
+                                };
+                                *state.cached_snapshot.write().await = Some(out.clone());
+                                state.ring.write().await.push(out.clone());
+                                let _ = state.tx.send(out);
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                // Stale registry entry: close and fall through to
+                                // a fresh launch instead of falsely "focusing".
+                                tracing::warn!(
+                                    "launch_project: existing session {existing_id:?} is stale (snapshot failed: {e}); closing stale entry and relaunching"
+                                );
+                                let _ = state.sessions.close(&existing_id).await;
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "launch_project: existing session {existing_id:?} has no backend; closing stale entry and relaunching"
+                        );
+                        let _ = state.sessions.close(&existing_id).await;
                     }
-                    // Emit a session list refresh + snapshot so the
-                    // client repaints without a round-trip.
-                    let sessions = state.sessions.list().await;
-                    broadcast_event(state, Event::SessionList { sessions }).await;
-                    if let Ok(snap) = state.backend().await.snapshot().await {
-                        let out = Envelope {
-                            schema: SCHEMA_VERSION,
-                            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
-                            origin: Some("backend".into()),
-                            session_id: Some(existing_id),
-                            body: Event::SessionSnapshot {
-                                session: Box::new(snap),
-                            },
-                        };
-                        *state.cached_snapshot.write().await = Some(out.clone());
-                        state.ring.write().await.push(out.clone());
-                        let _ = state.tx.send(out);
-                    }
-                    return Ok(());
                 }
             }
             match spawner.launch(&backend_id, path).await {

@@ -5,14 +5,14 @@
 // running in the background (which is just "switch off" — the
 // backend stays alive).
 //
-// "Close" is gated by unsaved-state with a short 2-step flow:
-//   * Save & close, or
-//   * Close without saving (with a final danger confirmation), or
+// "Close" is gated by a single 3-choice unsaved flow:
+//   * Save & close
+//   * Close without saving
 //   * Cancel
 
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
-import { confirmAction } from "./confirm-modal.js";
+import { confirmChoice } from "./confirm-modal.js";
 
 export class SessionSwitcher extends LitElement {
   static properties = {
@@ -170,14 +170,6 @@ export class SessionSwitcher extends LitElement {
       if (kind === "save") {
         window.__foyer?.ws?.send({ type: "save_session" });
       }
-      if (kind === "background") {
-        // Just switch away — pick another session or fall back to
-        // welcome. The backend stays running.
-        const others = this._sessions.filter((s) => s.id !== cur.id);
-        const next = others[others.length - 1]?.id || null;
-        window.__foyer?.store?.setCurrentSession(next);
-        return;
-      }
       // save + discard fall through to close_session below.
     }
     window.__foyer?.ws?.send({ type: "close_session", session_id: cur.id });
@@ -230,33 +222,24 @@ export class SessionSwitcher extends LitElement {
 }
 customElements.define("foyer-session-switcher", SessionSwitcher);
 
-/** Open an unsaved-changes modal flow. Returns one of:
+/** Open a single-step unsaved-changes modal flow. Returns one of:
  *    "save"       — save + close
  *    "discard"    — close without saving
  *    "cancel"     — abort
- *
- *  Flow is intentionally short:
- *    1) Save & close  /  More…
- *    2) Close without saving?  /  Cancel
- *  so "close this session" is 1-2 clicks, never 3. */
+ */
 async function unsavedGuard(session) {
-  const save = await confirmAction({
+  const choice = await confirmChoice({
     title: "Unsaved changes",
     message:
       `"${session.name || "This session"}" has unsaved changes.\n\n`
       + `Save before closing?`,
     confirmLabel: "Save & close",
-    cancelLabel: "More…",
+    altLabel: "Close without saving",
+    altTone: "danger",
+    cancelLabel: "Cancel",
     tone: "warning",
   });
-  if (save) return "save";
-  const discard = await confirmAction({
-    title: "Close without saving?",
-    message: `Discard unsaved changes to "${session.name || "this session"}"?`,
-    confirmLabel: "Close without saving",
-    cancelLabel: "Cancel",
-    tone: "danger",
-  });
-  if (discard) return "discard";
+  if (choice === "confirm") return "save";
+  if (choice === "alt") return "discard";
   return "cancel";
 }

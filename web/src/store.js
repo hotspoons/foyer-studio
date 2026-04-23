@@ -55,6 +55,10 @@ export class Store extends EventTarget {
       // agent tools) can query without a dedicated subscription.
       regionsByTrack: new Map(),
     };
+    // Transport-position reconciliation state.
+    this._lastTransportSeq = 0;
+    this._lastTransportPos = 0;
+    this._lastTransportSeekAt = 0;
     this._peerPruneInterval = null;
     if (typeof window !== "undefined") {
       this._peerPruneInterval = setInterval(() => this._prunePeers(), 3000);
@@ -205,11 +209,18 @@ export class Store extends EventTarget {
       this._emit();
     };
     const onEnvelope = (ev) => this._onEnvelope(ev.detail);
+    const onSeekRequest = (ev) => {
+      this._lastTransportSeekAt = Number(ev?.detail?.at_ms) || Date.now();
+      const target = Number(ev?.detail?.value);
+      if (Number.isFinite(target)) this._lastTransportPos = target;
+    };
     ws.addEventListener("status", onStatus);
     ws.addEventListener("envelope", onEnvelope);
+    ws.addEventListener("transport_seek_request", onSeekRequest);
     return () => {
       ws.removeEventListener("status", onStatus);
       ws.removeEventListener("envelope", onEnvelope);
+      ws.removeEventListener("transport_seek_request", onSeekRequest);
       if (this._ws === ws) this._ws = null;
     };
   }
@@ -217,6 +228,26 @@ export class Store extends EventTarget {
   _onEnvelope(env) {
     const body = env?.body;
     if (!body || typeof body.type !== "string") return;
+    const activeSessionId = this.state.currentSessionId || null;
+    const envelopeSessionId = env?.session_id || null;
+    const isSessionScoped =
+      body.type === "session_snapshot"
+      || body.type === "control_update"
+      || body.type === "meter_batch"
+      || body.type === "session_patch"
+      || body.type === "track_updated"
+      || body.type === "session_dirty_changed"
+      || body.type === "regions_list"
+      || body.type === "region_updated"
+      || body.type === "region_removed";
+    if (
+      isSessionScoped
+      && activeSessionId
+      && envelopeSessionId
+      && envelopeSessionId !== activeSessionId
+    ) {
+      return;
+    }
     // Presence bookkeeping.
     const origin = env?.origin;
     if (origin && origin !== this.state.selfOrigin) {
@@ -250,11 +281,17 @@ export class Store extends EventTarget {
           }
         }
         this.state.controls = c;
+        this._lastTransportSeq = Number(env?.seq || 0);
+        this._lastTransportPos = Number(c.get("transport.position") || 0);
         this._emit();
         break;
       }
       case "control_update": {
-        if (body.update?.id) {
+        if (body.update?.id === "transport.position") {
+          if (this._applyTransportPosition(body.update.value, Number(env?.seq || 0))) {
+            this._emitControl("transport.position");
+          }
+        } else if (body.update?.id) {
           if (this._applyControl(body.update.id, body.update.value)) {
             this._emitControl(body.update.id);
           }
@@ -263,6 +300,12 @@ export class Store extends EventTarget {
       }
       case "meter_batch": {
         for (const u of body.values || []) {
+          if (u?.id === "transport.position") {
+            if (this._applyTransportPosition(u.value, Number(env?.seq || 0))) {
+              this._emitControl("transport.position");
+            }
+            continue;
+          }
           if (this._applyControl(u.id, u.value)) {
             this._emitControl(u.id);
           }
@@ -452,6 +495,39 @@ export class Store extends EventTarget {
     }
     this.state.controls.set(id, value);
     return true;
+  }
+
+  /**
+   * Reconcile transport.position updates from backend ticks.
+   * While rolling, ignore stale backward jumps unless we recently
+   * observed an explicit seek request from the UI.
+   */
+  _applyTransportPosition(value, seq = 0) {
+    const next = Number(value) || 0;
+    if (seq && seq < this._lastTransportSeq) return false;
+
+    const now = Date.now();
+    const playing = !!this.state.controls.get("transport.playing");
+    const looping = !!this.state.controls.get("transport.looping");
+    const seekRecent = now - this._lastTransportSeekAt < 1500;
+    const prev = Number(
+      this.state.controls.get("transport.position")
+      ?? this._lastTransportPos
+      ?? 0,
+    );
+    const backwardsBy = prev - next;
+    const jitterThreshold = 2400; // ~50ms at 48kHz.
+
+    if (playing && !looping && backwardsBy > jitterThreshold && !seekRecent) {
+      return false;
+    }
+
+    const changed = this._applyControl("transport.position", next);
+    if (changed) {
+      if (seq) this._lastTransportSeq = seq;
+      this._lastTransportPos = next;
+    }
+    return changed;
   }
 }
 

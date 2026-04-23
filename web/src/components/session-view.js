@@ -4,6 +4,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { showPreview } from "./preview-modal.js";
+import { launchProjectGuarded } from "../session-launch.js";
 
 /** Parent of a jail-relative path. `""` and `"/"` return `""`. */
 function parentPath(p) {
@@ -207,6 +208,7 @@ export class SessionView extends LitElement {
     this._listing = null;
     this._error = "";
     this._opening = "";
+    this._launchPending = false;
     this._backends = [];
     this._activeBackend = null;
     // `null` means "infer from path at click time". A user click on a
@@ -405,17 +407,20 @@ export class SessionView extends LitElement {
     if (entry.kind !== "session_dir") return;
     // Guard against spam-click while a launch is still in flight — the
     // sidecar would queue two swaps racing each other.
-    if (this._opening) return;
-    this._opening = entry.path;
+    if (this._opening || this._launchPending) return;
     // Pick a backend: use the active one if set; otherwise the first
     // project-capable entry; otherwise the first enabled entry. For
     // Ardour sessions we prefer an ardour-kind backend so picking an
     // .ardour file actually spawns Ardour rather than the stub.
     const backend = this._pickBackendForPath(entry.path);
-    window.__foyer?.ws?.send({
-      type: "launch_project",
+    this._launchPending = true;
+    launchProjectGuarded({
       backend_id: backend,
       project_path: entry.path,
+    }).then((launched) => {
+      if (launched) this._opening = entry.path;
+    }).finally(() => {
+      this._launchPending = false;
     });
   }
 

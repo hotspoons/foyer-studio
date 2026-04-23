@@ -51,6 +51,12 @@ export class FoyerWs extends EventTarget {
       this.dispatchEvent(
         new CustomEvent("project_launch_start", { detail: body }),
       );
+    } else if (body?.type === "control_set" && body?.id === "transport.position") {
+      this.dispatchEvent(
+        new CustomEvent("transport_seek_request", {
+          detail: { value: Number(body.value) || 0, at_ms: Date.now() },
+        }),
+      );
     }
     const env = { schema: [0, 1], seq: 0, origin: this.origin, body };
     const text = JSON.stringify(env);

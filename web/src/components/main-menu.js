@@ -9,6 +9,7 @@ import { showProjectPicker } from "./project-picker-modal.js";
 import { openSettings } from "./settings-modal.js";
 import { promptText } from "./prompt-modal.js";
 import { load as loadRecents, forget as forgetRecent, touch as touchRecent, clearAll as clearRecents } from "../recents.js";
+import { launchProjectGuarded } from "../session-launch.js";
 
 // Category → menu label + order. Categories not listed are skipped.
 const MENU_ORDER = [
@@ -454,8 +455,7 @@ export class MainMenu extends LitElement {
     this._recentOpen = false;
     if (!entry?.path) return;
     touchRecent(entry);
-    window.__foyer?.ws?.send({
-      type: "launch_project",
+    launchProjectGuarded({
       backend_id: entry.backend_id || "ardour",
       project_path: entry.path,
     });

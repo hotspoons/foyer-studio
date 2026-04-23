@@ -355,6 +355,7 @@ export class TimelineView extends LitElement {
     this._zoomPadSec = 0;
     this._playheadSamples = 0;
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
+    this._seekHandler = (ev) => this._onSeekRequest(ev.detail);
     this._wfCache = null;
     this._onWfUpdate = () => this._repaintWaveforms();
     this._drag = null;
@@ -371,6 +372,7 @@ export class TimelineView extends LitElement {
     // Last seq that updated transport.position; guards against stale
     // out-of-order position packets causing visible playhead jump-back.
     this._lastTransportSeq = 0;
+    this._lastSeekAtMs = 0;
   }
 
   _loadLaneHeights() {
@@ -394,6 +396,7 @@ export class TimelineView extends LitElement {
     const ws = window.__foyer?.ws;
     if (ws) {
       ws.addEventListener("envelope", this._envelopeHandler);
+      ws.addEventListener("transport_seek_request", this._seekHandler);
       this._wfCache = new WaveformCache(ws);
       this._wfCache.addEventListener("update", this._onWfUpdate);
     }
@@ -408,6 +411,7 @@ export class TimelineView extends LitElement {
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
+    window.__foyer?.ws?.removeEventListener("transport_seek_request", this._seekHandler);
     this._wfCache?.removeEventListener("update", this._onWfUpdate);
     this._wfCache?.dispose();
     window.__foyer?.store?.removeEventListener("control", this._onStoreControl);
@@ -430,6 +434,22 @@ export class TimelineView extends LitElement {
   _onEnvelope(env) {
     const body = env?.body;
     if (!body) return;
+    const activeSessionId = window.__foyer?.store?.state?.currentSessionId || null;
+    const envelopeSessionId = env?.session_id || null;
+    const isSessionScoped =
+      body.type === "regions_list"
+      || body.type === "region_updated"
+      || body.type === "region_removed"
+      || body.type === "control_update"
+      || body.type === "meter_batch";
+    if (
+      isSessionScoped
+      && activeSessionId
+      && envelopeSessionId
+      && envelopeSessionId !== activeSessionId
+    ) {
+      return;
+    }
     if (body.type === "regions_list") {
       this._regionsByTrack = { ...this._regionsByTrack, [body.track_id]: body.regions };
       this._timeline = body.timeline;
@@ -463,8 +483,8 @@ export class TimelineView extends LitElement {
       this.dispatchEvent(new CustomEvent("foyer:regions-updated", { detail: { region_id, track_id } }));
     } else if (body.type === "control_update" && body.update?.id === "transport.position") {
       const seq = Number(env?.seq || 0);
-      if (seq && seq < this._lastTransportSeq) return;
-      if (seq) this._lastTransportSeq = seq;
+      const next = Number(body.update.value) || 0;
+      if (!this._shouldAcceptTransportPosition(next, seq)) return;
       this._playheadSamples = this._positionOrPin(Number(body.update.value) || 0);
     } else if (body.type === "meter_batch" && Array.isArray(body.values)) {
       // Shim's tick thread batches transport.position in with tempo /
@@ -473,13 +493,36 @@ export class TimelineView extends LitElement {
       for (const u of body.values) {
         if (u?.id === "transport.position") {
           const seq = Number(env?.seq || 0);
-          if (seq && seq < this._lastTransportSeq) break;
-          if (seq) this._lastTransportSeq = seq;
-          this._playheadSamples = this._positionOrPin(Number(u.value) || 0);
+          const next = Number(u.value) || 0;
+          if (this._shouldAcceptTransportPosition(next, seq)) {
+            this._playheadSamples = this._positionOrPin(next);
+          }
           break;
         }
       }
     }
+  }
+
+  _onSeekRequest(detail) {
+    this._lastSeekAtMs = Number(detail?.at_ms) || Date.now();
+  }
+
+  _shouldAcceptTransportPosition(next, seq) {
+    if (seq && seq < this._lastTransportSeq) return false;
+    const store = window.__foyer?.store;
+    const controls = store?.state?.controls;
+    const playing = !!controls?.get("transport.playing");
+    const looping = !!controls?.get("transport.looping");
+    const seekRecent = Date.now() - (this._lastSeekAtMs || 0) < 1500;
+    const backwardsBy = this._playheadSamples - next;
+    const jitterThreshold = 2400; // ~50ms @ 48kHz
+
+    if (playing && !looping && backwardsBy > jitterThreshold && !seekRecent) {
+      return false;
+    }
+
+    if (seq) this._lastTransportSeq = seq;
+    return true;
   }
 
   /** Honor the front-end position lock when one is active (see

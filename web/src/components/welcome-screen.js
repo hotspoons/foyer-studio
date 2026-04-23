@@ -16,6 +16,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { load as loadRecents, touch as touchRecent, forget as forgetRecent, clearAll } from "../recents.js";
+import { launchProjectGuarded } from "../session-launch.js";
 
 export class WelcomeScreen extends LitElement {
   static properties = {
@@ -306,10 +307,10 @@ export class WelcomeScreen extends LitElement {
     // Touch first so even if the launch fails the user sees their
     // click promote the entry.
     touchRecent(entry);
-    ws.send({
-      type: "launch_project",
+    launchProjectGuarded({
       backend_id: entry.backend_id || "ardour",
       project_path: entry.path,
+      ws,
     });
   }
 
@@ -360,10 +361,10 @@ export class WelcomeScreen extends LitElement {
       // carries the same path; use the primary. Then clear every
       // entry in the group since a successful relaunch makes them
       // all moot.
-      ws.send({
-        type: "launch_project",
+      launchProjectGuarded({
         backend_id: primary.backend_id || "ardour",
         project_path: primary.path,
+        ws,
       });
       for (const o of group.entries) {
         ws.send({ type: "dismiss_orphan", orphan_id: o.id });
