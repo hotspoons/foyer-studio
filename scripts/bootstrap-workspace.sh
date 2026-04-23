@@ -10,13 +10,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FOYER_REPO="https://github.com/foyer-studio/foyer-studio.git"
-# Ardour lives on a fork with two small patches on top of upstream that the
-# Foyer shim needs at build time (see the foyer-studio-integration branch).
-# Upstream remains at https://github.com/Ardour/ardour.git — we keep that as
-# a secondary remote named `upstream` for pulling new work.
-ARDOUR_REPO="https://github.com/hotspoons/zzz-forks-ardour.git"
-ARDOUR_BRANCH="foyer-studio-integration"
-ARDOUR_UPSTREAM="https://github.com/Ardour/ardour.git"
+# Always use Ardour proper and fetch release tags from there. Ardour's waf
+# configure reads version/tag metadata and can fail on tagless clones.
+ARDOUR_REPO="https://github.com/Ardour/ardour.git"
 EDITOR_CMD="${FOYER_WORKSPACE_EDITOR:-code}"
 
 print_usage() {
@@ -91,14 +87,26 @@ if [ "${#POSITIONAL_ARGS[@]}" -gt 2 ]; then
     exit 1
 fi
 
-# Clone ardour into $1 on the $ARDOUR_BRANCH branch, with upstream wired up.
+# Ensure ardour's origin points at Ardour proper and release tags are present.
+ensure_ardour_origin_and_tags() {
+    local dest="$1"
+    local current_origin
+    current_origin="$(git -C "$dest" remote get-url origin 2>/dev/null || true)"
+    if [ "$current_origin" != "$ARDOUR_REPO" ]; then
+        echo "  updating ardour origin: $current_origin -> $ARDOUR_REPO"
+        git -C "$dest" remote set-url origin "$ARDOUR_REPO"
+    fi
+    echo "  fetching ardour tags from origin..."
+    git -C "$dest" fetch --tags origin
+}
+
+# Clone ardour into $1 from Ardour proper and fetch tags.
 clone_ardour() {
     local dest="$1"
-    git clone --branch "$ARDOUR_BRANCH" "$ARDOUR_REPO" "$dest"
-    git -C "$dest" remote add upstream "$ARDOUR_UPSTREAM" 2>/dev/null || true
+    git clone "$ARDOUR_REPO" "$dest"
+    ensure_ardour_origin_and_tags "$dest"
     echo "  ardour branch:   $(git -C "$dest" rev-parse --abbrev-ref HEAD)"
     echo "  ardour origin:   $(git -C "$dest" remote get-url origin)"
-    echo "  ardour upstream: $(git -C "$dest" remote get-url upstream)"
 }
 
 echo "╔════════════════════════════════════════════════════════════════╗"
@@ -133,14 +141,10 @@ if [ -f "$SCRIPT_DIR/../foyer-studio.code-workspace" ]; then
 
     if [ -d "$ARDOUR_DIR" ]; then
         echo "✅ ardour already exists at: $ARDOUR_DIR"
-        current_branch="$(git -C "$ARDOUR_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
-        if [ "$current_branch" != "$ARDOUR_BRANCH" ]; then
-            echo "   (on branch '$current_branch' — foyer builds expect '$ARDOUR_BRANCH';"
-            echo "    switch manually when ready: cd $ARDOUR_DIR && git checkout $ARDOUR_BRANCH)"
-        fi
+        ensure_ardour_origin_and_tags "$ARDOUR_DIR"
     else
         echo "ardour not found at: $ARDOUR_DIR"
-        echo ">>> Cloning ardour fork + checking out $ARDOUR_BRANCH..."
+        echo ">>> Cloning Ardour proper..."
         clone_ardour "$ARDOUR_DIR"
         echo "✅ ardour cloned"
     fi
@@ -183,11 +187,12 @@ if [ -d "$WORKSPACE_DIR" ]; then
     fi
 
     if [ "$FOYER_EXISTS" = true ] && [ "$ARDOUR_EXISTS" = false ]; then
-        echo ">>> Cloning ardour fork on $ARDOUR_BRANCH..."
+        echo ">>> Cloning Ardour proper..."
         clone_ardour "$WORKSPACE_DIR/ardour"
     elif [ "$FOYER_EXISTS" = false ] && [ "$ARDOUR_EXISTS" = true ]; then
         echo ">>> Cloning foyer-studio..."
         git clone "$FOYER_REPO" "$WORKSPACE_DIR/foyer-studio"
+        ensure_ardour_origin_and_tags "$WORKSPACE_DIR/ardour"
     else
         read -p "Directory exists but is empty-ish. Remove and start fresh? [y/N] " -n 1 -r
         echo
@@ -207,7 +212,7 @@ if [ ! -d "$WORKSPACE_DIR" ]; then
     echo ">>> Cloning foyer-studio"
     git clone "$FOYER_REPO" "$WORKSPACE_DIR/foyer-studio"
 
-    echo ">>> Cloning ardour fork on $ARDOUR_BRANCH"
+    echo ">>> Cloning Ardour proper"
     clone_ardour "$WORKSPACE_DIR/ardour"
 fi
 
