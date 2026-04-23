@@ -47,6 +47,11 @@ export class FoyerWs extends EventTarget {
    * audio_*). The envelope is built for you.
    */
   send(body) {
+    if (body?.type === "launch_project") {
+      this.dispatchEvent(
+        new CustomEvent("project_launch_start", { detail: body }),
+      );
+    }
     const env = { schema: [0, 1], seq: 0, origin: this.origin, body };
     const text = JSON.stringify(env);
     if (this._ws && this._ws.readyState === WebSocket.OPEN) {

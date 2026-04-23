@@ -5,11 +5,9 @@
 // running in the background (which is just "switch off" — the
 // backend stays alive).
 //
-// "Close" is gated by unsaved-state: if the session is dirty, a
-// 4-way confirm dialog asks:
-//   * Save & close
-//   * Close without saving
-//   * Leave running (switch away)
+// "Close" is gated by unsaved-state with a short 2-step flow:
+//   * Save & close, or
+//   * Close without saving (with a final danger confirmation), or
 //   * Cancel
 
 import { LitElement, html, css } from "lit";
@@ -232,45 +230,33 @@ export class SessionSwitcher extends LitElement {
 }
 customElements.define("foyer-session-switcher", SessionSwitcher);
 
-/** Open a 4-way unsaved-changes modal. Returns one of:
+/** Open an unsaved-changes modal flow. Returns one of:
  *    "save"       — save + close
  *    "discard"    — close without saving
- *    "background" — leave session running, switch away
  *    "cancel"     — abort
  *
- *  Implemented as a sequence of cascading `confirmAction`s rather
- *  than a bespoke 4-button modal so we reuse the styled confirm
- *  shell. Could be replaced with a real 4-way modal later — the
- *  caller surface is stable. */
+ *  Flow is intentionally short:
+ *    1) Save & close  /  More…
+ *    2) Close without saving?  /  Cancel
+ *  so "close this session" is 1-2 clicks, never 3. */
 async function unsavedGuard(session) {
-  const msg =
-    `"${session.name || "This session"}" has unsaved changes.\n\n`
-    + `Choose what to do before closing.`;
-  const first = await confirmAction({
+  const save = await confirmAction({
     title: "Unsaved changes",
-    message: msg + `\n\nSave the session now?`,
+    message:
+      `"${session.name || "This session"}" has unsaved changes.\n\n`
+      + `Save before closing?`,
     confirmLabel: "Save & close",
     cancelLabel: "More…",
     tone: "warning",
   });
-  if (first) return "save";
-  const second = await confirmAction({
-    title: "Unsaved changes",
-    message:
-      `Close without saving will lose your edits. You can also leave the `
-      + `session running in the background and come back to it later — the `
-      + `Ardour process keeps running and appears in the session switcher.`,
-    confirmLabel: "Leave running (switch away)",
-    cancelLabel: "More…",
-  });
-  if (second) return "background";
-  const third = await confirmAction({
+  if (save) return "save";
+  const discard = await confirmAction({
     title: "Close without saving?",
     message: `Discard unsaved changes to "${session.name || "this session"}"?`,
     confirmLabel: "Close without saving",
     cancelLabel: "Cancel",
     tone: "danger",
   });
-  if (third) return "discard";
+  if (discard) return "discard";
   return "cancel";
 }

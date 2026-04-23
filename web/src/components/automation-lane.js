@@ -16,6 +16,7 @@
 
 import { LitElement, html, css } from "lit";
 import { ControlController } from "../store.js";
+import { confirmAction } from "./confirm-modal.js";
 
 const LANE_HEIGHT = 48;
 const PAD_Y = 4;
@@ -210,6 +211,15 @@ export class AutomationLane extends LitElement {
   _onPointerDown(ev) {
     if (ev.button !== 0) return;
     ev.preventDefault();
+    const rect = this.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    // Usability: placing a point at the very start of the lane is a
+    // common first gesture; prefer "add at t=0" over grabbing a nearby
+    // first point when the click is inside the left-edge gutter.
+    if (x <= HIT_RADIUS * 1.5) {
+      this._addPointAt(ev);
+      return;
+    }
     const { point, dist } = this._nearestPoint(ev.clientX);
     if (point && dist <= HIT_RADIUS) {
       this._startDrag(ev, point);
@@ -267,7 +277,8 @@ export class AutomationLane extends LitElement {
     const rect = this.getBoundingClientRect();
     const x = ev.clientX - rect.left;
     const y = ev.clientY - rect.top;
-    const time = Math.max(0, Math.min(this.totalSamples, this._sampleForX(x)));
+    const snappedX = x <= HIT_RADIUS * 1.5 ? 0 : x;
+    const time = Math.max(0, Math.min(this.totalSamples, this._sampleForX(snappedX)));
     const value = this._valueForY(y);
     this._sendCommand("add_automation_point", {
       lane_id: this.lane.control_id,
@@ -296,12 +307,18 @@ export class AutomationLane extends LitElement {
     });
   }
 
-  _confirmReset() {
+  async _confirmReset() {
     const count = Array.isArray(this.lane?.points) ? this.lane.points.length : 0;
     if (count === 0) return;
-    const confirmed = window.confirm(
-      `Clear all ${count} automation point${count === 1 ? "" : "s"} for ${metaFor(this.lane.control_id).label}?`
-    );
+    const confirmed = await confirmAction({
+      title: "Clear automation points?",
+      message:
+        `Clear all ${count} automation point${count === 1 ? "" : "s"} for `
+        + `${metaFor(this.lane.control_id).label}?`,
+      confirmLabel: "Clear",
+      cancelLabel: "Cancel",
+      tone: "warning",
+    });
     if (confirmed) {
       this._sendCommand("replace_automation_lane", {
         lane_id: this.lane.control_id,

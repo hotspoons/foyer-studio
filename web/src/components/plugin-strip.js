@@ -11,6 +11,7 @@ import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { openPluginFloat } from "../layout/plugin-layer.js";
 import { openPluginPicker } from "./plugin-picker-modal.js";
+import { showContextMenu } from "./context-menu.js";
 
 export class PluginStrip extends LitElement {
   static properties = {
@@ -91,14 +92,17 @@ export class PluginStrip extends LitElement {
     this._errors = [];
     this._dismissed = this._loadDismissed();
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
+    this._onControl = () => this.requestUpdate();
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.__foyer?.ws?.addEventListener("envelope", this._envelopeHandler);
+    window.__foyer?.store?.addEventListener("control", this._onControl);
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
+    window.__foyer?.store?.removeEventListener("control", this._onControl);
     super.disconnectedCallback();
   }
 
@@ -162,6 +166,7 @@ export class PluginStrip extends LitElement {
             class="row ${this._isBypassed(p) ? "bypassed" : ""}"
             title="Click to open ${p.name}"
             @click=${() => this._openPanel(p)}
+            @dblclick=${(ev) => this._openTrackEditor(ev)}
             @contextmenu=${(ev) => this._onContextMenu(ev, p)}
           >
             <span class="name">${p.name}</span>
@@ -176,7 +181,7 @@ export class PluginStrip extends LitElement {
         `
       )}
       ${extra > 0 ? html`<div class="empty">+${extra} more</div>` : null}
-      <div class="slot" @click=${this._addSlot} title="Open plugin picker">
+      <div class="slot" @click=${this._addSlot} @dblclick=${(ev) => this._openTrackEditor(ev)} title="Open plugin picker">
         ${icon("plus", 10)}
       </div>
     `;
@@ -224,10 +229,38 @@ export class PluginStrip extends LitElement {
 
   _onContextMenu(ev, p) {
     ev.preventDefault();
-    // Right-click still just opens (no slot picker — plugin layer doesn't
-    // use slots). Future: show close/minimize/hide-all in a context menu
-    // when the plugin is already open.
-    openPluginFloat(p);
+    ev.stopPropagation();
+    showContextMenu(ev, [
+      { heading: p?.name || "Plugin" },
+      {
+        label: "Open plugin panel",
+        icon: "window",
+        action: () => openPluginFloat(p),
+      },
+      {
+        label: "Open track editor…",
+        icon: "adjustments-horizontal",
+        action: () => this._openTrackEditor(),
+      },
+      { separator: true },
+      {
+        label: "Remove plugin",
+        icon: "trash",
+        tone: "danger",
+        action: () => this._removePlugin(p),
+      },
+    ]);
+  }
+
+  _removePlugin(p) {
+    if (!p?.id) return;
+    window.__foyer?.ws?.send({ type: "remove_plugin", plugin_id: p.id });
+  }
+
+  _openTrackEditor(ev) {
+    ev?.stopPropagation?.();
+    if (!this.trackId) return;
+    import("./track-editor-modal.js").then((m) => m.openTrackEditor(this.trackId));
   }
 
   _addSlot() {

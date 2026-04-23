@@ -57,15 +57,46 @@ export class Keybinds {
     }
 
     // Delete key (no modifiers) → delete regions in the current
-    // selection. Route through the menu-action path so the intercept
-    // in main-menu.js does the walk. Only fires when no modifier is
+    // selection. If there's a time-range selection OR track selection
+    // with regions in it, delete. Only fires when no modifier is
     // held so native delete in text inputs still works.
     if ((e.key === "Delete" || e.key === "Backspace") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       const tl = document.querySelector("foyer-timeline-view");
+      const store = window.__foyer?.store;
+      const selectedTracks = store?.state?.selectedTrackIds;
+      // Region click-selection wins first.
+      const selectedRegions = tl?.getSelectedRegionIds?.() || [];
+      if (selectedRegions.length) {
+        e.preventDefault();
+        tl.deleteSelectedRegions?.();
+        return;
+      }
+      // If there's a time-range selection, delete those regions
       if (tl?._selection) {
         e.preventDefault();
         tl.deleteSelection();
         return;
+      }
+      // If tracks are selected, delete all regions on those tracks
+      if (selectedTracks && selectedTracks.size > 0) {
+        e.preventDefault();
+        const byTrack = tl?._regionsByTrack || {};
+        for (const trackId of selectedTracks) {
+          for (const r of byTrack[trackId] || []) {
+            window.__foyer?.ws?.send({ type: "delete_region", id: r.id });
+          }
+        }
+        return;
+      }
+      // If nothing selected, check for a focused/clicked region via DOM
+      const focused = document.activeElement;
+      if (focused?.closest?.(".region")) {
+        e.preventDefault();
+        const regionEl = focused.closest(".region");
+        const regionId = regionEl?.dataset?.id;
+        if (regionId) {
+          window.__foyer?.ws?.send({ type: "delete_region", id: regionId });
+        }
       }
     }
 

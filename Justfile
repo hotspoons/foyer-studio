@@ -49,7 +49,7 @@ check: fmt-check clippy test
 # binding 0.0.0.0 exposes the DAW to anyone on the LAN.
 # Pass `debug=true` to enable verbose logging:
 #     just run debug=true
-run listen='127.0.0.1:3838' debug='false' *args: jack-dummy shim-check
+run listen='127.0.0.1:3838' debug='false' *args: tw-check ardour-check jack-dummy shim-check
     #!/usr/bin/env bash
     source /dev/stdin <<'EOF'
     rust_log() {
@@ -60,7 +60,7 @@ run listen='127.0.0.1:3838' debug='false' *args: jack-dummy shim-check
 
 # Convenience: bind all interfaces so another computer on the LAN
 # instead of loopback. Equivalent to `just run listen=0.0.0.0:3838`.
-run-lan debug='false' *args: jack-dummy shim-check
+run-lan debug='false' *args: tw-check ardour-check jack-dummy shim-check
     #!/usr/bin/env bash
     source /dev/stdin <<'EOF'
     rust_log() {
@@ -81,7 +81,7 @@ run-lan debug='false' *args: jack-dummy shim-check
 # loads are fine. The cert is tied to the host's LAN IPs at
 # generation time; if your address changes, re-run this recipe to
 # refresh.
-run-lan-tls *args='': jack-dummy shim-check
+run-lan-tls *args='': tw-check ardour-check jack-dummy shim-check
     #!/usr/bin/env bash
     set -euo pipefail
     tls_dir="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/tls"
@@ -117,7 +117,7 @@ run-lan-tls *args='': jack-dummy shim-check
 # default got changed and you just want the demo UI back. No JACK
 # dependency because the stub generates its own sine wave and never
 # spawns a DAW.
-run-stub *args:
+run-stub *args: tw-check
     cargo run --bin foyer -- serve --backend stub {{args}}
 
 # Launch with the Ardour backend. If PROJECT is given, the configured
@@ -127,7 +127,7 @@ run-stub *args:
 #
 #   just run-ardour                        # attach to already-running Ardour
 #   just run-ardour /tmp/foyer-session/foyer-smoke.ardour
-run-ardour project="" *args: jack-dummy shim-check
+run-ardour project="" *args: tw-check ardour-check jack-dummy shim-check
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{project}}" ]; then
@@ -166,6 +166,23 @@ tw-build:
 tw-watch:
     {{tw_bin}} -i web/styles/tw.css -o web/styles/tw.build.css --watch
 
+# Keep committed CSS artifact fresh in new containers/checkouts.
+# Rebuild when missing, empty, or older than source templates.
+tw-check:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    BUILT="web/styles/tw.build.css"
+    if [ ! -s "$BUILT" ]; then
+        echo "tw-check: missing/empty $BUILT → rebuilding"
+        exec just tw-build
+    fi
+    NEWER=$(find web/src web/index.html web/styles/tw.css -newer "$BUILT" -print -quit 2>/dev/null || true)
+    if [ -n "$NEWER" ]; then
+        echo "tw-check: stale ($NEWER newer than $BUILT) → rebuilding"
+        exec just tw-build
+    fi
+    echo "tw-check: up to date"
+
 # --- ardour (sibling repo at /workspaces/ardour) ---
 ardour_dir := "/workspaces/ardour"
 
@@ -179,6 +196,39 @@ ardour-build *args:
 
 # Convenience: configure + build in one shot.
 ardour: ardour-configure ardour-build
+
+# Validate that a dev-tree Hardour build is present and runnable.
+# This catches both "not built" and missing-runtime-lib cases.
+ardour-check:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    if [ ! -d "{{ardour_dir}}" ]; then
+        echo "ardour-check: {{ardour_dir}} missing"
+        echo "  clone Ardour at {{ardour_dir}} or update your config backend executable"
+        exit 1
+    fi
+    BIN=$(ls -1 {{ardour_dir}}/build/headless/hardour-* 2>/dev/null | sort -V | tail -n1 || true)
+    if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+        echo "ardour-check: no runnable hardour binary under {{ardour_dir}}/build/headless/"
+        echo "  run: just ardour-configure && just ardour-build"
+        exit 1
+    fi
+    if [ ! -f "{{ardour_dir}}/build/gtk2_ardour/ardev_common_waf.sh" ]; then
+        echo "ardour-check: missing ardev_common_waf.sh (build appears incomplete)"
+        echo "  run: just ardour-build"
+        exit 1
+    fi
+    # Match the launcher path: source ardev env, then execute hardour.
+    export TOP="{{ardour_dir}}"
+    export ASAN_COREDUMP="${ASAN_COREDUMP:-0}"
+    source "{{ardour_dir}}/build/gtk2_ardour/ardev_common_waf.sh"
+    if ! "$BIN" --version >/tmp/foyer-hardour-check.log 2>&1; then
+        echo "ardour-check: $BIN failed to start with ardev env"
+        echo "  excerpt:"
+        sed -n '1,20p' /tmp/foyer-hardour-check.log
+        exit 1
+    fi
+    echo "ardour-check: ok ($BIN)"
 
 # Run tests inside Ardour's tree. Mostly not needed unless touching libardour.
 ardour-test:
@@ -320,8 +370,8 @@ jack-dummy:
     # 9p filesystem hiccups and cross-VM scheduling jitter don't
     # trigger xruns. Drop to 256 or 128 on bare-metal Linux for
     # real tracking-grade latency.
-    echo "Starting jackd -R -d dummy @ 48 kHz, 720-sample buffer (~30 ms)…”
-    jackd -R -P 10 -d dummy -r 48000 -p 720 -n default > /tmp/jackd.log 2>&1 &
+    echo "Starting jackd -R -d dummy @ 48 kHz, 720-sample buffer (~30 ms)..."
+    jackd -R -P 10 -d dummy -r 48000 -p 720 > /tmp/jackd.log 2>&1 &
     # Poll for process + short settle time. jackd clients block on
     # connect until the server is actually ready, so we don't need
     # to sniff the log — existence + a beat is enough.

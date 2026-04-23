@@ -200,26 +200,6 @@ export class SessionView extends LitElement {
       box-shadow: 0 0 6px color-mix(in oklab, var(--color-success) 60%, transparent);
     }
 
-    /* "Spawning… Waiting for shim…" feedback while a launch is in flight. */
-    .launching {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--color-border);
-      background: color-mix(in oklab, var(--color-accent) 10%, transparent);
-      color: var(--color-text);
-      font-family: var(--font-mono);
-      font-size: 11px;
-    }
-    .launching .spinner {
-      width: 10px; height: 10px;
-      border: 2px solid color-mix(in oklab, var(--color-accent) 40%, transparent);
-      border-top-color: var(--color-accent-3);
-      border-radius: 50%;
-      animation: foyer-spin 0.8s linear infinite;
-    }
-    @keyframes foyer-spin { to { transform: rotate(360deg); } }
   `;
 
   constructor() {
@@ -491,19 +471,6 @@ export class SessionView extends LitElement {
     `;
   }
 
-  _renderLaunching() {
-    if (!this._opening) return null;
-    const id = this._selectedBackendId
-      || this._pickBackendForPath(this._opening);
-    const label = (this._backends || []).find((b) => b.id === id)?.label || id;
-    return html`
-      <div class="launching">
-        <div class="spinner"></div>
-        <span>Launching <strong>${label}</strong> for ${this._opening}…</span>
-      </div>
-    `;
-  }
-
   _up() {
     const p = this._listing?.path || "";
     const parts = p.split("/").filter(Boolean);
@@ -528,7 +495,6 @@ export class SessionView extends LitElement {
       : [];
     return html`
       ${this._renderPicker()}
-      ${this._renderLaunching()}
       <div class="toolbar">
         <button class="navbtn"
                 ?disabled=${this._histCursor <= 0}

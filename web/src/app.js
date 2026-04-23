@@ -54,6 +54,7 @@ export class FoyerApp extends LitElement {
     _status:  { state: true },
     _session: { state: true },
     _sessions: { state: true },
+    _projectLaunching: { state: true },
   };
 
   static styles = css`
@@ -78,6 +79,46 @@ export class FoyerApp extends LitElement {
       display: flex;
       overflow: hidden;
     }
+    .launch-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      background: color-mix(in oklab, var(--color-surface) 92%, transparent);
+      backdrop-filter: blur(10px);
+      color: var(--color-text);
+      font-family: var(--font-sans);
+      pointer-events: auto;
+    }
+    .launch-overlay .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid color-mix(in oklab, var(--color-accent) 30%, transparent);
+      border-top-color: var(--color-accent);
+      border-radius: 50%;
+      animation: foyer-app-launch-spin 0.85s linear infinite;
+    }
+    .launch-overlay .title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      color: var(--color-text-muted);
+    }
+    .launch-overlay .path {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-accent-3);
+      max-width: min(560px, 90vw);
+      text-align: center;
+      word-break: break-all;
+    }
+    @keyframes foyer-app-launch-spin {
+      to { transform: rotate(360deg); }
+    }
   `;
 
   constructor() {
@@ -85,6 +126,8 @@ export class FoyerApp extends LitElement {
     this._status = "idle";
     this._session = null;
     this._sessions = [];
+    this._projectLaunching = false;
+    this._launchPath = "";
 
     const wsUrl = this._resolveWsUrl();
     // Window index: today Foyer runs in a single browser window so the
@@ -127,6 +170,28 @@ export class FoyerApp extends LitElement {
     installSlotKeybinds(this.layout);
 
     this.keybinds = new Keybinds(this.layout, () => this._collectRects());
+
+    this._onProjectLaunchStart = () => {
+      this._projectLaunching = true;
+      this.requestUpdate();
+    };
+    this._onWsEnvelope = (ev) => {
+      const b = ev.detail?.body;
+      if (!b) return;
+      if (
+        b.type === "backend_swapped"
+        || (b.type === "error" && b.code === "launch_failed")
+      ) {
+        this._projectLaunching = false;
+        this._launchPath = "";
+        this.requestUpdate();
+      }
+    };
+    this.ws.addEventListener("project_launch_start", (ev) => {
+      this._launchPath = ev.detail?.project_path || "";
+      this._onProjectLaunchStart();
+    });
+    this.ws.addEventListener("envelope", this._onWsEnvelope);
 
     window.__foyer = {
       ws: this.ws,
@@ -186,6 +251,7 @@ export class FoyerApp extends LitElement {
     this.ws.connect();
   }
   disconnectedCallback() {
+    this.ws.removeEventListener("envelope", this._onWsEnvelope);
     this.keybinds.uninstall();
     super.disconnectedCallback();
   }
@@ -238,6 +304,15 @@ export class FoyerApp extends LitElement {
     return html`
       <foyer-status-bar .status=${this._status}></foyer-status-bar>
       <foyer-transport-bar></foyer-transport-bar>
+      ${this._projectLaunching ? html`
+        <div class="launch-overlay" aria-busy="true" aria-live="polite">
+          <div class="spinner"></div>
+          <div class="title">Opening project…</div>
+          ${this._launchPath
+            ? html`<div class="path">${this._launchPath}</div>`
+            : null}
+        </div>
+      ` : null}
       <div class="main">
         <div class="workspace">
           ${hasSessions ? html`

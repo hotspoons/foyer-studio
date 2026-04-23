@@ -146,6 +146,18 @@ export class TrackStrip extends LitElement {
       gap: 2px;
       padding: 0 2px;
     }
+    .monitor-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 2px;
+    }
+    .monitor-stack .divider {
+      height: 1px;
+      margin: 0 2px;
+      background: color-mix(in oklab, var(--color-border) 70%, transparent);
+      opacity: 0.8;
+    }
     .mon-btn {
       font-family: var(--font-sans);
       font-size: 8.5px; font-weight: 700;
@@ -317,30 +329,33 @@ export class TrackStrip extends LitElement {
           .trackName=${t.name}
         ></foyer-plugin-strip>
       ` : null}
-      <div class="row">
-        <foyer-toggle tone="mute" label="M" .on=${mute} @input=${(e) => this._setBool(t.mute?.id, e.detail.value)}></foyer-toggle>
-        <foyer-toggle tone="solo" label="S" .on=${solo} @input=${(e) => this._setBool(t.solo?.id, e.detail.value)}></foyer-toggle>
-        ${t.record_arm ? html`
-          <foyer-toggle tone="rec" label="●" .on=${rec} @input=${(e) => this._setBool(t.record_arm.id, e.detail.value)}></foyer-toggle>
+      <div class="monitor-stack">
+        <div class="row">
+          <foyer-toggle tone="mute" label="M" .on=${mute} @input=${(e) => this._setBool(t.mute?.id, e.detail.value)}></foyer-toggle>
+          <foyer-toggle tone="solo" label="S" .on=${solo} @input=${(e) => this._setBool(t.solo?.id, e.detail.value)}></foyer-toggle>
+          ${t.record_arm ? html`
+            <foyer-toggle tone="rec" label="●" .on=${rec} @input=${(e) => this._setBool(t.record_arm.id, e.detail.value)}></foyer-toggle>
+          ` : null}
+        </div>
+        ${t.monitoring !== undefined && t.monitoring !== null ? html`
+          <div class="divider"></div>
+          <div class="mon-row" title="Monitoring: auto, input (live), disk (playback) — Ardour MonitorChoice">
+            ${["auto", "in", "disk"].map((mode) => {
+              const full = mode === "in" ? "input" : mode;
+              const active = (t.monitoring || "auto") === full;
+              return html`
+                <button class="mon-btn ${active ? "on" : ""}"
+                        title=${
+                          full === "input" ? "Input — always monitor the live input (rehearsing)"
+                          : full === "disk" ? "Disk — always play back from disk (no live input)"
+                          : "Auto — switch based on transport state"
+                        }
+                        @click=${() => this._setMonitoring(full)}>${mode.toUpperCase()}</button>
+              `;
+            })}
+          </div>
         ` : null}
       </div>
-      ${t.monitoring !== undefined && t.monitoring !== null ? html`
-        <div class="mon-row" title="Monitoring: auto, input (live), disk (playback) — Ardour MonitorChoice">
-          ${["auto", "in", "disk"].map((mode) => {
-            const full = mode === "in" ? "input" : mode;
-            const active = (t.monitoring || "auto") === full;
-            return html`
-              <button class="mon-btn ${active ? "on" : ""}"
-                      title=${
-                        full === "input" ? "Input — always monitor the live input (rehearsing)"
-                        : full === "disk" ? "Disk — always play back from disk (no live input)"
-                        : "Auto — switch based on transport state"
-                      }
-                      @click=${() => this._setMonitoring(full)}>${mode.toUpperCase()}</button>
-            `;
-          })}
-        </div>
-      ` : null}
       <div class="body">
         <foyer-fader
           .value=${gainNorm}

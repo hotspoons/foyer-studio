@@ -498,6 +498,10 @@ export class LayoutStore extends EventTarget {
     if (t) {
       this.tree = t;
       this.focusId = Tree.leaves(t)[0]?.id || null;
+      // Preset/named switches are workspace-level swaps: clear generic
+      // floating tiles so stale detached windows from the old layout
+      // don't hang around on top of the new one.
+      this._floating = [];
       this._markBaseline("named", name);
       this._emit();
     }
@@ -519,6 +523,8 @@ export class LayoutStore extends EventTarget {
     if (!fn) return;
     this.tree = fn();
     this.focusId = Tree.leaves(this.tree)[0]?.id || null;
+    // Keep tile-class windows tied to the active layout identity.
+    this._floating = [];
     this._markBaseline("preset", name);
     this._emit();
   }

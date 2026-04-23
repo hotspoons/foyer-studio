@@ -228,6 +228,13 @@ export class TimelineView extends LitElement {
     }
     .region.dragging { cursor: grabbing; filter: brightness(1.15); }
     .region:hover { filter: brightness(1.08); }
+    .region.selected {
+      border-color: color-mix(in oklab, var(--color-accent-3) 75%, #fff 25%);
+      box-shadow:
+        0 0 0 1px color-mix(in oklab, var(--color-accent-3) 45%, transparent),
+        0 1px 3px rgba(0, 0, 0, 0.35);
+      filter: brightness(1.08);
+    }
     .region .name {
       position: absolute;
       top: 2px; left: 6px; right: 6px;
@@ -285,6 +292,32 @@ export class TimelineView extends LitElement {
       border-top-color: var(--color-danger);
     }
 
+    /* Recording placeholder - full stack when no track is record-armed */
+    .recording-placeholder {
+      position: absolute;
+      top: ${RULER_HEIGHT}px; bottom: 0;
+      background: color-mix(in oklab, var(--color-danger) 12%, transparent);
+      border-left: 2px solid var(--color-danger);
+      z-index: 2;
+      pointer-events: none;
+      animation: rec-pulse 1s ease-in-out infinite;
+    }
+    /* Per-lane strip while recording into armed tracks */
+    .recording-lane-fill {
+      position: absolute;
+      top: 4px;
+      bottom: 4px;
+      background: color-mix(in oklab, var(--color-danger) 14%, transparent);
+      border-left: 2px solid var(--color-danger);
+      z-index: 1;
+      pointer-events: none;
+      animation: rec-pulse 1s ease-in-out infinite;
+    }
+    @keyframes rec-pulse {
+      0%, 100% { opacity: 0.6; }
+      50% { opacity: 1; }
+    }
+
     /* Left-click-drag selection range. Drawn in two pieces so the ruler
      * reads as a bright highlight while the body overlay is just a dim
      * wash — same pattern as pretty much every DAW's ruler selection. */
@@ -333,6 +366,11 @@ export class TimelineView extends LitElement {
     // Bounded so a trigger-happy user can't balloon memory.
     this._zoomStack = [];
     this._zoomStackMax = 32;
+    // Region click selection (distinct from ruler time-range selection).
+    this._selectedRegionIds = new Set();
+    // Last seq that updated transport.position; guards against stale
+    // out-of-order position packets causing visible playhead jump-back.
+    this._lastTransportSeq = 0;
   }
 
   _loadLaneHeights() {
@@ -421,8 +459,12 @@ export class TimelineView extends LitElement {
           [track_id]: list.filter((r) => r.id !== region_id),
         };
       }
+      this._selectedRegionIds.delete(region_id);
       this.dispatchEvent(new CustomEvent("foyer:regions-updated", { detail: { region_id, track_id } }));
     } else if (body.type === "control_update" && body.update?.id === "transport.position") {
+      const seq = Number(env?.seq || 0);
+      if (seq && seq < this._lastTransportSeq) return;
+      if (seq) this._lastTransportSeq = seq;
       this._playheadSamples = this._positionOrPin(Number(body.update.value) || 0);
     } else if (body.type === "meter_batch" && Array.isArray(body.values)) {
       // Shim's tick thread batches transport.position in with tempo /
@@ -430,6 +472,9 @@ export class TimelineView extends LitElement {
       // the position entry so the playhead animates.
       for (const u of body.values) {
         if (u?.id === "transport.position") {
+          const seq = Number(env?.seq || 0);
+          if (seq && seq < this._lastTransportSeq) break;
+          if (seq) this._lastTransportSeq = seq;
           this._playheadSamples = this._positionOrPin(Number(u.value) || 0);
           break;
         }
@@ -461,6 +506,7 @@ export class TimelineView extends LitElement {
   _onLaneHeadClick(ev, trackId) {
     const store = window.__foyer?.store;
     if (!store) return;
+    this._selectedRegionIds.clear();
     let mode = "replace";
     if (ev.shiftKey) mode = "extend";
     else if (ev.ctrlKey || ev.metaKey) mode = "toggle";
@@ -796,6 +842,20 @@ export class TimelineView extends LitElement {
     return hits.length;
   }
 
+  getSelectedRegionIds() {
+    return [...this._selectedRegionIds];
+  }
+
+  deleteSelectedRegions() {
+    const ids = this.getSelectedRegionIds();
+    if (!ids.length) return 0;
+    const ws = window.__foyer?.ws;
+    for (const id of ids) ws?.send({ type: "delete_region", id });
+    this._selectedRegionIds.clear();
+    this.requestUpdate();
+    return ids.length;
+  }
+
   /** Toggle mute on regions overlapping the selection. If the set has
    *  any unmuted region, mute all. Otherwise unmute all. */
   muteSelection() {
@@ -871,6 +931,7 @@ export class TimelineView extends LitElement {
           ${tracks.map(t => this._renderLane(t))}
           ${this._renderSelection()}
           ${this._renderPlayhead()}
+          ${this._renderRecordingPlaceholder()}
         </div>
       </div>
     `;
@@ -893,6 +954,34 @@ export class TimelineView extends LitElement {
     const sr = this._timeline?.sample_rate || 48_000;
     const x = HEAD_WIDTH + (this._playheadSamples / sr) * this._zoom;
     return html`<div class="playhead" style="left:${x}px"></div>`;
+  }
+
+  /** Pixels for the live recording span (punch-in cursor → playhead), or null. */
+  _recordingSpanPixels(controls) {
+    if (!controls || !controls.get("transport.recording")) return null;
+    const sr = this._timeline?.sample_rate || 48_000;
+    let recStart = controls.get("transport.record_position");
+    if (recStart == null) recStart = Math.max(0, this._playheadSamples - sr);
+    const playhead = this._playheadSamples;
+    const leftPx = HEAD_WIDTH + (Math.min(recStart, playhead) / sr) * this._zoom;
+    const widthPx = Math.max(1, (Math.abs(playhead - recStart) / sr) * this._zoom);
+    return { leftPx, widthPx };
+  }
+
+  _renderRecordingPlaceholder() {
+    const store = window.__foyer?.store;
+    const controls = store?.state?.controls;
+    const span = this._recordingSpanPixels(controls);
+    if (!span) return null;
+    const tracks = this.session?.tracks || [];
+    const anyArmed = tracks.some((t) => {
+      const id = t.record_arm?.id;
+      return id && controls.get(id);
+    });
+    if (anyArmed) return null;
+    return html`
+      <div class="recording-placeholder" style="left:${span.leftPx}px;width:${span.widthPx}px"></div>
+    `;
   }
 
   _renderLane(track) {
@@ -960,10 +1049,12 @@ export class TimelineView extends LitElement {
           // (no source_path → synth_waveform fallback in
           // foyer-backend-host/src/lib.rs:244), which is a visual lie.
           const isMidi = track.kind === "midi";
+          const regionSelected = this._selectedRegionIds.has(r.id);
           return html`
-            <div class="region" data-id=${r.id}
+            <div class="region ${regionSelected ? "selected" : ""}" data-id=${r.id}
                  style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px"
-                 @pointerdown=${(e) => this._startDrag(e, r, "move")}
+                 @pointerdown=${(e) => { this._onRegionPointerDown(e, r); this._startDrag(e, r, "move"); }}
+                 @dblclick=${(e) => { e.stopPropagation(); this._openRegionEditor(r); }}
                  @contextmenu=${(e) => this._regionContextMenu(e, r)}>
               ${isMidi
                 ? html`<foyer-midi-strip class="viz" .notes=${r.notes || []} .color=${track.color || ""}></foyer-midi-strip>`
@@ -974,6 +1065,14 @@ export class TimelineView extends LitElement {
             </div>
           `;
         })}
+        ${(() => {
+          const recording = !!(controls && controls.get("transport.recording"));
+          const span = this._recordingSpanPixels(controls);
+          if (!recording || !armed || !span) return null;
+          return html`
+            <div class="recording-lane-fill" style="left:${span.leftPx}px;width:${span.widthPx}px"></div>
+          `;
+        })()}
         <div class="lane-resize"
              title="Drag to resize lane"
              @pointerdown=${(e) => this._startLaneResize(e, track.id)}></div>
@@ -1130,6 +1229,18 @@ export class TimelineView extends LitElement {
     showContextMenu(ev, items);
   }
 
+  _onRegionPointerDown(ev, region) {
+    if (!region?.id) return;
+    if (ev.shiftKey || ev.ctrlKey || ev.metaKey) {
+      if (this._selectedRegionIds.has(region.id)) this._selectedRegionIds.delete(region.id);
+      else this._selectedRegionIds.add(region.id);
+    } else {
+      this._selectedRegionIds.clear();
+      this._selectedRegionIds.add(region.id);
+    }
+    this.requestUpdate();
+  }
+
   _isMidiRegion(region) {
     if (Array.isArray(region?.notes)) return true;
     const tracks = this.session?.tracks || [];
@@ -1187,6 +1298,16 @@ export class TimelineView extends LitElement {
       // callers, though none of timeline's menu items need it.)
       void close;
     });
+  }
+
+  _openRegionEditor(region) {
+    if (!region) return;
+    const track = (this.session?.tracks || []).find((t) => t.id === region.track_id);
+    if (!track) return;
+    if (track.kind === "midi") {
+      if (region?.foyer_sequencer?.active !== false) this._openBeatSequencer(region);
+      else this._openMidiEditor(region);
+    }
   }
 
   _openMidiEditorForTrack(track) {
@@ -1331,6 +1452,7 @@ export class TimelineView extends LitElement {
         // return-on-stop lock is still running, cancel it so the user's
         // explicit seek wins.
         this._selection = null;
+        this._selectedRegionIds.clear();
         window.__foyer?.store?.releaseTransportPositionLock?.();
         const samples = this._samplesAtX(e.clientX, target);
         this._playheadSamples = samples;
