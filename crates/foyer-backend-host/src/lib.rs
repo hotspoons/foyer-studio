@@ -250,6 +250,33 @@ impl Backend for HostBackend {
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
+    async fn create_group(
+        &self,
+        name: String,
+        color: Option<String>,
+        members: Vec<EntityId>,
+    ) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::CreateGroup { name, color, members })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn update_group(
+        &self,
+        id: EntityId,
+        patch: foyer_schema::GroupPatch,
+    ) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::UpdateGroup { id, patch })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn delete_group(&self, id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::DeleteGroup { id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
 
     async fn set_track_input(
         &self,

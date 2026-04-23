@@ -1423,10 +1423,44 @@ async fn dispatch_command(
             }
         }
 
-        Command::CreateGroup { .. }
-        | Command::UpdateGroup { .. }
-        | Command::DeleteGroup { .. }
-        | Command::MovePlugin { .. }
+        Command::CreateGroup { name, color, members } => {
+            if let Err(e) = state.backend().await.create_group(name, color, members).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "create_group_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::UpdateGroup { id, patch } => {
+            if let Err(e) = state.backend().await.update_group(id, patch).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "update_group_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::DeleteGroup { id } => {
+            if let Err(e) = state.backend().await.delete_group(id).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "delete_group_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::MovePlugin { .. }
         | Command::SavePluginPreset { .. }
         | Command::OpenPluginGui { .. }
         | Command::ClosePluginGui { .. }

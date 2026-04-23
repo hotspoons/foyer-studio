@@ -197,6 +197,24 @@ pub trait Backend: Send + Sync + 'static {
     async fn reorder_tracks(&self, _ordered_ids: Vec<EntityId>) -> Result<(), BackendError> {
         Err(BackendError::Other("reorder_tracks not supported".into()))
     }
+    async fn create_group(
+        &self,
+        _name: String,
+        _color: Option<String>,
+        _members: Vec<EntityId>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("create_group not supported".into()))
+    }
+    async fn update_group(
+        &self,
+        _id: EntityId,
+        _patch: foyer_schema::GroupPatch,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("update_group not supported".into()))
+    }
+    async fn delete_group(&self, _id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("delete_group not supported".into()))
+    }
     /// Remove a region from its track. Returns the track id the region was
     /// on (so the server can emit `RegionRemoved { track_id, region_id }`).
     async fn delete_region(&self, _id: EntityId) -> Result<EntityId, BackendError> {
