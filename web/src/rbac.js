@@ -37,22 +37,28 @@ const CLIENT_ONLY_ACTIONS = new Set([
   "transport.return_on_stop",
   "view.zoom_selection",
   "view.zoom_previous",
-  "edit.delete_selection",
-  "edit.mute_selection",
   "settings.preferences",
 ]);
 
 /// Specific action ids that take a different server command than
-/// the generic `invoke_action` dispatch — usually because they need
-/// extra parameters (a path, a session id). Gate on the specific
-/// command instead of `invoke_action` so a role can have "invoke
-/// generic actions" but not "save the session."
+/// the generic `invoke_action` dispatch — either because they need
+/// extra parameters (a path, a session id) or because they're
+/// client-orchestrated: the menu handler lives in the browser but
+/// the selection-walk it performs dispatches a backend command per
+/// affected target. Gate on the specific command so a role can have
+/// "invoke generic actions" but not "delete regions."
 const ACTION_SPECIFIC_COMMAND = {
   "session.save":    "save_session",
   "session.save_as": "save_session",
   "session.close":   "close_session",
   "session.new":     "launch_project",
   "session.open":    "launch_project",
+  // Client-orchestrated selection ops — handler iterates the timeline
+  // selection and fires one command per hit. Gate on the underlying
+  // write command so viewers don't see a menu entry that'd fail with
+  // `forbidden_for_role` the instant they click it.
+  "edit.delete_selection": "delete_region",
+  "edit.mute_selection":   "update_region",
 };
 
 /// Decide whether a given action catalog entry (id) should be shown.

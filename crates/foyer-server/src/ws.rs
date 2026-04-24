@@ -604,7 +604,7 @@ async fn dispatch_command(
                 broadcast_event(state, Event::Error {
                     code: "auth_required".into(),
                     message: format!(
-                        "login required to invoke '{tag}' — reconnect with a valid `?token=`"
+                        "unauthenticated guest attempted '{tag}' — must sign in first"
                     ),
                 })
                 .await;
@@ -614,12 +614,18 @@ async fn dispatch_command(
                 let allowed = state.roles_policy.read().await.allows(role_id, tag);
                 if !allowed {
                     tracing::warn!(
-                        "RBAC: role '{role_id}' ({recipient}) denied '{tag}'"
+                        "RBAC: '{recipient}' (role '{role_id}') denied '{tag}'"
                     );
+                    // Include recipient + role in the message so the
+                    // host (who sees all error broadcasts in the
+                    // startup-errors banner) can tell which specific
+                    // guest tripped the rule. The same message reaches
+                    // the offender — slightly redundant for them but
+                    // consistent and harmless.
                     broadcast_event(state, Event::Error {
                         code: "forbidden_for_role".into(),
                         message: format!(
-                            "role '{role_id}' is not permitted to invoke '{tag}'"
+                            "{recipient} (role '{role_id}') is not permitted to invoke '{tag}'"
                         ),
                     })
                     .await;
