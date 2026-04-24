@@ -20,6 +20,7 @@ static constexpr bool LOG_STEADY_STATE_STATS = false;
 #include "pbd/xml++.h"
 
 #include "ipc.h"
+#include "shim_input_port.h"
 #include "surface.h"
 
 namespace ArdourSurface {
@@ -141,6 +142,13 @@ MasterTap::run (BufferSet& bufs,
 	// lock contention is brief. If this ever shows up on an RT
 	// profile, swap to an eventfd or atomic counter.
 	_wake_cv.notify_one ();
+
+	// Drive the ingress soft-ports' RT drain. MasterTap is the only
+	// RT hook the shim has (ControlProtocols don't get a per-cycle
+	// callback), so the master bus's process tick doubles as the
+	// system-wide ingress tick. See `shim_input_port.h` for why this
+	// has to run on the RT thread.
+	ShimInputPort::tick_all_rt (nframes);
 }
 
 void
@@ -180,6 +188,10 @@ MasterTap::silence (samplecnt_t nframes, samplepos_t /*start_sample*/)
 		written += n;
 	}
 	_wake_cv.notify_one ();
+
+	// Same ingress tick as run() — Ardour calls one or the other
+	// every cycle, never both, so the ingress drain must hook both.
+	ShimInputPort::tick_all_rt (static_cast<pframes_t> (nframes));
 }
 
 void
