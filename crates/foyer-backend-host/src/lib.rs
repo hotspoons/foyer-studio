@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Generic host backend: implements [`Backend`] by speaking [`foyer-ipc`] to a shim.
 //!
 //! The sidecar doesn't care what's on the other end of the socket — it could be the

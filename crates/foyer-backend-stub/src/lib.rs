@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! In-memory stub backend.
 //!
 //! A small fake session (transport + a handful of tracks) with:

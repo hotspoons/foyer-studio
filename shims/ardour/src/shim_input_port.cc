@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Foyer Studio — Ardour shim: soft input port for browser audio ingress.
  */

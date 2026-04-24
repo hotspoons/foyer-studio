@@ -416,16 +416,24 @@ export class PluginStrip extends LitElement {
       // from the plugins-view catalog (drag-from-library), so
       // always treat a catalog-sourced drop as an add-only.
       if (!payload.plugin_uri) return;
+      const isFromExistingTrack = !!(payload.track_id && payload.plugin_id);
+      const isMove = isFromExistingTrack && !copy;
+      // Wrap the add+remove pair in one undo group so a cross-track
+      // drag lands as a single Ctrl+Z (otherwise the user'd have to
+      // undo the add then the remove, and the intermediate state
+      // would briefly show the plugin on both tracks). PLAN 177.
+      const label = isMove ? "Foyer move plugin" : "Foyer add plugin";
+      ws.send({ type: "undo_group_begin", name: label });
       ws.send({
         type: "add_plugin",
         track_id: this.trackId,
         plugin_uri: payload.plugin_uri,
         index: targetIdx,
       });
-      const isFromExistingTrack = !!(payload.track_id && payload.plugin_id);
-      if (isFromExistingTrack && !copy) {
+      if (isMove) {
         ws.send({ type: "remove_plugin", plugin_id: payload.plugin_id });
       }
+      ws.send({ type: "undo_group_end" });
     }
     this.requestUpdate();
   }

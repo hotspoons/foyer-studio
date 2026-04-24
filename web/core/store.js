@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Reactive session store.
 //
 // Receives Envelope<Event> from the ws client, reduces into a flat state shape,
@@ -54,6 +55,13 @@ export class Store extends EventTarget {
       // don't own their own region state (mixer strip chips,
       // agent tools) can query without a dedicated subscription.
       regionsByTrack: new Map(),
+      // track_id → peer_id, mirrors the server's routing table. The
+      // host sets an entry by choosing a user in the track editor;
+      // the named browser then shows a mic toolbar affordance. Used
+      // by mixer + track editor to gate live-monitoring UI and by
+      // the transport bar to decide whether to render the return-of-
+      // mic button.
+      trackBrowserSources: new Map(),
       // ── RBAC (populated from ClientGreeting) ─────────────────────
       // Filled on each handshake so components can gate UI without
       // re-implementing policy. `isTunnel` false means LAN → no
@@ -346,6 +354,22 @@ export class Store extends EventTarget {
           this.state.peers.delete(body.peer_id);
           this.dispatchEvent(new CustomEvent("peers"));
         }
+        break;
+      }
+      case "track_browser_source_changed": {
+        const tid = body.track_id;
+        if (!tid) break;
+        if (body.peer_id) this.state.trackBrowserSources.set(tid, body.peer_id);
+        else              this.state.trackBrowserSources.delete(tid);
+        this.dispatchEvent(new CustomEvent("track-browser-sources"));
+        break;
+      }
+      case "track_browser_sources_snapshot": {
+        this.state.trackBrowserSources = new Map();
+        for (const e of body.entries || []) {
+          if (e?.track_id && e?.peer_id) this.state.trackBrowserSources.set(e.track_id, e.peer_id);
+        }
+        this.dispatchEvent(new CustomEvent("track-browser-sources"));
         break;
       }
       case "session_snapshot": {

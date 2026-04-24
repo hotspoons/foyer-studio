@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Foyer Studio — top-level app shell with tiling layout.
 //
 // This is the shipping Foyer UI (`foyer-ui`). It consumes foyer-core
@@ -35,6 +36,7 @@ import "./components/transport-bar.js";
 import "./components/main-menu.js";
 import "./components/right-dock.js";
 import "./components/agent-panel.js";
+import "./components/chat-panel.js";
 import "./components/command-palette.js";
 import "./components/layout-fab.js";
 import "./components/automation-panel.js";
@@ -352,6 +354,7 @@ export class FoyerApp extends LitElement {
       <foyer-plugin-layer .store=${this.layout}></foyer-plugin-layer>
       <foyer-floating-tiles .store=${this.layout}></foyer-floating-tiles>
       <foyer-agent-panel></foyer-agent-panel>
+      <foyer-chat-panel></foyer-chat-panel>
       <foyer-layout-fab .store=${this.layout}></foyer-layout-fab>
       <foyer-command-palette></foyer-command-palette>
       <foyer-automation-panel></foyer-automation-panel>

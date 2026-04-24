@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Foyer WebSocket client.
 //
 // Thin layer on top of the browser WebSocket. Handles:
@@ -83,6 +84,22 @@ export class FoyerWs extends EventTarget {
     return this.send({ type: "control_set", id, value });
   }
 
+  /**
+   * Send a raw binary frame on the same socket. Used by push-to-talk
+   * to relay audio without opening another WS. The caller owns the
+   * wire format; see `chat.rs` for the layout used today.
+   * Returns `true` when the frame hit the socket, `false` when the
+   * socket is not open (binary frames are dropped rather than queued
+   * because audio data is time-sensitive).
+   */
+  sendBinary(buffer) {
+    if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+      this._ws.send(buffer);
+      return true;
+    }
+    return false;
+  }
+
   _open() {
     const sep = this.url.includes("?") ? "&" : "?";
     // Forward `?token=<...>` from the page URL into the WS handshake
@@ -102,6 +119,9 @@ export class FoyerWs extends EventTarget {
       }).toString();
 
     const ws = new WebSocket(url);
+    // Binary frames (PTT audio) need to land as ArrayBuffer so we can
+    // read the little-endian payload directly.
+    ws.binaryType = "arraybuffer";
     this._ws = ws;
 
     ws.addEventListener("open", () => {
@@ -121,6 +141,14 @@ export class FoyerWs extends EventTarget {
     });
 
     ws.addEventListener("message", (ev) => {
+      // Binary frames are out-of-band payloads (PTT audio today). Dispatch
+      // as a separate event so JSON handlers don't trip on them and new
+      // binary consumers (future meter batches, for example) can slot in
+      // without touching the envelope parser.
+      if (ev.data instanceof ArrayBuffer) {
+        this.dispatchEvent(new CustomEvent("binary", { detail: ev.data }));
+        return;
+      }
       let env;
       try {
         env = JSON.parse(ev.data);

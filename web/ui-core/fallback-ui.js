@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Fallback shell — shown when foyer-core boots but no UI variant is
 // registered (or all registered variants chose to match: 0 for the
 // current device).

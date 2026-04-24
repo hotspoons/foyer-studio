@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Wire protocol between a Foyer shim (running inside the host DAW) and the Rust
 //! sidecar process.
 //!

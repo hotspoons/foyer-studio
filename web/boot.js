@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Foyer page boot.
 //
 // How UI variants are discovered:

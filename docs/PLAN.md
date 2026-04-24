@@ -1,210 +1,153 @@
-Observed issues:
+# Foyer Studio — active plan
 
-- [x] ✅ Make audio streaming console prints with chunk data for FE and BE debug only. Keep connections, disconnections, subscriptions, etc. silence the constant noise
-  - Already in good shape in tree (`VERBOSE` in `audio-listener.js`, encode path uses `tracing::debug!` in `audio.rs`); no extra changes needed.
-- [x] ✅ Loader/throbber after selecting a project, before it loads
-  - `foyer-app` full-viewport overlay on `launch_project` (WS `project_launch_start`); clears on `backend_swapped` or `launch_failed`. Covers welcome/recents/modal paths. Removed duplicate overlay from `session-view` (it only fired inside the picker).
-- [x] ✅ Show audio placeholder as we are recording, figure out live waveforms later
-  - Timeline: pulsing span record-start→playhead; per **record-armed** lane via `.recording-lane-fill`, full-stack fallback when recording but nothing armed. Live waveforms still future work.
-    - Fixed: timeline now latches a record anchor at record-start and grows forward from that fixed position.
-    - Looks lovely!
-- [x] ✅Seek head (time marker) is jumping around on some projects, going back and forward like 3 seconds
-  - Timeline/store now ignore out-of-order `transport.position` packets and reject non-seek backward jumps during active playback.
-  - Added dev-gated drop counters (`localStorage['foyer.dev.transportDiag']="1"`) to diagnose race suppression.
-    - Will continue to monitor, it isn't consistent, will check local storage if it occurs
-- [x] ✅Can't adjust tempo, changing it just immediately resets it
-  - Shim now applies `transport.tempo` via Ardour `TempoMap::write_copy()` + `change_tempo()`, so FE control writes persist and echo correctly.
-- [x] ✅Zoom to selection in timeline
-  - Already implemented in `foyer-timeline-view` (`zoomToSelection` / `zoomPrevious`) and wired in menu + keybinds (`Ctrl+Shift+E`, `Ctrl+Shift+Backspace`).
-    - Added an inline `Zoom to selection` toolbar button beside zoom controls when a selection exists.
-- [x] ✅Loop selection don't work
-  - Timeline `Loop selection` now drives `set_loop_range`; server/backend-host/shim wire loop start/end and loop-enable with Ardour auto-loop location updates.
-- [/] Routing and groups are incomplete, no UI for them, just static RO track info
-  - Routing panel now supports input selection, bus assignment, sends, and group assignment write-path via `update_track.group_id`.
-  - Shim snapshot now emits `session.groups` + per-track `group_id`; remaining gap is dedicated create/rename/delete group UI workflow.
-- [x]  ✅Bypass button on plugin doesn't light up in track editor view (but does in plugin view)
-  - Plugin strip now listens to store control updates and re-renders bypass state live in embedded track-editor strip.
-    - Updated plugin-strip bypass affordance styling: stronger BY text, dimmer baseline row, and explicit bypass-highlight treatment.
-- [x] ✅Plugin's can't be deleted from channel configs!!
-  - Added remove flow in channel plugin strip context menu (`remove_plugin` command).
-    - Delete key doesn't work after focusing on a plugin. Need to be able to delete via a key
-- [x]  ✅Double clicking a sequence or midi region should open the respective editor
-  - Region double-click now opens the appropriate editor on MIDI tracks (beat sequencer for active sequencer layouts, piano roll otherwise).
-- [x]  ✅Double clicking effects strip or empty part of strip in mixer should open track editor
-  - Mixer track strip dblclick already opened track editor; plugin-strip area/empty slot now also routes dblclick to track editor.
-    - Fixed MIDI region editor routing: sequencer opens only when sequencer metadata exists and is active; plain MIDI regions now open piano roll without conversion prompt.
-- [x] ✅When clicking on a region, delete key should delete the region 
-  - Added explicit region click-selection and keyboard delete path for selected regions.
-    - Global keybind listener now runs in capture phase so Delete/Backspace region deletion is reliable despite focus churn.
-      - NEITHER DELETE OR BACKSPACE DOES SHIT WHEN SELECTED ON A REGION!!!
-- [x] ✅Multi-select regions!
-  - Added modifier multi-select/toggle for regions (Shift/Ctrl/Cmd on region click) plus selected styling and batch delete support.
-    - Multi move/multi delete doesn't work, mouse or otherwise
-- [x] ✅Switching tile layouts should delete any existing floating tile-classed windows
-  - `layout-store` now clears generic floating tile windows on preset/named layout load (`loadPreset`, `loadNamed`).
-- [x] ✅For midi channels, combine the "Track editor" dialog and midi settings dialog into a single dialog switchable with tabs, remember last tab
-  - Track editor now embeds a MIDI tab for MIDI tracks and persists last selected tab in localStorage.
-- [x] ✅Auto/in/disk needs vertical layout grouping like M/S/rec with a divider between
-  - Track strip now renders M/S/rec and monitoring mode in a vertical stack with a divider (`monitor-stack` + `divider`).
-    - Monitoring mode buttons now stack vertically to avoid clipping in narrow strip widths.
-- [x] ✅Panning editor is missing, need stereo and surround pans
-  - Added `foyer-pan-editor-modal`: stereo slider writes host pan, and surround pad UX is present (X writes current pan, Y previewed for future surround backend axes).
-- [/] Plugin windows can't be moved! They need to auto-layout and auto-move
-  - Plugin float windows remain auto-packed by default and are now draggable; manual position persists in layout store and is clamped to the visible workspace.
-     - They are resizable (with an ugly corner marker that doesn't match the theme) but they are still fixed in place, headers not draggable. Please fix
-- [x] ✅Can't delete tracks from the timeline view (should also work with multiple tracks)
-  - End-to-end command path now active: schema/server/backend-host/shim `delete_track`, plus timeline single/multi selection delete actions with confirmation.
-- [x] ✅Can't rearrange tracks from the timeline view
-  - End-to-end reorder now active through shim: timeline move up/down emits `reorder_tracks`, shim updates route presentation order and resorts routes.
-    - Not complete. No errors but no action, I don't see the tracks rearranghing
-    - Complete now
-- [x]  ✅Right click on track should have delete option (as well as multi select -> delete track) with confirmation
-  - Lane-head context menu delete now executes through working backend contracts and applies to selected tracks (or current track) with confirmation.
-- [x] ✅Clear automation should be a styled dialog, not an old school confirm dialog
-  - Automation lane clear now uses styled `confirm-modal` (`confirmAction`) instead of `window.confirm`.
-   - Stabilized shim automation lane mutation paths (`replace_automation_lane`, `update_automation_point`) to avoid unsafe list mutation patterns and reduce point snap-back.
-- [x]  ✅Automation painting is clunky, it is hard to put an automation point at the start of a track, not sure what's going on
-  - Added left-edge add behavior: clicks near lane start now snap to `time_samples=0` and prefer add-point over grabbing nearby first point.
-- [x]  ✅Close session needs to be one to two clicks, not three - Save & Close, Close (abandon changes), cancel. No More.... button. Close abandon changes should prompt are you sure, that is it
-  - Session switcher unsaved-close flow reduced to 1-2 clicks: Save & Close, or Close without saving (with one danger confirm), or Cancel.
+Fresh cut as of 2026-04-24. Everything already landed is archived in
+[old/PLAN.md](old/PLAN.md) under the "Archived 2026-04-24" section.
 
-Short term features:
-- [x] ✅ Timeline marker doesn't move on loop selection button, but does on main track button for looping - suggest removing loop selection button
-  - **Reverted** transport-bar loop toggle back to `controlSet("transport.looping", !loop)` (the original working pattern). **Restored** timeline "Loop selection" toolbar button (`_setLoopToSelection()`). **Fixed** `encode_transport_state()` in shim to include `transport.looping` in the meter batch (was missing, so the FE never got loop-state updates after a toggle). Root cause: `signal_bridge.cc` sends `encode_transport_state` for transport changes, but it only emitted 4 values (tempo, playing, recording, position) — looping was omitted, so the FE stayed stale.
-- [x] ✅ Undo/redo don't really work, kinda but not really
-  - **Fixed**: `ControlSet` in `dispatch.cc` was calling `AutomationControl::set_value` without wrapping it in a reversible command. Ardour's undo stack requires an active `UndoTransaction` for most parameter changes to be recorded. We now wrap every `ControlSet` mutation in `session.begin_reversible_command("Foyer control change")` / `session.commit_reversible_command()`. Undo/redo should now work for control changes (gain, pan, mute, etc.). Plugin param changes also use `UseGroup` so group-ganged tracks are handled correctly.
-- [x] ✅ Tempo adjustments should reflow/regenerate midi from sequencer tracks, currently they don't on the front end
-  - **Fixed**: Added a tempo-change listener inside the beat-sequencer's `_onStoreControl` handler: when `transport.tempo` fires and the current layout is `active`, we call `_persistLayout()` which sends `set_sequencer_layout` to the server. The server runs `expand_sequencer_layout` with the new tempo context and calls `replace_region_notes` to rewrite the region's MIDI data. Notes and region length now stay synced with the live tempo grid.
-- [x] ✅ "- Shim snapshot now emits `session.groups` + per-track `group_id`; remaining gap is dedicated create/rename/delete group UI workflow."
-  - Created `web/src/components/group-manager-modal.js`: a polished standalone dialog with group list, inline rename, color picker, member count, create, and delete-with-confirmation. Opened from **Track** main menu ("Group Manager…") and from the track editor routing section ("Manage…" button next to the Group dropdown). Track editor simplified to just the dropdown + Manage link.
-- [x] ✅ Move plugins and instruments below mixer header and M/S/Rec/auto/in/disk controls so those heights stay consistent. Make it so if the plugins reach the gain sliders the plugins strip scrolls vertically
-  - `plugin-scroll` wrapper in `track-strip.js` now **always renders** regardless of whether the track has plugins. Previously it was conditionally omitted when `plugins.length === 0`, which caused the fader/meter to float upward and break height consistency. Faders now stay anchored at the bottom uniformly.
-- [x] ✅ Panning editor should be in-form and in a default-hidden mini form with a collapsable header at the bottom of the mixing panel above the gain sliders
-  - Replaced the inline stereo slider in `track-strip.js` with a collapsible **Pan** header that expands into a mini-form with **Stereo / Surround** tabs. Stereo tab shows the L/R slider + numeric readout. Surround tab shows an 80px 2D placement pad: pointer-down/move writes X to host pan, Y is previewed client-side. Collapsed by default (`_panOpen = false`).
-- [x] ✅ Delete key doesn't work when focused on one or more tracks - need this to spawn delete dialog
-- [x] ✅ "NEITHER DELETE OR BACKSPACE DOES SHIT WHEN SELECTED ON A REGION!!!"
-- [x] ✅ Plugin windows can't be moved! They need to auto-layout and auto-move
-  - **Replaced** the RAF-throttled store-churn drag with the exact same pattern used in `foyer-window.js`: during `pointermove`, directly mutate the `.pwin` element's inline `left`/`top` styles (zero Lit re-render, zero store churn). On `pointerup`, read the final pixel values from the DOM and persist to the layout store once. Added `header.dragging` cursor state for visual feedback. Resize handler updated to the same direct-DOM-then-persist pattern.
-- [x] ✅ CloudFlare tunnels support
-  - **Schema** (`foyer-schema/src/tunnel.rs`): Added `TunnelRole` (Viewer/Performer/SessionController/Admin) with `allows_command()` filtering, `TunnelConnection` (token_hash, role, label), `TunnelManifest` (persisted to `$XDG_DATA_HOME/foyer/tunnel-manifest.json`), and `TunnelProviderKind`/`TunnelProviderConfig` extensible enum for future providers (Ngrok, LocalRelay, etc.).
-  - **Server** (`foyer-server/src/tunnel.rs`): `create_token()` generates 32-char random tokens, SHA-256 hashes them with a pepper, persists to manifest. `verify_token()` checks hashes. `start_cloudflare()` spawns `cloudflared tunnel --url http://localhost:<port>`, parses stdout for the public hostname, emits `TunnelUp`. `stop_tunnel()` kills the process. `broadcast_tunnel_state()` pushes manifest to all clients.
-  - **Wire protocol** (`message.rs`): Added `TunnelCreateToken`, `TunnelRevokeToken`, `TunnelSetEnabled`, `TunnelStart`, `TunnelStop`, `TunnelRequestState` commands + `TunnelState`, `TunnelUp`, `TunnelDown`, `TunnelTokenCreated` events.
-  - **WS dispatch** (`ws.rs`): Commands wired to tunnel module functions. `foyer-server/Cargo.toml` gained `sha2`, `hex`, `tempfile`, `rand`, `tokio/process`.
-  - **Frontend** (`tunnel-manager-modal.js`): Polished dialog with global enable toggle, start/stop cloudflared, in-line create-token form (label + role dropdown), token display with copy-to-clipboard, connection list with revoke, and role descriptions. Opened from Session → Remote Access… menu.
-  - **RBAC**: `TunnelRole::allows_command()` defines per-role command allow-lists. `connection_role()` in tunnel.rs inspects `?token=` in the WebSocket origin on every envelope. Future: integrate with command-dispatch gating in `ws.rs`.
-  - **Extensibility**: `TunnelProviderKind` is a tagged enum; adding `Ngrok` or `LocalRelay` means adding a variant + a `start_*` function mirroring `start_cloudflare()` — no other code changes required.
-- [x] Cloudflare tunnel modes end-to-end (see DECISIONS 35, 37). Three-mode ladder in `CloudflareProvider`:
-  - **Auto-provision** (`api_token + account_id + hostname`): new `crates/foyer-server/src/cloudflare_api.rs` client talks to the v4 REST API — create-or-reuse tunnel, push ingress config, upsert proxied CNAME, fetch run token. Idempotent; restart doesn't leave orphan objects.
-  - **Raw token** (`tunnel_token + hostname`): paste connector token from the Zero Trust dashboard, skip the API.
-  - **Quick tunnel** (empty): URL-parse fix anchors on `.trycloudflare.com` so we don't latch onto the ToS link banner, and scans stderr (where cloudflared actually prints it) instead of only stdout. Early-exit surfaces as a real error instead of a 30s silent timeout.
-- [x] Tunnel URL auto-provision writes DNS CNAME, ingress config, and fetches the run token without dashboard clickthrough. Schema adds `tunnel_token` next to the existing `api_token / account_id / zone_id / tunnel_name / hostname` on `CloudflareTunnelConfig`.
-- [x] Named-tunnel credential model: invites mint `(normalized-email, random-password)`; server stores `sha256(normalize(email):password|PEPPER)` as `token_hash`; URL `?token=` is `base64url(email_norm:password)` and auto-logs-in. Password shown once in UI; 16-char alphabet without 0/O/1/l/I. See DECISION 36.
-- [x] Tunnel toggle in the Remote Access modal is browser-sticky (`localStorage['foyer.tunnel.enabled']`) so it doesn't flip off on reload. Start-tunnel throbber no longer clears prematurely on the pre-start `stop_tunnel` broadcast + gains a 60s client-side safety timeout.
-- [x] Tunnel modal UI: URLs / usernames / passwords are `user-select: text`, duplicate URL display removed, multi-recipient invite form with add/remove rows, per-row Copy-URL + QR + Email + Revoke icons, just-created credential callout with copy buttons, inline QR overlay rendering `/qr?data=<url>`.
-- [x] Connected-peer roster is server-authoritative (DECISION 39). `AppState.peers: HashMap<String, PeerInfo>` + `Event::PeerJoined / PeerLeft / PeerList`. Each WS connection mints a UUID on handshake, registers in the map, broadcasts join, cleans up + broadcasts leave on disconnect. `PeerInfo` carries `label` (`"host"` for LAN, invite recipient for tunnel), `is_local`, `is_tunnel`, `role_id`. Status bar popover shows the list with `host` / guest distinction + role chip for tunnel guests. Fixes the "peer count doesn't include tunnel connections" bug and replaces the passive origin-sniffing.
+Format:
+- `[ ]` open, `[/]` partial, `[x]` done. Completed entries normally
+  move to the archive on the next cleanup.
+- A `+` prefix after the checkbox marks an item Rich has flagged as
+  priority for the current push. A `-` prefix means backburnered.
 
+Active decisions log: [DECISIONS.md](DECISIONS.md) (currently ≥ 41
+entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
-Mid term:
-- [x] RBAC — config-driven, enforced at action level (see DECISION 38)
-  - **Config.** `crates/foyer-config/src/roles.rs` loads `roles.yaml` seeded from a binary-bundled default (`include_str!("../defaults/roles.yaml")`) on first run. Lives at `$XDG_DATA_HOME/foyer/roles.yaml`; delete to regenerate. Ships the four canonical roles (admin / session_controller / performer / viewer) with allow/deny pattern support (`*`, `prefix.*`, `prefix_*`, literal).
-  - **Enforcement.** Single gate in `dispatch_command` (`crates/foyer-server/src/ws.rs`). Every incoming `Command` variant → wire tag via `command_tag()` (73-arm match, fail-closed on new commands) → `RolesConfig::allows(role_id, tag)`. Denied → `Event::Error { code: "forbidden_for_role" | "auth_required" }`. LAN connections bypass; tunnel-origin connections enforce.
-  - **Tunnel-origin marker.** `TunnelOrigin` request extension applied by the tunnel-auth listener router; WS upgrade extractor reads `Option<Extension<TunnelOrigin>>`. LAN listener doesn't set it.
-  - **Token verification.** WS handshake reads `?token=` query param, decodes `base64url(email:password)`, re-hashes with pepper, matches against `TunnelManifest.connections[].token_hash`. Resolves to `ConnectionAuth { Lan | Authenticated { role_id, recipient } | Unauthenticated }` for the life of the socket.
-  - **Outbound event filter.** Writer loop runs every broadcast envelope through `should_forward_event`: Unauthenticated tunnel connections see only `ClientGreeting` / `Error` / peer-roster events; non-admin tunnel roles don't see `TunnelState` / `TunnelUp` / `TunnelDown` / `TunnelTokenCreated` (admin state stays private); LAN sees everything.
-  - **Login flow.** `foyer-login-modal` (`web/src/components/login-modal.js`) shown when greeting carries `is_tunnel && !is_authenticated`. Submits email+password, encodes `base64url(email:password)`, rewrites `window.location` with `?token=`, page reload re-handshakes. No cookies; URL token is the single identity source.
-  - **Client mirror (UI gating).** Shared helper `web/src/rbac.js` (`isAllowed` / `isActionAllowed`) used by main-menu, session-switcher, transport-bar, command-palette, welcome-screen. Server allow-list streamed to client in `ClientGreeting.role_allow` so UI uses the same pattern rules. Non-admin tunnel guests see no failing buttons — the whole transport-control cluster hides for viewers, welcome screen becomes "waiting for host", command palette filters disallowed actions, session switcher hides Close/Open-Another, main menu items filter per-category. Rogue post-gate clicks surface via `startup-errors` banner (extended to always capture `forbidden_for_role` / `auth_required`).
-  - **Follow-up — mixer surfaces.** Fader / mute / solo / plugin edit controls still render for all roles; denied clicks hit the banner but controls stay visible. Multi-component sweep tracked separately.
+---
 
+## License
+- [x] SPDX headers on entry points + top-level `LICENSE` split. `shims/ardour/` under GPL-2.0-or-later (inherits libardour); main project under Apache-2.0. Rationale in DECISION 15.
 
-### UI:
-- [/] Refactor UI so it is modular and hackable. (DECISION 40)
-  - [x] Split into `foyer-core` (renderless business logic: ws, store, RBAC, audio, automation, registries) → `foyer-ui-core` (shared primitives: tiling, windowing, widgets, fallback shell) → `ui-*` variants (opinionated UIs; `ui-full` is the shipping one). Dependency arrow is one-way.
-  - [x] JSDoc-typed registries in core: `features`, `ui-variants`, `widgets`, `views`. Each is a plain EventTarget-backed map consumable by anyone who imports `foyer-core`.
-  - [x] CSS opinion scoped to each UI variant; `foyer-ui-core` exposes shared vars + primitives, no layout rules.
-  - [x] Shipping UI is now `ui-full/`; nav-bar publishes DEFAULT_VIEWS into the view registry with `elementTag` fields so tile-leaf creates bodies by tag lookup (no hardcoded imports from ui-core into ui).
-  - [x] Variants auto-discovered via `/variants.json` (server scans `web_root` for `ui-*/package.js`; excludes reserved `ui-core`/`ui-tests`). `boot.js` fetches + dynamic-imports each; no `index.html` edit needed to ship one.
-  - [x] Fallback UI in `ui-core/fallback-ui.js` paints "If you lived here, you'd be home now" when no variant matches — proves core can run without any registered renderer.
-  - [x] Backend capabilities plumb through `Backend::features()` → `ClientGreeting.features` → `foyer-core/registry/features.js` → `showFeature()`/`featureEnabled()` helpers. Optimistic default on unknown ids.
-  - [x] Hot-serve from `$XDG_DATA_HOME/foyer/web` with first-run extraction from the binary (`include_dir!`). Default is the install dir (the canonical user-facing path); `--web-root <path>` overrides for dev (`just run` passes `--web-root web`). `just prep` nukes the install dir before each run so stale extractions can't linger.
-  - [x] `--web-overlay <PATH>` flag (repeatable) + `FOYER_WEB_OVERLAY` env for `just run` — layer a sibling dir on top of the base web tree without editing the main repo. `/variants.json` scans every root so `ui-*/` folders in an overlay auto-register. Up to 4 overlays compose via `ServeDir.fallback`. See DECISION 40 + [DEVELOPMENT.md](DEVELOPMENT.md).
-  - [x] `FOYER_BUNDLED_WEB` build-time env var — rebuild `foyer` with a different web tree baked into the binary (no source edit required). Wired via `crates/foyer-cli/build.rs` → `include_dir!("$FOYER_BUNDLED_WEB")`.
-  - [x] HACKING.md in `web/` with recipes (new UI variant, widget override, feature-gated surfaces, new tile view, React-style swap, CLI-driven probe, skip ui-core entirely).
-  - [x] DEVELOPMENT.md in `docs/` — covers `just run`, overlay dev loop, shipping your own binary, CI gate.
-  - [x] AGENTS.md (symlinked as `CLAUDE.md`) — cold-start brief for coding agents with `window.__foyer` probe recipes + `just ui-probe` usage.
-  - [x] Playwright smoke harness + `just test-ui` / `just test-ui-ci` / `just ci` — CI and local gates share the same recipes. See `.github/workflows/ci.yml`.
-  - [x] Fixed tile-leaf element reuse (DECISION 40 amendment) — body views (mixer, timeline, plugin panel) no longer remount on every store event; killed the Listen-start spam + white-flash regression.
-  - [x] Plugin window body renders correctly (`<foyer-plugin-panel>` side-effect imported from `ui-full/app.js`); removed the white corner-L resize handle to match `foyer-window`.
-  - [ ] - Additional UI variants (`ui-lite`, `ui-touch`, `ui-kids`) — scaffolding ready, no concrete variants written yet beyond `ui-full`.
-  - [ ] + Click and drag plugins and midi instruments from one channel to another or from the plugins view to another
-  - [ ] + 1x high x 0.5x wide one panel, 0.5x high x 0.5x wide x 2 other panel layout (3 windows) for presets
-  - [/] Widget-registry adoption sweep: registries exist (`registerWidget` / `widgetTag`) but most shipping components still hardcode tag names. Migrating to `widgetTag(...)` lookups would let alt-UIs override at the widget level without forking whole views.
+## In app communications layer
+- [x] Relay chat — FAB + dockable panel next to the agent FAB. `marked` + `highlight.js` (yaml grammar bundled) vendored under `web/vendor/`; lazy-loaded on first panel open. Server keeps a bounded in-memory ring (`chat::ChatState`, cap 500); admins (and LAN users, trusted) can clear. `Command::ChatSnapshot` writes JSONL under `$XDG_DATA_HOME/foyer/chat/<filename>.jsonl` with basename-only sanitisation.
+- [x] Push-to-talk rides binary frames on the existing control `/ws` (no extra socket — stays under the 6-connection-per-origin cap). Wire format in `chat.rs`: `[P][v][ts_ms_BE][peer_id_hex][f32 LE @ 48 kHz mono]`. `Event::PttState` announces the active speaker so the UI pulses a ring around the FAB, shows a "Alice speaking…" banner, and blocks simultaneous presses.
 
+## Remote session engineering
+- [x] Track editor's "Use browser mic for this track" replaced with a user selector listing performer+ peers (including the host as "This machine"). Routes through `Command::SetTrackBrowserSource`; server broadcasts `Event::TrackBrowserSourceChanged` and snapshots the whole map in the post-greeting handshake. Peer disconnect clears their entries automatically.
+- [x] Transport bar grows a mic button when this browser is the assigned source for ≥1 track. Click starts mic ingress and wires the track's `input_port`; click again stops and clears. Button disappears when the assignment goes away (host unassign, peer leave, etc.).
+- [x] Live monitoring forced off for browser-sourced tracks — server sets `monitoring="off"` whenever an assignment lands, mixer strip shows `MON OFF` in place of the Auto/In/Disk triplet. No live collab over the browser leg; overdubs only.
 
-- [x] + Click and drag to reorder plugins in mixer and mini strip in channel editor
-  - HTML5 DnD on `<foyer-plugin-strip>` rows: each row is `draggable`, dragstart records `{plugin_id, plugin_uri, track_id, source_index}`, drop computes the new index and sends `move_plugin`. Cross-track drops route through add_plugin + remove_plugin (Ctrl/Alt toggles copy). `.drop-before` CSS indicator marks the row the plugin would slot in front of; empty `+` slot also accepts drop as "append."
-- [~] Cloudflare tunnels auth:
-  - [x] Quick tunnels + full account-linked tunnels (api_token + account_id + hostname → auto-provisions tunnel/ingress/DNS; see DECISION 35).
-  - [~] Credential model: each invite mints `(normalized-email, random-password)`; server stores `sha256(email:password|pepper)` as `token_hash`; URL `?token=` is `base64url(email:password)` and auto-logs-in when opened; password shown once in UI, never persisted. (DECISION 36)
-  - [x] Two-port architecture: main LAN server stays open by default; all tunnel traffic routes through a separate process-local auth server (default `127.0.0.1:3839`) where RBAC will live. (DECISION 37)
-  - [x] **Tunnel-side listener serves the full Foyer UI + WS.** `crates/foyer-server/src/lib.rs::build_http_router` is now a shared builder the tunnel-auth listener calls with the same `Arc<AppState>` as the main LAN listener — tunnel guests see the real Foyer, not the `"ok"` stub. `web_root` moved onto `AppState` so the builder is pure. See DECISION 37 rev.
-  - [x] **Tunnel-side RBAC.** Token verification on WS handshake + per-command role gating + outbound event filter — all via DECISION 38. (Rolled into the RBAC item above.)
-  - [x] Multi-recipient access-link form: one row per email+role, submitted as N `tunnel_create_token`s. Role set = Viewer / Performer / Session Controller / Admin.
-  - [x] Per-recipient "Email connection info" button spawns mailto with the direct link (plus username+password if just-created).
-  - [ ] Storing the credential hashes in extended Ardour XML session metadata (currently stored in `$XDG_DATA_HOME/foyer/tunnel-manifest.json`). Deferred to a future pass — requires shim XML surgery and is orthogonal to the wire auth model.
-    - Is this even worthwhile? Defer
-- [x] + Both beat sequencer and midi roll should have a strip that can slide out from the right for managing instruments, patches, etc. (just a compact view of the same form on the track editor)
-  - Both editors now wrap their body in a row layout with a right-anchored drawer that embeds `<foyer-midi-manager>`. Drawer state (open/closed) sticky per-browser. Sequencer toolbar + midi-editor toolbar each got a toggle button. `trackId` is plumbed through `openMidiEditor(region, {trackId})` so the drawer shows the right track's instruments.
-- [x] + You should not be able to hook up a mic from the browser to a midi track
-  - UI: `track-editor-modal._curateInputPorts` filters ports by track kind — MIDI tracks only see `is_midi` ports, audio tracks only see non-MIDI. Mic ingress row is hidden entirely for MIDI tracks (`t.kind === "midi"` branch).
-  - Server: `Command::SetTrackInput` rejects track-kind/port-kind mismatches with `set_track_input_mismatch` before reaching the backend, so CLI / alt-UIs can't bypass the UI filter.
-- [x] + Res (1/4, 1/8, 1/16, etc.) keeps resetting randomly when opening the beat sequencer. Make sure there is no default value clobbering the state value from the back end, thats what it seems like
-  - Root cause: the three sequencer-toolbar `<select>`s used Lit's `.value` property binding, which commits after option children are inserted. In practice the browser saw an empty option set during the commit window and silently fell through to the first option (1/4). Switched to per-option `?selected=${...}` so the match is atomic with option creation.
-- [x] Anonymous-visitor login page (when someone has the URL host but no token). `foyer-login-modal` shown on `is_tunnel && !is_authenticated`, submits email+password as `base64url` token, reloads. Rolled into DECISION 38.
-- [x] + Remote sessions over the tunnel should have listen enabled by default, maybe even hidden from view
-  - `_applyListenPref` now short-circuits to `wantOn = true` for tunnel guests, bypassing the localStorage saved-pref path. The Listen toggle is hidden in the mixer toolbar for tunnel guests too (`rbac.isTunnel` check on render), so they can't turn it off. LAN hosts keep the toggle + saved preference.
-- [/] Flakiness on Monitoring/listening setting with multiple clients connected. Make sure this is per client and sticky per client
-  - Likely helped by the DECISION 40 amendment (mixer element no longer remounts on every store tick, which was re-running `_applyListenPref` and stacking concurrent `AudioListener` starts). Per-client persistence + tunnel-session default-listen remain to verify.
-- [x] For each recipient created, a "QR" icon renders the personal link as a QR code in an overlay (uses the existing `/qr` SVG endpoint).
-- [x] + Projects should always be by absolute path - I see the same projects repeated, some are relative, some are absolute. From the UI perspective the jail's prefix should be stripped off of anything displayed on screen
-  - Server: `swap_backend` now runs the incoming `project_path` through `Path::canonicalize` before storing, so internal lookups (dedupe in `launch_project`, session registry) see one canonical form regardless of what the client sent.
-  - Wire: `SessionRegistry` gained `jail_root: Option<PathBuf>` and a `jail_display_path()` helper that strips the jail prefix. `SessionOpened` / `SessionList` / `BackendSwapped` all run the path through it before emitting so the client never sees an absolute path in any UI-facing field. Recents storage inherits this automatically (client stores `info.path` as-received).
-- [ ] UX for floating windows versus tiles (tiles being core UI):
-  - The track editor, plugin windows, beat editor, midi roll, and maybe a couple of other windows should be a different class of windows than the primary interfaces that has it's own separate dock lower on the right strip with small window indicators, and quick controls to tile all open windows, untile (capture last position before tiling, restore to this), minimize all, unminimize all. They should be styled differently to show they are a different layer of the application and should always float above core windows. Maybe add a hint of transparency and/or blur to background too.
-  - Optionally have a tiled panel that can be scrolled h and v that contains a different view of all open float-class windows
+## Bugs
 
-
-- [x] UI hot-serving from folder (via a CLI flag / config option) instead of built-in, and dump it from the rust binary on first load and serve it from the local folder instead of the bin
-  - DECISION 40: binary bundles `web/` via `include_dir!` and extracts to `$XDG_DATA_HOME/foyer/web/` on first run; `--web-root` / `--web-overlay` / `FOYER_BUNDLED_WEB` cover override, layer, and shipping-a-fork cases. See [DEVELOPMENT.md](DEVELOPMENT.md).
-- [/] Serve http, https, or both (via CLI flag / config option)
-  - HTTPS solo works today (`just run-tls`, `--tls-cert/--tls-key`, or `server.tls_cert`/`server.tls_key` in config.yaml). Running HTTP + HTTPS simultaneously on two sockets isn't wired yet — would need a second listener task off the same `AppState`.
 - [ ] (optionally scale aware) chord modifier keys for music sequence editor
-- [ ] scale-highlighting in piano roll w/ options for weird scales, maybe microtonal
-- [ ] Time marker (see head) doesn't seem to align with MIDI, and it also doesn't align with audio output. We need to figure out an algorithm to account for the offset and set the time marker to account for the delay. Streaming devices with bluetooth have this really well figured out, we should peek at some implementations of how video streams are set to a delay to allow the audio latency to set in. We'll need this all over the place, meters, visualizations, seek heads. Just anything that displays real-time display to the user, have it pipe through a function that can set and maintain a stream delay on it
-
-
-- [/] +Undo/redo still broken
-  - Landed: `delete_region` is now reversible (shim wraps in `begin/commit_reversible_command`, which was missing before). New wire commands `Command::UndoGroupBegin { name }` + `UndoGroupEnd` carry a nesting-depth counter through the shim — when a group is open, individual mutation handlers skip their own transaction pair and the outer group owns the batch (one undo step unwinds the whole thing). Client-side: `timeline-view.deleteSelectedRegions` wraps its loop in a group, so multi-region delete is now a single Ctrl+Z.
-  - Still pending: plugin moves, track reorders, and other bulk ops need the same group-wrap pattern on the client + begin/commit wrapping on the shim side. The scaffolding is in place; extending it is a grind-through-the-call-sites sweep.
-- [x] +Plugin window drag still lags / feels "drunk"
-  - DECISION 41: removed the `transition: left 0.18s ease, top 0.18s ease, ...` that turned every pointermove into a rubber-band animation, and dropped the `_repack()` clamp that snapped manually-dragged windows back into the workspace rect. Plugin floats now behave like `foyer-window` — dumb, direct, no fancy event-loop layer.
-- [ ] x Scrolling in midi roll is broken, can't vertically scroll after screen is painted, stuck at C7
-Long term:
-
-- [ ] **Scope RBAC denials to offender + admins.** Today `forbidden_for_role` / `auth_required` errors broadcast to every connected client, so a viewer can see another viewer's denial banner flash by. Clean fix: add an optional `target_peer_id` field to `Event::Error` (or a new admin-only `Event::RbacDenied`) and extend `should_forward_event` in `crates/foyer-server/src/ws.rs` to route denials only to (a) the offending connection and (b) LAN/admin roles. Offender gets a concise "you can't do that"; host + admins get the full `{recipient, role_id, command}` payload for audit; other guests see nothing. Message already names the recipient in current builds (DECISION 38), so the host-visibility half is in place — this is the client-scope half.
-
-
-### Resampler:
-- [ ] Add a foyer-audio crate (or module in foyer-backend) wrapping rubato::SincFixedIn with a small Resampler { in_rate, out_rate, channels } helper that pushes/pops f32 chunks.
-- [ ] Ingress: in shim_input_port.cc drain_loop, check _sample_rate vs AudioEngine::instance()->sample_rate(); when mismatched, hold a rubato instance per port and run captured chunks through it before buf.read_from. Keep the 20 ms frame-size invariant on the output side, not input.
-- [ ] Egress: in foyer-server/src/audio.rs encode_loop, resample the shim-side PCM to format.sample_rate before Opus/raw framing — wire it between the mpsc receiver and the encoder's frame batcher. Same Resampler helper.
-- [ ] Bit depth: not a real concern — the whole pipeline is already f32 end-to-end (browser AudioWorklet, IPC pack_audio, Ardour AudioBuffer). No conversion needed unless we add a SampleFormat::S16Le variant later.
-- [ ] Handshake: extend AudioIngressOpen so the client can send its actual AudioContext.sampleRate (don't hardcode 48k in audio-ingress.js:49), and have the shim echo back the engine's rate in AudioIngressOpened.format so the browser knows if it needs to resize its worklet buffer.
-
+- [ ] Scale-highlighting in piano roll w/ options for weird scales, maybe microtonal
+- [ ] Time marker (see head) doesn't align with MIDI, and it doesn't align with audio
+  output. Need a stream-delay function that every real-time surface (meters,
+  visualizations, seek heads) routes through — set the delay once per session,
+  all displays stay consistent. Bluetooth audio stacks solve this already; crib
+  from a video-jitter-buffer reference implementation.
 - [ ] Loop button quirk: main loop button loops last selection when no selection active
-  - The transport-bar loop toggle uses `controlSet("transport.looping", !loop)` which sets an absolute boolean. When no explicit selection exists, Ardour's `loop_toggle()` falls back to the previous loop range. User wants: if no selection, either do nothing or show a hint. The timeline "Loop selection" button works correctly because it explicitly sends `set_loop_range` with selection bounds.
+  - Transport-bar toggle uses `controlSet("transport.looping", !loop)` (absolute boolean).
+    When no explicit selection exists, Ardour's `loop_toggle()` falls back to the previous
+    loop range. Want: if no selection, either no-op or hint. Timeline "Loop selection"
+    button works correctly because it explicitly sends `set_loop_range` with bounds.
+- [/] Flakiness on Monitoring/listening setting with multiple clients connected
+  - Likely helped by the tile-leaf element-reuse fix (mixer no longer remounts on every
+    store tick, which was re-running `_applyListenPref` and stacking concurrent
+    `AudioListener` starts). Per-client persistence + multi-client stability still need
+    verification on a live Ardour session with 2+ browsers.
+
+## UI shape
+
+- [ ] UX for floating windows vs tiles (tiles being core UI)
+  - Track editor, plugin windows, beat editor, midi roll, and similar should be a
+    different class of window than the primary interfaces. Dedicated dock lower on the
+    right strip with small window indicators + quick controls (tile all open, untile,
+    minimize all, unminimize all). Styled differently to show they're a separate layer;
+    should always float above core windows. Consider transparency/blur on the background.
+  - Optionally a tiled panel scrollable H/V containing a different view of all open
+    float-class windows.
+- [/] Widget-registry adoption sweep
+  - `registerWidget` / `widgetTag` registries exist but most shipping components still
+    hardcode tag names. Migrating to `widgetTag(...)` lookups would let alt-UIs override
+    at widget granularity without forking whole views.
+- [ ] - Additional UI variants (`ui-lite`, `ui-touch`, `ui-kids`)
+  - Scaffolding is ready (auto-discovery via `/variants.json`, layered overlays, the
+    variant registry picks by `match(env)` score). No concrete variants written yet
+    beyond `ui-full`.
 
 
-- [ ] Add read-only, transport-only, and admin roles, map API keys to roles, enforce on FE and BE
-- [ ] Semantic plugin search?
-- [ ] Plugin snapshot system (maybe use lightweight containers and run process in there?) with session
-  - [ ] Export a full foyer container that includes the plugins used during the session in addition to the audio session
+
+## Infra + ops
+
+- [/] Serve HTTP, HTTPS, or both simultaneously
+  - HTTPS solo works today (`just run-tls`, `--tls-cert/--tls-key`, or
+    `server.tls_cert`/`server.tls_key` in config.yaml). Running HTTP + HTTPS concurrently
+    on two sockets isn't wired yet — would need a second listener task off the same
+    `AppState`.
+
+## Undo/redo (continuation)
+
+- [/] Extend undo-group wrapping to the remaining bulk ops
+  - Wire scaffolding + nesting-depth counter: complete (`Command::UndoGroupBegin/End` +
+    shim `_undo_group_depth`; mutation handlers skip their own begin/commit when a group
+    is open).
+  - Shim mutation handlers wrapped: `DeleteRegion`, `UpdateRegion`, `UpdateTrack`,
+    `DeleteTrack`, `ReorderTracks`, `AddPlugin`, `RemovePlugin`, `AddAutomationPoint`,
+    `UpdateAutomationPoint`, `DeleteAutomationPoint`, `ReplaceAutomationLane`.
+    `AddNote` / `UpdateNote` / `DeleteNote` / `ReplaceRegionNotes` are *already*
+    reversible via `MidiModel::apply_diff_command_as_commit` (Ardour's own pattern), so
+    they don't need our wrap.
+  - Client bulk-op group wrapping: `deleteSelectedRegions`, `_deleteSelectedTracks`
+    (now wraps N `delete_track`s in one group), and plugin-strip cross-track drag
+    (wraps add+remove in one group so the move is a single Ctrl+Z).
+  - Still pending:
+    - [ ] `move_plugin` end-to-end: schema has the command, server routes to a
+      `backend.move_plugin()` but the backend trait method + HostBackend forwarder +
+      shim `Kind::MovePlugin` handler don't exist yet. Today the drop handler on
+      cross-track drag goes through add+remove (grouped), and same-track reorder still
+      emits `move_plugin` which the server catches in the `not-implemented` arm. Wire
+      the full path or rewrite same-track reorder as a remove+add too.
+    - [ ] Rapid-fire coalesce: if the user scrubs a fader for 2s, today that's N
+      separate undo steps. Option: have `dispatch.cc` keep a short time-window merger
+      on `ControlSet` so consecutive writes to the same control id within ~200ms stack
+      into one transaction. Separate concern from the group API.
+
+## Long term
+
+- [ ] Scope RBAC denials to offender + admins
+  - Today `forbidden_for_role` / `auth_required` errors broadcast to every connected
+    client, so a viewer can see another viewer's denial banner flash by. Clean fix: add
+    an optional `target_peer_id` field to `Event::Error` (or a new admin-only
+    `Event::RbacDenied`) and extend `should_forward_event` in
+    `crates/foyer-server/src/ws.rs` to route denials only to the offending connection +
+    LAN/admin roles. Message already names the recipient in current builds (DECISION 38);
+    this is the client-scope half.
+- [ ] Add read-only, transport-only, and admin roles with API keys
+  - Roles already config-driven (DECISION 38) but API-key-to-role mapping isn't wired.
+    Shape: `roles.yaml` gains an `api_keys: {key_hash: role_id}` section; server accepts
+    `Authorization: Bearer <key>` on WS handshake and resolves to the role.
+- [ ] Semantic plugin search
+  - Plugin picker today is substring match on name + vendor. Search by sonic description
+    ("warm saturation", "long reverb tail") using a local embeddings model against the
+    plugin catalog's description fields.
+- [ ] Plugin snapshot system with session
+  - Bundle the specific plugin binaries + presets into the session archive so a session
+    opens with the same plugin state on another machine (or a shipping
+    Foyer container). Export a full Foyer container that includes the plugins used
+    during the session in addition to the audio.
+
+## Resampler (audio ingress / egress sample-rate handling)
+
+- [ ] Add a `foyer-audio` crate (or module in `foyer-backend`) wrapping
+  `rubato::SincFixedIn` with a small `Resampler { in_rate, out_rate, channels }` helper
+  that pushes/pops f32 chunks.
+- [ ] Ingress: in `shim_input_port.cc` `drain_loop`, check `_sample_rate` vs
+  `AudioEngine::instance()->sample_rate()`; when mismatched, hold a `rubato` instance per
+  port and run captured chunks through it before `buf.read_from`. Keep the 20 ms
+  frame-size invariant on the output side, not input.
+- [ ] Egress: in `foyer-server/src/audio.rs` `encode_loop`, resample the shim-side PCM to
+  `format.sample_rate` before Opus/raw framing — wire it between the mpsc receiver and
+  the encoder's frame batcher. Same Resampler helper.
+- [ ] Bit depth: not a real concern — the whole pipeline is already f32 end-to-end
+  (browser `AudioWorklet`, IPC `pack_audio`, Ardour `AudioBuffer`). No conversion needed
+  unless we add a `SampleFormat::S16Le` variant later.
+- [ ] Handshake: extend `AudioIngressOpen` so the client can send its actual
+  `AudioContext.sampleRate` (don't hardcode 48k in `audio-ingress.js:49`); shim echoes
+  back the engine's rate in `AudioIngressOpened.format` so the browser knows whether to
+  resize its worklet buffer.
+
+## Known deferred
+
+- Storing tunnel credential hashes in extended Ardour XML session metadata (currently in
+  `$XDG_DATA_HOME/foyer/tunnel-manifest.json`). Rich's call: "Is this even worthwhile?
+  Defer." Leave in manifest file indefinitely.

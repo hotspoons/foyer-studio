@@ -200,13 +200,16 @@ export class TrackStrip extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this._onSelection = () => this._syncSelected();
+    this._onBrowserSources = () => this.requestUpdate();
     window.__foyer?.store?.addEventListener("selection", this._onSelection);
+    window.__foyer?.store?.addEventListener("track-browser-sources", this._onBrowserSources);
     this._syncSelected();
     this.addEventListener("click", this._onStripClick);
     this.addEventListener("dblclick", this._onStripDblClick);
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("selection", this._onSelection);
+    window.__foyer?.store?.removeEventListener("track-browser-sources", this._onBrowserSources);
     this.removeEventListener("click", this._onStripClick);
     this.removeEventListener("dblclick", this._onStripDblClick);
     super.disconnectedCallback();
@@ -339,21 +342,27 @@ export class TrackStrip extends LitElement {
         </div>
         ${t.monitoring !== undefined && t.monitoring !== null ? html`
           <div class="divider"></div>
-          <div class="mon-row" title="Monitoring: auto, input (live), disk (playback) — Ardour MonitorChoice">
-            ${["auto", "in", "disk"].map((mode) => {
-              const full = mode === "in" ? "input" : mode;
-              const active = (t.monitoring || "auto") === full;
-              return html`
-                <button class="mon-btn ${active ? "on" : ""}"
-                        title=${
-                          full === "input" ? "Input — always monitor the live input (rehearsing)"
-                          : full === "disk" ? "Disk — always play back from disk (no live input)"
-                          : "Auto — switch based on transport state"
-                        }
-                        @click=${() => this._setMonitoring(full)}>${mode.toUpperCase()}</button>
-              `;
-            })}
-          </div>
+          ${this._hasBrowserSource(t.id) ? html`
+            <div class="mon-row" title="Live monitoring is off for browser-sourced tracks — the round-trip latency would make it unusable.">
+              <span style="font-size:10px;color:var(--color-text-muted);padding:2px 4px">MON OFF</span>
+            </div>
+          ` : html`
+            <div class="mon-row" title="Monitoring: auto, input (live), disk (playback) — Ardour MonitorChoice">
+              ${["auto", "in", "disk"].map((mode) => {
+                const full = mode === "in" ? "input" : mode;
+                const active = (t.monitoring || "auto") === full;
+                return html`
+                  <button class="mon-btn ${active ? "on" : ""}"
+                          title=${
+                            full === "input" ? "Input — always monitor the live input (rehearsing)"
+                            : full === "disk" ? "Disk — always play back from disk (no live input)"
+                            : "Auto — switch based on transport state"
+                          }
+                          @click=${() => this._setMonitoring(full)}>${mode.toUpperCase()}</button>
+                `;
+              })}
+            </div>
+          `}
         ` : null}
       </div>
       <div class="plugin-scroll">
@@ -606,6 +615,16 @@ export class TrackStrip extends LitElement {
     if (!this.track) return;
     this.track = { ...this.track, monitoring: mode };
     this._updatePatch({ monitoring: mode });
+  }
+
+  /**
+   * True when some browser is the assigned source for this track —
+   * in which case live monitoring is forced off (browser round-trip
+   * latency kills the "hear yourself while laying a take" use case).
+   */
+  _hasBrowserSource(trackId) {
+    const sources = window.__foyer?.store?.state?.trackBrowserSources;
+    return !!(sources && sources.get && sources.get(trackId));
   }
 
   updated(changed) {

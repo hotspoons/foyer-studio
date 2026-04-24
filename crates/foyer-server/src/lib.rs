@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! WebSocket server + client fan-out for Foyer.
 //!
 //! Owns a single `Backend` (any type that implements [`foyer_backend::Backend`]),
@@ -13,6 +14,7 @@
 mod audio;
 mod audio_opus;
 mod audio_ws;
+pub(crate) mod chat;
 mod cloudflare_api;
 mod cloudflare_provider;
 mod cloudflared_dl;
@@ -186,6 +188,22 @@ pub(crate) struct AppState {
     /// (on `AudioIngressClose` or server restart) closes the channel
     /// and the backend tears the sink down from its side.
     pub(crate) ingress_senders: Mutex<HashMap<u32, PcmTx>>,
+    /// In-app chat + PTT state. Decoupled from the DAW — messages and
+    /// push-to-talk audio fan out purely client-to-client via the
+    /// sidecar. See `chat.rs` for the wire format.
+    pub(crate) chat: chat::ChatState,
+    /// Track id → peer id assignment. When a row is present the named
+    /// peer's browser is expected to act as the audio source for that
+    /// track (mic capture over the existing `/ws/ingress/` pipe). Not
+    /// persisted across sidecar restarts; the host re-assigns per
+    /// session.
+    pub(crate) track_browser_sources: RwLock<HashMap<foyer_schema::EntityId, String>>,
+    /// Broadcast for PTT binary frames. Separate channel from the
+    /// JSON envelope bus so the writer loop can forward it as a
+    /// `Message::Binary` without re-encoding. Each connection
+    /// subscribes; the sender's own frames are filtered by matching
+    /// the embedded peer id.
+    pub(crate) ptt_tx: broadcast::Sender<Vec<u8>>,
     /// Multi-session registry. Holds every currently-open session
     /// keyed by its UUID; each has its own backend Arc + event pump.
     /// `add_session`/`close_session` on this registry broadcasts
@@ -411,6 +429,7 @@ impl Server {
         spawner: Option<Arc<dyn BackendSpawner>>,
     ) -> Self {
         let (tx, _) = broadcast::channel(BROADCAST_CAP);
+        let (ptt_tx, _) = broadcast::channel::<Vec<u8>>(BROADCAST_CAP);
         let ring = Arc::new(RwLock::new(DeltaRing::new(RING_CAP)));
         let next_seq = Arc::new(AtomicU64::new(1));
         let sessions = Arc::new(SessionRegistry::new(
@@ -432,6 +451,9 @@ impl Server {
             tls_enabled: std::sync::atomic::AtomicBool::new(false),
             audio_hub: Arc::new(audio::AudioHub::new()),
             ingress_senders: Mutex::new(HashMap::new()),
+            chat: chat::ChatState::new(),
+            track_browser_sources: RwLock::new(HashMap::new()),
+            ptt_tx,
             sessions,
             orphans: RwLock::new(Vec::new()),
             focus_session_id: RwLock::new(None),

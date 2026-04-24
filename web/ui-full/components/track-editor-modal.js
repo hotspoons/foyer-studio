@@ -260,6 +260,8 @@ export class TrackEditorModal extends LitElement {
     super.connectedCallback();
     document.addEventListener("keydown", this._keyHandler);
     window.__foyer?.store?.addEventListener("change", this._storeHandler);
+    window.__foyer?.store?.addEventListener("peers", this._storeHandler);
+    window.__foyer?.store?.addEventListener("track-browser-sources", this._storeHandler);
     window.__foyer?.ws?.addEventListener?.("envelope", this._onEnvelope);
     // Restore mic state if this track already has a live ingress
     // (modal was closed and reopened).
@@ -274,6 +276,8 @@ export class TrackEditorModal extends LitElement {
   disconnectedCallback() {
     document.removeEventListener("keydown", this._keyHandler);
     window.__foyer?.store?.removeEventListener("change", this._storeHandler);
+    window.__foyer?.store?.removeEventListener("peers", this._storeHandler);
+    window.__foyer?.store?.removeEventListener("track-browser-sources", this._storeHandler);
     window.__foyer?.ws?.removeEventListener?.("envelope", this._onEnvelope);
     super.disconnectedCallback();
   }
@@ -616,38 +620,125 @@ export class TrackEditorModal extends LitElement {
   }
 
   _renderMicRow(currentInput) {
-    const live    = TRACK_MICS.get(this.trackId);
-    // Button reads "Disconnect" if we own the ingress OR if the track
-    // is already wired to a foyer: port (another client may have
-    // hooked it up). The disconnect path handles both cases.
-    const micOn   = this._micState === "active"
-                 || !!live
-                 || (currentInput || "").startsWith("foyer:");
+    // Replace the old boolean "Use browser mic" button with a user
+    // selector: the host picks which connected peer (performer+)
+    // sources audio for this track. Picking "This machine" wires the
+    // local mic ingress; picking another peer just announces the
+    // assignment and their browser surfaces its own toolbar mic
+    // button in response.
+    const store = window.__foyer?.store;
+    const sources = store?.state?.trackBrowserSources;
+    const selfPeerId = store?.state?.selfPeerId || "";
+    const assigned = sources?.get?.(this.trackId) || "";
+    const peers = this._performerPeers();
     const starting = this._micState === "starting";
-    const label = starting
-      ? html`${icon("microphone", 14)} <span>Starting mic…</span>`
-      : micOn
-        ? html`${icon("microphone", 14)} <span>Disconnect browser mic</span>`
-        : html`${icon("microphone", 14)} <span>Use browser mic for this track</span>`;
-    const title = micOn
-      ? `Stop the browser mic ingress (${live?.portName || currentInput})`
-      : "Grant mic access and route this track's input to the browser capture";
     return html`
       <div class="row">
-        <label></label>
-        <button class="mic-btn ${micOn ? "on" : ""}"
+        <label>Source user</label>
+        <select class="fld"
                 ?disabled=${starting}
-                title=${title}
-                @click=${this._toggleBrowserMic}>
-          ${label}
-        </button>
+                .value=${assigned}
+                @change=${(e) => this._onBrowserSourceChange(e.currentTarget.value)}>
+          <option value="">None (off)</option>
+          ${peers.map((p) => html`
+            <option value=${p.id} ?selected=${assigned === p.id}>
+              ${p.id === selfPeerId ? `This machine (${p.label})` : p.label}
+            </option>
+          `)}
+          ${assigned && !peers.find((p) => p.id === assigned) ? html`
+            <option value=${assigned} ?selected=${true}>
+              (offline peer — ${assigned.slice(0, 6)}…)
+            </option>` : null}
+        </select>
       </div>
-      ${this._micState === "error" ? html`
+      ${assigned === selfPeerId ? html`
         <div class="row">
           <label></label>
-          <span class="hint" style="color:var(--color-danger,#c04040)">${this._micError || "Mic failed to start."}</span>
-        </div>` : null}
+          <button class="mic-btn ${this._micState === "active" ? "on" : ""}"
+                  ?disabled=${starting}
+                  title=${this._micState === "active"
+                    ? "Stop the browser mic ingress"
+                    : "Start capturing your mic into this track"}
+                  @click=${this._toggleBrowserMic}>
+            ${starting
+              ? html`${icon("microphone", 14)} <span>Starting mic…</span>`
+              : this._micState === "active"
+                ? html`${icon("microphone", 14)} <span>Disconnect browser mic</span>`
+                : html`${icon("microphone", 14)} <span>Start capturing your mic</span>`}
+          </button>
+        </div>
+        ${this._micState === "error" ? html`
+          <div class="row">
+            <label></label>
+            <span class="hint" style="color:var(--color-danger,#c04040)">${this._micError || "Mic failed to start."}</span>
+          </div>` : null}
+      ` : assigned ? html`
+        <div class="row">
+          <label></label>
+          <span class="hint">Waiting for that user to enable their mic from their browser toolbar.</span>
+        </div>
+      ` : null}
+      <div class="row">
+        <label></label>
+        <span class="hint" style="font-size:10px">
+          Live monitoring is forced off for browser-sourced tracks — the
+          browser leg adds too much latency. Use this for overdubs.
+        </span>
+      </div>
     `;
+  }
+
+  /** Peers eligible to source a track: anyone whose role is
+   *  `performer`, `session_controller`, or `admin` — i.e. anyone who
+   *  isn't just a viewer. LAN peers always qualify (they're the host). */
+  _performerPeers() {
+    const peers = window.__foyer?.store?.state?.peers;
+    if (!peers) return [];
+    const out = [];
+    for (const p of peers.values()) {
+      if (p.is_local) { out.push(p); continue; }          // host / LAN
+      if (!p.is_tunnel) { out.push(p); continue; }        // catch-all
+      const role = p.role_id || "";
+      if (role === "admin" || role === "session_controller" || role === "performer") {
+        out.push(p);
+      }
+    }
+    // Stable order: host first, then alphabetical by label.
+    out.sort((a, b) => {
+      if (a.is_local && !b.is_local) return -1;
+      if (!a.is_local && b.is_local) return 1;
+      return (a.label || "").localeCompare(b.label || "");
+    });
+    return out;
+  }
+
+  _onBrowserSourceChange = async (peerId) => {
+    const selfPeerId = window.__foyer?.store?.state?.selfPeerId || "";
+    const prev = window.__foyer?.store?.state?.trackBrowserSources?.get?.(this.trackId) || "";
+    // If we were the active source and the selection changes, stop
+    // our local ingress — the new user (or no one) takes over.
+    if (prev === selfPeerId && peerId !== selfPeerId) {
+      await this._stopLocalMicIfActive();
+    }
+    window.__foyer?.ws?.send?.({
+      type: "set_track_browser_source",
+      track_id: this.trackId,
+      peer_id: peerId || "",
+    });
+  };
+
+  async _stopLocalMicIfActive() {
+    const live = TRACK_MICS.get(this.trackId);
+    const t = this._track();
+    const curr = (t?.inputs?.[0]?.name) || "";
+    if (live || curr.startsWith("foyer:")) {
+      if (live) {
+        try { await live.ingress.stop(); } catch {}
+        TRACK_MICS.delete(this.trackId);
+      }
+      this._setTrackInput("");
+      this._micState = "idle";
+    }
   }
 
   // Trim the raw port list down to the subset that's actually useful

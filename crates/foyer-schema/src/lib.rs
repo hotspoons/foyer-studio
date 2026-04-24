@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! DAW-agnostic domain schema for Foyer Studio.
 //!
 //! Nothing in this crate knows about any specific host DAW. Types here are the neutral
@@ -28,8 +29,8 @@ pub use fs::{FsEntry, FsEntryKind, PathListing};
 pub use id::EntityId;
 pub use io::{EnginePort, IoDirection, IoPort};
 pub use message::{
-    BackendInfo, Command, ControlUpdate, Envelope, Event, OrphanInfo, Patch, PeerInfo, Seq,
-    SessionInfo,
+    BackendInfo, ChatMessageRecord, Command, ControlUpdate, Envelope, Event, OrphanInfo, Patch,
+    PeerInfo, PttSpeaker, Seq, SessionInfo, TrackBrowserSourceEntry,
 };
 pub use midi::{
     default_gm_drum_rows, expand_sequencer_layout, sequencer_layout_length_ticks, ArrangementSlot,

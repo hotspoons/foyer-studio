@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The `Backend` trait is the sidecar's view of the world. Implementations:
 //!
 //! - `foyer-backend-stub` — in-memory fake session for development and demo mode.

@@ -28,3 +28,4 @@ vgcore.*
 /shims/*/cmake-build/
 /shims/*/build/
 
+/tmp

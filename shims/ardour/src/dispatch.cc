@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Foyer Studio — Ardour shim: dispatcher implementation.
  *
@@ -1353,12 +1354,17 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			// are only valid on registered threads.
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
 				auto hit = schema_map::find_region (shim->session (), snap.id);
 				if (!hit.region) {
 					PBD::warning << "foyer_shim: update_region: unknown region id: " << snap.id << endmsg;
 					return;
 				}
+				// See PLAN 177 + DeleteRegion handler for the pattern.
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer update region");
 				if (snap.has_patch_start) {
 					hit.region->set_position (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_start)));
 				}
@@ -1371,7 +1377,8 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (snap.has_patch_muted) {
 					hit.region->set_muted (snap.patch_muted);
 				}
-				auto bytes = msgpack_out::encode_region_updated (shim->session (), snap.id);
+				if (own_txn) session.commit_reversible_command ();
+				auto bytes = msgpack_out::encode_region_updated (session, snap.id);
 				if (!bytes.empty ()) {
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 				}
@@ -2126,7 +2133,8 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.id.empty ()) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
 				if (snap.id.rfind ("track.", 0) != 0) return;
 				const std::string sid = snap.id.substr (6);
 				std::shared_ptr<Route> route;
@@ -2141,7 +2149,11 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					PBD::warning << "foyer_shim: delete_track: unknown track id: " << snap.id << endmsg;
 					return;
 				}
-				shim->session ().remove_route (route);
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer delete track");
+				session.remove_route (route);
+				if (own_txn) session.commit_reversible_command ();
 				auto bytes = msgpack_out::encode_patch_reload ();
 				shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
@@ -2151,8 +2163,12 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.ordered_track_ids.empty ()) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
-				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer reorder tracks");
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
 				std::map<std::string, std::shared_ptr<Route>> by_sid;
 				for (auto const& r : *routes) {
 					if (!r) continue;
@@ -2193,6 +2209,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				PBD::warning << "foyer_shim: reorder_tracks done"
 				             << " n_routes=" << by_sid.size ()
 				             << endmsg;
+				if (own_txn) session.commit_reversible_command ();
 				auto bytes = msgpack_out::encode_patch_reload ();
 				shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
@@ -2231,12 +2248,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.id.empty ()) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
-				// Locate the route by foyer id.
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto& session = shim->session ();
+				// Locate the route by foyer id. Begin the reversible
+				// command only after validation so early-returns
+				// don't leave dangling open transactions.
 				if (snap.id.rfind ("track.", 0) != 0) return;
 				const std::string sid = snap.id.substr (6);
 				std::shared_ptr<Route> route;
-				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
 				for (auto const& r : *routes) {
 					if (!r) continue;
 					std::ostringstream tmp;
@@ -2247,6 +2268,8 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					PBD::warning << "foyer_shim: update_track: unknown track id: " << snap.id << endmsg;
 					return;
 				}
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer update track");
 				if (snap.has_patch_name) {
 					route->set_name (snap.patch_name);
 				}
@@ -2361,18 +2384,20 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 
 				if (group_changed) {
+					if (own_txn) session.commit_reversible_command ();
 					auto bytes = msgpack_out::encode_patch_reload ();
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 				} else {
-					auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.id);
+					if (own_txn) session.commit_reversible_command ();
+					auto bytes = msgpack_out::encode_track_updated (session, snap.id);
 					if (!bytes.empty ()) {
 						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 					}
 				}
-            });
-            break;
-        }
-        case DecodedCmd::Kind::CreateGroup: {
+			});
+			break;
+		}
+		case DecodedCmd::Kind::CreateGroup: {
             DecodedCmd snap = cmd;
             FoyerShim* shim = &_shim;
             _shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
@@ -2580,12 +2605,14 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.track_id.empty () || cmd.plugin_uri.empty ()) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
 				// Find the target track.
 				if (snap.track_id.rfind ("track.", 0) != 0) return;
 				const std::string sid = snap.track_id.substr (6);
+				auto& session = shim->session ();
 				std::shared_ptr<Route> route;
-				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
 				for (auto const& r : *routes) {
 					if (!r) continue;
 					std::ostringstream tmp;
@@ -2605,7 +2632,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				};
 				std::shared_ptr<ARDOUR::Plugin> plug;
 				for (auto t : order) {
-					plug = ARDOUR::find_plugin (shim->session (), snap.plugin_uri, t);
+					plug = ARDOUR::find_plugin (session, snap.plugin_uri, t);
 					if (plug) break;
 				}
 				if (!plug) {
@@ -2613,14 +2640,18 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					return;
 				}
 
-				auto pi = std::make_shared<ARDOUR::PluginInsert> (shim->session (), shim->session (), plug);
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer add plugin");
+				auto pi = std::make_shared<ARDOUR::PluginInsert> (session, session, plug);
 				if (route->add_processor (pi, ARDOUR::PreFader, nullptr, true) != 0) {
+					if (own_txn) session.commit_reversible_command ();
 					PBD::warning << "foyer_shim: add_plugin: Route::add_processor failed for " << snap.plugin_uri << endmsg;
 					return;
 				}
+				if (own_txn) session.commit_reversible_command ();
 				// Success — ask the signal bridge to re-emit the route's
 				// snapshot so clients see the new plugin instance.
-				auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.track_id);
+				auto bytes = msgpack_out::encode_track_updated (session, snap.track_id);
 				if (!bytes.empty ()) {
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 				}
@@ -2631,14 +2662,20 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.plugin_id.empty ()) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
 				// plugin_id format is "plugin.<pbd-id>" — reuse the
 				// same resolution pattern ControlSet uses for the
 				// bypass toggle.
 				if (snap.plugin_id.rfind ("plugin.", 0) != 0) return;
 				const std::string pid = snap.plugin_id.substr (7);
-				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
-				std::string affected_track;
+				auto& session = shim->session ();
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
+				// Locate first so we can skip begin/commit when the
+				// plugin id doesn't resolve — keeps dangling txn out
+				// of the way.
+				std::shared_ptr<Route> target_route;
+				std::shared_ptr<Processor> target_proc;
 				for (auto const& r : *routes) {
 					if (!r) continue;
 					for (uint32_t i = 0; ; ++i) {
@@ -2648,24 +2685,32 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						if (!pi) continue;
 						std::ostringstream os; os << pi->id ();
 						if (os.str () != pid) continue;
-						if (r->remove_processor (proc) == 0) {
-							std::ostringstream tid;
-							tid << r->id ();
-							affected_track = "track." + tid.str ();
-						} else {
-							PBD::warning << "foyer_shim: remove_plugin: Route::remove_processor failed" << endmsg;
-						}
+						target_route = r;
+						target_proc = proc;
 						break;
 					}
-					if (!affected_track.empty ()) break;
+					if (target_proc) break;
 				}
-				if (affected_track.empty ()) {
+				if (!target_route || !target_proc) {
 					PBD::warning << "foyer_shim: remove_plugin: plugin_id not found: " << snap.plugin_id << endmsg;
 					return;
 				}
-				auto bytes = msgpack_out::encode_track_updated (shim->session (), affected_track);
-				if (!bytes.empty ()) {
-					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer remove plugin");
+				std::string affected_track;
+				if (target_route->remove_processor (target_proc) == 0) {
+					std::ostringstream tid;
+					tid << target_route->id ();
+					affected_track = "track." + tid.str ();
+				} else {
+					PBD::warning << "foyer_shim: remove_plugin: Route::remove_processor failed" << endmsg;
+				}
+				if (own_txn) session.commit_reversible_command ();
+				if (!affected_track.empty ()) {
+					auto bytes = msgpack_out::encode_track_updated (session, affected_track);
+					if (!bytes.empty ()) {
+						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+					}
 				}
 			});
 			break;
@@ -2856,14 +2901,19 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.lane_id.empty ()) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto& session = shim->session ();
 				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
-				    schema_map::resolve_automation_control (shim->session (), snap.lane_id));
+				    schema_map::resolve_automation_control (session, snap.lane_id));
 				if (!ac) return;
 				auto alist = ac->alist ();
 				if (!alist) return;
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer add automation point");
 				alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_point.time_samples)), snap.auto_point.value);
-				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
+				if (own_txn) session.commit_reversible_command ();
+				auto bytes = msgpack_out::encode_track_updated (session, schema_map::track_id_for_control (session, snap.lane_id));
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;
@@ -2872,12 +2922,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.lane_id.empty () || !cmd.has_auto_orig_time) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto& session = shim->session ();
 				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
-				    schema_map::resolve_automation_control (shim->session (), snap.lane_id));
+				    schema_map::resolve_automation_control (session, snap.lane_id));
 				if (!ac) return;
 				auto alist = ac->alist ();
 				if (!alist) return;
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer move automation point");
 				// Rebuild the lane around the point at `auto_orig_time`.
 				// Matching on (time,value) is fragile because the UI sends
 				// the *new* value; using nearest-time replacement avoids
@@ -2914,7 +2968,8 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				for (auto const& pt : pts) {
 					alist->add (Temporal::timepos_t (pt.first), pt.second);
 				}
-				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
+				if (own_txn) session.commit_reversible_command ();
+				auto bytes = msgpack_out::encode_track_updated (session, schema_map::track_id_for_control (session, snap.lane_id));
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;
@@ -2923,16 +2978,21 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.lane_id.empty ()) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto& session = shim->session ();
 				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
-				    schema_map::resolve_automation_control (shim->session (), snap.lane_id));
+				    schema_map::resolve_automation_control (session, snap.lane_id));
 				if (!ac) return;
 				auto alist = ac->alist ();
 				if (!alist) return;
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer delete automation point");
 				alist->erase (
 					Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_point.time_samples)),
 					snap.auto_point.value);
-				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
+				if (own_txn) session.commit_reversible_command ();
+				auto bytes = msgpack_out::encode_track_updated (session, schema_map::track_id_for_control (session, snap.lane_id));
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;
@@ -2941,21 +3001,26 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.lane_id.empty ()) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto& session = shim->session ();
 				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
-				    schema_map::resolve_automation_control (shim->session (), snap.lane_id));
+				    schema_map::resolve_automation_control (session, snap.lane_id));
 				if (!ac) return;
 				auto alist = ac->alist ();
 				if (!alist) return;
 				// Avoid fast_simple_add under a manually-held writer lock; using
 				// public mutators here has been markedly safer across Ardour
 				// builds when replacing the entire lane.
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer replace automation lane");
 				alist->clear ();
 				for (auto const& pt : snap.auto_points) {
 					alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (pt.time_samples)), pt.value);
 				}
 				alist->mark_dirty ();
-				auto bytes = msgpack_out::encode_track_updated (shim->session (), schema_map::track_id_for_control (shim->session (), snap.lane_id));
+				if (own_txn) session.commit_reversible_command ();
+				auto bytes = msgpack_out::encode_track_updated (session, schema_map::track_id_for_control (session, snap.lane_id));
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // foyer-core bootstrap.
 //
 // Single entry point that:
@@ -21,6 +22,7 @@
 
 import { FoyerWs } from "./ws.js";
 import { Store } from "./store.js";
+import { ChatStore } from "./chat.js";
 import { installTransportReturn } from "./transport-return.js";
 import { pickUiVariant, sniffEnv, getUiVariant } from "./registry/ui-variants.js";
 import { setFeatures } from "./registry/features.js";
@@ -50,8 +52,10 @@ export function bootFoyerCore(opts = {}) {
 
   const store = new Store({ selfOrigin: originTag });
   const ws = new FoyerWs({ url: wsUrl, origin: originTag });
+  const chat = new ChatStore({ ws, store });
 
   store.attach(ws);
+  chat.attach();
   installTransportReturn({ store, ws });
 
   // Drain ClientGreeting into the feature + variant registries.
@@ -76,6 +80,7 @@ export function bootFoyerCore(opts = {}) {
   globalThis.__foyer = Object.assign(globalThis.__foyer || {}, {
     store,
     ws,
+    chat,
     mountVariant,
     unmountVariant,
   });

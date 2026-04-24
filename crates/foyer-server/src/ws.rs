@@ -299,6 +299,30 @@ async fn handle(
         let _ = send_env(&mut tx_ws, &env).await;
     }
 
+    // Unicast the current track → browser-source routing so a late-
+    // joining browser knows which tracks it is expected to source
+    // audio for without having to ask after greeting.
+    {
+        let entries: Vec<_> = state
+            .track_browser_sources
+            .read()
+            .await
+            .iter()
+            .map(|(tid, pid)| foyer_schema::TrackBrowserSourceEntry {
+                track_id: tid.clone(),
+                peer_id: pid.clone(),
+            })
+            .collect();
+        let env = Envelope {
+            schema: SCHEMA_VERSION,
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            session_id: None,
+            body: Event::TrackBrowserSourcesSnapshot { entries },
+        };
+        let _ = send_env(&mut tx_ws, &env).await;
+    }
+
     // Register + broadcast PeerJoined. Every client (including the one
     // that just connected) receives the join through the broadcast
     // channel; the new client filters its own entry via `peer_id` from
@@ -379,17 +403,39 @@ async fn handle(
     let reader_state = state.clone();
     let reader_origin = origin_tag.clone();
     let reader_auth = auth.clone();
+    let reader_peer_id = peer_id.clone();
+    let reader_peer_label = peer_info.label.clone();
     let reader = tokio::spawn(async move {
         while let Some(frame) = rx_ws.next().await {
             let Ok(msg) = frame else { break };
             match msg {
                 Message::Text(t) => {
-                    if let Err(e) =
-                        dispatch_command(&reader_state, reader_origin.as_deref(), &reader_auth, &t)
-                            .await
+                    if let Err(e) = dispatch_command(
+                        &reader_state,
+                        reader_origin.as_deref(),
+                        &reader_auth,
+                        &reader_peer_id,
+                        &reader_peer_label,
+                        &t,
+                    )
+                    .await
                     {
                         tracing::warn!("client command rejected: {e}");
                     }
+                }
+                Message::Binary(b) => {
+                    // Binary frames on the control WS carry push-to-talk
+                    // audio. The chat module inspects the prefix byte and
+                    // fans the frame out to every peer (minus the sender)
+                    // as another binary message. See `chat::handle_binary`
+                    // for the wire format.
+                    crate::chat::handle_binary(
+                        &reader_state,
+                        &reader_peer_id,
+                        &reader_peer_label,
+                        &b,
+                    )
+                    .await;
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -397,32 +443,61 @@ async fn handle(
         }
     });
 
-    // Writer loop.
+    // Writer loop — interleaves JSON envelopes (control-plane) with
+    // PTT binary frames (push-to-talk audio) over the same WS. The
+    // sender filters its own PTT frames by matching the embedded
+    // peer id so the speaker doesn't hear itself echo back through
+    // the server.
+    let mut rx_ptt = state.ptt_tx.subscribe();
+    let self_peer_id = peer_id.clone();
     loop {
-        match rx_broadcast.recv().await {
-            Ok(env) => {
-                // Outbound RBAC filter: events that describe tunnel
-                // admin state (token minted, tunnel started, etc.)
-                // should only reach connections that could have
-                // initiated them. Unauthenticated tunnel guests see
-                // nothing but the greeting + error stream until they
-                // log in.
-                if !should_forward_event(&env.body, &auth, &state).await {
-                    continue;
-                }
-                if send_env(&mut tx_ws, &env).await.is_err() {
-                    break;
-                }
-            }
-            Err(RecvError::Lagged(n)) => {
-                tracing::warn!("client lagged {n} messages; sending snapshot");
-                if let Some(snap) = state.current_snapshot().await {
-                    if send_env(&mut tx_ws, &snap).await.is_err() {
+        tokio::select! {
+            biased;
+            env_result = rx_broadcast.recv() => match env_result {
+                Ok(env) => {
+                    // Outbound RBAC filter: events that describe tunnel
+                    // admin state (token minted, tunnel started, etc.)
+                    // should only reach connections that could have
+                    // initiated them. Unauthenticated tunnel guests see
+                    // nothing but the greeting + error stream until they
+                    // log in.
+                    if !should_forward_event(&env.body, &auth, &state).await {
+                        continue;
+                    }
+                    if send_env(&mut tx_ws, &env).await.is_err() {
                         break;
                     }
                 }
-            }
-            Err(RecvError::Closed) => break,
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!("client lagged {n} messages; sending snapshot");
+                    if let Some(snap) = state.current_snapshot().await {
+                        if send_env(&mut tx_ws, &snap).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(RecvError::Closed) => break,
+            },
+            ptt_result = rx_ptt.recv() => match ptt_result {
+                Ok(frame) => {
+                    // Skip self-echo. The outbound framing embeds the
+                    // speaker's peer id at bytes 10..42 so the comparison
+                    // is cheap.
+                    if frame.len() >= 42 && &frame[10..42] == self_peer_id.as_bytes() {
+                        continue;
+                    }
+                    use futures::SinkExt;
+                    if tx_ws
+                        .send(axum::extract::ws::Message::Binary(frame))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            },
         }
     }
 
@@ -441,6 +516,14 @@ async fn handle(
         },
     };
     let _ = state.tx.send(env);
+    // A host-selected "browser source = this peer" assignment stops
+    // making sense the moment the peer leaves — drop those entries
+    // and notify everyone so the track editor's selector flips back
+    // to "off" for the relevant tracks.
+    clear_track_sources_for_peer(&state, &peer_id).await;
+    // Also release any PTT hold held by this peer (leaving mid-speech
+    // should free the slot).
+    crate::chat::handle_ptt_stop(&state, &peer_id).await;
 }
 
 fn now_ms() -> u64 {
@@ -603,6 +686,14 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::TunnelStart { .. } => "tunnel_start",
         Command::TunnelStop => "tunnel_stop",
         Command::TunnelRequestState => "tunnel_request_state",
+        Command::ChatSend { .. } => "chat_send",
+        Command::ChatClear => "chat_clear",
+        Command::ChatHistoryRequest => "chat_history_request",
+        Command::ChatSnapshot { .. } => "chat_snapshot",
+        Command::PttStart => "ptt_start",
+        Command::PttStop => "ptt_stop",
+        Command::SetTrackBrowserSource { .. } => "set_track_browser_source",
+        Command::ListTrackBrowserSources => "list_track_browser_sources",
     }
 }
 
@@ -610,6 +701,8 @@ async fn dispatch_command(
     state: &std::sync::Arc<AppState>,
     origin: Option<&str>,
     auth: &ConnectionAuth,
+    peer_id: &str,
+    peer_label: &str,
     text: &str,
 ) -> Result<(), DispatchError> {
     let env: Envelope<Command> = serde_json::from_str(text).map_err(DispatchError::Parse)?;
@@ -2140,6 +2233,34 @@ async fn dispatch_command(
             crate::tunnel::broadcast_tunnel_state(state).await;
         }
 
+        Command::ChatSend { body } => {
+            crate::chat::handle_send(state, peer_id, peer_label, body).await;
+        }
+        Command::ChatClear => {
+            crate::chat::handle_clear(state, peer_id, peer_label, auth).await;
+        }
+        Command::ChatHistoryRequest => {
+            crate::chat::handle_history_request(state).await;
+        }
+        Command::ChatSnapshot { filename } => {
+            crate::chat::handle_snapshot(state, auth, filename).await;
+        }
+        Command::PttStart => {
+            crate::chat::handle_ptt_start(state, peer_id, peer_label).await;
+        }
+        Command::PttStop => {
+            crate::chat::handle_ptt_stop(state, peer_id).await;
+        }
+        Command::SetTrackBrowserSource {
+            track_id,
+            peer_id: assigned_peer,
+        } => {
+            set_track_browser_source(state, track_id, assigned_peer).await;
+        }
+        Command::ListTrackBrowserSources => {
+            broadcast_track_browser_sources(state).await;
+        }
+
         Command::MovePlugin { .. }
         | Command::SavePluginPreset { .. }
         | Command::OpenPluginGui { .. }
@@ -2187,4 +2308,106 @@ enum DispatchError {
     Parse(#[from] serde_json::Error),
     #[error("backend: {0}")]
     Backend(#[from] foyer_backend::BackendError),
+}
+
+/// Apply a "which peer is the source for this track" assignment.
+/// Empty `assigned_peer` clears. Also sets the track's `monitoring`
+/// to `false` so the assigned user doesn't try to live-monitor
+/// themselves over a high-latency browser leg.
+async fn set_track_browser_source(
+    state: &std::sync::Arc<AppState>,
+    track_id: foyer_schema::EntityId,
+    assigned_peer: String,
+) {
+    let peer_id = if assigned_peer.is_empty() {
+        None
+    } else {
+        Some(assigned_peer)
+    };
+    {
+        let mut map = state.track_browser_sources.write().await;
+        match &peer_id {
+            Some(p) => {
+                map.insert(track_id.clone(), p.clone());
+            }
+            None => {
+                map.remove(&track_id);
+            }
+        }
+    }
+    broadcast_event(
+        state,
+        Event::TrackBrowserSourceChanged {
+            track_id: track_id.clone(),
+            peer_id: peer_id.clone(),
+        },
+    )
+    .await;
+
+    // Disable live monitoring on any track that has a browser source —
+    // a 100–300 ms round trip would make hearing yourself unusable.
+    // Best-effort: ignore backend errors (the schema change still gets
+    // out to clients so the UI hides the Listen control regardless).
+    if peer_id.is_some() {
+        // `monitoring` is a semantic enum on the wire ("off" / "cue" /
+        // "input"); forcing "off" matches the policy documented in
+        // SetTrackBrowserSource's schema comment. Latency over the
+        // browser leg would make live monitoring unusable.
+        let monitor_patch = foyer_schema::session::TrackPatch {
+            monitoring: Some("off".to_string()),
+            ..Default::default()
+        };
+        let backend = state.backend().await;
+        if let Err(e) = backend.update_track(track_id.clone(), monitor_patch).await {
+            tracing::debug!(
+                "set_track_browser_source: backend.update_track(monitoring=off) failed: {e}"
+            );
+        }
+    }
+}
+
+/// Broadcast the current routing table. Sent on `ListTrackBrowserSources`
+/// and piggybacked by the connect handshake so a fresh browser immediately
+/// knows which tracks it is on the hook for.
+async fn broadcast_track_browser_sources(state: &std::sync::Arc<AppState>) {
+    let entries: Vec<_> = state
+        .track_browser_sources
+        .read()
+        .await
+        .iter()
+        .map(|(tid, pid)| foyer_schema::TrackBrowserSourceEntry {
+            track_id: tid.clone(),
+            peer_id: pid.clone(),
+        })
+        .collect();
+    broadcast_event(state, Event::TrackBrowserSourcesSnapshot { entries }).await;
+}
+
+/// Called from the WS disconnect path so a peer leaving clears any
+/// track assignments that pointed at them — otherwise the host would
+/// see "Alice" still listed as the source for a track long after she
+/// closed her browser.
+pub(crate) async fn clear_track_sources_for_peer(state: &std::sync::Arc<AppState>, peer_id: &str) {
+    let cleared: Vec<_> = {
+        let mut map = state.track_browser_sources.write().await;
+        let tids: Vec<_> = map
+            .iter()
+            .filter(|(_, pid)| *pid == peer_id)
+            .map(|(tid, _)| tid.clone())
+            .collect();
+        for tid in &tids {
+            map.remove(tid);
+        }
+        tids
+    };
+    for tid in cleared {
+        broadcast_event(
+            state,
+            Event::TrackBrowserSourceChanged {
+                track_id: tid,
+                peer_id: None,
+            },
+        )
+        .await;
+    }
 }

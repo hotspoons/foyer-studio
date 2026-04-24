@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Foyer Studio — Ardour shim: subscribes to Ardour's signals, emits Foyer
  * events over the IPC connection.

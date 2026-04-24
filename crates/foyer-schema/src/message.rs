@@ -451,6 +451,87 @@ pub enum Event {
         /// Everything a recipient needs to auto-log-in by clicking.
         url: String,
     },
+
+    // ───── in-app chat / PTT (relay only — not audio-engine bound) ──────
+    /// A chat message arrived. Fanned out to every connected peer.
+    /// Persisted in the server's in-memory ring (cleared by admins or
+    /// snapshotted to disk on demand).
+    ChatMessage {
+        record: ChatMessageRecord,
+    },
+    /// Reply to `Command::ChatHistoryRequest` — the current in-memory
+    /// ring of recent chat messages in insertion order.
+    ChatHistory {
+        records: Vec<ChatMessageRecord>,
+    },
+    /// Chat history was wiped by an admin (or LAN user). All clients
+    /// should drop their transcripts.
+    ChatCleared {
+        cleared_by_peer_id: String,
+        cleared_by_label: String,
+    },
+    /// Chat was written to disk. `path` is jail-display-friendly
+    /// (relative to `$XDG_DATA_HOME/foyer/chat/`).
+    ChatSnapshotSaved {
+        path: String,
+        message_count: u32,
+    },
+    /// Who currently holds the PTT (or `None` when nobody is speaking).
+    /// UI uses this to render a "🎙 Alice is speaking" banner + to gate
+    /// the local press so two people can't clobber each other.
+    PttState {
+        speaker: Option<PttSpeaker>,
+    },
+    /// One entry in the track → browser-source routing table.
+    /// `peer_id` is `None` when the assignment is cleared (no browser
+    /// acts as source for this track). Emitted on every change and
+    /// also proactively on peer disconnect (the server clears any
+    /// assignments pointing at a peer who left).
+    TrackBrowserSourceChanged {
+        track_id: EntityId,
+        peer_id: Option<String>,
+    },
+    /// Full snapshot of the track → browser-source routing map. Sent
+    /// right after the client greeting so a late-joining browser
+    /// sees which tracks it is already expected to source without
+    /// having to wait for the next mutation.
+    TrackBrowserSourcesSnapshot {
+        entries: Vec<TrackBrowserSourceEntry>,
+    },
+}
+
+/// One chat message as stored in the server's in-memory ring.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatMessageRecord {
+    /// Monotonically-assigned id (per-server). Lets clients dedupe and
+    /// sort cheaply without relying on envelope `seq` (which may
+    /// contain non-chat envelopes between messages).
+    pub id: u64,
+    /// Connection id of the sender — matches `PeerInfo.id`.
+    pub from_peer_id: String,
+    /// Display name (e.g. "host", invite email, or explicit label).
+    pub from_label: String,
+    /// Message body (markdown allowed; client renders).
+    pub body: String,
+    /// Unix epoch milliseconds of server-side receipt.
+    pub ts_ms: u64,
+}
+
+/// Who currently holds the PTT key. Kept small because this is
+/// broadcast on every hold/release.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PttSpeaker {
+    pub peer_id: String,
+    pub label: String,
+    /// Unix epoch milliseconds when the speaker started holding.
+    pub since_ms: u64,
+}
+
+/// One row of the track → browser-source assignment map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackBrowserSourceEntry {
+    pub track_id: EntityId,
+    pub peer_id: String,
 }
 
 fn is_zero_u16(n: &u16) -> bool {
@@ -1008,6 +1089,57 @@ pub enum Command {
     TunnelStop,
     /// Ask the server for a `TunnelState` snapshot.
     TunnelRequestState,
+
+    // ───── in-app chat / PTT (relay only — not audio-engine bound) ──────
+    /// Post a chat message. The server stamps it with the sender's
+    /// peer id + label (from the connection's handshake) and fans out
+    /// `Event::ChatMessage` to every connected peer.
+    ChatSend {
+        /// Raw message body. Markdown + fenced code blocks render
+        /// client-side; server never parses.
+        body: String,
+    },
+    /// Clear the server's in-memory chat ring. Admins (and every LAN
+    /// user — LAN is trusted) may invoke. Emits `Event::ChatCleared`.
+    ChatClear,
+    /// Ask for the current in-memory chat history. Replied to the
+    /// sender with `Event::ChatHistory`. Sent on chat-FAB open.
+    ChatHistoryRequest,
+    /// Write the current in-memory chat to
+    /// `$XDG_DATA_HOME/foyer/chat/<filename>.jsonl` (one record per
+    /// line). The server ignores any path separators in `filename` —
+    /// only the basename is kept so clients can't escape the chat
+    /// dir. `None` picks a default `chat-<unix_ts>.jsonl`.
+    ChatSnapshot {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        filename: Option<String>,
+    },
+    /// Begin holding the push-to-talk key. The server records the
+    /// caller as the current speaker and broadcasts `PttState`.
+    /// Rejected (with a targeted error) if someone else is already
+    /// speaking — two simultaneous PTT presses scramble each other.
+    PttStart,
+    /// Release the PTT key. Server clears the speaker slot and
+    /// broadcasts `PttState { speaker: None }`.
+    PttStop,
+    /// Set (or clear) the browser peer that sources audio for
+    /// `track_id`. `peer_id` empty string clears the assignment.
+    /// The named peer's browser is expected to respond by showing a
+    /// mic toolbar affordance the user can click to start ingress.
+    /// Server also patches the track's `monitoring` to `false` —
+    /// live monitoring over a remote browser would be unbearable
+    /// (100-300ms round trip minimum), so browser-sourced tracks
+    /// are strictly for layering onto existing takes.
+    SetTrackBrowserSource {
+        track_id: EntityId,
+        #[serde(default)]
+        peer_id: String,
+    },
+    /// Ask the server for the current track → browser-source map.
+    /// Answered with `Event::TrackBrowserSourcesSnapshot`. The
+    /// initial greeting already includes it, so this is only used
+    /// when a client wants a fresh snapshot mid-session.
+    ListTrackBrowserSources,
 }
 
 #[cfg(test)]

@@ -5,6 +5,13 @@ import "foyer-ui-core/widgets/number-scrub.js";
 import { ControlController } from "foyer-core/store.js";
 import { icon } from "foyer-ui-core/icons.js";
 import { isAllowed, onRbacChange } from "foyer-core/rbac.js";
+import { AudioIngress } from "foyer-core/audio/audio-ingress.js";
+
+// Shared across track-editor-modal + transport-bar: lightly-typed map
+// of trackId → { ingress, portName } for the live mic captures this
+// browser owns. Pinned on globalThis so re-opening the modal (or the
+// mic button on the transport bar) sees the same state.
+const TRACK_MICS = (globalThis.__foyerTrackMics ||= new Map());
 import {
   RETURN_MODE_LABELS,
   RETURN_MODE_TITLES,
@@ -135,11 +142,82 @@ export class TransportBar extends LitElement {
     // Repaint when RBAC state changes so gated buttons appear /
     // disappear when the user logs in.
     this._offRbac = onRbacChange(() => this.requestUpdate());
+    // Repaint when the host assigns / unassigns this browser as the
+    // source for a track — that drives the mic button's visibility.
+    this._onSourceChange = () => this.requestUpdate();
+    store.addEventListener("track-browser-sources", this._onSourceChange);
+    store.addEventListener("peers", this._onSourceChange);
+    store.addEventListener("greeting", this._onSourceChange);
   }
   disconnectedCallback() {
-    window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
+    const store = window.__foyer?.store;
+    store?.removeEventListener("change", this._onStoreChange);
+    store?.removeEventListener("track-browser-sources", this._onSourceChange);
+    store?.removeEventListener("peers", this._onSourceChange);
+    store?.removeEventListener("greeting", this._onSourceChange);
     this._offRbac?.();
     super.disconnectedCallback();
+  }
+
+  /** Track ids this browser is expected to source audio for. */
+  _myAssignedTracks() {
+    const store = window.__foyer?.store?.state;
+    if (!store) return [];
+    const selfId = store.selfPeerId;
+    if (!selfId) return [];
+    const map = store.trackBrowserSources;
+    if (!map) return [];
+    const out = [];
+    for (const [tid, pid] of map.entries()) {
+      if (pid === selfId) out.push(tid);
+    }
+    return out;
+  }
+
+  async _toggleAssignedMic() {
+    const tracks = this._myAssignedTracks();
+    if (tracks.length === 0) return;
+    const anyLive = tracks.some((tid) => TRACK_MICS.has(tid));
+    if (anyLive) {
+      // Stop: disconnect every live ingress + clear the track input on
+      // each, so the backend re-auto-connects if the assignment is
+      // later cleared.
+      for (const tid of tracks) {
+        const live = TRACK_MICS.get(tid);
+        if (live) {
+          try { await live.ingress.stop(); } catch {}
+          TRACK_MICS.delete(tid);
+        }
+        window.__foyer?.ws?.send?.({
+          type: "update_track",
+          id: tid,
+          patch: { input_port: "" },
+        });
+      }
+    } else {
+      // Start: one ingress per assigned track. In the common
+      // single-track case this is just one open/send pair.
+      for (const tid of tracks) {
+        if (TRACK_MICS.has(tid)) continue;
+        const ingress = new AudioIngress({
+          ws: window.__foyer?.ws,
+          baseUrl: location.origin.replace(/^http/, "ws"),
+        });
+        try {
+          await ingress.start();
+        } catch (err) {
+          console.warn("[transport-bar] mic start failed:", err);
+          continue;
+        }
+        TRACK_MICS.set(tid, { ingress, portName: ingress.enginePortName });
+        window.__foyer?.ws?.send?.({
+          type: "update_track",
+          id: tid,
+          patch: { input_port: ingress.enginePortName },
+        });
+      }
+    }
+    this.requestUpdate();
   }
 
   render() {
@@ -194,6 +272,7 @@ export class TransportBar extends LitElement {
         </div>
         <div class="sep"></div>
       ` : null}
+      ${this._renderSourceMic()}
       <foyer-number
         label="Tempo"
         unit="BPM"
@@ -256,6 +335,31 @@ export class TransportBar extends LitElement {
     const v = Number(ev.detail?.value);
     if (Number.isFinite(v)) window.__foyer.ws.controlSet("transport.tempo", v);
   };
+
+  /**
+   * The transport-bar mic button only appears while the host has
+   * assigned this browser as the source for at least one track. When
+   * the assignment is cleared the button disappears — matches the
+   * request in docs/PLAN.md lines 28-29.
+   */
+  _renderSourceMic() {
+    const tracks = this._myAssignedTracks();
+    if (tracks.length === 0) return null;
+    const live = tracks.some((tid) => TRACK_MICS.has(tid));
+    const label = tracks.length === 1 ? "this track" : `${tracks.length} tracks`;
+    return html`
+      <div class="row">
+        <div class="btn ${live ? "rec on" : "rec"}"
+             title=${live
+               ? `Stop capturing mic → ${label}`
+               : `Start capturing mic → ${label}`}
+             @click=${() => this._toggleAssignedMic()}>
+          ${icon("microphone", 14)}
+        </div>
+      </div>
+      <div class="sep"></div>
+    `;
+  }
 
   _metaChord() {
     // Cosmetic: pick the chord symbol for the tooltip based on OS.

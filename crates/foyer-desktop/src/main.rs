@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Foyer Studio desktop shell.
 //!
 //! Two modes, one binary:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Foyer Studio user config.
 //!
 //! Lives at `$XDG_DATA_HOME/foyer/config.yaml` (defaults to

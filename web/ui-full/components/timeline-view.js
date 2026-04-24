@@ -682,7 +682,13 @@ export class TimelineView extends LitElement {
     });
     if (!ok) return;
     const ws = window.__foyer?.ws;
+    // Multi-track deletes land as a single undo step (PLAN 177).
+    const label = ids.length === 1
+      ? "Foyer delete track"
+      : `Foyer delete ${ids.length} tracks`;
+    ws?.send({ type: "undo_group_begin", name: label });
     for (const id of ids) ws?.send({ type: "delete_track", id });
+    ws?.send({ type: "undo_group_end" });
   }
 
   _isSequencerTrack(trackId) {

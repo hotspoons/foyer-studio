@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // foyer-ui — the shipping Foyer desktop UI.
 //
 // One concrete consumer of foyer-core + foyer-ui-core. This is where
