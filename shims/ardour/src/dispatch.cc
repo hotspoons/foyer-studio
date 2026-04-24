@@ -257,6 +257,8 @@ struct DecodedCmd
 		CreateGroup,
 		UpdateGroup,
 		DeleteGroup,
+		UndoGroupBegin,
+		UndoGroupEnd,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
@@ -1131,6 +1133,8 @@ decode (const std::vector<std::uint8_t>& buf)
             else if (cmd_type == "create_group")         out.kind = DecodedCmd::Kind::CreateGroup;
             else if (cmd_type == "update_group")         out.kind = DecodedCmd::Kind::UpdateGroup;
             else if (cmd_type == "delete_group")         out.kind = DecodedCmd::Kind::DeleteGroup;
+            else if (cmd_type == "undo_group_begin")     out.kind = DecodedCmd::Kind::UndoGroupBegin;
+            else if (cmd_type == "undo_group_end")       out.kind = DecodedCmd::Kind::UndoGroupEnd;
             else if (cmd_type == "audio_stream_open"
                 ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
 			else if (cmd_type == "audio_stream_close"
@@ -1378,7 +1382,8 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.id.empty ()) break;
 			std::string region_id = cmd.id;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, region_id] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, region_id] () {
 				auto hit = schema_map::find_region (shim->session (), region_id);
 				if (!hit.region) {
 					PBD::warning << "foyer_shim: delete_region: unknown region id: " << region_id << endmsg;
@@ -1386,7 +1391,17 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				// `RegionRemoved` signal will fire on the playlist and our
 				// signal bridge relays it; we don't re-emit here.
-				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				//
+				// Wrap the playlist mutation in a reversible-command
+				// transaction so Ardour's undo stack sees it as a
+				// discrete user op (PLAN 177). When the client has
+				// an outer undo group open (multi-region delete),
+				// that outer group owns the transaction — skip our
+				// own begin/commit pair so we don't nest them.
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer delete region");
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
 				for (auto const& r : *routes) {
 					if (!r) continue;
 					auto track = std::dynamic_pointer_cast<Track> (r);
@@ -1398,6 +1413,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						break;
 					}
 				}
+				if (own_txn) session.commit_reversible_command ();
 			});
 			break;
 		}
@@ -1889,6 +1905,37 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			FoyerShim* shim = &_shim;
 			_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
 				shim->session ().redo (1);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::UndoGroupBegin: {
+			// Opens a reversible-command transaction that remains
+			// open across subsequent mutation dispatches until
+			// UndoGroupEnd closes it. Mutation handlers inspect
+			// `_undo_group_depth` and skip their own per-op begin/
+			// commit pair when a group is active — the whole batch
+			// becomes one undo step. Label from cmd.id (client
+			// passes the group's `name` as the id field).
+			std::string label = cmd.id.empty () ? std::string ("Foyer batch") : cmd.id;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, label] () {
+				if (self->_undo_group_depth == 0) {
+					shim->session ().begin_reversible_command (label);
+				}
+				self->_undo_group_depth++;
+			});
+			break;
+		}
+		case DecodedCmd::Kind::UndoGroupEnd: {
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self] () {
+				if (self->_undo_group_depth == 0) return;
+				self->_undo_group_depth--;
+				if (self->_undo_group_depth == 0) {
+					shim->session ().commit_reversible_command ();
+				}
 			});
 			break;
 		}

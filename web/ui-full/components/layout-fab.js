@@ -28,6 +28,7 @@ const PRESET_ORDER = [
   { id: "timeline-over-mixer",          label: "Timeline over Mixer",     tag: "stack" },
   { id: "mixer-over-timeline",          label: "Mixer over Timeline",     tag: "stack" },
   { id: "everything",                   label: "Everything",              tag: "full" },
+  { id: "timeline-left-mixer-over-plugins", label: "Timeline · Mixer / Plugins", tag: "tall+2" },
   { id: "session+timeline+mixer",       label: "Projects · Timeline · Mixer", tag: "3-col" },
   { id: "session+timeline-over-mixer",  label: "Projects · Timeline / Mixer", tag: "tri" },
   { id: "session-left-timeline-right",  label: "Projects + Timeline",     tag: "P · T" },

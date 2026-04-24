@@ -52,6 +52,17 @@ export class PluginStrip extends LitElement {
       color: var(--color-accent-3);
     }
     .row.bypassed { opacity: 0.45; }
+    /* Drop indicator during drag-to-reorder: a bright top border
+     * marks the row the dragged plugin would slot in front of.
+     * Matches the rest of the editor's accent styling. */
+    .row.drop-before {
+      box-shadow: 0 -2px 0 0 var(--color-accent) inset;
+      border-top-color: var(--color-accent);
+    }
+    .slot.drop-target {
+      outline: 1.5px dashed var(--color-accent);
+      outline-offset: -2px;
+    }
     .row .name {
       flex: 1; min-width: 0;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -104,6 +115,9 @@ export class PluginStrip extends LitElement {
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
     this._onControl = () => this.requestUpdate();
     this._focused = false;
+    // Drag-reorder state — see `_onDragStart`.
+    this._draggingIdx = -1;
+    this._dropIdx = -1;
   }
 
   _onKeyDown(e) {
@@ -185,13 +199,20 @@ export class PluginStrip extends LitElement {
         </div>
       `)}
       ${shown.map(
-        (p) => html`
+        (p, i) => html`
           <div
-            class="row ${this._isBypassed(p) ? "bypassed" : ""}"
-            title="Click to open ${p.name}"
+            class="row ${this._isBypassed(p) ? "bypassed" : ""} ${this._dropIdx === i ? "drop-before" : ""}"
+            title="Click to open ${p.name} · drag to reorder"
+            draggable="true"
+            data-idx=${i}
             @click=${() => this._openPanel(p)}
             @dblclick=${(ev) => this._openTrackEditor(ev)}
             @contextmenu=${(ev) => this._onContextMenu(ev, p)}
+            @dragstart=${(ev) => this._onDragStart(ev, p, i)}
+            @dragover=${(ev) => this._onDragOver(ev, i)}
+            @dragleave=${(ev) => this._onDragLeave(ev, i)}
+            @drop=${(ev) => this._onDrop(ev, i)}
+            @dragend=${(ev) => this._onDragEnd(ev)}
           >
             <span class="name">${p.name}</span>
             <button
@@ -205,7 +226,13 @@ export class PluginStrip extends LitElement {
         `
       )}
       ${extra > 0 ? html`<div class="empty">+${extra} more</div>` : null}
-      <div class="slot" @click=${this._addSlot} @dblclick=${(ev) => this._openTrackEditor(ev)} title="Open plugin picker">
+      <div class="slot ${this._dropIdx === plugs.length ? "drop-target" : ""}"
+           @click=${this._addSlot}
+           @dblclick=${(ev) => this._openTrackEditor(ev)}
+           @dragover=${(ev) => this._onDragOver(ev, plugs.length)}
+           @dragleave=${(ev) => this._onDragLeave(ev, plugs.length)}
+           @drop=${(ev) => this._onDrop(ev, plugs.length)}
+           title="Open plugin picker · drop here to append">
         ${icon("plus", 10)}
       </div>
       </div>
@@ -294,6 +321,119 @@ export class PluginStrip extends LitElement {
   _removePlugin(p) {
     if (!p?.id) return;
     window.__foyer?.ws?.send({ type: "remove_plugin", plugin_id: p.id });
+  }
+
+  // ── drag-to-reorder ───────────────────────────────────────────────
+  // HTML5 drag-and-drop. The payload carries the source plugin id,
+  // source track id, and source index so a drop target can either
+  // (a) reorder within the same track (PLAN 143) by computing a new
+  // index, or (b) accept a cross-strip drop and re-home the plugin
+  // via remove + add (PLAN 138). dataTransfer uses a Foyer-specific
+  // MIME string so we don't collide with OS-level drag payloads.
+
+  _onDragStart(ev, p, idx) {
+    if (!p?.id) return;
+    const dt = ev.dataTransfer;
+    if (!dt) return;
+    // Copy on Alt/Ctrl at drop time — the drag image is the row
+    // regardless. effectAllowed controls what the browser's cursor
+    // shows; we let it be `copyMove` and pick at drop.
+    dt.effectAllowed = "copyMove";
+    const payload = JSON.stringify({
+      plugin_id: p.id,
+      plugin_uri: p.uri || "",
+      track_id: this.trackId,
+      index: idx,
+    });
+    dt.setData("application/x-foyer-plugin", payload);
+    // Plain-text fallback for browsers/tools that don't recognize the
+    // custom mime; shouldn't matter in-app but keeps DevTools honest.
+    dt.setData("text/plain", p.name || p.id);
+    this._draggingIdx = idx;
+  }
+
+  _parseDragPayload(ev) {
+    const raw = ev.dataTransfer?.getData("application/x-foyer-plugin");
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+
+  _onDragOver(ev, idx) {
+    // Must preventDefault to make the element a valid drop target.
+    // Even when the drop would be a no-op (same index on same track)
+    // we accept so the user gets consistent hover feedback.
+    const payload = this._parseDragPayload(ev);
+    if (!payload) {
+      // If no Foyer payload, don't interfere with native browser DnD
+      // (text dragged from elsewhere, etc).
+      return;
+    }
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = ev.altKey || ev.ctrlKey ? "copy" : "move";
+    // Visual insertion indicator — highlight the row this drop would
+    // slot the plugin before.
+    this._dropIdx = idx;
+    this.requestUpdate();
+  }
+
+  _onDragLeave(ev, idx) {
+    // Clear the indicator only if we're leaving the row currently
+    // flagged. Firing on every child-bubble dragleave would flash
+    // the indicator off/on during the drag.
+    if (this._dropIdx === idx) {
+      this._dropIdx = -1;
+      this.requestUpdate();
+    }
+  }
+
+  _onDrop(ev, targetIdx) {
+    const payload = this._parseDragPayload(ev);
+    this._dropIdx = -1;
+    if (!payload) return;
+    ev.preventDefault();
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    const sameTrack = payload.track_id === this.trackId;
+    const copy = ev.altKey || ev.ctrlKey;
+    if (sameTrack && !copy) {
+      // Reorder within this strip. `new_index` is the 0-based slot
+      // the plugin should end up at AFTER removal of the source.
+      // Computing that means: if dragging down, target index is as
+      // given; if dragging up, it's also as given (both because the
+      // server's move_plugin is defined to treat new_index as the
+      // post-move slot).
+      if (payload.index !== targetIdx) {
+        ws.send({
+          type: "move_plugin",
+          plugin_id: payload.plugin_id,
+          new_index: targetIdx,
+        });
+      }
+    } else {
+      // Cross-track (or Alt/Ctrl-copy within same track) → add on
+      // target track + remove from source track. PLAN 138.
+      // `plugin_id` + `track_id` are absent when the payload came
+      // from the plugins-view catalog (drag-from-library), so
+      // always treat a catalog-sourced drop as an add-only.
+      if (!payload.plugin_uri) return;
+      ws.send({
+        type: "add_plugin",
+        track_id: this.trackId,
+        plugin_uri: payload.plugin_uri,
+        index: targetIdx,
+      });
+      const isFromExistingTrack = !!(payload.track_id && payload.plugin_id);
+      if (isFromExistingTrack && !copy) {
+        ws.send({ type: "remove_plugin", plugin_id: payload.plugin_id });
+      }
+    }
+    this.requestUpdate();
+  }
+
+  _onDragEnd(_ev) {
+    this._draggingIdx = -1;
+    this._dropIdx = -1;
+    this.requestUpdate();
   }
 
   _duplicatePluginToTrack(plugin, targetTrackId) {

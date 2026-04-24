@@ -204,12 +204,24 @@ export class Mixer extends LitElement {
     // which is what the "monitoring keeps turning off" regression
     // was really observing).
     if (this._listening || this._applyingListenPref) return;
-    const saved = localStorage.getItem("foyer.listen.master");
+    // Tunnel guests always want Listen on — they have no hardware
+    // connection to the DAW's output and the whole point of the
+    // tunnel session is hearing what the host is playing. The
+    // toggle itself is hidden from their UI (see render()), so
+    // the saved localStorage pref is bypassed in this branch.
+    // PLAN 158.
+    const rbac = window.__foyer?.store?.state?.rbac;
+    const isTunnel = !!rbac?.isTunnel;
     let wantOn;
-    if (saved === "1") wantOn = true;
-    else if (saved === "0") wantOn = false;
-    else if (isLocal === null) return; // no pref + no greeting yet — wait
-    else wantOn = !isLocal;
+    if (isTunnel) {
+      wantOn = true;
+    } else {
+      const saved = localStorage.getItem("foyer.listen.master");
+      if (saved === "1") wantOn = true;
+      else if (saved === "0") wantOn = false;
+      else if (isLocal === null) return; // no pref + no greeting yet — wait
+      else wantOn = !isLocal;
+    }
     if (wantOn) {
       this._applyingListenPref = true;
       this._toggleListen(true)
@@ -374,12 +386,14 @@ export class Mixer extends LitElement {
               style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:10px;padding:3px 8px;cursor:pointer;font-family:var(--font-sans);"
             >Reset widths</button>`
           : null}
-        <button class="listen-chip ${this._listening ? "on" : ""}"
-                @click=${this._toggleListen}
-                title="${this._listening ? "Stop monitoring" : "Monitor the master bus in your browser"}">
-          ${icon(this._listening ? "speaker-wave" : "speaker-x-mark", 12)}
-          <span>${this._listening ? "Monitoring" : "Listen"}</span>
-        </button>
+        ${window.__foyer?.store?.state?.rbac?.isTunnel
+          ? null
+          : html`<button class="listen-chip ${this._listening ? "on" : ""}"
+                    @click=${this._toggleListen}
+                    title="${this._listening ? "Stop monitoring" : "Monitor the master bus in your browser"}">
+              ${icon(this._listening ? "speaker-wave" : "speaker-x-mark", 12)}
+              <span>${this._listening ? "Monitoring" : "Listen"}</span>
+            </button>`}
         <span>${tracks.length} tracks · ${density.trackWidth}px</span>
       </div>
       ${tracks.length === 0

@@ -339,7 +339,23 @@ impl AppState {
                 })
                 .unwrap_or_else(|| backend_id.clone())
         });
-        let path = project_path.clone().unwrap_or_default();
+        // Canonicalize the path before stashing it in the session
+        // registry. Clients send a mix of relative ("sessions/foo")
+        // and absolute ("/workspaces/…/sessions/foo") paths; without
+        // normalization the same project shows up twice in recents
+        // and the "already open?" match in launch_project misses.
+        // Fall back to the original string if canonicalize fails
+        // (e.g. path is a URI or a not-yet-created session dir).
+        let path = project_path
+            .as_deref()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .canonicalize()
+                    .ok()
+                    .and_then(|c| c.to_str().map(String::from))
+                    .unwrap_or_else(|| p.to_string())
+            })
+            .unwrap_or_default();
         self.sessions
             .clone()
             .add(sid.clone(), backend_id.clone(), next, path, name)
@@ -351,11 +367,17 @@ impl AppState {
 
         // Tell all clients to re-snapshot. The swap event goes through
         // the same broadcast + ring as every other event so `?since=`
-        // reconnects replay it.
+        // reconnects replay it. Strip the jail prefix from the path
+        // so the UI keeps its "no absolute paths" guarantee
+        // (PLAN 162).
+        let display_path = match project_path.as_deref() {
+            Some(p) => Some(self.sessions.jail_display_path(p).await),
+            None => None,
+        };
         let env = self.envelope(
             Event::BackendSwapped {
                 backend_id,
-                project_path,
+                project_path: display_path,
             },
             None,
         );
@@ -485,6 +507,13 @@ impl Server {
             Arc::get_mut(&mut self.state)
                 .expect("AppState not yet shared")
                 .jail = Some(jail);
+            // Canonicalize the jail root so SessionRegistry can strip
+            // it from UI-facing paths. We use the canonical form
+            // because `swap_backend` also canonicalizes the project
+            // path — only matching forms produce a clean prefix
+            // strip.
+            let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+            *self.state.sessions.jail_root.write().await = Some(canonical);
             tracing::info!("file jail rooted at {}", root.display());
         }
 

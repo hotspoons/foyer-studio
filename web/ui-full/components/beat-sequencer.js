@@ -32,6 +32,8 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { playPreviewNote, resumePreviewCtx } from "foyer-core/audio/midi-preview.js";
+// Side-strip embedded body — see `_toggleStrip` + render().
+import "./midi-manager.js";
 
 const PPQN = 960;
 const PREVIEW_PREF_KEY = "foyer.beat.preview.v1";
@@ -230,6 +232,7 @@ export class BeatSequencer extends LitElement {
     _drumPitch: { state: true, type: Number },
     _drumLabel: { state: true, type: String },
     _presetsOpen: { state: true, type: Boolean },
+    _stripOpen: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -244,6 +247,42 @@ export class BeatSequencer extends LitElement {
       color: var(--color-text);
       font-family: var(--font-sans);
       font-size: 11px;
+    }
+    /* Row split: main column fills, side-strip docks to the right. */
+    .root {
+      flex: 1; min-height: 0; min-width: 0;
+      display: flex; flex-direction: row;
+      overflow: hidden;
+    }
+    .main {
+      flex: 1 1 auto; min-width: 0; min-height: 0;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .side-strip {
+      flex: 0 0 auto;
+      display: flex; flex-direction: row;
+      border-left: 1px solid var(--color-border);
+      background: var(--color-surface-elevated);
+      transition: width 0.18s ease;
+      width: 32px;           /* rail-only */
+      min-width: 0;
+    }
+    .side-strip.open {
+      width: min(360px, 45%);
+    }
+    .strip-handle {
+      flex: 0 0 32px;
+      display: flex; align-items: center; justify-content: center;
+      background: transparent; border: 0;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      border-right: 1px solid var(--color-border);
+    }
+    .strip-handle:hover { color: var(--color-accent); }
+    .side-strip foyer-midi-manager {
+      flex: 1; min-width: 0;
+      overflow: auto;
     }
     .tb {
       display: flex; align-items: center; gap: 10px;
@@ -642,6 +681,14 @@ export class BeatSequencer extends LitElement {
     this._drumPitch = 36;
     this._drumLabel = "Custom";
     this._presetsOpen = false;
+    // Slide-out instruments/patches drawer on the right edge.
+    // Remembered across opens so a user who prefers it visible
+    // doesn't have to re-open it every time. PLAN 154.
+    try {
+      this._stripOpen = localStorage.getItem("foyer.beat.strip-open") === "1";
+    } catch {
+      this._stripOpen = false;
+    }
     this._onStoreControl = (ev) => {
       if (ev.detail === "transport.position"
           || ev.detail === "transport.tempo"
@@ -1290,15 +1337,41 @@ export class BeatSequencer extends LitElement {
   // ── render ───────────────────────────────────────────────────────
   render() {
     const L = this._currentLayout();
+    const stripOpen = this._stripOpen;
     return html`
-      ${this._renderToolbar(L)}
-      ${L.active === false ? this._renderArchivedBanner() : null}
-      ${this._renderSeekBar()}
-      ${this._renderArrangement(L)}
-      ${this._renderPatternEditor(L)}
+      <div class="root">
+        <div class="main">
+          ${this._renderToolbar(L)}
+          ${L.active === false ? this._renderArchivedBanner() : null}
+          ${this._renderSeekBar()}
+          ${this._renderArrangement(L)}
+          ${this._renderPatternEditor(L)}
+        </div>
+        <div class="side-strip ${stripOpen ? "open" : ""}">
+          <button class="strip-handle"
+                  title=${stripOpen ? "Hide instruments + patches" : "Show instruments + patches for this track"}
+                  @click=${() => this._toggleStrip()}>
+            ${icon(stripOpen ? "chevron-right" : "chevron-left", 14)}
+          </button>
+          ${stripOpen ? html`
+            <foyer-midi-manager
+              style="flex:1;min-height:0"
+              .trackId=${this.trackId}
+              .trackName=${this.regionName || ""}
+            ></foyer-midi-manager>` : null}
+        </div>
+      </div>
       ${this._addDrum ? this._renderDrumPicker() : null}
       ${this._presetsOpen ? this._renderPresetsModal() : null}
     `;
+  }
+
+  _toggleStrip() {
+    this._stripOpen = !this._stripOpen;
+    try {
+      localStorage.setItem("foyer.beat.strip-open", this._stripOpen ? "1" : "0");
+    } catch { /* ignore */ }
+    this.requestUpdate();
   }
 
   _renderArchivedBanner() {
@@ -1387,22 +1460,22 @@ export class BeatSequencer extends LitElement {
         <span>${this.regionName || "—"}</span>
         <span style="flex:1"></span>
         <label>Mode
-          <select .value=${L.mode} @change=${(e) => this._setMode(e.currentTarget.value)}>
-            <option value="drum">Drum</option>
-            <option value="pitched">Pitched (piano roll)</option>
+          <select @change=${(e) => this._setMode(e.currentTarget.value)}>
+            <option value="drum" ?selected=${L.mode === "drum"}>Drum</option>
+            <option value="pitched" ?selected=${L.mode === "pitched"}>Pitched (piano roll)</option>
           </select>
         </label>
         <label>Steps/bar
-          <select .value=${String(L.pattern_steps)} @change=${(e) => this._setSteps(Number(e.currentTarget.value))}>
+          <select @change=${(e) => this._setSteps(Number(e.currentTarget.value))}>
             ${STEP_COUNTS.map((n) => html`
-              <option value=${n}>${n}</option>
+              <option value=${n} ?selected=${L.pattern_steps === n}>${n}</option>
             `)}
           </select>
         </label>
         <label>Res
-          <select .value=${String(L.resolution)} @change=${(e) => this._setResolution(Number(e.currentTarget.value))}>
+          <select @change=${(e) => this._setResolution(Number(e.currentTarget.value))}>
             ${RESOLUTIONS.map((r) => html`
-              <option value=${r.subdiv}>${r.label}</option>
+              <option value=${r.subdiv} ?selected=${L.resolution === r.subdiv}>${r.label}</option>
             `)}
           </select>
         </label>

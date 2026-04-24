@@ -49,6 +49,14 @@ private:
 	// because IPC reader and event-loop threads both touch it.
 	std::mutex _ingress_mx;
 	std::map<std::uint32_t, std::unique_ptr<ShimInputPort>> _ingress_ports;
+
+	// Nesting depth for `undo_group_begin` / `undo_group_end`. Only
+	// touched from the event-loop thread (the call_slot lambdas).
+	// Individual mutation handlers that wrap themselves in begin/
+	// commit pairs check this and skip their own transaction pair
+	// when it's > 0 so the outer group owns the whole batch.
+	// PLAN 177.
+	std::uint32_t _undo_group_depth = 0;
 };
 
 } // namespace ArdourSurface

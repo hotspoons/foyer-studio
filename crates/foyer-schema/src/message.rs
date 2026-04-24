@@ -573,6 +573,18 @@ pub enum Command {
     Subscribe,
     /// Request a fresh snapshot (resync).
     RequestSnapshot,
+    /// Open a named undo group. Subsequent mutations (region delete,
+    /// plugin move, etc.) land in the same `UndoTransaction` until a
+    /// matching `UndoGroupEnd` is received. One undo step unwinds
+    /// the whole batch. Without grouping each command would be its
+    /// own undo step — users hitting Delete on 5 selected regions
+    /// would need 5 Ctrl+Z presses to restore the full selection.
+    /// `name` becomes the undo-history label. See PLAN 177.
+    UndoGroupBegin {
+        name: String,
+    },
+    /// Close the currently-open undo group. No-op if none is open.
+    UndoGroupEnd,
     /// Apply a value change.
     ControlSet {
         id: EntityId,

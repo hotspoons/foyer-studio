@@ -232,6 +232,19 @@ pub trait Backend: Send + Sync + 'static {
     async fn reorder_tracks(&self, _ordered_ids: Vec<EntityId>) -> Result<(), BackendError> {
         Err(BackendError::Other("reorder_tracks not supported".into()))
     }
+
+    /// Open a named undo group. Mutations received between this call
+    /// and a matching `undo_group_end` land in the same
+    /// `UndoTransaction` so one undo step unwinds the whole batch.
+    /// Default is a no-op so stubs + minimal backends keep
+    /// compiling; the Ardour host implements this against
+    /// `Session::begin_reversible_command`. See PLAN 177.
+    async fn undo_group_begin(&self, _name: String) -> Result<(), BackendError> {
+        Ok(())
+    }
+    async fn undo_group_end(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
     async fn create_group(
         &self,
         _name: String,

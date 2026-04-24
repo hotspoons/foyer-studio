@@ -500,6 +500,12 @@ impl HostClient {
     pub async fn redo(&self) -> Result<(), ClientError> {
         self.send_command(Command::Redo).await
     }
+    pub async fn undo_group_begin(&self, name: String) -> Result<(), ClientError> {
+        self.send_command(Command::UndoGroupBegin { name }).await
+    }
+    pub async fn undo_group_end(&self) -> Result<(), ClientError> {
+        self.send_command(Command::UndoGroupEnd).await
+    }
 
     pub async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, ClientError> {
         let (tx, rx) = oneshot::channel();

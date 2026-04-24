@@ -528,6 +528,8 @@ fn command_tag(cmd: &Command) -> &'static str {
     match cmd {
         Command::Subscribe => "subscribe",
         Command::RequestSnapshot => "request_snapshot",
+        Command::UndoGroupBegin { .. } => "undo_group_begin",
+        Command::UndoGroupEnd => "undo_group_end",
         Command::ControlSet { .. } => "control_set",
         Command::AudioEgressStart { .. } => "audio_egress_start",
         Command::AudioEgressStop { .. } => "audio_egress_stop",
@@ -661,6 +663,30 @@ async fn dispatch_command(
     }
 
     match env.body {
+        Command::UndoGroupBegin { name } => {
+            if let Err(e) = state.backend().await.undo_group_begin(name).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "undo_group_begin_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::UndoGroupEnd => {
+            if let Err(e) = state.backend().await.undo_group_end().await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "undo_group_end_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
         Command::Subscribe | Command::RequestSnapshot => {
             // Easy case: produce a fresh snapshot synchronously and push into the
             // broadcast stream. All connected clients will see it — not just the asker
@@ -1118,12 +1144,51 @@ async fn dispatch_command(
             track_id,
             port_name,
         } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .set_track_input(track_id, port_name)
-                .await
-            {
+            // Track-kind vs port-kind mismatch check. A MIDI track
+            // wired to an audio port produces silent frames and lets
+            // clients accidentally route a mic capture to a MIDI
+            // track. Reject up front before it hits the backend so
+            // alt-UIs and CLI drivers can't bypass the UI-side filter
+            // (PLAN 155). Empty `port_name` restores default
+            // auto-connect; skip the check in that case.
+            let backend = state.backend().await;
+            let mismatch = if let Some(name) = port_name.as_deref().filter(|s| !s.is_empty()) {
+                let session = backend.snapshot().await.ok();
+                let track = session
+                    .as_ref()
+                    .and_then(|s| s.tracks.iter().find(|t| t.id == track_id));
+                let ports = backend.list_ports(None).await.unwrap_or_default();
+                let port = ports.iter().find(|p| p.name == name);
+                match (track, port) {
+                    (Some(t), Some(p)) => {
+                        use foyer_schema::TrackKind;
+                        let track_is_midi = matches!(t.kind, TrackKind::Midi);
+                        if track_is_midi != p.is_midi {
+                            let want = if track_is_midi { "MIDI" } else { "audio" };
+                            let got = if p.is_midi { "MIDI" } else { "audio" };
+                            Some(format!(
+                                "track '{}' is {} but port '{}' is {}",
+                                t.name, want, name, got,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(message) = mismatch {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "set_track_input_mismatch".into(),
+                        message,
+                    },
+                )
+                .await;
+            } else if let Err(e) = backend.set_track_input(track_id, port_name).await {
                 broadcast_event(
                     state,
                     Event::Error {

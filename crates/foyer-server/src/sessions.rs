@@ -27,6 +27,7 @@
 //! server-wide shared state.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,6 +69,11 @@ pub(crate) struct SessionRegistry {
     pub(crate) tx: broadcast::Sender<Envelope<Event>>,
     pub(crate) ring: Arc<RwLock<DeltaRing>>,
     pub(crate) next_seq: Arc<AtomicU64>,
+    /// Jail root for this session registry. Kept so outbound paths
+    /// can be stripped to jail-relative form on the wire even
+    /// though the registry stores canonical absolutes internally.
+    /// `None` = no jail → leave paths as-is.
+    pub(crate) jail_root: RwLock<Option<PathBuf>>,
 }
 
 impl SessionRegistry {
@@ -81,7 +87,27 @@ impl SessionRegistry {
             tx,
             ring,
             next_seq,
+            jail_root: RwLock::new(None),
         }
+    }
+
+    /// Convert an absolute (or already-relative) path to the
+    /// jail-relative form UI consumers should ever see. Absolute
+    /// paths outside the jail, or paths that don't start with the
+    /// jail prefix, fall through unchanged — that's better than
+    /// silently returning an empty string.
+    pub(crate) async fn jail_display_path(&self, path: &str) -> String {
+        let root = self.jail_root.read().await.clone();
+        let Some(root) = root else {
+            return path.to_string();
+        };
+        let Some(root_str) = root.to_str() else {
+            return path.to_string();
+        };
+        if let Some(stripped) = path.strip_prefix(root_str) {
+            return stripped.trim_start_matches('/').to_string();
+        }
+        path.to_string()
     }
 
     /// Append a new session. Spawns the event pump against this
@@ -120,7 +146,13 @@ impl SessionRegistry {
             dirty,
             pump,
         };
-        let info = entry.to_info();
+        // Strip the jail prefix before we broadcast — UI-facing paths
+        // never include the jail root (PLAN 162). Internal lookups
+        // (find_by_path during "already open?") still use the
+        // stored canonical absolute, so both relative and absolute
+        // callers land on the same session entry.
+        let mut info = entry.to_info();
+        info.path = self.jail_display_path(&info.path).await;
         self.sessions.write().await.insert(id.clone(), entry);
         // Broadcast open + updated list so UIs can slot the new
         // session into the switcher without a full refresh.
@@ -215,6 +247,13 @@ impl SessionRegistry {
             .values()
             .map(SessionEntry::to_info)
             .collect();
+        // Strip jail prefix on the way out — UI never sees absolute
+        // paths (PLAN 162). Do this after collecting so we release
+        // the read lock before calling jail_display_path (which
+        // takes the jail_root RwLock).
+        for info in &mut infos {
+            info.path = self.jail_display_path(&info.path).await;
+        }
         infos.sort_by_key(|i| i.opened_at);
         infos
     }

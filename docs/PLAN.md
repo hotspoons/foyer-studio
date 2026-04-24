@@ -125,15 +125,23 @@ Mid term:
   - [x] Variants auto-discovered via `/variants.json` (server scans `web_root` for `ui-*/package.js`; excludes reserved `ui-core`/`ui-tests`). `boot.js` fetches + dynamic-imports each; no `index.html` edit needed to ship one.
   - [x] Fallback UI in `ui-core/fallback-ui.js` paints "If you lived here, you'd be home now" when no variant matches — proves core can run without any registered renderer.
   - [x] Backend capabilities plumb through `Backend::features()` → `ClientGreeting.features` → `foyer-core/registry/features.js` → `showFeature()`/`featureEnabled()` helpers. Optimistic default on unknown ids.
-  - [x] Hot-serve from `$XDG_DATA_HOME/foyer/web` with first-run extraction from the binary (`include_dir!`). Users edit in place; `--web-root <path>` overrides; working-copy `./web/` wins during dev.
+  - [x] Hot-serve from `$XDG_DATA_HOME/foyer/web` with first-run extraction from the binary (`include_dir!`). Default is the install dir (the canonical user-facing path); `--web-root <path>` overrides for dev (`just run` passes `--web-root web`). `just prep` nukes the install dir before each run so stale extractions can't linger.
+  - [x] `--web-overlay <PATH>` flag (repeatable) + `FOYER_WEB_OVERLAY` env for `just run` — layer a sibling dir on top of the base web tree without editing the main repo. `/variants.json` scans every root so `ui-*/` folders in an overlay auto-register. Up to 4 overlays compose via `ServeDir.fallback`. See DECISION 40 + [DEVELOPMENT.md](DEVELOPMENT.md).
+  - [x] `FOYER_BUNDLED_WEB` build-time env var — rebuild `foyer` with a different web tree baked into the binary (no source edit required). Wired via `crates/foyer-cli/build.rs` → `include_dir!("$FOYER_BUNDLED_WEB")`.
   - [x] HACKING.md in `web/` with recipes (new UI variant, widget override, feature-gated surfaces, new tile view, React-style swap, CLI-driven probe, skip ui-core entirely).
-  - [ ] Additional UI variants (`ui-lite`, `ui-touch`, `ui-kids`) — scaffolding ready, no concrete variants written yet beyond `ui-full`.
-  - [ ] Click and drag plugins and midi instruments from one channel to another or from the plugins view to another
-  - [ ] 1x high x 0.5x wide one panel, 0.5x high x 0.5x wide x 2 other panel layout (3 windows)
-  - [ ] Widget-registry adoption sweep: most shipping components still hardcode tag names; migrating to `widgetTag(...)` lookups would let alt-UIs override at the widget level without forking whole views.
+  - [x] DEVELOPMENT.md in `docs/` — covers `just run`, overlay dev loop, shipping your own binary, CI gate.
+  - [x] AGENTS.md (symlinked as `CLAUDE.md`) — cold-start brief for coding agents with `window.__foyer` probe recipes + `just ui-probe` usage.
+  - [x] Playwright smoke harness + `just test-ui` / `just test-ui-ci` / `just ci` — CI and local gates share the same recipes. See `.github/workflows/ci.yml`.
+  - [x] Fixed tile-leaf element reuse (DECISION 40 amendment) — body views (mixer, timeline, plugin panel) no longer remount on every store event; killed the Listen-start spam + white-flash regression.
+  - [x] Plugin window body renders correctly (`<foyer-plugin-panel>` side-effect imported from `ui-full/app.js`); removed the white corner-L resize handle to match `foyer-window`.
+  - [ ] - Additional UI variants (`ui-lite`, `ui-touch`, `ui-kids`) — scaffolding ready, no concrete variants written yet beyond `ui-full`.
+  - [ ] + Click and drag plugins and midi instruments from one channel to another or from the plugins view to another
+  - [ ] + 1x high x 0.5x wide one panel, 0.5x high x 0.5x wide x 2 other panel layout (3 windows) for presets
+  - [/] Widget-registry adoption sweep: registries exist (`registerWidget` / `widgetTag`) but most shipping components still hardcode tag names. Migrating to `widgetTag(...)` lookups would let alt-UIs override at the widget level without forking whole views.
 
 
-- [ ] Click and drag to reorder plugins in mixer and mini strip in channel editor
+- [x] + Click and drag to reorder plugins in mixer and mini strip in channel editor
+  - HTML5 DnD on `<foyer-plugin-strip>` rows: each row is `draggable`, dragstart records `{plugin_id, plugin_uri, track_id, source_index}`, drop computes the new index and sends `move_plugin`. Cross-track drops route through add_plugin + remove_plugin (Ctrl/Alt toggles copy). `.drop-before` CSS indicator marks the row the plugin would slot in front of; empty `+` slot also accepts drop as "append."
 - [~] Cloudflare tunnels auth:
   - [x] Quick tunnels + full account-linked tunnels (api_token + account_id + hostname → auto-provisions tunnel/ingress/DNS; see DECISION 35).
   - [~] Credential model: each invite mints `(normalized-email, random-password)`; server stores `sha256(email:password|pepper)` as `token_hash`; URL `?token=` is `base64url(email:password)` and auto-logs-in when opened; password shown once in UI, never persisted. (DECISION 36)
@@ -143,31 +151,43 @@ Mid term:
   - [x] Multi-recipient access-link form: one row per email+role, submitted as N `tunnel_create_token`s. Role set = Viewer / Performer / Session Controller / Admin.
   - [x] Per-recipient "Email connection info" button spawns mailto with the direct link (plus username+password if just-created).
   - [ ] Storing the credential hashes in extended Ardour XML session metadata (currently stored in `$XDG_DATA_HOME/foyer/tunnel-manifest.json`). Deferred to a future pass — requires shim XML surgery and is orthogonal to the wire auth model.
-- [ ] Both beat sequencer and midi roll should have a strip that can slide out from the right for managing instruments, patches, etc. (just a compact view of the same form on the track editor)
-- [ ] You should not be able to hook up a mic from the browser to a midi track  
-- [ ] Res (1/4, 1/8, 1/16, etc.) keeps resetting randomly when opening the beat sequencer. Make sure there is no default value clobbering the state value from the back end, thats what it seems like
+    - Is this even worthwhile? Defer
+- [x] + Both beat sequencer and midi roll should have a strip that can slide out from the right for managing instruments, patches, etc. (just a compact view of the same form on the track editor)
+  - Both editors now wrap their body in a row layout with a right-anchored drawer that embeds `<foyer-midi-manager>`. Drawer state (open/closed) sticky per-browser. Sequencer toolbar + midi-editor toolbar each got a toggle button. `trackId` is plumbed through `openMidiEditor(region, {trackId})` so the drawer shows the right track's instruments.
+- [x] + You should not be able to hook up a mic from the browser to a midi track
+  - UI: `track-editor-modal._curateInputPorts` filters ports by track kind — MIDI tracks only see `is_midi` ports, audio tracks only see non-MIDI. Mic ingress row is hidden entirely for MIDI tracks (`t.kind === "midi"` branch).
+  - Server: `Command::SetTrackInput` rejects track-kind/port-kind mismatches with `set_track_input_mismatch` before reaching the backend, so CLI / alt-UIs can't bypass the UI filter.
+- [x] + Res (1/4, 1/8, 1/16, etc.) keeps resetting randomly when opening the beat sequencer. Make sure there is no default value clobbering the state value from the back end, thats what it seems like
+  - Root cause: the three sequencer-toolbar `<select>`s used Lit's `.value` property binding, which commits after option children are inserted. In practice the browser saw an empty option set during the commit window and silently fell through to the first option (1/4). Switched to per-option `?selected=${...}` so the match is atomic with option creation.
 - [x] Anonymous-visitor login page (when someone has the URL host but no token). `foyer-login-modal` shown on `is_tunnel && !is_authenticated`, submits email+password as `base64url` token, reloads. Rolled into DECISION 38.
-- [ ] Remote sessions over the tunnel should have listen enabled by default, maybe even hidden from view
-- [ ] Flakiness on Monitoring/listening setting with multiple clients connected. Make sure this is per client and sticky per client
+- [x] + Remote sessions over the tunnel should have listen enabled by default, maybe even hidden from view
+  - `_applyListenPref` now short-circuits to `wantOn = true` for tunnel guests, bypassing the localStorage saved-pref path. The Listen toggle is hidden in the mixer toolbar for tunnel guests too (`rbac.isTunnel` check on render), so they can't turn it off. LAN hosts keep the toggle + saved preference.
+- [/] Flakiness on Monitoring/listening setting with multiple clients connected. Make sure this is per client and sticky per client
+  - Likely helped by the DECISION 40 amendment (mixer element no longer remounts on every store tick, which was re-running `_applyListenPref` and stacking concurrent `AudioListener` starts). Per-client persistence + tunnel-session default-listen remain to verify.
 - [x] For each recipient created, a "QR" icon renders the personal link as a QR code in an overlay (uses the existing `/qr` SVG endpoint).
-- [ ] Projects should always be by absolute path - I see the same projects repeated, some are relative, some are absolute. From the UI perspective the jail's prefix should be stripped off of anything displayed on screen
+- [x] + Projects should always be by absolute path - I see the same projects repeated, some are relative, some are absolute. From the UI perspective the jail's prefix should be stripped off of anything displayed on screen
+  - Server: `swap_backend` now runs the incoming `project_path` through `Path::canonicalize` before storing, so internal lookups (dedupe in `launch_project`, session registry) see one canonical form regardless of what the client sent.
+  - Wire: `SessionRegistry` gained `jail_root: Option<PathBuf>` and a `jail_display_path()` helper that strips the jail prefix. `SessionOpened` / `SessionList` / `BackendSwapped` all run the path through it before emitting so the client never sees an absolute path in any UI-facing field. Recents storage inherits this automatically (client stores `info.path` as-received).
 - [ ] UX for floating windows versus tiles (tiles being core UI):
   - The track editor, plugin windows, beat editor, midi roll, and maybe a couple of other windows should be a different class of windows than the primary interfaces that has it's own separate dock lower on the right strip with small window indicators, and quick controls to tile all open windows, untile (capture last position before tiling, restore to this), minimize all, unminimize all. They should be styled differently to show they are a different layer of the application and should always float above core windows. Maybe add a hint of transparency and/or blur to background too.
   - Optionally have a tiled panel that can be scrolled h and v that contains a different view of all open float-class windows
 
 
-- [ ] UI hot-serving from folder (via a CLI flag / config option) instead of built-in, and dump it from the rust binary on first load and serve it from the local folder instead of the bin
-- [ ] Serve http, https, or both (via CLI flag / config option)
+- [x] UI hot-serving from folder (via a CLI flag / config option) instead of built-in, and dump it from the rust binary on first load and serve it from the local folder instead of the bin
+  - DECISION 40: binary bundles `web/` via `include_dir!` and extracts to `$XDG_DATA_HOME/foyer/web/` on first run; `--web-root` / `--web-overlay` / `FOYER_BUNDLED_WEB` cover override, layer, and shipping-a-fork cases. See [DEVELOPMENT.md](DEVELOPMENT.md).
+- [/] Serve http, https, or both (via CLI flag / config option)
+  - HTTPS solo works today (`just run-tls`, `--tls-cert/--tls-key`, or `server.tls_cert`/`server.tls_key` in config.yaml). Running HTTP + HTTPS simultaneously on two sockets isn't wired yet — would need a second listener task off the same `AppState`.
 - [ ] (optionally scale aware) chord modifier keys for music sequence editor
 - [ ] scale-highlighting in piano roll w/ options for weird scales, maybe microtonal
 - [ ] Time marker (see head) doesn't seem to align with MIDI, and it also doesn't align with audio output. We need to figure out an algorithm to account for the offset and set the time marker to account for the delay. Streaming devices with bluetooth have this really well figured out, we should peek at some implementations of how video streams are set to a delay to allow the audio latency to set in. We'll need this all over the place, meters, visualizations, seek heads. Just anything that displays real-time display to the user, have it pipe through a function that can set and maintain a stream delay on it
 
 
-- [ ] Undo/redo still broken
-  - The `begin_reversible_command` wrapping we added makes single control changes undoable, but bulk operations (region deletes, plugin moves, track reorders) and rapid-fire sequences still don't group properly. Ardour's undo scope is complex — needs deeper investigation into `UndoTransaction` grouping, `Session::begin_reversible_command` naming for merge semantics, and whether Foyer should bundle rapid mutations into a single scoped command.
-- [x] Plugin window drag still lags / feels "drunk"
+- [/] +Undo/redo still broken
+  - Landed: `delete_region` is now reversible (shim wraps in `begin/commit_reversible_command`, which was missing before). New wire commands `Command::UndoGroupBegin { name }` + `UndoGroupEnd` carry a nesting-depth counter through the shim — when a group is open, individual mutation handlers skip their own transaction pair and the outer group owns the batch (one undo step unwinds the whole thing). Client-side: `timeline-view.deleteSelectedRegions` wraps its loop in a group, so multi-region delete is now a single Ctrl+Z.
+  - Still pending: plugin moves, track reorders, and other bulk ops need the same group-wrap pattern on the client + begin/commit wrapping on the shim side. The scaffolding is in place; extending it is a grind-through-the-call-sites sweep.
+- [x] +Plugin window drag still lags / feels "drunk"
   - DECISION 41: removed the `transition: left 0.18s ease, top 0.18s ease, ...` that turned every pointermove into a rubber-band animation, and dropped the `_repack()` clamp that snapped manually-dragged windows back into the workspace rect. Plugin floats now behave like `foyer-window` — dumb, direct, no fancy event-loop layer.
-- [ ] Scrolling in midi roll is broken, can't vertically scroll after screen is painted, stuck at C7
+- [ ] x Scrolling in midi roll is broken, can't vertically scroll after screen is painted, stuck at C7
 Long term:
 
 - [ ] **Scope RBAC denials to offender + admins.** Today `forbidden_for_role` / `auth_required` errors broadcast to every connected client, so a viewer can see another viewer's denial banner flash by. Clean fix: add an optional `target_peer_id` field to `Event::Error` (or a new admin-only `Event::RbacDenied`) and extend `should_forward_event` in `crates/foyer-server/src/ws.rs` to route denials only to (a) the offending connection and (b) LAN/admin roles. Offender gets a concise "you can't do that"; host + admins get the full `{recipient, role_id, command}` payload for audit; other guests see nothing. Message already names the recipient in current builds (DECISION 38), so the host-visibility half is in place — this is the client-scope half.

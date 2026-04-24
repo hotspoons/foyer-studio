@@ -170,7 +170,10 @@ export class PluginsView extends LitElement {
 
   _renderCard(p) {
     return html`
-      <div class="card" @click=${() => this._select(p)}>
+      <div class="card"
+           draggable="true"
+           @dragstart=${(ev) => this._onCardDragStart(ev, p)}
+           @click=${() => this._select(p)}>
         ${icon("puzzle-piece", 18)}
         <div>
           <div class="name">${p.name}</div>
@@ -190,6 +193,25 @@ export class PluginsView extends LitElement {
     this.dispatchEvent(new CustomEvent("plugin-select", {
       detail: p, bubbles: true, composed: true,
     }));
+  }
+
+  /**
+   * Drag-out: a catalog entry dragged onto a track's plugin strip is
+   * received as an "add_plugin" drop — the strip's `_onDrop` sees a
+   * payload with no source `track_id` and routes to the add branch.
+   * PLAN 138 ("from the plugins view to another").
+   */
+  _onCardDragStart(ev, p) {
+    if (!p?.uri) return;
+    const dt = ev.dataTransfer;
+    if (!dt) return;
+    dt.effectAllowed = "copy";
+    dt.setData("application/x-foyer-plugin", JSON.stringify({
+      plugin_uri: p.uri,
+      plugin_name: p.name,
+      // No `track_id` / `index` → receiver treats as add-from-catalog.
+    }));
+    dt.setData("text/plain", p.name || p.uri);
   }
 }
 customElements.define("foyer-plugins-view", PluginsView);

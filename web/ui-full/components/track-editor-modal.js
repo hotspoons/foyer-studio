@@ -567,7 +567,7 @@ export class TrackEditorModal extends LitElement {
               <option value=${currentInput}>${currentInput}</option>` : null}
           </select>
         </div>
-        ${this._renderMicRow(currentInput)}
+        ${t.kind === "midi" ? null : this._renderMicRow(currentInput)}
         ${t.kind === "audio" || t.kind === "midi" ? html`
           <div class="row">
             <label>Output bus</label>
@@ -659,6 +659,13 @@ export class TrackEditorModal extends LitElement {
   // capture, and other tracks' outputs (for pre-split / cue routing).
   _curateInputPorts(track, allTracks) {
     const ports = this._ports || [];
+    // Track-kind gate: a MIDI track wired to an audio port would
+    // produce silent frames (Ardour data-type mismatch) and lets the
+    // user click a mic source for a MIDI track, which makes no sense.
+    // For MIDI tracks we only surface MIDI-flagged ports; for audio
+    // tracks we drop MIDI-flagged ports. Physical-bus/master ports
+    // are filtered further below regardless.
+    const isMidiTrack = track.kind === "midi";
     // Build a set of this track's own output port names so we can
     // exclude them from "Other tracks" (pre-empt the self-feedback).
     const ownOutputs = new Set((track.outputs || []).map((p) => p.name));
@@ -670,6 +677,9 @@ export class TrackEditorModal extends LitElement {
     const tracks = [];
     for (const p of ports) {
       if (!p?.name) continue;
+      // Drop mismatched-kind ports up front.
+      if (isMidiTrack && !p.is_midi) continue;
+      if (!isMidiTrack && p.is_midi) continue;
       const n = p.name;
       if (n.startsWith("foyer:")) { foyer.push(p); continue; }
       if (p.is_physical) { hw.push(p); continue; }

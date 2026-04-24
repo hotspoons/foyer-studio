@@ -27,6 +27,8 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
+// Side-strip body — see `_toggleStrip` + render().
+import "./midi-manager.js";
 
 const KEY_LABELS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const BLACK = new Set([1, 3, 6, 8, 10]);
@@ -95,6 +97,11 @@ export class MidiEditor extends LitElement {
     _snapIdx:    { state: true, type: Number },
     _localNotes: { state: true, type: Array },
     _drag:       { state: true, type: Object },
+    _stripOpen:  { state: true, type: Boolean },
+    /** Opaque: the track id this editor's region belongs to. Plumbed
+     *  so the side-strip's <foyer-midi-manager> can show the right
+     *  track's instruments + patches. PLAN 154. */
+    trackId:     { type: String, attribute: "track-id" },
   };
 
   static styles = css`
@@ -279,6 +286,19 @@ export class MidiEditor extends LitElement {
        "not the active editing surface". Still fully legible. */
     :host([readonly]) .notes-canvas { cursor: not-allowed; }
     :host([readonly]) .note { cursor: not-allowed; }
+
+    /* Slide-out instruments+patches drawer on the right edge. Shares
+     * the beat-sequencer's shape so the two editors feel unified.
+     * PLAN 154. */
+    .side-strip {
+      flex: 0 0 auto;
+      display: flex;
+      border-left: 1px solid var(--color-border);
+      background: var(--color-surface-elevated);
+      overflow: hidden;
+    }
+    .side-strip.open { width: min(360px, 45%); }
+    .side-strip foyer-midi-manager { flex: 1; min-width: 0; overflow: auto; }
   `;
 
   constructor() {
@@ -291,6 +311,20 @@ export class MidiEditor extends LitElement {
     this.ppqn = 960;
     this._zoomIdx = nearestIdx(H_ZOOM_LEVELS, 0.0167);
     this._rowIdx  = nearestIdx(V_ROW_HEIGHTS, 14);
+    // Side-strip preference (instruments/patches drawer). Sticky
+    // per-browser so re-opening the roll keeps the drawer state.
+    try {
+      this._stripOpen = localStorage.getItem("foyer.midi.strip-open") === "1";
+    } catch {
+      this._stripOpen = false;
+    }
+    this.trackId = "";
+    // Always render the full A0–C8 keyboard. Scroll position is
+    // the affordance for "focus on notes here" — narrowing the
+    // rendered range (previous approach) left the canvas shorter
+    // than the viewport so there was nothing to scroll, which
+    // manifested as "stuck at C7" when notes lived below C7 and
+    // the autoFit clamped visibility to that sub-band.
     this._pitchLo = 21;
     this._pitchHi = 108;
     this._selection = new Set();
@@ -421,6 +455,15 @@ export class MidiEditor extends LitElement {
     return Math.max(0, Math.round(ticks / s) * s);
   }
 
+  /**
+   * The piano roll always renders the full A0–C8 range (pitches
+   * 21–108) so the user can *scroll* up or down to any pitch. "Fit"
+   * just scrolls the viewport to center on the note range; it does
+   * NOT narrow `visiblePitches` anymore — doing so was what made
+   * the roll feel "stuck" (canvas height shrank below viewport
+   * height, so `overflow: auto` had nothing to do). Rich's 2026-04
+   * "stuck at C7" bug.
+   */
   _autoFitPitch() {
     const notes = this._localNotes || [];
     if (notes.length === 0) return;
@@ -429,16 +472,29 @@ export class MidiEditor extends LitElement {
       if (n.pitch < lo) lo = n.pitch;
       if (n.pitch > hi) hi = n.pitch;
     }
-    this._pitchLo = Math.max(0, lo - 3);
-    this._pitchHi = Math.min(127, hi + 3);
+    this.updateComplete.then(() => {
+      const scroll = this.renderRoot?.querySelector(".notes-scroll");
+      if (!scroll) return;
+      const rowH = this._rowH();
+      // Top of visible range → pitchHi (108). Top row of our
+      // desired focus pitch = (108 - (hi + 3)) * rowH, clamped.
+      const topPitch = Math.min(108, hi + 3);
+      const rowOffset = Math.max(0, (108 - topPitch) * rowH);
+      scroll.scrollTop = rowOffset;
+    });
+  }
+  _resetPitch() {
     this.updateComplete.then(() => {
       const scroll = this.renderRoot?.querySelector(".notes-scroll");
       if (scroll) scroll.scrollTop = 0;
     });
   }
-  _resetPitch() {
-    this._pitchLo = 21;
-    this._pitchHi = 108;
+
+  _toggleStrip() {
+    this._stripOpen = !this._stripOpen;
+    try {
+      localStorage.setItem("foyer.midi.strip-open", this._stripOpen ? "1" : "0");
+    } catch { /* ignore */ }
   }
 
   // ── coordinate helpers ────────────────────────────────────────────
@@ -937,6 +993,11 @@ export class MidiEditor extends LitElement {
         </button>
         <button title="Undo (Ctrl+Z)" @click=${() => this._send({ type: "undo" })}>↶</button>
         <button title="Redo (Ctrl+Shift+Z / Ctrl+Y)" @click=${() => this._send({ type: "redo" })}>↷</button>
+        <button title=${this._stripOpen ? "Hide instruments + patches" : "Show instruments + patches for this track"}
+                @click=${() => this._toggleStrip()}
+                style="margin-left:auto">
+          ${icon(this._stripOpen ? "chevron-right" : "musical-note", 12)}
+        </button>
       </div>
 
       <div class="body" style="--row-h:${rowH}px">
@@ -983,6 +1044,13 @@ export class MidiEditor extends LitElement {
             })}
           </div>
         </div>
+        ${this._stripOpen ? html`
+          <aside class="side-strip open">
+            <foyer-midi-manager
+              .trackId=${this.trackId || ""}
+              .trackName=${this.regionName || ""}
+            ></foyer-midi-manager>
+          </aside>` : null}
       </div>
 
       <div class="status">
@@ -1003,11 +1071,12 @@ customElements.define("foyer-midi-editor", MidiEditor);
  *  read-only mode with a banner explaining why — piano-roll edits would
  *  be clobbered by the next SetSequencerLayout regen. The banner's
  *  "Convert to MIDI" button flips the layout to `active: false`. */
-export function openMidiEditor(region) {
+export function openMidiEditor(region, opts = {}) {
   const el = document.createElement("foyer-midi-editor");
   el.notes      = region?.notes || [];
   el.regionId   = region?.id || "";
   el.regionName = region?.name || "";
+  el.trackId    = opts.trackId || region?.track_id || "";
   el.sequencerLayout = region?.foyer_sequencer || null;
   el.readOnly = !!(region?.foyer_sequencer && region.foyer_sequencer.active !== false);
   return el;

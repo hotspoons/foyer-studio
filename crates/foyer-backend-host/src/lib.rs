@@ -373,6 +373,18 @@ impl Backend for HostBackend {
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
+    async fn undo_group_begin(&self, name: String) -> Result<(), BackendError> {
+        self.client
+            .undo_group_begin(name)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn undo_group_end(&self) -> Result<(), BackendError> {
+        self.client
+            .undo_group_end()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
 
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {
         self.client

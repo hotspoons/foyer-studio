@@ -269,4 +269,18 @@ export const PRESETS = {
     split(DIR.ROW, [leaf("session"), leaf("plugins")]),
     split(DIR.ROW, [leaf("timeline"), leaf("mixer")]),
   ]),
+
+  // PLAN 139 — a tall left pane and two stacked right panes at half
+  // height each. The default placement puts timeline on the left
+  // (the "long view" of the session) with mixer and plugins stacked
+  // on the right (the work surfaces). It's a one-hand-on-keyboard /
+  // one-hand-on-mouse layout: keep the playhead moving on the left
+  // while you tweak channels + plugins on the right.
+  "timeline-left-mixer-over-plugins": () => ({
+    ...split(DIR.ROW, [
+      leaf("timeline"),
+      split(DIR.COLUMN, [leaf("mixer"), leaf("plugins")]),
+    ]),
+    ratios: [0.5, 0.5],
+  }),
 };

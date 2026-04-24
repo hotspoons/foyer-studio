@@ -979,7 +979,15 @@ export class TimelineView extends LitElement {
     const ids = this.getSelectedRegionIds();
     if (!ids.length) return 0;
     const ws = window.__foyer?.ws;
+    // Wrap the batch in an undo group so one Ctrl+Z restores the
+    // entire selection rather than popping one region at a time.
+    // PLAN 177.
+    const groupLabel = ids.length === 1
+      ? "Foyer delete region"
+      : `Foyer delete ${ids.length} regions`;
+    ws?.send({ type: "undo_group_begin", name: groupLabel });
     for (const id of ids) ws?.send({ type: "delete_region", id });
+    ws?.send({ type: "undo_group_end" });
     this._selectedRegionIds.clear();
     this.requestUpdate();
     return ids.length;
@@ -1413,6 +1421,9 @@ export class TimelineView extends LitElement {
       editor.sequencerLayout = region?.foyer_sequencer || null;
       editor.readOnly = !!(region?.foyer_sequencer && region.foyer_sequencer.active !== false);
       const trackId = region?.track_id;
+      // Propagate to the editor so its side-strip (instruments +
+      // patches) can show the right track's state. PLAN 154.
+      editor.trackId = trackId || "";
       // Keep the editor in sync with the live region list — when the
       // backend echoes a RegionUpdated for this region, push the fresh
       // note list in. Without this the editor would show the snapshot
