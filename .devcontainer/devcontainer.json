@@ -113,7 +113,7 @@
       ]
     }
   },
-  "initializeCommand": "sh -c 'mkdir -p \"$HOME/.claude\" \"$HOME/.local/share/opencode\" \"$HOME/.local/state/opencode\" \"$HOME/.config/opencode\" && touch \"$HOME/.claude.json\"'",
+  "initializeCommand": "cmd.exe /c powershell -NoProfile -Command \"$ErrorActionPreference='SilentlyContinue'; New-Item -ItemType Directory -Force -Path $env:USERPROFILE\\.claude, $env:USERPROFILE\\.local\\share\\opencode, $env:USERPROFILE\\.local\\state\\opencode, $env:USERPROFILE\\.config\\opencode | Out-Null; if (!(Test-Path $env:USERPROFILE\\.claude.json)) { Set-Content -Path $env:USERPROFILE\\.claude.json -Value '{}' }\" || sh -c 'mkdir -p \"$HOME/.claude\" \"$HOME/.local/share/opencode\" \"$HOME/.local/state/opencode\" \"$HOME/.config/opencode\" && touch \"$HOME/.claude.json\"'",
   "onCreateCommand": "bash .devcontainer/post-create.sh",
   "mounts": [
     // Ardour lives under `ext/ardour/` inside this repo now (gitignored)

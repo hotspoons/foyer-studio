@@ -7,8 +7,6 @@ import { icon } from "foyer-ui-core/icons.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import "foyer-ui-core/widgets/window-list.js";
 
-const KEY = "foyer.rightdock.v1";
-
 const VIEW_ICON = {
   mixer: "adjustments-horizontal",
   timeline: "list-bullet",
@@ -18,18 +16,8 @@ const VIEW_ICON = {
   plugin_panel: "puzzle-piece",
 };
 
-function load() {
-  try { return JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch { return {}; }
-}
-function save(s) {
-  try { localStorage.setItem(KEY, JSON.stringify(s)); } catch {}
-}
-
 export class RightDock extends LitElement {
   static properties = {
-    _open:   { state: true, type: Boolean },
-    _width:  { state: true, type: Number },
-    _panel:  { state: true, type: String },
     _minimized: { state: true, type: Array },
     _dropHighlight: { state: true, type: Boolean },
   };
@@ -42,8 +30,6 @@ export class RightDock extends LitElement {
       background: var(--color-surface);
       border-left: 1px solid var(--color-border);
     }
-    :host([collapsed]) { border-left: 0; }
-
     .rail {
       display: flex; flex-direction: column; align-items: center;
       gap: 4px;
@@ -91,61 +77,14 @@ export class RightDock extends LitElement {
       letter-spacing: 0.08em;
     }
 
-    .panel {
-      display: flex;
-      flex-direction: column;
-      border-right: 1px solid var(--color-border);
-      overflow: hidden;
-      min-width: 180px;
-    }
-    header {
-      display: flex; align-items: center; gap: 8px;
-      padding: 8px 12px;
-      border-bottom: 1px solid var(--color-border);
-      background: var(--color-surface-elevated);
-      font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
-      color: var(--color-text-muted);
-      font-family: var(--font-sans); font-weight: 600;
-    }
-    .content { flex: 1; overflow: auto; padding: 8px 10px; font-family: var(--font-sans); }
-
-    .action-group-title {
-      font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
-      color: var(--color-text-muted);
-      margin: 8px 0 2px;
-    }
-    .action-item {
-      display: flex; align-items: center; gap: 6px;
-      padding: 4px 6px;
-      font-size: 11px; color: var(--color-text);
-      cursor: pointer;
-      border-radius: var(--radius-sm);
-    }
-    .action-item:hover { background: var(--color-surface-elevated); color: var(--color-accent-3); }
-
-    .resize {
-      width: 4px; cursor: col-resize;
-      background: transparent;
-    }
-    .resize:hover { background: var(--color-accent); }
   `;
 
   constructor() {
     super();
-    const s = load();
-    // Default-closed now: the rail is always visible; the panel only
-    // opens when the user clicks a specific FAB. Keeps the workspace
-    // wide on first launch.
-    this._open = !!s.open;
-    this._width = s.width || 280;
-    // No hardcoded "actions" default — panel state is driven entirely
-    // by which FAB the user clicks (`fab:<id>`).
-    this._panel = s.panel || "";
     this._minimized = [];
     this._dropHighlight = false;
     this._storeHandler = () => this.requestUpdate();
     this._layoutHandler = () => this._refreshMinimized();
-    this._updateAttrs();
   }
 
   connectedCallback() {
@@ -197,18 +136,12 @@ export class RightDock extends LitElement {
     window.__foyer?.layout?.floatSet(id, { minimized: true });
   }
 
-  _updateAttrs() {
-    if (this._open) this.removeAttribute("collapsed");
-    else this.setAttribute("collapsed", "");
-  }
-
-  _persist() {
-    save({ open: this._open, width: this._width, panel: this._panel });
-  }
-
   /** Fire after any change that affects how much horizontal space the
    *  dock consumes, so layouts that reserve the workspace rect can
-   *  reflow on this tick. */
+   *  reflow on this tick. Still useful for external listeners even
+   *  though the rail itself no longer resizes — docked FAB panels
+   *  appear to the left of the rail and may overlap with floats.
+   */
   _announceDockChanged() {
     this.dispatchEvent(
       new CustomEvent("resize", { bubbles: true, composed: true })
@@ -216,52 +149,12 @@ export class RightDock extends LitElement {
     window.dispatchEvent(new CustomEvent("foyer:dock-resized"));
   }
 
-  _toggle(panel) {
-    if (this._open && this._panel === panel) {
-      this._open = false;
-    } else {
-      this._open = true;
-      this._panel = panel;
-    }
-    this._updateAttrs();
-    this._persist();
-    this._announceDockChanged();
-  }
-
-  _startResize(ev) {
-    ev.preventDefault();
-    const startX = ev.clientX;
-    const startW = this._width;
-    const move = (e) => {
-      const dx = startX - e.clientX;
-      this._width = Math.max(200, Math.min(600, startW + dx));
-      // Announce mid-drag so slot-clamped floats ride the resize live
-      // instead of only snapping into the new size on release.
-      this._announceDockChanged();
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      this._persist();
-      this._announceDockChanged();
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  }
-
   render() {
-    const style = this._open ? `width:${this._width}px` : "width:0";
-    // Everything above the minimized-floats section is now a dockable
-    // FAB — Actions, Session, Windows, Agent, Chat, Layouts. The rail
-    // just iterates them; users can tear any of them out to float or
-    // drag an existing floater back onto the rail to re-dock.
+    // The right-dock is now rail-only — docked FABs render their
+    // own panels (see `chat-panel.js#_renderPanelBody({compact:true})`
+    // + `quadrant-fab.js#_renderDockedPanel()`). The rail lists docked
+    // FABs first, then a separator, then minimized floats.
     return html`
-      ${this._open ? html`
-        <div class="resize" @pointerdown=${this._startResize}></div>
-        <div class="panel" style=${style}>
-          ${this._renderPanel()}
-        </div>
-      ` : null}
       <div class="rail">
         ${this._renderDockedFabs({ leadingSep: false })}
         ${this._minimized.length ? html`<div class="rail-sep"></div>` : null}
@@ -345,21 +238,27 @@ export class RightDock extends LitElement {
     };
     const up = () => {
       if (!tore) {
-        // It was a tap — open the FAB's content inside the right-dock
-        // panel, matching the Actions / Session / Windows pattern.
-        // Old behavior (floating popover anchored to the rail icon)
-        // is still reachable via the FAB's own `openFromDock` for
-        // FABs that opt out of dock-panel rendering.
-        this._toggle(`fab:${id}`);
-        // Let the FAB know it's been opened from the dock so any
-        // one-shot setup (layout presets fetch, agent connect, …)
-        // runs exactly once per show.
+        // Tap: let the FAB render its OWN docked panel (pos:fixed,
+        // anchored next to the rail). We used to render the FAB's
+        // content inside the right-dock's own panel div, but that
+        // stripped the FAB's shadow-DOM styles and produced double
+        // headers. Delegating keeps the docked presentation visually
+        // identical to the floating one and makes tear-out a
+        // simple state flip.
         const fab = window.__foyer?.layout?.fabInstance?.(id);
-        fab?.onDockPanelOpen?.();
-        // Best-effort close of the legacy floating panel if it was
-        // left open by a prior interaction.
-        if (fab?._open) fab.closeFromDock?.();
-        void iconTop;
+        if (fab) {
+          // Close any other docked FAB panels so only one is up at
+          // a time — matches the old "slide-out" panel feel.
+          const others = (window.__foyer?.layout?.dockedFabs?.() || [])
+            .filter((f) => f.id !== id);
+          for (const o of others) {
+            const otherFab = window.__foyer?.layout?.fabInstance?.(o.id);
+            if (otherFab?._open) otherFab.closeFromDock?.();
+          }
+          fab.toggleFromDock?.(iconTop);
+          if (fab._open) fab.onDockPanelOpen?.();
+          this._announceDockChanged();
+        }
       }
       cleanup();
     };
@@ -385,6 +284,11 @@ export class RightDock extends LitElement {
     if (!layout) return;
     const fab = layout.fabInstance?.(id);
     layout.undockFab(id);
+    // Collapse the FAB's own docked panel — it's about to fly away
+    // as a floating button, and leaving `_open=true` would leave a
+    // ghost copy pinned at the old rail anchor.
+    if (fab?._open) fab.closeFromDock?.();
+    this._announceDockChanged();
     if (!fab) return;
 
     const size = 48;
@@ -413,11 +317,12 @@ export class RightDock extends LitElement {
 
   _onFabIconContext(ev, id) {
     ev.preventDefault();
-    // Right-click undocks and closes the popup. Same as drag-off but via
-    // keyboard-friendly gesture.
+    // Right-click undocks the FAB and closes its docked panel. Same
+    // effect as drag-off but via keyboard-friendly gesture.
     window.__foyer?.layout?.undockFab(id);
     const fab = window.__foyer?.layout?.fabInstance?.(id);
     fab?.closeFromDock?.();
+    this._announceDockChanged();
   }
 
   _labelFor(e) {
@@ -443,27 +348,10 @@ export class RightDock extends LitElement {
   }
 
   _renderPanel() {
-    // Every panel in the rail is now driven through the FAB registry.
-    // Actions / Session / Windows used to be hardcoded here; they're
-    // regular dockable FABs too (`foyer-actions-fab` etc.).
-    if (this._panel?.startsWith("fab:")) {
-      const id = this._panel.slice(4);
-      const fab = window.__foyer?.layout?.fabInstance?.(id);
-      const meta = window.__foyer?.layout?.fabMeta?.(id) || {};
-      if (!fab) return html`<header>${meta.label || id}</header>`;
-      // Prefer the dedicated `dockPanelContent()` method if the FAB
-      // exposes one; fall back to its normal `_renderPanelContent()`.
-      const content =
-        typeof fab.dockPanelContent === "function"
-          ? fab.dockPanelContent()
-          : typeof fab._renderPanelContent === "function"
-            ? fab._renderPanelContent()
-            : html``;
-      return html`
-        <header>${meta.label || id}</header>
-        <div class="content">${content}</div>
-      `;
-    }
+    // Docked FABs render their own pos:fixed panel next to the rail
+    // (anchored via their `_dockStyle()` / `_renderDockedPanel()` —
+    // see `quadrant-fab.js` + `chat-panel.js`). The right-dock's own
+    // panel is no longer used for anything post-FAB-migration.
     return null;
   }
 }
