@@ -2,7 +2,19 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ARDOUR_DIR="${FOYER_ARDOUR_DIR:-/workspaces/ardour}"
+
+# Resolve Ardour source tree. Priority mirrors scripts/dev/ardour.sh:
+#   1. $FOYER_ARDOUR_DIR (explicit override)
+#   2. <repo>/ext/ardour (in-repo convention — gitignored)
+#   3. /workspaces/ardour (legacy sibling layout)
+if [ -n "${FOYER_ARDOUR_DIR:-}" ]; then
+    ARDOUR_DIR="$FOYER_ARDOUR_DIR"
+elif [ -d "$ROOT_DIR/ext/ardour" ]; then
+    ARDOUR_DIR="$ROOT_DIR/ext/ardour"
+else
+    ARDOUR_DIR="/workspaces/ardour"
+fi
+
 SHIM_DIR="$ROOT_DIR/shims/ardour"
 SHIM_BUILD_DIR="$SHIM_DIR/cmake-build"
 INSTALL_DEST="${FOYER_SHIM_DEST:-$HOME/.config/ardour9}"
@@ -41,6 +53,14 @@ do_install() {
 }
 
 do_check() {
+    # Stub-backend workflows don't need the shim; skip with a hint if
+    # Ardour source is missing (the shim can't build without it). The
+    # `just prep → shim check` path used to hard-fail here, blocking
+    # the perfectly-fine stub boot.
+    if [ ! -d "$ARDOUR_DIR" ]; then
+        echo "shim: skipped (no Ardour source at $ARDOUR_DIR — real backend needs \`just ardour clone && just ardour build\`)"
+        return 0
+    fi
     installed="$INSTALL_DEST/surfaces/libfoyer_shim.so"
     if [ ! -e "$installed" ]; then
         echo "shim: not installed, building + installing"

@@ -123,7 +123,21 @@ case "$cmd" in
         do_check
         ;;
     ensure)
-        require_repo
+        # Called by `just prep` before every `just run[-tls]`. Full
+        # bootstrap:
+        #   1. clone into ext/ardour if source tree missing (~1 GB)
+        #   2. configure + build if the headless binary isn't there
+        #   3. write the resulting executable path into
+        #      `$XDG_DATA_HOME/foyer/config.yaml` via
+        #      `foyer configure --backend ardour --force`
+        # Idempotent — once everything is in place this short-circuits
+        # in < 1 s. The one-time slow path clones + builds Ardour, so
+        # fresh-clone devs get a real DAW on `just run` without having
+        # to remember separate setup steps.
+        if [ ! -d "$ARDOUR_DIR" ]; then
+            echo "ardour: source tree missing at $ARDOUR_DIR — cloning (large, one-time)"
+            do_clone
+        fi
         ensure_tags
         need_build=0
         bin="$(latest_bin)"
@@ -134,7 +148,7 @@ case "$cmd" in
             need_build=1
         fi
         if [ "$need_build" -eq 1 ]; then
-            echo "ardour: bootstrapping build (slow path)"
+            echo "ardour: bootstrapping build (slow path — ~15 min)"
             do_configure
             do_build
         fi
@@ -143,6 +157,16 @@ case "$cmd" in
             do_build
             do_check
         fi
+        # Write the resolved executable path into config.yaml so the
+        # sidecar (and the UI's backend launcher) can spawn it. Uses
+        # `foyer configure --backend ardour --force` with
+        # FOYER_ARDOUR_BUILD_ROOT pinned to the resolved ARDOUR_DIR
+        # so detection finds the binary deterministically.
+        (
+            cd "$REPO_ROOT"
+            FOYER_ARDOUR_BUILD_ROOT="$ARDOUR_DIR" \
+                cargo run --quiet --bin foyer -- configure --backend ardour --force
+        )
         ;;
     clean)
         require_repo

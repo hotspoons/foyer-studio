@@ -34,3 +34,5 @@ vgcore.*
 # workflow (Ardour, future DAW source trees). `ext/` replaces the
 # old sibling-workspace layout — see `just ardour clone`.
 /ext/
+
+.claude/*
