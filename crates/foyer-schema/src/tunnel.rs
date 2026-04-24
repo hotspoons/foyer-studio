@@ -168,7 +168,9 @@ pub struct TunnelManifest {
     pub active_provider_url: Option<String>,
 }
 
-fn yes() -> bool { true }
+fn yes() -> bool {
+    true
+}
 
 // ─── Provider enum (extensible) ──────────────────────────────────────
 

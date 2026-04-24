@@ -115,6 +115,24 @@ Mid term:
   - **Client mirror (UI gating).** Shared helper `web/src/rbac.js` (`isAllowed` / `isActionAllowed`) used by main-menu, session-switcher, transport-bar, command-palette, welcome-screen. Server allow-list streamed to client in `ClientGreeting.role_allow` so UI uses the same pattern rules. Non-admin tunnel guests see no failing buttons — the whole transport-control cluster hides for viewers, welcome screen becomes "waiting for host", command palette filters disallowed actions, session switcher hides Close/Open-Another, main menu items filter per-category. Rogue post-gate clicks surface via `startup-errors` banner (extended to always capture `forbidden_for_role` / `auth_required`).
   - **Follow-up — mixer surfaces.** Fader / mute / solo / plugin edit controls still render for all roles; denied clicks hit the banner but controls stay visible. Multi-component sweep tracked separately.
 
+
+### UI:
+- [/] Refactor UI so it is modular and hackable. (DECISION 40)
+  - [x] Split into `foyer-core` (renderless business logic: ws, store, RBAC, audio, automation, registries) → `foyer-ui-core` (shared primitives: tiling, windowing, widgets, fallback shell) → `ui-*` variants (opinionated UIs; `ui-full` is the shipping one). Dependency arrow is one-way.
+  - [x] JSDoc-typed registries in core: `features`, `ui-variants`, `widgets`, `views`. Each is a plain EventTarget-backed map consumable by anyone who imports `foyer-core`.
+  - [x] CSS opinion scoped to each UI variant; `foyer-ui-core` exposes shared vars + primitives, no layout rules.
+  - [x] Shipping UI is now `ui-full/`; nav-bar publishes DEFAULT_VIEWS into the view registry with `elementTag` fields so tile-leaf creates bodies by tag lookup (no hardcoded imports from ui-core into ui).
+  - [x] Variants auto-discovered via `/variants.json` (server scans `web_root` for `ui-*/package.js`; excludes reserved `ui-core`/`ui-tests`). `boot.js` fetches + dynamic-imports each; no `index.html` edit needed to ship one.
+  - [x] Fallback UI in `ui-core/fallback-ui.js` paints "If you lived here, you'd be home now" when no variant matches — proves core can run without any registered renderer.
+  - [x] Backend capabilities plumb through `Backend::features()` → `ClientGreeting.features` → `foyer-core/registry/features.js` → `showFeature()`/`featureEnabled()` helpers. Optimistic default on unknown ids.
+  - [x] Hot-serve from `$XDG_DATA_HOME/foyer/web` with first-run extraction from the binary (`include_dir!`). Users edit in place; `--web-root <path>` overrides; working-copy `./web/` wins during dev.
+  - [x] HACKING.md in `web/` with recipes (new UI variant, widget override, feature-gated surfaces, new tile view, React-style swap, CLI-driven probe, skip ui-core entirely).
+  - [ ] Additional UI variants (`ui-lite`, `ui-touch`, `ui-kids`) — scaffolding ready, no concrete variants written yet beyond `ui-full`.
+  - [ ] Click and drag plugins and midi instruments from one channel to another or from the plugins view to another
+  - [ ] 1x high x 0.5x wide one panel, 0.5x high x 0.5x wide x 2 other panel layout (3 windows)
+  - [ ] Widget-registry adoption sweep: most shipping components still hardcode tag names; migrating to `widgetTag(...)` lookups would let alt-UIs override at the widget level without forking whole views.
+
+
 - [ ] Click and drag to reorder plugins in mixer and mini strip in channel editor
 - [~] Cloudflare tunnels auth:
   - [x] Quick tunnels + full account-linked tunnels (api_token + account_id + hostname → auto-provisions tunnel/ingress/DNS; see DECISION 35).
@@ -144,21 +162,12 @@ Mid term:
 - [ ] scale-highlighting in piano roll w/ options for weird scales, maybe microtonal
 - [ ] Time marker (see head) doesn't seem to align with MIDI, and it also doesn't align with audio output. We need to figure out an algorithm to account for the offset and set the time marker to account for the delay. Streaming devices with bluetooth have this really well figured out, we should peek at some implementations of how video streams are set to a delay to allow the audio latency to set in. We'll need this all over the place, meters, visualizations, seek heads. Just anything that displays real-time display to the user, have it pipe through a function that can set and maintain a stream delay on it
 
-### UI:
-- [ ] Refactor UI so it is modular and hackable. 
-  - [ ] Move the core functionality necessary to run the UI for any possible configuration (websocket handling, audio workers, business logic for primary DAW functions as pure business logic like session handling, gruoups, busses, tracks, transports, plugins, etc. - everything common to all DAWs - but no UI, abstract out with __JSDoc__ so we get pseudo-typing). Avoid directly binding to browser-specific APIs and defer to facades with implementations that are run on startup if we detect we are in a browser. If there is any particular core feature that is DAW specific we need proper abstraction and/or registration so we don't couple to the DAW and just have an implementation for that DAW of a special feature. The core goal is that all of the hard work for the UI business logic is abstracted into a JavaScript library with zero opinion on interaction, look and feel, or back end, so people can hack front ends onto it. And if they want to port off of a browser to another platform, that should be possible too. Add a feature registry per DAW so we can easily omit features not supported by one DAW or another and the UI implementation should respect this.
-  - [ ] Core should have a UI registry that can take multiple UIs and swap them out on demand, and can be used as either a bootstrapper or library (omitting this step). UIs should have a primary manifest that identify themselves as such, then have their own primary bootstrapping logic on top of this
-  - [ ] CSS is subjective, so no opinions on this - this is per UI implementation
-  - [ ] Register a shipping UI - foyer-ui - that takes foyer-core and paints it with what we made thus far. We want to make sure all controls, menu items, windows, etc. have a central registry that maps elements to DAW back ends so we can omit features buttons, menus etc that aren't supported. Need to push as much of this mapping logic as possible into core. We should also have swappable UIs as a whole for this project - a full-featured UI, a lite UI, a small and big touch UI, and a kids UI. Small and big touch UIs should be auto-detected based on client, but we want to be able to control track muting, arming, IO, and basic transport commands so someone could record themselves easily using their phone as a control surface for these tasks - advanced more for levels. Components should be sharable between UIs, but layouts should be scoped to the specific UI, so an advanced layout would not conflict with a simple layout for presets and last updated states
-  - [ ] Shipping UI is the only one with opinions, the core just abstracts the hard as fuck stuff to do so you get a clean API to build any UI on top of
-  - [ ] Click and drag plugins and midi instruments from one channel to another or from the plugins view to another
-  - [ ] 1x high x 0.5x wide one panel, 0.5x high x 0.5x wide x 2 other panel layout (3 windows)
 
 - [ ] Undo/redo still broken
   - The `begin_reversible_command` wrapping we added makes single control changes undoable, but bulk operations (region deletes, plugin moves, track reorders) and rapid-fire sequences still don't group properly. Ardour's undo scope is complex — needs deeper investigation into `UndoTransaction` grouping, `Session::begin_reversible_command` naming for merge semantics, and whether Foyer should bundle rapid mutations into a single scoped command.
-- [ ] Plugin window drag still lags / feels "drunk"
-  - Despite switching to direct-DOM manipulation (same pattern as `foyer-window.js`), plugin floats still stutter during drag. The track editor window (`foyer-window`) drags smoothly with identical code. Difference may be: (1) plugin layer lives at z-index 850 vs window at 900+, (2) plugin content (`foyer-plugin-panel`) re-renders on drag because it's a Lit component receiving prop updates, (3) the `.pwin` element contains an iframe or heavy plugin UI that triggers browser compositor work on every layout change. Needs comparison profiling against track editor drag.
-
+- [x] Plugin window drag still lags / feels "drunk"
+  - DECISION 41: removed the `transition: left 0.18s ease, top 0.18s ease, ...` that turned every pointermove into a rubber-band animation, and dropped the `_repack()` clamp that snapped manually-dragged windows back into the workspace rect. Plugin floats now behave like `foyer-window` — dumb, direct, no fancy event-loop layer.
+- [ ] Scrolling in midi roll is broken, can't vertically scroll after screen is painted, stuck at C7
 Long term:
 
 - [ ] **Scope RBAC denials to offender + admins.** Today `forbidden_for_role` / `auth_required` errors broadcast to every connected client, so a viewer can see another viewer's denial banner flash by. Clean fix: add an optional `target_peer_id` field to `Event::Error` (or a new admin-only `Event::RbacDenied`) and extend `should_forward_event` in `crates/foyer-server/src/ws.rs` to route denials only to (a) the offending connection and (b) LAN/admin roles. Offender gets a concise "you can't do that"; host + admins get the full `{recipient, role_id, command}` payload for audit; other guests see nothing. Message already names the recipient in current builds (DECISION 38), so the host-visibility half is in place — this is the client-scope half.

@@ -73,9 +73,7 @@ fn decode_errors(errs: &[ApiError]) -> String {
     }
 }
 
-async fn send_json<T: for<'de> Deserialize<'de>>(
-    req: reqwest::RequestBuilder,
-) -> Result<T> {
+async fn send_json<T: for<'de> Deserialize<'de>>(req: reqwest::RequestBuilder) -> Result<T> {
     // Capture status+body so 401/403/5xx don't get silently swallowed
     // by serde when the body isn't the expected envelope shape.
     let resp = req.send().await.context("cloudflare api request")?;
@@ -141,7 +139,10 @@ pub async fn find_tunnel_by_name(
     Ok(list
         .into_iter()
         .find(|t| t.deleted_at.is_none())
-        .map(|t| Tunnel { id: t.id, name: t.name }))
+        .map(|t| Tunnel {
+            id: t.id,
+            name: t.name,
+        }))
 }
 
 /// Create a new Cloudflare Tunnel with `config_src: cloudflare` so
@@ -210,9 +211,7 @@ pub async fn set_tunnel_ingress(
             ]
         }
     });
-    let url = format!(
-        "{API_BASE}/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations"
-    );
+    let url = format!("{API_BASE}/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations");
     let _: serde_json::Value = send_json(http.put(&url).bearer_auth(token).json(&body)).await?;
     Ok(())
 }
@@ -268,14 +267,11 @@ pub async fn ensure_dns_cname(
     });
     if let Some(rec) = existing.into_iter().next() {
         if rec.content == target && rec.proxied {
-            tracing::info!(
-                "dns record {hostname} -> {target} already correct (proxied)"
-            );
+            tracing::info!("dns record {hostname} -> {target} already correct (proxied)");
             return Ok(());
         }
         let url = format!("{API_BASE}/zones/{zone_id}/dns_records/{}", rec.id);
-        let _: serde_json::Value =
-            send_json(http.put(&url).bearer_auth(token).json(&body)).await?;
+        let _: serde_json::Value = send_json(http.put(&url).bearer_auth(token).json(&body)).await?;
         tracing::info!("updated dns {hostname} -> {target}");
     } else {
         let url = format!("{API_BASE}/zones/{zone_id}/dns_records");
@@ -317,15 +313,17 @@ pub async fn provision_tunnel(
 ) -> Result<ProvisionedTunnel> {
     let zone = match zone_id {
         Some(zid) => zid.to_string(),
-        None => find_zone_for_hostname(http, api_token, hostname)
-            .await?
-            .ok_or_else(|| {
-                anyhow!(
-                    "no Cloudflare zone found for {hostname} — check that the domain \
+        None => {
+            find_zone_for_hostname(http, api_token, hostname)
+                .await?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "no Cloudflare zone found for {hostname} — check that the domain \
                      is in this account and the API token has Zone:Read access"
-                )
-            })?
-            .id,
+                    )
+                })?
+                .id
+        }
     };
     tracing::info!("cloudflare: using zone {zone} for {hostname}");
 
@@ -343,9 +341,16 @@ pub async fn provision_tunnel(
         }
     };
 
-    set_tunnel_ingress(http, api_token, account_id, &tunnel.id, hostname, service_url)
-        .await
-        .context("set tunnel ingress")?;
+    set_tunnel_ingress(
+        http,
+        api_token,
+        account_id,
+        &tunnel.id,
+        hostname,
+        service_url,
+    )
+    .await
+    .context("set tunnel ingress")?;
     tracing::info!(
         "cloudflare: ingress {hostname} -> {service_url} on tunnel {}",
         tunnel.id

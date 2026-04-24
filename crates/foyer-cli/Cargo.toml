@@ -24,3 +24,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Bundle web/ into the binary so a shipped `foyer` is self-contained.
+# On first run the CLI extracts it to $XDG_DATA_HOME/foyer/web; users
+# edit in place to hack (see web/HACKING.md). `--web-root <path>`
+# overrides; `./web` takes precedence when it exists (dev mode).
+include_dir = "0.7"

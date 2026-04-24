@@ -85,7 +85,7 @@ pub fn scan_in(dir: &Path) -> Vec<Advertisement> {
         }
         out.push(ad);
     }
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    out.sort_by_key(|ad| std::cmp::Reverse(ad.mtime));
     out
 }
 
@@ -127,7 +127,14 @@ pub enum DiscoveryError {
 
 fn format_shims(ads: &[Advertisement]) -> String {
     ads.iter()
-        .map(|a| format!("{} (pid {}, session \"{}\")", a.socket.display(), a.pid, a.session))
+        .map(|a| {
+            format!(
+                "{} (pid {}, session \"{}\")",
+                a.socket.display(),
+                a.pid,
+                a.session
+            )
+        })
         .collect::<Vec<_>>()
         .join("; ")
 }

@@ -64,14 +64,19 @@ impl RegionStore {
 }
 
 fn synthesize_for(track_id: &EntityId) -> Vec<Region> {
-    let slug = track_id.as_str().rsplit('.').next().unwrap_or("x").to_string();
+    let slug = track_id
+        .as_str()
+        .rsplit('.')
+        .next()
+        .unwrap_or("x")
+        .to_string();
     // Non-overlapping: 4 regions of 6s each, 2s gaps, offset so tracks don't
     // all start at 0.
     let seed: u64 = track_id
         .as_str()
         .bytes()
         .fold(0u64, |a, b| a.wrapping_mul(131).wrapping_add(b as u64));
-    let start_offset = (seed % 4) as u64 * 48_000;
+    let start_offset = (seed % 4) * 48_000;
     let gap = 2 * 48_000; // 2 seconds
     let dur = 6 * 48_000; // 6 seconds
     let mut out = Vec::new();

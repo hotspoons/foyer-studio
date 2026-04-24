@@ -102,7 +102,10 @@ impl StubState {
             });
         }
         // Playhead: advance when `transport.playing` is true, freeze when not.
-        let playing = matches!(self.session.transport.playing.value, ControlValue::Bool(true));
+        let playing = matches!(
+            self.session.transport.playing.value,
+            ControlValue::Bool(true)
+        );
         if playing {
             // Ticker runs every ~33ms; sample_rate=48_000. Advance by one
             // tick's worth of samples per tick.
@@ -135,11 +138,7 @@ impl StubState {
     /// name/color changes update immediately; `group_id` is stored
     /// verbatim; `bus_assign` is a no-op in the stub until we model
     /// routing.
-    pub(crate) fn update_track(
-        &mut self,
-        id: &EntityId,
-        patch: &TrackPatch,
-    ) -> Option<Track> {
+    pub(crate) fn update_track(&mut self, id: &EntityId, patch: &TrackPatch) -> Option<Track> {
         let t = self.session.tracks.iter_mut().find(|t| &t.id == id)?;
         if let Some(name) = patch.name.as_ref() {
             t.name = name.clone();
@@ -227,7 +226,8 @@ impl StubState {
         lane_id: &EntityId,
         mode: AutomationMode,
     ) -> Result<(), BackendError> {
-        let lane = self.find_lane_mut(lane_id)
+        let lane = self
+            .find_lane_mut(lane_id)
             .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
         lane.mode = mode;
         Ok(())
@@ -238,7 +238,8 @@ impl StubState {
         lane_id: &EntityId,
         point: AutomationPoint,
     ) -> Result<(), BackendError> {
-        let lane = self.find_lane_mut(lane_id)
+        let lane = self
+            .find_lane_mut(lane_id)
             .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
         lane.points.push(point);
         lane.points.sort_by_key(|p| p.time_samples);
@@ -252,11 +253,16 @@ impl StubState {
         new_time_samples: u64,
         value: f64,
     ) -> Result<(), BackendError> {
-        let lane = self.find_lane_mut(lane_id)
+        let lane = self
+            .find_lane_mut(lane_id)
             .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
-        let pt = lane.points.iter_mut()
+        let pt = lane
+            .points
+            .iter_mut()
             .find(|p| p.time_samples == original_time_samples)
-            .ok_or_else(|| BackendError::Other(format!("point not found at {original_time_samples}")))?;
+            .ok_or_else(|| {
+                BackendError::Other(format!("point not found at {original_time_samples}"))
+            })?;
         pt.time_samples = new_time_samples;
         pt.value = value;
         lane.points.sort_by_key(|p| p.time_samples);
@@ -268,12 +274,15 @@ impl StubState {
         lane_id: &EntityId,
         time_samples: u64,
     ) -> Result<(), BackendError> {
-        let lane = self.find_lane_mut(lane_id)
+        let lane = self
+            .find_lane_mut(lane_id)
             .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
         let old_len = lane.points.len();
         lane.points.retain(|p| p.time_samples != time_samples);
         if lane.points.len() == old_len {
-            return Err(BackendError::Other(format!("point not found at {time_samples}")));
+            return Err(BackendError::Other(format!(
+                "point not found at {time_samples}"
+            )));
         }
         Ok(())
     }
@@ -283,7 +292,8 @@ impl StubState {
         lane_id: &EntityId,
         points: Vec<AutomationPoint>,
     ) -> Result<(), BackendError> {
-        let lane = self.find_lane_mut(lane_id)
+        let lane = self
+            .find_lane_mut(lane_id)
             .ok_or_else(|| BackendError::Other(format!("unknown lane {lane_id}")))?;
         lane.points = points;
         Ok(())

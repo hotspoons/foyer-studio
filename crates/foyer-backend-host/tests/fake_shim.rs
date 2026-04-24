@@ -263,6 +263,7 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                             stream_id,
                             source,
                             format,
+                            port_name: None,
                         }),
                     };
                     next_seq += 1;

@@ -125,7 +125,10 @@ mod tests {
         let mut enc = OpusFrameEncoder::new(48_000, 2, 960).expect("init");
         let pcm = vec![0.0f32; 960 * 2];
         let packet = enc.encode(&pcm).expect("encode");
-        assert!(!packet.is_empty(), "opus emits at least one byte even for silence");
+        assert!(
+            !packet.is_empty(),
+            "opus emits at least one byte even for silence"
+        );
     }
 
     #[test]

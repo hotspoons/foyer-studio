@@ -115,7 +115,8 @@ fn run_host(
     let actual = listener.local_addr()?;
     drop(listener); // release before Server::run rebinds
 
-    let config = Config { tls: None,
+    let config = Config {
+        tls: None,
         listen: actual,
         web_root: std::env::current_dir().ok().map(|d| d.join("web")),
         jail_root: None,

@@ -96,9 +96,8 @@ fn normalize_relative(rel: &str) -> PathBuf {
     let trimmed = rel.trim_start_matches('/').trim();
     let mut out = PathBuf::new();
     for c in Path::new(trimmed).components() {
-        match c {
-            Component::Normal(os) => out.push(os),
-            _ => {}
+        if let Component::Normal(os) = c {
+            out.push(os)
         }
     }
     out

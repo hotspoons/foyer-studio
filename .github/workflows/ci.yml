@@ -10,7 +10,10 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  check:
+  # Rust gates — fmt + clippy + test, all driven by the same `just`
+  # recipes devs run locally. Keeping the steps identical on both
+  # sides means a green `just ci` == a green CI check.
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,6 +21,38 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace --all-targets
+      - uses: extractions/setup-just@v2
+      - run: just fmt-check
+      - run: just clippy
+      - run: just test
+
+  # Browser-level smoke — boots a stub-backend Foyer server and drives
+  # it headless with Playwright. No JACK / Ardour / shim needed; this
+  # exercises the three-tier web split (core / ui-core / ui-*) and
+  # the Rust server's HTTP + WS surface.
+  ui-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Chromium deps
+        run: |
+          cd tests-ui
+          bun install
+          bunx playwright install --with-deps chromium
+      - name: Build tailwind assets
+        run: ./scripts/dev/tw.sh build
+      - name: just test-ui-ci
+        run: just test-ui-ci
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            tests-ui/report
+            tests-ui/test-results
+          retention-days: 14

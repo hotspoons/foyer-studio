@@ -14,11 +14,11 @@ mod audio;
 mod audio_opus;
 mod audio_ws;
 mod cloudflare_api;
-mod cloudflared_dl;
 mod cloudflare_provider;
+mod cloudflared_dl;
 mod dev;
-mod ingress_ws;
 mod files;
+mod ingress_ws;
 mod jail;
 pub mod orphans;
 mod ring;
@@ -29,9 +29,9 @@ pub(crate) mod ws;
 
 pub use jail::{Jail, JailError};
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -82,6 +82,13 @@ pub struct Config {
     pub listen: SocketAddr,
     /// Directory of static web assets to serve at `/`. `None` disables static serving.
     pub web_root: Option<PathBuf>,
+    /// Extra web-asset directories layered on top of `web_root`.
+    /// Earlier entries win over later entries; `web_root` is the
+    /// final fallback. Used to stage a UI variant that lives
+    /// outside the main repo without editing the base tree.
+    /// `/variants.json` scans every root so dropped-in `ui-*/`
+    /// folders surface in the boot.js variant list automatically.
+    pub web_overlays: Vec<PathBuf>,
     /// Filesystem jail for the browser / session picker. When `None`, remote
     /// clients cannot browse the host's filesystem at all — `BrowsePath`
     /// returns an error.
@@ -111,6 +118,7 @@ impl Default for Config {
         Self {
             listen: "127.0.0.1:3838".parse().unwrap(),
             web_root: None,
+            web_overlays: Vec::new(),
             jail_root: None,
             tls: None,
         }
@@ -203,11 +211,7 @@ pub(crate) struct AppState {
     /// Active tunnel provider (ngrok, cloudflared, …).  Held in an
     /// Arc<Mutex<…>> so the provider-specific shutdown logic runs
     /// polymorphically without the caller knowing which one it is.
-    pub(crate) tunnel_provider: Mutex<Option<
-        std::sync::Arc<
-            tokio::sync::Mutex<Box<dyn crate::tunnel_provider::TunnelProvider>>,
-        >
-    >>,
+    pub(crate) tunnel_provider: Mutex<Option<SharedTunnelProvider>>,
     /// Hostname reported by the active tunnel.
     pub(crate) tunnel_hostname: RwLock<Option<String>>,
     /// Configuration snapshot from config.yaml (tunnel.ngrok, tunnel.cloudflare).
@@ -219,6 +223,12 @@ pub(crate) struct AppState {
     /// static fallback) as the main LAN listener. Set by `Server::run`
     /// from `Config::web_root` before either listener comes up.
     pub(crate) web_root: RwLock<Option<PathBuf>>,
+    /// Extra web-asset dirs layered on top of `web_root`. Earlier
+    /// entries win; `web_root` is the last-resort fallback.
+    /// `/variants.json` scans the full chain so fork-dev variants
+    /// (under their own sibling dir) show up in boot.js without any
+    /// edits to the main repo. See `ServerConfig::web_overlays`.
+    pub(crate) web_overlays: RwLock<Vec<PathBuf>>,
     /// RBAC policy loaded from `$XDG_DATA_HOME/foyer/roles.yaml`
     /// (seeded from the binary on first run). Queried on each
     /// tunnel-origin command dispatch; LAN connections skip it. Stored
@@ -232,6 +242,12 @@ pub(crate) struct AppState {
     /// bar a reliable "who's here" view that — unlike the old
     /// origin-sniffing — includes tunnel guests and quiet observers.
     pub(crate) peers: RwLock<HashMap<String, foyer_schema::PeerInfo>>,
+    /// Operator pin for the UI variant every browser should load —
+    /// e.g. `Some("touch")` on a kiosk deployment, `Some("kids")` on
+    /// a family workstation. `None` lets each browser pick via
+    /// `?ui=` URL override, localStorage preference, or its own
+    /// heuristic match. Broadcast in `ClientGreeting.default_ui_variant`.
+    pub(crate) default_ui_variant: Option<String>,
 }
 
 impl AppState {
@@ -310,16 +326,17 @@ impl AppState {
         // Register the new session so the switcher + multi-session
         // command routing sees it. Falls back to a synthetic id when
         // the caller didn't supply one (stub backends, legacy tests).
-        let sid = session_id.unwrap_or_else(|| {
-            EntityId::new(format!(
-                "session.{}",
-                uuid::Uuid::new_v4().simple()
-            ))
-        });
+        let sid = session_id
+            .unwrap_or_else(|| EntityId::new(format!("session.{}", uuid::Uuid::new_v4().simple())));
         let name = session_name.unwrap_or_else(|| {
             project_path
                 .as_deref()
-                .and_then(|p| std::path::Path::new(p).file_stem()?.to_str().map(String::from))
+                .and_then(|p| {
+                    std::path::Path::new(p)
+                        .file_stem()?
+                        .to_str()
+                        .map(String::from)
+                })
                 .unwrap_or_else(|| backend_id.clone())
         });
         let path = project_path.clone().unwrap_or_default();
@@ -374,7 +391,11 @@ impl Server {
         let (tx, _) = broadcast::channel(BROADCAST_CAP);
         let ring = Arc::new(RwLock::new(DeltaRing::new(RING_CAP)));
         let next_seq = Arc::new(AtomicU64::new(1));
-        let sessions = Arc::new(SessionRegistry::new(tx.clone(), ring.clone(), next_seq.clone()));
+        let sessions = Arc::new(SessionRegistry::new(
+            tx.clone(),
+            ring.clone(),
+            next_seq.clone(),
+        ));
         let state = Arc::new(AppState {
             cached_snapshot: RwLock::new(None),
             tx,
@@ -397,12 +418,14 @@ impl Server {
             tunnel_hostname: RwLock::new(None),
             tunnel_cfg: RwLock::new(foyer_config::TunnelConfig::default()),
             web_root: RwLock::new(None),
+            web_overlays: RwLock::new(Vec::new()),
             // Bundled default keeps the server usable even if the CLI
             // forgets to call `load_roles_policy` — fails closed on
             // bad inputs, permissive on admin, which matches the
             // "LAN is trusted" baseline.
             roles_policy: RwLock::new(foyer_config::RolesConfig::bundled_default()),
             peers: RwLock::new(HashMap::new()),
+            default_ui_variant: None,
         });
         Self { state }
     }
@@ -411,9 +434,14 @@ impl Server {
     /// can read tokens without env vars.
     pub async fn load_tunnel_config(&self, cfg: &foyer_config::TunnelConfig) {
         *self.state.tunnel_cfg.write().await = cfg.clone();
-        tracing::info!("tunnel config loaded — ngrok: {}, cloudflare: {}",
-            cfg.ngrok.is_some().then_some("yes").unwrap_or("no"),
-            cfg.cloudflare.is_some().then_some("yes").unwrap_or("no")
+        tracing::info!(
+            "tunnel config loaded — ngrok: {}, cloudflare: {}",
+            if cfg.ngrok.is_some() { "yes" } else { "no" },
+            if cfg.cloudflare.is_some() {
+                "yes"
+            } else {
+                "no"
+            }
         );
     }
 
@@ -473,11 +501,16 @@ impl Server {
             *self.state.pump_handle.lock().await = Some(handle);
         }
 
-        // Stash web_root on state so the tunnel-auth listener can rebuild
-        // the same router without a separate Config handoff.
+        // Stash web_root + overlays on state so the tunnel-auth
+        // listener can rebuild the same router without a separate
+        // Config handoff.
         *self.state.web_root.write().await = config.web_root.clone();
+        *self.state.web_overlays.write().await = config.web_overlays.clone();
         if let Some(root) = &config.web_root {
             tracing::info!("serving static files from {}", root.display());
+        }
+        for overlay in &config.web_overlays {
+            tracing::info!("web overlay on top: {}", overlay.display());
         }
 
         let router = build_http_router(self.state.clone()).await;
@@ -506,17 +539,17 @@ impl Server {
             // secure context. `axum-server` with `tls-rustls` uses
             // pure-Rust rustls + ring under the hood; no libssl
             // dependency, musl-clean.
-            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-                &tls.cert,
-                &tls.key,
-            )
-            .await
-            .map_err(|e| ServerError::Io(std::io::Error::other(format!(
-                "load TLS pair (cert={}, key={}): {}",
-                tls.cert.display(),
-                tls.key.display(),
-                e
-            ))))?;
+            let tls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
+                    .await
+                    .map_err(|e| {
+                        ServerError::Io(std::io::Error::other(format!(
+                            "load TLS pair (cert={}, key={}): {}",
+                            tls.cert.display(),
+                            tls.key.display(),
+                            e
+                        )))
+                    })?;
             tracing::info!("foyer-server listening on https://{}", config.listen);
             axum_server::bind_rustls(config.listen, tls_config)
                 .serve(service)
@@ -548,7 +581,12 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
         .route("/ws/ingress/:stream_id", get(ingress_ws::upgrade))
         .route("/files/*path", get(files::serve_file))
         .route("/console", get(console_tail))
-        .route("/qr", get(qr_svg));
+        .route("/qr", get(qr_svg))
+        // Discovery endpoint for web UI variants — `boot.js` calls
+        // this to learn which `ui-*/package.js` packages are available
+        // under the served web_root, so users can drop a new variant
+        // folder without editing the index.html's import map.
+        .route("/variants.json", get(variants_json));
 
     // Dev-only integration probe harness. Gated on FOYER_DEV=1 so
     // production runs don't expose a side-channel for backend
@@ -562,12 +600,63 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
     }
 
     let web_root = state.web_root.read().await.clone();
+    let overlays = state.web_overlays.read().await.clone();
     let mut router = router
         .with_state(state)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
-    if let Some(root) = web_root {
-        router = router.fallback_service(ServeDir::new(root));
+    // Static-asset fallback: overlays are tried first (in flag order),
+    // then `web_root` as the last resort. Each overlay is composed
+    // into the chain via `ServeDir::fallback`, so a miss in overlay[0]
+    // cascades to overlay[1], …, then web_root. Nesting reverses the
+    // iteration order because the outermost `ServeDir` is the one
+    // the router hits first.
+    if web_root.is_some() || !overlays.is_empty() {
+        let base_path = web_root.unwrap_or_else(|| PathBuf::from("/var/empty"));
+        let base = ServeDir::new(&base_path);
+        // tower-http's `ServeDir::fallback` consumes self + the new
+        // fallback and returns a distinctly-typed `ServeDir<F>`. For
+        // N overlays that's an N-deep generic tree. We match on
+        // overlay count to produce a concrete type per branch rather
+        // than fight type inference in a loop. Four overlays is
+        // already overkill for anyone who isn't stacking UI themes;
+        // push farther via symlinked content inside a single overlay.
+        match overlays.as_slice() {
+            [] => {
+                router = router.fallback_service(base);
+            }
+            [a] => {
+                router = router.fallback_service(ServeDir::new(a).fallback(base));
+            }
+            [a, b] => {
+                router = router.fallback_service(
+                    ServeDir::new(a).fallback(ServeDir::new(b).fallback(base)),
+                );
+            }
+            [a, b, c] => {
+                router = router.fallback_service(
+                    ServeDir::new(a).fallback(
+                        ServeDir::new(b).fallback(ServeDir::new(c).fallback(base)),
+                    ),
+                );
+            }
+            [a, b, c, d, ..] => {
+                if overlays.len() > 4 {
+                    tracing::warn!(
+                        "{} web overlays passed; only the first 4 layer through ServeDir \
+                         (symlink inside an overlay if you really need more)",
+                        overlays.len()
+                    );
+                }
+                router = router.fallback_service(
+                    ServeDir::new(a).fallback(
+                        ServeDir::new(b).fallback(
+                            ServeDir::new(c).fallback(ServeDir::new(d).fallback(base)),
+                        ),
+                    ),
+                );
+            }
+        }
     }
     router
 }
@@ -675,6 +764,12 @@ async fn emit_backend_lost(state: &Arc<AppState>, backend_id: &str, reason: Stri
 /// Axum handler state extractor used by the ws module.
 pub(crate) type SharedState = State<Arc<AppState>>;
 
+/// Shared handle to the currently-running tunnel provider. `Arc` so
+/// shutdown can be initiated from any task; `tokio::sync::Mutex` so
+/// async provider methods can hold the lock across await points.
+pub(crate) type SharedTunnelProvider =
+    std::sync::Arc<tokio::sync::Mutex<Box<dyn crate::tunnel_provider::TunnelProvider>>>;
+
 /// `GET /console?since=<byte-offset>` — tail the DAW stdout/stderr log.
 /// Returns a JSON blob with the current file size and any bytes newer
 /// than `since` (capped so a multi-megabyte log can't nuke a browser).
@@ -699,6 +794,74 @@ struct ConsoleReply {
     path: String,
     /// True if the file doesn't exist yet (nothing has been logged).
     missing: bool,
+}
+
+/// `/variants.json` handler — scans the served `web_root` for
+/// folders matching `ui-*` that contain a `package.js`, and returns
+/// their ids. `boot.js` in the browser consumes this to dynamically
+/// import each variant's package without requiring the user to edit
+/// the import-map in index.html.
+///
+/// Shape:
+/// ```json
+/// { "variants": ["ui-full", "ui-touch"] }
+/// ```
+/// Empty list when the web_root is unset or nothing matches. Order
+/// is not stable — the browser doesn't depend on order (each
+/// variant's `match` score decides which one wins).
+async fn variants_json(State(state): SharedState) -> impl IntoResponse {
+    use axum::Json;
+    #[derive(serde::Serialize)]
+    struct Reply {
+        variants: Vec<String>,
+    }
+    // Scan order mirrors asset-serve priority: overlays first (in
+    // flag order) then web_root. A `ui-*` dropped into an overlay
+    // surfaces in boot.js without editing the main repo; duplicates
+    // dedup so an overlay that shadows a base variant wins (handled
+    // by the serve layer) and still only appears once in the
+    // discovery list.
+    let overlays = state.web_overlays.read().await.clone();
+    let base = state.web_root.read().await.clone();
+    let roots: Vec<PathBuf> = overlays
+        .into_iter()
+        .chain(base.into_iter())
+        .collect();
+    if roots.is_empty() {
+        return Json(Reply { variants: vec![] });
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for root in &roots {
+        let Ok(iter) = std::fs::read_dir(root) else { continue };
+        for entry in iter.flatten() {
+            let Ok(ty) = entry.file_type() else { continue };
+            if !ty.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if !name_str.starts_with("ui-") {
+                continue;
+            }
+            // Reserved names that share the "ui-" prefix but aren't
+            // UI variants (they're shared primitives / utility
+            // folders). The discovery contract is purely name-based
+            // so alt-UI authors don't have to grep code to know
+            // which ids are safe.
+            if matches!(name_str, "ui-core" | "ui-tests") {
+                continue;
+            }
+            if !entry.path().join("package.js").is_file() {
+                continue;
+            }
+            seen.insert(name_str.to_string());
+        }
+    }
+    Json(Reply {
+        variants: seen.into_iter().collect(),
+    })
 }
 
 async fn console_tail(
@@ -778,10 +941,7 @@ async fn qr_svg(
              qr error: {e}</text></svg>"
         ),
     };
-    (
-        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
-        svg,
-    )
+    ([(axum::http::header::CONTENT_TYPE, "image/svg+xml")], svg)
 }
 
 fn read_range(path: &std::path::Path, from: u64, to: u64) -> std::io::Result<Vec<u8>> {

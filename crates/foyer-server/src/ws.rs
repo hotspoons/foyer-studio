@@ -20,9 +20,12 @@ use std::sync::atomic::Ordering;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Extension, Query, State};
 use axum::response::IntoResponse;
-use std::net::{IpAddr, SocketAddr};
-use foyer_schema::{Command, ControlUpdate, Envelope, Event, TunnelProviderConfig, TunnelProviderKind, SCHEMA_VERSION};
+use foyer_schema::{
+    Command, ControlUpdate, Envelope, Event, TunnelProviderConfig, TunnelProviderKind,
+    SCHEMA_VERSION,
+};
 use futures::{SinkExt, StreamExt};
+use std::net::{IpAddr, SocketAddr};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{AppState, SharedState};
@@ -71,10 +74,7 @@ pub(crate) enum ConnectionAuth {
     /// entry in the loaded `RolesConfig`. `recipient` is the invite's
     /// display name (usually the guest's email) — piped into the
     /// greeting so the UI can say "logged in as Alice".
-    Authenticated {
-        role_id: String,
-        recipient: String,
-    },
+    Authenticated { role_id: String, recipient: String },
     /// Tunnel listener, no valid token. Client sees the greeting with
     /// `auth_required: true` and surfaces a login modal. Until they
     /// re-connect with a token, every command is rejected.
@@ -86,7 +86,10 @@ impl ConnectionAuth {
         !matches!(self, ConnectionAuth::Lan)
     }
     pub fn is_authenticated(&self) -> bool {
-        matches!(self, ConnectionAuth::Lan | ConnectionAuth::Authenticated { .. })
+        matches!(
+            self,
+            ConnectionAuth::Lan | ConnectionAuth::Authenticated { .. }
+        )
     }
 }
 
@@ -205,7 +208,13 @@ async fn handle(
     };
     let peer_label = match &auth {
         ConnectionAuth::Authenticated { recipient, .. } => recipient.clone(),
-        _ => if is_local { "host".to_string() } else { peer.to_string() },
+        _ => {
+            if is_local {
+                "host".to_string()
+            } else {
+                peer.to_string()
+            }
+        }
     };
     let peer_info = foyer_schema::PeerInfo {
         id: peer_id.clone(),
@@ -256,6 +265,17 @@ async fn handle(
                 role_allow,
                 recipient,
                 peer_id: peer_id.clone(),
+                // Capability snapshot — whatever the active backend
+                // implementation says it supports. Mirrored on the
+                // client into foyer-core's feature registry so the
+                // UI can gate surfaces for DAWs with narrower feature
+                // sets than Ardour (mixing/matching backends is a
+                // medium-term goal — see DECISION 40).
+                features: state.backend.read().await.features(),
+                // No host-level pin by default. An operator can set
+                // `Config::default_ui_variant` to force all browsers
+                // onto `touch`, `kids`, `lite`, or a third-party UI.
+                default_ui_variant: state.default_ui_variant.clone(),
             },
         };
         let _ = send_env(&mut tx_ws, &greeting).await;
@@ -283,14 +303,20 @@ async fn handle(
     // that just connected) receives the join through the broadcast
     // channel; the new client filters its own entry via `peer_id` from
     // the greeting.
-    state.peers.write().await.insert(peer_id.clone(), peer_info.clone());
+    state
+        .peers
+        .write()
+        .await
+        .insert(peer_id.clone(), peer_info.clone());
     {
         let env = Envelope {
             schema: SCHEMA_VERSION,
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
-            body: Event::PeerJoined { peer: peer_info.clone() },
+            body: Event::PeerJoined {
+                peer: peer_info.clone(),
+            },
         };
         let _ = state.tx.send(env);
     }
@@ -358,13 +384,9 @@ async fn handle(
             let Ok(msg) = frame else { break };
             match msg {
                 Message::Text(t) => {
-                    if let Err(e) = dispatch_command(
-                        &reader_state,
-                        reader_origin.as_deref(),
-                        &reader_auth,
-                        &t,
-                    )
-                    .await
+                    if let Err(e) =
+                        dispatch_command(&reader_state, reader_origin.as_deref(), &reader_auth, &t)
+                            .await
                     {
                         tracing::warn!("client command rejected: {e}");
                     }
@@ -414,7 +436,9 @@ async fn handle(
         seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
         origin: Some("server".into()),
         session_id: None,
-        body: Event::PeerLeft { peer_id: peer_id.clone() },
+        body: Event::PeerLeft {
+            peer_id: peer_id.clone(),
+        },
     };
     let _ = state.tx.send(env);
 }
@@ -440,11 +464,7 @@ fn now_ms() -> u64 {
 /// Events minted unicast via `send_env` (greeting, initial session
 /// list, PeerList snapshot) bypass this check — they only reach the
 /// connection they're intended for.
-async fn should_forward_event(
-    event: &Event,
-    auth: &ConnectionAuth,
-    state: &AppState,
-) -> bool {
+async fn should_forward_event(event: &Event, auth: &ConnectionAuth, state: &AppState) -> bool {
     match auth {
         ConnectionAuth::Unauthenticated => {
             matches!(
@@ -514,10 +534,10 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::AudioIngressOpen { .. } => "audio_ingress_open",
         Command::AudioIngressClose { .. } => "audio_ingress_close",
         Command::LatencyProbe { .. } => "latency_probe",
-        Command::ListActions { .. } => "list_actions",
+        Command::ListActions => "list_actions",
         Command::InvokeAction { .. } => "invoke_action",
         Command::ListRegions { .. } => "list_regions",
-        Command::ListPlugins { .. } => "list_plugins",
+        Command::ListPlugins => "list_plugins",
         Command::BrowsePath { .. } => "browse_path",
         Command::OpenSession { .. } => "open_session",
         Command::SaveSession { .. } => "save_session",
@@ -527,9 +547,9 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::DuplicateRegion { .. } => "duplicate_region",
         Command::ListWaveform { .. } => "list_waveform",
         Command::ClearWaveformCache { .. } => "clear_waveform_cache",
-        Command::ListBackends { .. } => "list_backends",
+        Command::ListBackends => "list_backends",
         Command::LaunchProject { .. } => "launch_project",
-        Command::ListSessions { .. } => "list_sessions",
+        Command::ListSessions => "list_sessions",
         Command::SelectSession { .. } => "select_session",
         Command::CloseSession { .. } => "close_session",
         Command::ReattachOrphan { .. } => "reattach_orphan",
@@ -562,8 +582,8 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::AddSend { .. } => "add_send",
         Command::RemoveSend { .. } => "remove_send",
         Command::SetSendLevel { .. } => "set_send_level",
-        Command::Undo { .. } => "undo",
-        Command::Redo { .. } => "redo",
+        Command::Undo => "undo",
+        Command::Redo => "redo",
         Command::SetAutomationMode { .. } => "set_automation_mode",
         Command::AddAutomationPoint { .. } => "add_automation_point",
         Command::UpdateAutomationPoint { .. } => "update_automation_point",
@@ -579,8 +599,8 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::TunnelRevokeToken { .. } => "tunnel_revoke_token",
         Command::TunnelSetEnabled { .. } => "tunnel_set_enabled",
         Command::TunnelStart { .. } => "tunnel_start",
-        Command::TunnelStop { .. } => "tunnel_stop",
-        Command::TunnelRequestState { .. } => "tunnel_request_state",
+        Command::TunnelStop => "tunnel_stop",
+        Command::TunnelRequestState => "tunnel_request_state",
     }
 }
 
@@ -601,33 +621,37 @@ async fn dispatch_command(
         let tag = command_tag(&env.body);
         match auth {
             ConnectionAuth::Unauthenticated => {
-                broadcast_event(state, Event::Error {
-                    code: "auth_required".into(),
-                    message: format!(
-                        "unauthenticated guest attempted '{tag}' — must sign in first"
-                    ),
-                })
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "auth_required".into(),
+                        message: format!(
+                            "unauthenticated guest attempted '{tag}' — must sign in first"
+                        ),
+                    },
+                )
                 .await;
                 return Ok(());
             }
             ConnectionAuth::Authenticated { role_id, recipient } => {
                 let allowed = state.roles_policy.read().await.allows(role_id, tag);
                 if !allowed {
-                    tracing::warn!(
-                        "RBAC: '{recipient}' (role '{role_id}') denied '{tag}'"
-                    );
+                    tracing::warn!("RBAC: '{recipient}' (role '{role_id}') denied '{tag}'");
                     // Include recipient + role in the message so the
                     // host (who sees all error broadcasts in the
                     // startup-errors banner) can tell which specific
                     // guest tripped the rule. The same message reaches
                     // the offender — slightly redundant for them but
                     // consistent and harmless.
-                    broadcast_event(state, Event::Error {
-                        code: "forbidden_for_role".into(),
-                        message: format!(
-                            "{recipient} (role '{role_id}') is not permitted to invoke '{tag}'"
-                        ),
-                    })
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "forbidden_for_role".into(),
+                            message: format!(
+                                "{recipient} (role '{role_id}') is not permitted to invoke '{tag}'"
+                            ),
+                        },
+                    )
                     .await;
                     return Ok(());
                 }
@@ -657,7 +681,11 @@ async fn dispatch_command(
             let _ = state.tx.send(out);
         }
         Command::ControlSet { id, value } => {
-            state.backend().await.set_control(id.clone(), value.clone()).await?;
+            state
+                .backend()
+                .await
+                .set_control(id.clone(), value.clone())
+                .await?;
             // The backend's event stream will reflect the change; we also emit a
             // synthetic ControlUpdate tagged with the caller's origin so the UI
             // knows who moved the fader.
@@ -787,26 +815,31 @@ async fn dispatch_command(
                 .await;
             }
         }
-        Command::UpdateRegion { id, patch } => match state.backend().await.update_region(id, patch).await {
-            Ok(region) => broadcast_event(state, Event::RegionUpdated { region }).await,
-            Err(e) => {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "update_region_failed".into(),
-                        message: e.to_string(),
-                    },
-                )
-                .await;
+        Command::UpdateRegion { id, patch } => {
+            match state.backend().await.update_region(id, patch).await {
+                Ok(region) => broadcast_event(state, Event::RegionUpdated { region }).await,
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "update_region_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
             }
-        },
+        }
         Command::DeleteRegion { id } => {
             let region_id = id.clone();
             match state.backend().await.delete_region(id).await {
                 Ok(track_id) => {
                     broadcast_event(
                         state,
-                        Event::RegionRemoved { track_id, region_id },
+                        Event::RegionRemoved {
+                            track_id,
+                            region_id,
+                        },
                     )
                     .await;
                 }
@@ -822,8 +855,16 @@ async fn dispatch_command(
                 }
             }
         }
-        Command::ListWaveform { region_id, samples_per_peak } => {
-            match state.backend().await.load_waveform(region_id, samples_per_peak).await {
+        Command::ListWaveform {
+            region_id,
+            samples_per_peak,
+        } => {
+            match state
+                .backend()
+                .await
+                .load_waveform(region_id, samples_per_peak)
+                .await
+            {
                 Ok(peaks) => broadcast_event(state, Event::WaveformData { peaks }).await,
                 Err(e) => {
                     broadcast_event(
@@ -839,7 +880,9 @@ async fn dispatch_command(
         }
         Command::ClearWaveformCache { region_id } => {
             match state.backend().await.clear_waveform_cache(region_id).await {
-                Ok(dropped) => broadcast_event(state, Event::WaveformCacheCleared { dropped }).await,
+                Ok(dropped) => {
+                    broadcast_event(state, Event::WaveformCacheCleared { dropped }).await
+                }
                 Err(e) => {
                     broadcast_event(
                         state,
@@ -910,11 +953,7 @@ async fn dispatch_command(
             .await;
         }
         Command::ListBackends => {
-            let backends = state
-                .spawner
-                .as_ref()
-                .map(|s| s.list())
-                .unwrap_or_default();
+            let backends = state.spawner.as_ref().map(|s| s.list()).unwrap_or_default();
             let active = state.active_backend_id.read().await.clone();
             broadcast_event(state, Event::BackendsListed { backends, active }).await;
         }
@@ -933,9 +972,7 @@ async fn dispatch_command(
                 .await;
                 return Ok(());
             };
-            let path = project_path
-                .as_deref()
-                .map(std::path::Path::new);
+            let path = project_path.as_deref().map(std::path::Path::new);
             // "Already open by path" short-circuit. If the user clicks
             // Open on a project whose path matches an already-
             // registered session, focus that session instead of
@@ -1009,13 +1046,7 @@ async fn dispatch_command(
                     // CLI spawner will set it on the backend before
                     // returning and we can pass it through here.
                     state
-                        .swap_backend(
-                            backend_id,
-                            project_path,
-                            new_backend,
-                            None,
-                            None,
-                        )
+                        .swap_backend(backend_id, project_path, new_backend, None, None)
                         .await;
                 }
                 Err(e) => {
@@ -1083,7 +1114,10 @@ async fn dispatch_command(
                 .await;
             }
         }
-        Command::SetTrackInput { track_id, port_name } => {
+        Command::SetTrackInput {
+            track_id,
+            port_name,
+        } => {
             if let Err(e) = state
                 .backend()
                 .await
@@ -1240,9 +1274,7 @@ async fn dispatch_command(
                     be_rx
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "open_egress failed ({e}); falling back to sidecar test tone"
-                    );
+                    tracing::warn!("open_egress failed ({e}); falling back to sidecar test tone");
                     // 1-hour cap is a liveness guard, not a UX
                     // timer — the tone exits immediately when the
                     // subscriber drops (stream close), so in
@@ -1259,11 +1291,7 @@ async fn dispatch_command(
                 .await
             {
                 Ok(_) => {
-                    broadcast_event(
-                        state,
-                        Event::AudioEgressStarted { stream_id },
-                    )
-                    .await;
+                    broadcast_event(state, Event::AudioEgressStarted { stream_id }).await;
                 }
                 Err(e) => {
                     broadcast_event(
@@ -1301,11 +1329,7 @@ async fn dispatch_command(
         Command::AudioStreamClose { stream_id } => {
             // Best-effort: tell the backend to tear the tap down, and
             // close the sidecar-side fan-out regardless.
-            let _ = state
-                .backend()
-                .await
-                .close_egress(stream_id)
-                .await;
+            let _ = state.backend().await.close_egress(stream_id).await;
             state.audio_hub.close_stream(stream_id).await;
             broadcast_event(state, Event::AudioEgressStopped { stream_id }).await;
         }
@@ -1347,10 +1371,7 @@ async fn dispatch_command(
                 .await;
             }
         }
-        Command::DeleteNote {
-            region_id,
-            note_id,
-        } => {
+        Command::DeleteNote { region_id, note_id } => {
             if let Err(e) = state
                 .backend()
                 .await
@@ -1368,8 +1389,16 @@ async fn dispatch_command(
             }
         }
 
-        Command::AddPatchChange { region_id, patch_change } => {
-            if let Err(e) = state.backend().await.add_patch_change(region_id, patch_change).await {
+        Command::AddPatchChange {
+            region_id,
+            patch_change,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .add_patch_change(region_id, patch_change)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1380,9 +1409,16 @@ async fn dispatch_command(
                 .await;
             }
         }
-        Command::UpdatePatchChange { region_id, patch_change_id, patch } => {
-            if let Err(e) = state.backend().await
-                .update_patch_change(region_id, patch_change_id, patch).await
+        Command::UpdatePatchChange {
+            region_id,
+            patch_change_id,
+            patch,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .update_patch_change(region_id, patch_change_id, patch)
+                .await
             {
                 broadcast_event(
                     state,
@@ -1394,9 +1430,15 @@ async fn dispatch_command(
                 .await;
             }
         }
-        Command::DeletePatchChange { region_id, patch_change_id } => {
-            if let Err(e) = state.backend().await
-                .delete_patch_change(region_id, patch_change_id).await
+        Command::DeletePatchChange {
+            region_id,
+            patch_change_id,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .delete_patch_change(region_id, patch_change_id)
+                .await
             {
                 broadcast_event(
                     state,
@@ -1409,9 +1451,16 @@ async fn dispatch_command(
             }
         }
 
-        Command::DuplicateRegion { source_region_id, at_samples, length_samples } => {
-            if let Err(e) = state.backend().await
-                .duplicate_region(source_region_id, at_samples, length_samples).await
+        Command::DuplicateRegion {
+            source_region_id,
+            at_samples,
+            length_samples,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .duplicate_region(source_region_id, at_samples, length_samples)
+                .await
             {
                 broadcast_event(
                     state,
@@ -1424,9 +1473,18 @@ async fn dispatch_command(
             }
         }
 
-        Command::CreateRegion { track_id, at_samples, length_samples, kind, name } => {
-            if let Err(e) = state.backend().await
-                .create_region(track_id, at_samples, length_samples, kind, name).await
+        Command::CreateRegion {
+            track_id,
+            at_samples,
+            length_samples,
+            kind,
+            name,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .create_region(track_id, at_samples, length_samples, kind, name)
+                .await
             {
                 broadcast_event(
                     state,
@@ -1477,7 +1535,12 @@ async fn dispatch_command(
             // the session's tempo map. Pass the tick count through
             // a special-cased RegionPatch the shim interprets.
             let length_ticks = foyer_schema::sequencer_layout_length_ticks(&layout, 1920);
-            if let Err(e) = state.backend().await.set_sequencer_layout(region_id.clone(), layout).await {
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_sequencer_layout(region_id.clone(), layout)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1506,7 +1569,12 @@ async fn dispatch_command(
             // Deactivation (active=false) leaves existing notes
             // untouched so piano-roll edits can take over.
             if is_active {
-                if let Err(e) = state.backend().await.replace_region_notes(region_id, notes).await {
+                if let Err(e) = state
+                    .backend()
+                    .await
+                    .replace_region_notes(region_id, notes)
+                    .await
+                {
                     broadcast_event(
                         state,
                         Event::Error {
@@ -1519,7 +1587,12 @@ async fn dispatch_command(
             }
         }
         Command::ReplaceRegionNotes { region_id, notes } => {
-            if let Err(e) = state.backend().await.replace_region_notes(region_id, notes).await {
+            if let Err(e) = state
+                .backend()
+                .await
+                .replace_region_notes(region_id, notes)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1531,7 +1604,12 @@ async fn dispatch_command(
             }
         }
         Command::ClearSequencerLayout { region_id } => {
-            if let Err(e) = state.backend().await.clear_sequencer_layout(region_id).await {
+            if let Err(e) = state
+                .backend()
+                .await
+                .clear_sequencer_layout(region_id)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1570,7 +1648,12 @@ async fn dispatch_command(
 
         // ─── automation lane edit (Phase B) ─────────────────────────
         Command::SetAutomationMode { lane_id, mode } => {
-            if let Err(e) = state.backend().await.set_automation_mode(lane_id, mode).await {
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_automation_mode(lane_id, mode)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1582,7 +1665,12 @@ async fn dispatch_command(
             }
         }
         Command::AddAutomationPoint { lane_id, point } => {
-            if let Err(e) = state.backend().await.add_automation_point(lane_id, point).await {
+            if let Err(e) = state
+                .backend()
+                .await
+                .add_automation_point(lane_id, point)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1615,8 +1703,16 @@ async fn dispatch_command(
                 .await;
             }
         }
-        Command::DeleteAutomationPoint { lane_id, time_samples } => {
-            if let Err(e) = state.backend().await.delete_automation_point(lane_id, time_samples).await {
+        Command::DeleteAutomationPoint {
+            lane_id,
+            time_samples,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .delete_automation_point(lane_id, time_samples)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1628,7 +1724,12 @@ async fn dispatch_command(
             }
         }
         Command::ReplaceAutomationLane { lane_id, points } => {
-            if let Err(e) = state.backend().await.replace_automation_lane(lane_id, points).await {
+            if let Err(e) = state
+                .backend()
+                .await
+                .replace_automation_lane(lane_id, points)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1641,13 +1742,14 @@ async fn dispatch_command(
         }
 
         Command::ListPluginPresets { plugin_id } => {
-            match state.backend().await.list_plugin_presets(plugin_id.clone()).await {
+            match state
+                .backend()
+                .await
+                .list_plugin_presets(plugin_id.clone())
+                .await
+            {
                 Ok(presets) => {
-                    broadcast_event(
-                        state,
-                        Event::PluginPresetsListed { plugin_id, presets },
-                    )
-                    .await;
+                    broadcast_event(state, Event::PluginPresetsListed { plugin_id, presets }).await;
                 }
                 Err(e) => {
                     broadcast_event(
@@ -1661,9 +1763,15 @@ async fn dispatch_command(
                 }
             }
         }
-        Command::LoadPluginPreset { plugin_id, preset_id } => {
-            if let Err(e) = state.backend().await
-                .load_plugin_preset(plugin_id, preset_id).await
+        Command::LoadPluginPreset {
+            plugin_id,
+            preset_id,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .load_plugin_preset(plugin_id, preset_id)
+                .await
             {
                 broadcast_event(
                     state,
@@ -1685,8 +1793,13 @@ async fn dispatch_command(
         // for every click on the timeline.
         Command::Locate { samples } => {
             use foyer_schema::{ControlValue, EntityId};
-            if let Err(e) = state.backend().await
-                .set_control(EntityId::new("transport.position"), ControlValue::Float(samples as f64))
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_control(
+                    EntityId::new("transport.position"),
+                    ControlValue::Float(samples as f64),
+                )
                 .await
             {
                 broadcast_event(
@@ -1743,7 +1856,9 @@ async fn dispatch_command(
                     // land on a live backend.
                     {
                         let mut focus = state.focus_session_id.write().await;
-                        if focus.as_ref() == Some(&session_id) { *focus = None; }
+                        if focus.as_ref() == Some(&session_id) {
+                            *focus = None;
+                        }
                     }
                     if let Some(fallback_id) = state.sessions.most_recent_id().await {
                         if let Some(be) = state.sessions.backend(&fallback_id).await {
@@ -1808,8 +1923,17 @@ async fn dispatch_command(
             }
         }
 
-        Command::CreateGroup { name, color, members } => {
-            if let Err(e) = state.backend().await.create_group(name, color, members).await {
+        Command::CreateGroup {
+            name,
+            color,
+            members,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .create_group(name, color, members)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1849,7 +1973,9 @@ async fn dispatch_command(
         Command::TunnelCreateToken { recipient, role } => {
             match crate::tunnel::create_token(state, recipient.clone(), role).await {
                 Ok((conn, token, password)) => {
-                    let url = conn.tunnel_url.clone()
+                    let url = conn
+                        .tunnel_url
+                        .clone()
                         .unwrap_or_else(|| format!("http://localhost:3838/?token={token}"));
                     tracing::info!("tunnel token created for {recipient}: {url}");
                     broadcast_event(
@@ -1891,7 +2017,7 @@ async fn dispatch_command(
             {
                 let mut m = state.tunnel_manifest.write().await;
                 m.enabled = enabled;
-                let _ = crate::tunnel::save_manifest(&*m).await;
+                let _ = crate::tunnel::save_manifest(&m).await;
             }
             crate::tunnel::broadcast_tunnel_state(state).await;
         }
@@ -1905,13 +2031,31 @@ async fn dispatch_command(
                     domain: tunnel_cfg.ngrok.as_ref().and_then(|c| c.domain.clone()),
                 },
                 TunnelProviderKind::Cloudflare => TunnelProviderConfig::Cloudflare {
-                    api_token: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.api_token.clone()),
-                    account_id: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.account_id.clone()),
-                    zone_id: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.zone_id.clone()),
-                    tunnel_name: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.tunnel_name.clone()),
-                    hostname: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.hostname.clone()),
-                    tunnel_token: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.tunnel_token.clone()),
-                }
+                    api_token: tunnel_cfg
+                        .cloudflare
+                        .as_ref()
+                        .and_then(|c| c.api_token.clone()),
+                    account_id: tunnel_cfg
+                        .cloudflare
+                        .as_ref()
+                        .and_then(|c| c.account_id.clone()),
+                    zone_id: tunnel_cfg
+                        .cloudflare
+                        .as_ref()
+                        .and_then(|c| c.zone_id.clone()),
+                    tunnel_name: tunnel_cfg
+                        .cloudflare
+                        .as_ref()
+                        .and_then(|c| c.tunnel_name.clone()),
+                    hostname: tunnel_cfg
+                        .cloudflare
+                        .as_ref()
+                        .and_then(|c| c.hostname.clone()),
+                    tunnel_token: tunnel_cfg
+                        .cloudflare
+                        .as_ref()
+                        .and_then(|c| c.tunnel_token.clone()),
+                },
             };
             if let Err(e) = crate::tunnel::start_tunnel(state.clone(), provider, &config).await {
                 broadcast_event(

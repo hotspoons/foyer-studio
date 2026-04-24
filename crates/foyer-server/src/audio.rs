@@ -122,8 +122,11 @@ impl AudioHub {
         // batch on 20 ms boundaries so the browser's jitter buffer
         // can stay identical across codec choices.
         let frame_size = match format.codec {
-            AudioCodec::Opus => encoded_chunk_frame_size(format.sample_rate, 20)
-                .ok_or_else(|| format!("unsupported sample rate {} for opus", format.sample_rate))?,
+            AudioCodec::Opus => {
+                encoded_chunk_frame_size(format.sample_rate, 20).ok_or_else(|| {
+                    format!("unsupported sample rate {} for opus", format.sample_rate)
+                })?
+            }
             AudioCodec::RawF32Le => ((format.sample_rate as usize) * 20) / 1000,
         };
 

@@ -75,6 +75,36 @@ pub trait Backend: Send + Sync + 'static {
     async fn subscribe(&self) -> Result<EventStream, BackendError>;
     async fn set_control(&self, id: EntityId, value: ControlValue) -> Result<(), BackendError>;
 
+    /// Capability snapshot — map of `feature_id → supported`. Emitted in
+    /// `ClientGreeting.features` so clients can gate UI for back-ends
+    /// with narrower feature sets than Ardour. The default assumes a
+    /// full-featured DAW; slim backends (stub, mobile control-surface
+    /// adapters) override this to disable specific ids and the
+    /// shipping UI hides those surfaces automatically.
+    ///
+    /// Conventions (non-exhaustive): `"sequencer"`, `"midi"`,
+    /// `"surround_pan"`, `"automation"`, `"groups"`, `"sends"`,
+    /// `"plugins"`, `"recording"`, `"export"`. Present + `false`
+    /// = explicit hide; absent = unknown (UI is optimistic).
+    fn features(&self) -> std::collections::BTreeMap<String, bool> {
+        use std::collections::BTreeMap;
+        let mut f = BTreeMap::new();
+        for id in [
+            "sequencer",
+            "midi",
+            "surround_pan",
+            "automation",
+            "groups",
+            "sends",
+            "plugins",
+            "recording",
+            "export",
+        ] {
+            f.insert(id.into(), true);
+        }
+        f
+    }
+
     // ─── introspection ──────────────────────────────────────────────────
     //
     // Default implementations return empty results so a backend that hasn't
@@ -105,12 +135,18 @@ pub trait Backend: Send + Sync + 'static {
             }
             "transport.stop" => {
                 return self
-                    .set_control(EntityId::new("transport.playing"), ControlValue::Bool(false))
+                    .set_control(
+                        EntityId::new("transport.playing"),
+                        ControlValue::Bool(false),
+                    )
                     .await;
             }
             "transport.record" => {
                 return self
-                    .set_control(EntityId::new("transport.recording"), ControlValue::Bool(true))
+                    .set_control(
+                        EntityId::new("transport.recording"),
+                        ControlValue::Bool(true),
+                    )
                     .await;
             }
             "transport.loop" => {
@@ -124,7 +160,10 @@ pub trait Backend: Send + Sync + 'static {
             }
             "transport.goto_start" => {
                 return self
-                    .set_control(EntityId::new("transport.position"), ControlValue::Float(0.0))
+                    .set_control(
+                        EntityId::new("transport.position"),
+                        ControlValue::Float(0.0),
+                    )
                     .await;
             }
             _ => {}
@@ -184,11 +223,7 @@ pub trait Backend: Send + Sync + 'static {
     /// backend returns the updated `Track` so the server can rebroadcast
     /// it — that's authoritative even if the shim applies the change
     /// asynchronously (e.g. after clamping).
-    async fn update_track(
-        &self,
-        _id: EntityId,
-        _patch: TrackPatch,
-    ) -> Result<Track, BackendError> {
+    async fn update_track(&self, _id: EntityId, _patch: TrackPatch) -> Result<Track, BackendError> {
         Err(BackendError::Other("update_track not supported".into()))
     }
     async fn delete_track(&self, _id: EntityId) -> Result<(), BackendError> {
@@ -285,7 +320,9 @@ pub trait Backend: Send + Sync + 'static {
         _region_id: EntityId,
         _notes: Vec<MidiNote>,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("replace_region_notes not supported".into()))
+        Err(BackendError::Other(
+            "replace_region_notes not supported".into(),
+        ))
     }
 
     async fn add_patch_change(
@@ -301,14 +338,18 @@ pub trait Backend: Send + Sync + 'static {
         _patch_change_id: EntityId,
         _patch: PatchChangePatch,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("update_patch_change not supported".into()))
+        Err(BackendError::Other(
+            "update_patch_change not supported".into(),
+        ))
     }
     async fn delete_patch_change(
         &self,
         _region_id: EntityId,
         _patch_change_id: EntityId,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("delete_patch_change not supported".into()))
+        Err(BackendError::Other(
+            "delete_patch_change not supported".into(),
+        ))
     }
 
     async fn set_sequencer_layout(
@@ -316,13 +357,14 @@ pub trait Backend: Send + Sync + 'static {
         _region_id: EntityId,
         _layout: SequencerLayout,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("set_sequencer_layout not supported".into()))
+        Err(BackendError::Other(
+            "set_sequencer_layout not supported".into(),
+        ))
     }
-    async fn clear_sequencer_layout(
-        &self,
-        _region_id: EntityId,
-    ) -> Result<(), BackendError> {
-        Err(BackendError::Other("clear_sequencer_layout not supported".into()))
+    async fn clear_sequencer_layout(&self, _region_id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other(
+            "clear_sequencer_layout not supported".into(),
+        ))
     }
 
     // ─── automation lanes ───────────────────────────────────────────────
@@ -331,14 +373,18 @@ pub trait Backend: Send + Sync + 'static {
         _lane_id: EntityId,
         _mode: foyer_schema::AutomationMode,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("set_automation_mode not supported".into()))
+        Err(BackendError::Other(
+            "set_automation_mode not supported".into(),
+        ))
     }
     async fn add_automation_point(
         &self,
         _lane_id: EntityId,
         _point: foyer_schema::AutomationPoint,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("add_automation_point not supported".into()))
+        Err(BackendError::Other(
+            "add_automation_point not supported".into(),
+        ))
     }
     async fn update_automation_point(
         &self,
@@ -347,21 +393,27 @@ pub trait Backend: Send + Sync + 'static {
         _new_time_samples: u64,
         _value: f64,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("update_automation_point not supported".into()))
+        Err(BackendError::Other(
+            "update_automation_point not supported".into(),
+        ))
     }
     async fn delete_automation_point(
         &self,
         _lane_id: EntityId,
         _time_samples: u64,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("delete_automation_point not supported".into()))
+        Err(BackendError::Other(
+            "delete_automation_point not supported".into(),
+        ))
     }
     async fn replace_automation_lane(
         &self,
         _lane_id: EntityId,
         _points: Vec<foyer_schema::AutomationPoint>,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("replace_automation_lane not supported".into()))
+        Err(BackendError::Other(
+            "replace_automation_lane not supported".into(),
+        ))
     }
 
     async fn set_loop_range(
@@ -385,7 +437,9 @@ pub trait Backend: Send + Sync + 'static {
         _plugin_id: EntityId,
         _preset_id: EntityId,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("load_plugin_preset not supported".into()))
+        Err(BackendError::Other(
+            "load_plugin_preset not supported".into(),
+        ))
     }
 
     // ─── session undo / redo ────────────────────────────────────────────
@@ -477,11 +531,7 @@ pub trait Backend: Send + Sync + 'static {
         Err(BackendError::Other("remove_send not supported".into()))
     }
     /// Set an aux send's linear gain (0.0 .. ~2.0).
-    async fn set_send_level(
-        &self,
-        _send_id: EntityId,
-        _level: f64,
-    ) -> Result<(), BackendError> {
+    async fn set_send_level(&self, _send_id: EntityId, _level: f64) -> Result<(), BackendError> {
         Err(BackendError::Other("set_send_level not supported".into()))
     }
 
@@ -513,7 +563,7 @@ pub fn synth_waveform(
     // Per-region parameters extracted from the seed.
     let freq_a = 0.12 + (seed as f32 / u64::MAX as f32) * 0.18;
     let freq_b = 0.03 + ((seed >> 16) as f32 / u64::MAX as f32) * 0.06;
-    let phase  = ((seed >> 32) as f32 / u64::MAX as f32) * std::f32::consts::TAU;
+    let phase = ((seed >> 32) as f32 / u64::MAX as f32) * std::f32::consts::TAU;
     let peak_amp = 0.55 + ((seed >> 8) as f32 / u64::MAX as f32) * 0.30;
 
     let mut peaks = Vec::with_capacity(bucket_count as usize * 2);
@@ -523,8 +573,8 @@ pub fn synth_waveform(
         let env = (1.0 - (2.0 * t - 1.0).powi(6)).max(0.0);
         // Three harmonics so the shape doesn't look like a pure sine.
         let base = (t * bucket_count as f32 * freq_a + phase).sin() * 0.6
-                 + (t * bucket_count as f32 * freq_b + phase * 0.5).sin() * 0.25
-                 + ((i * 37 + 17) as f32).sin() * 0.10;
+            + (t * bucket_count as f32 * freq_b + phase * 0.5).sin() * 0.25
+            + ((i * 37 + 17) as f32).sin() * 0.10;
         let amp = env * peak_amp * base;
         // Bucket is (min, max) — fake a slight min/max spread.
         let spread = env * 0.05;

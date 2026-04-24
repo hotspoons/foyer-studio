@@ -41,9 +41,7 @@ async fn handle(mut socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let Some(tx) = tx else {
-        tracing::warn!(
-            "/ws/ingress/{stream_id} no sender registered after 6 s; close"
-        );
+        tracing::warn!("/ws/ingress/{stream_id} no sender registered after 6 s; close");
         let _ = socket
             .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                 code: 4404,

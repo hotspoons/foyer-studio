@@ -5,6 +5,8 @@
 //! drops (by seq gap), attribute changes (for presence/UI), and reject incompatible
 //! senders.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -276,6 +278,21 @@ pub enum Event {
         /// its own entry out of the displayed roster using this.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         peer_id: String,
+        /// Backend-feature snapshot keyed by a stable feature id (e.g.
+        /// `"sequencer"`, `"surround_pan"`, `"groups"`, `"sends"`,
+        /// `"automation"`). `true` = supported, `false` = explicitly
+        /// unsupported, absent = unknown (UI defaults to optimistic).
+        /// Web core mirrors this into its feature registry so alt-UIs
+        /// and shipping UI gate surfaces without command probing.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        features: BTreeMap<String, bool>,
+        /// Admin-pinned UI variant id, or `None` to let the client
+        /// auto-pick (URL `?ui=` > localStorage > heuristic match). A
+        /// host can pin a specific UI variant per deployment (e.g.
+        /// "kiosk runs only `touch`") without baking that into each
+        /// browser.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_ui_variant: Option<String>,
     },
 
     // ───── track / group / plugin lifecycle ─────────────────────────────
@@ -436,11 +453,19 @@ pub enum Event {
     },
 }
 
-fn is_zero_u16(n: &u16) -> bool { *n == 0 }
-fn is_false(b: &bool) -> bool { !*b }
-fn yes_bool() -> bool { true }
+fn is_zero_u16(n: &u16) -> bool {
+    *n == 0
+}
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+fn yes_bool() -> bool {
+    true
+}
 
-fn default_region_kind() -> String { "midi".to_string() }
+fn default_region_kind() -> String {
+    "midi".to_string()
+}
 
 /// One currently-open session as tracked by the sidecar. Multi-session
 /// clients render this in the session switcher chip and in the
@@ -494,7 +519,9 @@ pub struct OrphanInfo {
     pub started_at: u64,
 }
 
-fn is_zero_u64(n: &u64) -> bool { *n == 0 }
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
 
 /// One connected client. Tracked server-side and broadcast via
 /// `PeerJoined` / `PeerLeft` / `PeerList` so every client sees a

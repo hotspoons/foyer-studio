@@ -253,8 +253,11 @@ impl Backend for StubBackend {
                     .await?;
             }
             "transport.stop" => {
-                self.set_control(EntityId::new("transport.playing"), ControlValue::Bool(false))
-                    .await?;
+                self.set_control(
+                    EntityId::new("transport.playing"),
+                    ControlValue::Bool(false),
+                )
+                .await?;
             }
             "transport.record" => {
                 let cur = self
@@ -266,8 +269,11 @@ impl Backend for StubBackend {
                     .recording
                     .value;
                 let next = !matches!(cur, ControlValue::Bool(true));
-                self.set_control(EntityId::new("transport.recording"), ControlValue::Bool(next))
-                    .await?;
+                self.set_control(
+                    EntityId::new("transport.recording"),
+                    ControlValue::Bool(next),
+                )
+                .await?;
             }
             "transport.loop" => {
                 let cur = self
@@ -312,11 +318,7 @@ impl Backend for StubBackend {
         Ok(track_id)
     }
 
-    async fn update_track(
-        &self,
-        id: EntityId,
-        patch: TrackPatch,
-    ) -> Result<Track, BackendError> {
+    async fn update_track(&self, id: EntityId, patch: TrackPatch) -> Result<Track, BackendError> {
         let updated = self
             .state
             .lock()
@@ -342,7 +344,10 @@ impl Backend for StubBackend {
         lane_id: EntityId,
         point: foyer_schema::AutomationPoint,
     ) -> Result<(), BackendError> {
-        self.state.lock().await.add_automation_point(&lane_id, point)
+        self.state
+            .lock()
+            .await
+            .add_automation_point(&lane_id, point)
     }
     async fn update_automation_point(
         &self,
@@ -351,24 +356,32 @@ impl Backend for StubBackend {
         new_time_samples: u64,
         value: f64,
     ) -> Result<(), BackendError> {
-        self.state
-            .lock()
-            .await
-            .update_automation_point(&lane_id, original_time_samples, new_time_samples, value)
+        self.state.lock().await.update_automation_point(
+            &lane_id,
+            original_time_samples,
+            new_time_samples,
+            value,
+        )
     }
     async fn delete_automation_point(
         &self,
         lane_id: EntityId,
         time_samples: u64,
     ) -> Result<(), BackendError> {
-        self.state.lock().await.delete_automation_point(&lane_id, time_samples)
+        self.state
+            .lock()
+            .await
+            .delete_automation_point(&lane_id, time_samples)
     }
     async fn replace_automation_lane(
         &self,
         lane_id: EntityId,
         points: Vec<foyer_schema::AutomationPoint>,
     ) -> Result<(), BackendError> {
-        self.state.lock().await.replace_automation_lane(&lane_id, points)
+        self.state
+            .lock()
+            .await
+            .replace_automation_lane(&lane_id, points)
     }
 
     async fn update_region(
@@ -420,7 +433,8 @@ impl Backend for StubBackend {
             }
             found
         };
-        let region = maybe_region.ok_or_else(|| BackendError::Other(format!("unknown region {region_id}")))?;
+        let region = maybe_region
+            .ok_or_else(|| BackendError::Other(format!("unknown region {region_id}")))?;
         let peaks = self
             .waveforms
             .lock()
@@ -429,10 +443,7 @@ impl Backend for StubBackend {
         Ok(peaks)
     }
 
-    async fn clear_waveform_cache(
-        &self,
-        region_id: Option<EntityId>,
-    ) -> Result<u32, BackendError> {
+    async fn clear_waveform_cache(&self, region_id: Option<EntityId>) -> Result<u32, BackendError> {
         let mut cache = self.waveforms.lock().await;
         let dropped = match region_id {
             Some(id) => cache.clear_region(&id),
@@ -454,12 +465,48 @@ impl Backend for StubBackend {
             }
         };
         Ok(vec![
-            mk("lv2:eq", "x42 EQ", PluginFormat::Lv2, PluginRole::Effect, "x42"),
-            mk("lv2:comp", "x42 Compressor", PluginFormat::Lv2, PluginRole::Effect, "x42"),
-            mk("lv2:reverb", "Calf Reverb", PluginFormat::Lv2, PluginRole::Effect, "Calf Studio Gear"),
-            mk("lv2:limiter", "TDR Limiter", PluginFormat::Lv2, PluginRole::Effect, "Tokyo Dawn Labs"),
-            mk("lv2:synth", "Helm", PluginFormat::Lv2, PluginRole::Instrument, "Matt Tytel"),
-            mk("vst3:saturator", "Klevgränd Squasher", PluginFormat::Vst3, PluginRole::Effect, "Klevgränd"),
+            mk(
+                "lv2:eq",
+                "x42 EQ",
+                PluginFormat::Lv2,
+                PluginRole::Effect,
+                "x42",
+            ),
+            mk(
+                "lv2:comp",
+                "x42 Compressor",
+                PluginFormat::Lv2,
+                PluginRole::Effect,
+                "x42",
+            ),
+            mk(
+                "lv2:reverb",
+                "Calf Reverb",
+                PluginFormat::Lv2,
+                PluginRole::Effect,
+                "Calf Studio Gear",
+            ),
+            mk(
+                "lv2:limiter",
+                "TDR Limiter",
+                PluginFormat::Lv2,
+                PluginRole::Effect,
+                "Tokyo Dawn Labs",
+            ),
+            mk(
+                "lv2:synth",
+                "Helm",
+                PluginFormat::Lv2,
+                PluginRole::Instrument,
+                "Matt Tytel",
+            ),
+            mk(
+                "vst3:saturator",
+                "Klevgränd Squasher",
+                PluginFormat::Vst3,
+                PluginRole::Effect,
+                "Klevgränd",
+            ),
         ])
     }
 

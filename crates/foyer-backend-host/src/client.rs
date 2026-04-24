@@ -4,6 +4,13 @@
 //! behind `Arc`s: one reader task, one writer task, a shared broadcast of events,
 //! and a small registry of open audio streams.
 
+// The pending-request maps intentionally spell out their full generic
+// signatures (`Mutex<HashMap<EntityId, Vec<oneshot::Sender<(...)>>>>`).
+// Factoring each into a `type` alias would scatter three-line definitions
+// that are only used at one call site each and make the Shared struct
+// harder to scan, not easier.
+#![allow(clippy::type_complexity)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -65,8 +72,13 @@ enum AudioRoute {
 }
 
 /// What the writer task accepts via its queue.
+///
+/// The `Control` variant wraps an `Envelope<Control>` that's much larger
+/// than the `Audio` variant's `(u32, Vec<u8>)`. Boxing the big variant
+/// is what clippy recommends (`large_enum_variant`); it keeps the
+/// channel's queued-item size small on the audio hot path.
 enum WriteItem {
-    Control(Envelope<Control>),
+    Control(Box<Envelope<Control>>),
     Audio(u32, Vec<u8>),
 }
 
@@ -196,7 +208,7 @@ impl HostClient {
         };
         self.shared
             .out_tx
-            .send(WriteItem::Control(env))
+            .send(WriteItem::Control(Box::new(env)))
             .await
             .map_err(|_| ClientError::WriterClosed)
     }
@@ -382,7 +394,9 @@ impl HostClient {
         length_samples: Option<u64>,
     ) -> Result<(), ClientError> {
         self.send_command(Command::DuplicateRegion {
-            source_region_id, at_samples, length_samples,
+            source_region_id,
+            at_samples,
+            length_samples,
         })
         .await
     }
@@ -396,7 +410,11 @@ impl HostClient {
         name: Option<String>,
     ) -> Result<(), ClientError> {
         self.send_command(Command::CreateRegion {
-            track_id, at_samples, length_samples, kind, name,
+            track_id,
+            at_samples,
+            length_samples,
+            kind,
+            name,
         })
         .await
     }
@@ -440,7 +458,8 @@ impl HostClient {
         region_id: EntityId,
         note: MidiNote,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::AddNote { region_id, note }).await
+        self.send_command(Command::AddNote { region_id, note })
+            .await
     }
 
     pub async fn update_midi_note(
@@ -462,11 +481,8 @@ impl HostClient {
         region_id: EntityId,
         note_id: EntityId,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::DeleteNote {
-            region_id,
-            note_id,
-        })
-        .await
+        self.send_command(Command::DeleteNote { region_id, note_id })
+            .await
     }
 
     pub async fn replace_region_notes(
@@ -474,7 +490,8 @@ impl HostClient {
         region_id: EntityId,
         notes: Vec<MidiNote>,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::ReplaceRegionNotes { region_id, notes }).await
+        self.send_command(Command::ReplaceRegionNotes { region_id, notes })
+            .await
     }
 
     pub async fn undo(&self) -> Result<(), ClientError> {
@@ -517,12 +534,9 @@ impl HostClient {
     pub async fn remove_send(&self, send_id: EntityId) -> Result<(), ClientError> {
         self.send_command(Command::RemoveSend { send_id }).await
     }
-    pub async fn set_send_level(
-        &self,
-        send_id: EntityId,
-        level: f64,
-    ) -> Result<(), ClientError> {
-        self.send_command(Command::SetSendLevel { send_id, level }).await
+    pub async fn set_send_level(&self, send_id: EntityId, level: f64) -> Result<(), ClientError> {
+        self.send_command(Command::SetSendLevel { send_id, level })
+            .await
     }
 
     pub async fn list_plugin_presets(
@@ -537,7 +551,8 @@ impl HostClient {
             .entry(plugin_id.clone())
             .or_default()
             .push(tx);
-        self.send_command(Command::ListPluginPresets { plugin_id }).await?;
+        self.send_command(Command::ListPluginPresets { plugin_id })
+            .await?;
         timeout(rx, "list_plugin_presets").await
     }
 
@@ -546,7 +561,11 @@ impl HostClient {
         plugin_id: EntityId,
         preset_id: EntityId,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::LoadPluginPreset { plugin_id, preset_id }).await
+        self.send_command(Command::LoadPluginPreset {
+            plugin_id,
+            preset_id,
+        })
+        .await
     }
 
     pub async fn add_patch_change(
@@ -554,7 +573,11 @@ impl HostClient {
         region_id: EntityId,
         patch_change: PatchChange,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::AddPatchChange { region_id, patch_change }).await
+        self.send_command(Command::AddPatchChange {
+            region_id,
+            patch_change,
+        })
+        .await
     }
     pub async fn update_patch_change(
         &self,
@@ -562,14 +585,23 @@ impl HostClient {
         patch_change_id: EntityId,
         patch: PatchChangePatch,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::UpdatePatchChange { region_id, patch_change_id, patch }).await
+        self.send_command(Command::UpdatePatchChange {
+            region_id,
+            patch_change_id,
+            patch,
+        })
+        .await
     }
     pub async fn delete_patch_change(
         &self,
         region_id: EntityId,
         patch_change_id: EntityId,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::DeletePatchChange { region_id, patch_change_id }).await
+        self.send_command(Command::DeletePatchChange {
+            region_id,
+            patch_change_id,
+        })
+        .await
     }
 
     pub async fn set_sequencer_layout(
@@ -577,13 +609,12 @@ impl HostClient {
         region_id: EntityId,
         layout: SequencerLayout,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::SetSequencerLayout { region_id, layout }).await
+        self.send_command(Command::SetSequencerLayout { region_id, layout })
+            .await
     }
-    pub async fn clear_sequencer_layout(
-        &self,
-        region_id: EntityId,
-    ) -> Result<(), ClientError> {
-        self.send_command(Command::ClearSequencerLayout { region_id }).await
+    pub async fn clear_sequencer_layout(&self, region_id: EntityId) -> Result<(), ClientError> {
+        self.send_command(Command::ClearSequencerLayout { region_id })
+            .await
     }
 
     pub async fn set_automation_mode(
@@ -591,14 +622,16 @@ impl HostClient {
         lane_id: EntityId,
         mode: foyer_schema::AutomationMode,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::SetAutomationMode { lane_id, mode }).await
+        self.send_command(Command::SetAutomationMode { lane_id, mode })
+            .await
     }
     pub async fn add_automation_point(
         &self,
         lane_id: EntityId,
         point: foyer_schema::AutomationPoint,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::AddAutomationPoint { lane_id, point }).await
+        self.send_command(Command::AddAutomationPoint { lane_id, point })
+            .await
     }
     pub async fn update_automation_point(
         &self,
@@ -612,7 +645,8 @@ impl HostClient {
             original_time_samples,
             new_time_samples,
             value,
-        }).await
+        })
+        .await
     }
     pub async fn delete_automation_point(
         &self,
@@ -622,14 +656,16 @@ impl HostClient {
         self.send_command(Command::DeleteAutomationPoint {
             lane_id,
             time_samples,
-        }).await
+        })
+        .await
     }
     pub async fn replace_automation_lane(
         &self,
         lane_id: EntityId,
         points: Vec<foyer_schema::AutomationPoint>,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::ReplaceAutomationLane { lane_id, points }).await
+        self.send_command(Command::ReplaceAutomationLane { lane_id, points })
+            .await
     }
 
     pub async fn set_track_input(
@@ -637,7 +673,11 @@ impl HostClient {
         track_id: EntityId,
         port_name: Option<String>,
     ) -> Result<(), ClientError> {
-        self.send_command(Command::SetTrackInput { track_id, port_name }).await
+        self.send_command(Command::SetTrackInput {
+            track_id,
+            port_name,
+        })
+        .await
     }
 
     pub async fn update_track(
@@ -814,9 +854,7 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                             cache.insert(r.id.clone(), r.clone());
                         }
                     }
-                    if let Some(waiters) =
-                        shared.pending_regions.lock().await.remove(track_id)
-                    {
+                    if let Some(waiters) = shared.pending_regions.lock().await.remove(track_id) {
                         for w in waiters {
                             let _ = w.send((*timeline, regions.clone()));
                         }
@@ -828,11 +866,8 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                         .lock()
                         .await
                         .insert(region.id.clone(), region.clone());
-                    if let Some(waiters) = shared
-                        .pending_update_region
-                        .lock()
-                        .await
-                        .remove(&region.id)
+                    if let Some(waiters) =
+                        shared.pending_update_region.lock().await.remove(&region.id)
                     {
                         for w in waiters {
                             let _ = w.send(region.clone());
@@ -840,11 +875,8 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     }
                 }
                 Event::TrackUpdated { track } => {
-                    if let Some(waiters) = shared
-                        .pending_update_track
-                        .lock()
-                        .await
-                        .remove(&track.id)
+                    if let Some(waiters) =
+                        shared.pending_update_track.lock().await.remove(&track.id)
                     {
                         for w in waiters {
                             let _ = w.send((**track).clone());
@@ -856,11 +888,8 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     region_id,
                 } => {
                     shared.regions_cache.lock().await.remove(region_id);
-                    if let Some(waiters) = shared
-                        .pending_delete_region
-                        .lock()
-                        .await
-                        .remove(region_id)
+                    if let Some(waiters) =
+                        shared.pending_delete_region.lock().await.remove(region_id)
                     {
                         for w in waiters {
                             let _ = w.send(track_id.clone());
@@ -868,28 +897,21 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     }
                 }
                 Event::PluginsList { entries } => {
-                    let waiters: Vec<_> = std::mem::take(
-                        &mut *shared.pending_plugins_list.lock().await,
-                    );
+                    let waiters: Vec<_> =
+                        std::mem::take(&mut *shared.pending_plugins_list.lock().await);
                     for w in waiters {
                         let _ = w.send(entries.clone());
                     }
                 }
                 Event::PortsListed { ports } => {
-                    let waiters: Vec<_> = std::mem::take(
-                        &mut *shared.pending_ports_list.lock().await,
-                    );
+                    let waiters: Vec<_> =
+                        std::mem::take(&mut *shared.pending_ports_list.lock().await);
                     for w in waiters {
                         let _ = w.send(ports.clone());
                     }
                 }
                 Event::PluginPresetsListed { plugin_id, presets } => {
-                    if let Some(waiters) = shared
-                        .pending_presets
-                        .lock()
-                        .await
-                        .remove(plugin_id)
-                    {
+                    if let Some(waiters) = shared.pending_presets.lock().await.remove(plugin_id) {
                         for w in waiters {
                             let _ = w.send(presets.clone());
                         }

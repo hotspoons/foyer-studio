@@ -1803,3 +1803,87 @@ also didn't see the host (who had origin `"backend"` / `"server"`
 stripped from user-visible presence). Moving to a server-authoritative
 model makes the data shape match reality — one connection, one entry,
 lifetime bounded by the WS socket.
+
+## 40. Three-tier web split: foyer-core / foyer-ui-core / foyer-ui-*
+
+**Date:** 2026-04-24
+
+**Decision.** Foyer's browser tree is three packages with one-way
+dependencies: `foyer-core` (renderless DAW logic — wire protocol,
+store, RBAC, audio, automation, registries) → `foyer-ui-core`
+(shared browser primitives — tiling, windowing, widgets, fallback
+shell) → one or more `ui-*` variants (opinionated UIs; `ui-full` is
+the shipping one). Variants self-register via `registerUiVariant()`
+as a side-effect of `<web_root>/ui-*/package.js` being loaded. The
+server's `/variants.json` endpoint scans `web_root` for folders
+matching `ui-*` (excluding reserved names `ui-core`, `ui-tests`) and
+returns their ids; `boot.js` fetches that list, dynamically imports
+each package, then calls `bootFoyerCore()`.
+
+**Alternatives.** (a) Single flat `web/src/` tree — what we had
+before. (b) A bundler + npm workspace. (c) A server-side view
+registry keyed to backend types.
+
+**Why.** Rich's goal is "unlock new interactivity paradigms with
+fucking complicated software" — the UI being easy to fork/replace
+matters more than compactness. Split keeps the wire protocol and
+state reducer in one place (so alternate UIs don't re-invent either)
+but lets a React/Svelte/native author ignore everything above core.
+Rejected (b) because we have a no-Node-shipping policy; everything
+stays ES modules + import map served from the Rust binary. Rejected
+(c) because feature detection (what DAWs support what) and widget
+selection (what UI renders what) are orthogonal axes; the registry
+layered on core handles both client-side.
+
+**Hot-serve.** On first run the CLI extracts the bundled web/ to
+`$XDG_DATA_HOME/foyer/web/` and serves from there, so users edit
+in place and refresh the browser. `--web-root <path>` overrides;
+a working-copy `./web/` takes precedence for dev. Delete the
+install dir to reset.
+
+**Variant discovery** is pure filesystem — drop a `ui-myvariant/`
+folder with a `package.js`, restart `foyer serve`, the variant
+shows up in `/variants.json`. No `index.html` edits, no bundler
+re-run. See `web/HACKING.md` for recipes.
+
+**Registries.** `foyer-core/registry/{features,ui-variants,widgets,views}.js`
+hold the shared contracts:
+- `features` — backend capability flags from `ClientGreeting.features`
+- `ui-variants` — registered UIs + `pickUiVariant()` priority ladder
+- `widgets` — logical id → concrete element tag with variant fallback chain
+- `views` — tileable surface catalog (mixer, timeline, …) with `elementTag`
+
+**Backend capability surface.** `Backend::features()` returns a
+`BTreeMap<String, bool>`; server forwards it in the greeting. Default
+trait impl claims the full Ardour-ish surface; slim backends (stub,
+future mobile control-surface adapters) override with explicit
+disables so the UI hides unsupported menu items without probing.
+
+**Fallback UI.** When no variant matches (brand-new device shape,
+bogus `?ui=` id, or late-arriving greeting), `ui-core/fallback-ui.js`
+paints a minimal "If you lived here, you'd be home now" shell so
+the page is never blank. Live-wires to the store so connection
+status is visible even in this state.
+
+## 41. Plugin window drag = "dumb like foyer-window"
+
+**Date:** 2026-04-24
+
+**Decision.** Plugin float windows no longer apply any CSS
+transition on `left` / `top` / `width` / `height`, and the
+layout-store's position clamp during re-render no longer bounds
+manual drags to the workspace rect. Drag writes inline style
+directly on pointermove; pointerup persists through the store; the
+re-render uses exactly what was persisted — no smoothing, no
+snap-back.
+
+**Why.** The 180ms transition on `left` / `top` turned every
+pointermove tick into a rubber-band animation which felt "drunk"
+during drag. Separately, the `_repack()` clamp mapped dragged-off-
+screen positions back into the visible workspace, producing a
+visible snap-back whenever a window landed near an edge. Both
+misbehaviors were inherited from an early prototype and don't
+match the `foyer-window` idiom, which is the one users compared
+them to. Keep the "snowflake" status only where it's earned;
+plugin windows get the same dumb direct-manipulation model as
+everything else.

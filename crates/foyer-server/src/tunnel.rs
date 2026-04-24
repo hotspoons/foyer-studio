@@ -25,7 +25,10 @@ fn manifest_path() -> anyhow::Result<PathBuf> {
 pub async fn load_manifest() -> TunnelManifest {
     let path = match manifest_path() {
         Ok(p) => p,
-        Err(e) => { tracing::warn!("tunnel manifest path err: {e}"); return TunnelManifest::default(); }
+        Err(e) => {
+            tracing::warn!("tunnel manifest path err: {e}");
+            return TunnelManifest::default();
+        }
     };
     match tokio::fs::read_to_string(&path).await {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
@@ -36,7 +39,8 @@ pub async fn load_manifest() -> TunnelManifest {
 pub async fn save_manifest(manifest: &TunnelManifest) -> anyhow::Result<()> {
     let path = manifest_path()?;
     let raw = serde_json::to_string_pretty(manifest)?;
-    let mut tmp = tempfile::NamedTempFile::with_prefix_in("tunnel-manifest", path.parent().unwrap())?;
+    let mut tmp =
+        tempfile::NamedTempFile::with_prefix_in("tunnel-manifest", path.parent().unwrap())?;
     tmp.write_all(raw.as_bytes())?;
     tmp.flush()?;
     tokio::fs::rename(tmp.path(), &path).await?;
@@ -105,10 +109,11 @@ fn decode_token(token: &str) -> Option<(String, String)> {
 /// without second-guessing.
 fn generate_password() -> String {
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    const ALPHABET: &[u8] =
-        b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
     let mut rng = StdRng::from_entropy();
-    (0..16).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+    (0..16)
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
 }
 
 // ─── Token CRUD ──────────────────────────────────────────────────────
@@ -146,7 +151,13 @@ pub async fn create_token(
             .trim()
             .to_ascii_lowercase()
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '@' || c == '.' { c } else { '-' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '@' || c == '.' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect::<String>()
     };
     let password = generate_password();
@@ -163,7 +174,7 @@ pub async fn create_token(
         })
     };
     let conn = TunnelConnection {
-        id: foyer_schema::EntityId::new(&format!("conn_{}", &token[..12.min(token.len())])),
+        id: foyer_schema::EntityId::new(format!("conn_{}", &token[..12.min(token.len())])),
         recipient: recipient.clone(),
         token_hash: hash,
         role,
@@ -174,7 +185,7 @@ pub async fn create_token(
     {
         let mut m = state.tunnel_manifest.write().await;
         m.connections.push(conn.clone());
-        save_manifest(&*m).await?;
+        save_manifest(&m).await?;
     }
     broadcast_tunnel_state(state).await;
     Ok((conn, token, password))
@@ -184,7 +195,7 @@ pub async fn revoke_token(state: &AppState, id: &foyer_schema::EntityId) -> anyh
     {
         let mut m = state.tunnel_manifest.write().await;
         m.connections.retain(|c| &c.id != id);
-        save_manifest(&*m).await?;
+        save_manifest(&m).await?;
     }
     broadcast_tunnel_state(state).await;
     Ok(())
@@ -198,7 +209,9 @@ pub async fn verify_token(state: &AppState, token: &str) -> Option<TunnelConnect
     let (email_norm, password) = decode_token(token)?;
     let hash = hash_credentials(&email_norm, &password);
     let m = state.tunnel_manifest.read().await;
-    if !m.enabled { return None; }
+    if !m.enabled {
+        return None;
+    }
     m.connections.iter().find(|c| c.token_hash == hash).cloned()
 }
 
@@ -214,7 +227,9 @@ pub async fn verify_credentials(
     let email_norm = normalize_email(email);
     let hash = hash_credentials(&email_norm, password);
     let m = state.tunnel_manifest.read().await;
-    if !m.enabled { return None; }
+    if !m.enabled {
+        return None;
+    }
     m.connections.iter().find(|c| c.token_hash == hash).cloned()
 }
 
@@ -256,11 +271,9 @@ pub async fn start_tunnel(
         // remain valid — the hash on the server side didn't change.
         let renamed = rewrite_connection_urls(&mut m.connections, &hostname);
         if renamed > 0 {
-            tracing::info!(
-                "tunnel: rewrote {renamed} share URL(s) onto {hostname}"
-            );
+            tracing::info!("tunnel: rewrote {renamed} share URL(s) onto {hostname}");
         }
-        let _ = save_manifest(&*m).await;
+        let _ = save_manifest(&m).await;
     }
     broadcast_tunnel_state(&state).await;
     broadcast_event(
@@ -270,7 +283,8 @@ pub async fn start_tunnel(
             hostname: hostname.clone(),
             url: hostname,
         },
-    ).await;
+    )
+    .await;
     Ok(())
 }
 
@@ -296,8 +310,12 @@ fn rewrite_connection_urls(
         "https://".to_string()
     };
     for conn in connections.iter_mut() {
-        let Some(ref old_url) = conn.tunnel_url else { continue };
-        let Some(token) = extract_token_param(old_url) else { continue };
+        let Some(ref old_url) = conn.tunnel_url else {
+            continue;
+        };
+        let Some(token) = extract_token_param(old_url) else {
+            continue;
+        };
         let new_url = format!("{scheme_prefix}{hostname}/?token={token}");
         if Some(&new_url) != conn.tunnel_url.as_ref() {
             conn.tunnel_url = Some(new_url);
@@ -335,7 +353,7 @@ pub async fn stop_tunnel(state: &AppState) {
         let mut m = state.tunnel_manifest.write().await;
         m.active_provider = None;
         m.active_provider_url = None;
-        let _ = save_manifest(&*m).await;
+        let _ = save_manifest(&m).await;
     }
     broadcast_tunnel_state(state).await;
     if let Some(kind) = provider_kind {
@@ -374,7 +392,7 @@ pub(crate) async fn broadcast_tunnel_state(state: &AppState) {
         let m = state.tunnel_manifest.read().await;
         (
             m.enabled,
-            m.active_provider.clone(),
+            m.active_provider,
             m.active_provider_url.clone(),
             m.connections.clone(),
         )
@@ -382,19 +400,27 @@ pub(crate) async fn broadcast_tunnel_state(state: &AppState) {
     broadcast_event(
         state,
         Event::TunnelState {
-            state: TunnelState { enabled, active_provider: provider, active_provider_url: provider_url, connections },
+            state: TunnelState {
+                enabled,
+                active_provider: provider,
+                active_provider_url: provider_url,
+                connections,
+            },
         },
-    ).await;
+    )
+    .await;
 }
 
 async fn broadcast_event(state: &AppState, event: Event) {
-    use std::sync::atomic::Ordering;
     use foyer_schema::SCHEMA_VERSION;
+    use std::sync::atomic::Ordering;
     let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
     let env = Envelope {
-        schema: SCHEMA_VERSION, seq,
+        schema: SCHEMA_VERSION,
+        seq,
         origin: Some("server".into()),
-        session_id: None, body: event,
+        session_id: None,
+        body: event,
     };
     state.ring.write().await.push(env.clone());
     let _ = state.tx.send(env);

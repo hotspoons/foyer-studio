@@ -98,9 +98,8 @@ pub async fn scan_orphans() -> Vec<OrphanInfo> {
         };
         // Classify: pid alive? socket reachable?
         let pid_alive = entry.pid > 0 && pid_is_alive(entry.pid);
-        let socket_reachable = pid_alive
-            && !entry.socket_path.is_empty()
-            && Path::new(&entry.socket_path).exists();
+        let socket_reachable =
+            pid_alive && !entry.socket_path.is_empty() && Path::new(&entry.socket_path).exists();
         let kind = if pid_alive && socket_reachable {
             "running"
         } else if pid_alive && !socket_reachable {
@@ -180,7 +179,7 @@ fn pid_is_alive(pid: u32) -> bool {
     // this should gain a cfg branch.
     #[cfg(target_os = "linux")]
     {
-        return Path::new(&format!("/proc/{pid}")).exists();
+        Path::new(&format!("/proc/{pid}")).exists()
     }
     #[cfg(not(target_os = "linux"))]
     {

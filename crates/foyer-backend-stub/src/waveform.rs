@@ -11,12 +11,10 @@ use std::collections::HashMap;
 use foyer_schema::{EntityId, Region, WaveformPeaks};
 
 const CHANNELS: u16 = 1; // stub = mono
-// Matches the client's TIERS ladder (web/src/layout/waveform-cache.js).
-// Finer tiers (≤32 sp/peak) are for extreme zoom where coarse peaks
-// look like a smeared envelope across many pixels.
-const TIERS: [u32; 13] = [
-    2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
-];
+                         // Matches the client's TIERS ladder (web/src/layout/waveform-cache.js).
+                         // Finer tiers (≤32 sp/peak) are for extreme zoom where coarse peaks
+                         // look like a smeared envelope across many pixels.
+const TIERS: [u32; 13] = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
 
 pub(crate) struct WaveformCache {
     entries: HashMap<(String, u32), WaveformPeaks>,
@@ -70,8 +68,7 @@ fn pick_tier(requested: u32) -> u32 {
 }
 
 fn synthesize(region: &Region, samples_per_peak: u32) -> WaveformPeaks {
-    let bucket_count = ((region.length_samples + samples_per_peak as u64 - 1)
-        / samples_per_peak as u64) as u32;
+    let bucket_count = region.length_samples.div_ceil(samples_per_peak as u64) as u32;
     let mut peaks = Vec::with_capacity((bucket_count as usize) * 2 * CHANNELS as usize);
     // Seed derived from region id so peaks are stable.
     let seed: u64 = region
@@ -86,7 +83,11 @@ fn synthesize(region: &Region, samples_per_peak: u32) -> WaveformPeaks {
         for _ch in 0..CHANNELS {
             let t = i as f32 / bucket_count.max(1) as f32;
             // Envelope: fast attack, long decay.
-            let env = if t < 0.02 { t / 0.02 } else { (1.0 - t).powf(1.5) };
+            let env = if t < 0.02 {
+                t / 0.02
+            } else {
+                (1.0 - t).powf(1.5)
+            };
             let osc = ((t * 84.0).sin() + (t * 27.0).sin() * 0.4).tanh();
             let jitter = ((rng_next(&mut rng_state) as f32) / u32::MAX as f32 - 0.5) * 0.4;
             let amp = (osc + jitter).clamp(-1.0, 1.0) * env;

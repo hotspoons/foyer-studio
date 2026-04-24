@@ -7,6 +7,22 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/styles/tw.build.css">
 
+<!--
+  Import map — bare specifiers for the two stable packages. Everything
+  else (UI variants) lives in a convention-named folder (`ui-*`) and
+  is URL-loaded, not bare-specified. That means dropping a new UI
+  variant DOES NOT require editing this file:
+
+    1. Place your package at `<web_root>/ui-myvariant/package.js`
+       (for installed copies, `~/.local/share/foyer/web/ui-myvariant/`).
+    2. Restart `foyer serve` (or hit `/variants.json` to confirm it
+       was discovered).
+    3. Reload the browser — `boot.js` fetches the discovered list and
+       dynamically imports each `package.js`, whose side-effect is
+       a `registerUiVariant({...})` call.
+
+  See `HACKING.md` for recipes.
+-->
 <script type="importmap">
 {
   "imports": {
@@ -17,13 +33,23 @@
     "lit-element":             "/vendor/lit-element/index.js",
     "lit-element/":            "/vendor/lit-element/",
     "@lit/reactive-element":   "/vendor/@lit/reactive-element/reactive-element.js",
-    "@lit/reactive-element/":  "/vendor/@lit/reactive-element/"
+    "@lit/reactive-element/":  "/vendor/@lit/reactive-element/",
+
+    "foyer-core":              "/core/index.js",
+    "foyer-core/":             "/core/",
+    "foyer-ui-core":           "/ui-core/index.js",
+    "foyer-ui-core/":          "/ui-core/"
   }
 }
 </script>
-<script type="module" src="/src/app.js"></script>
+<script type="module" src="/boot.js"></script>
 </head>
 <body class="h-screen overflow-hidden flex flex-col">
-  <foyer-app></foyer-app>
+  <!--
+    Body stays empty until the core bootstrap picks a UI variant and
+    mounts it. If you see the "If you lived here" fallback shell, no
+    UI variant matched — open DevTools console and/or add `?ui=<id>`
+    to the URL to force a specific variant.
+  -->
 </body>
 </html>

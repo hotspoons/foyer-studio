@@ -90,8 +90,12 @@ pub struct ServerConfig {
     pub tls_key: Option<PathBuf>,
 }
 
-fn default_version() -> u32 { CONFIG_SCHEMA_VERSION }
-fn default_backend_id() -> String { "ardour".to_string() }
+fn default_version() -> u32 {
+    CONFIG_SCHEMA_VERSION
+}
+fn default_backend_id() -> String {
+    "ardour".to_string()
+}
 
 /// Tunnel provider configuration stored in config.yaml.
 /// Both `ngrok` and `cloudflare` sections can coexist — the user picks
@@ -203,7 +207,9 @@ pub struct BackendConfig {
     pub env: std::collections::BTreeMap<String, String>,
 }
 
-fn yes() -> bool { true }
+fn yes() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -239,16 +245,14 @@ pub fn load_or_seed() -> Result<Config> {
 /// and by `--config` overrides on the CLI.
 pub fn load_or_seed_at(path: &Path) -> Result<Config> {
     if path.exists() {
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
-        let cfg: Config = serde_yaml::from_str(&raw)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let cfg: Config =
+            serde_yaml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
         return Ok(cfg);
     }
     let cfg = seed_default();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let yaml = serde_yaml::to_string(&cfg).context("serialize default config")?;
     let header = "# Foyer Studio config — see crates/foyer-config/src/lib.rs for schema.\n\
@@ -423,9 +427,13 @@ fn scan_build_dir(dir: &Path, prefix: &str) -> Option<PathBuf> {
     let mut short = None;
     let mut versioned = None;
     let short_max_len = prefix.len() + 2; // "ardour" + up to two digits
-    let Ok(rd) = std::fs::read_dir(dir) else { return None; };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return None;
+    };
     for entry in rd.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue; };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
         let path = entry.path();
         if !is_executable(&path) {
             continue;
@@ -439,7 +447,11 @@ fn scan_build_dir(dir: &Path, prefix: &str) -> Option<PathBuf> {
         // Install wrapper — e.g. "ardour9" or "hardour9".
         if name.starts_with(prefix)
             && name.len() <= short_max_len
-            && name.as_bytes().iter().skip(prefix.len()).all(u8::is_ascii_digit)
+            && name
+                .as_bytes()
+                .iter()
+                .skip(prefix.len())
+                .all(u8::is_ascii_digit)
             && short.is_none()
         {
             short = Some(path);

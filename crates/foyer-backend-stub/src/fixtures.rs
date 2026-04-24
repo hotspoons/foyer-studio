@@ -282,12 +282,7 @@ fn comp_params(pid: &str) -> Vec<Parameter> {
             Some("Detection"),
             1,
         ),
-        p_toggle(
-            &format!("{pid}.sc.hpf"),
-            "SC HPF",
-            Some("Sidechain"),
-            false,
-        ),
+        p_toggle(&format!("{pid}.sc.hpf"), "SC HPF", Some("Sidechain"), false),
     ]
 }
 

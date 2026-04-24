@@ -4,8 +4,8 @@
 //! `~/.local/share/foyer/bin/cloudflared` (Linux) or the equivalent on macOS/
 //! Windows.  Subsequent calls verify the binary exists and is up-to-date.
 
-use std::path::PathBuf;
 use anyhow::{anyhow, bail, Context, Result};
+use std::path::PathBuf;
 
 const BIN_NAME: &str = "cloudflared";
 
@@ -38,15 +38,17 @@ pub async fn ensure() -> Result<PathBuf> {
     }
     download().await?;
     if !path.is_file() {
-        bail!("cloudflared download completed but binary not found at {}", path.display());
+        bail!(
+            "cloudflared download completed but binary not found at {}",
+            path.display()
+        );
     }
     Ok(path)
 }
 
 async fn download() -> Result<()> {
     let dir = bin_dir()?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create bin dir {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create bin dir {}", dir.display()))?;
 
     let url = download_url()?;
     tracing::info!("downloading cloudflared from {}", url);
@@ -65,7 +67,10 @@ async fn download() -> Result<()> {
         bail!("cloudflared download failed: HTTP {}", resp.status());
     }
 
-    let bytes = resp.bytes().await.context("read cloudflared response body")?;
+    let bytes = resp
+        .bytes()
+        .await
+        .context("read cloudflared response body")?;
 
     let tmp = dir.join("cloudflared.tmp");
     tokio::fs::write(&tmp, &bytes)

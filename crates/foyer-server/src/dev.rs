@@ -19,9 +19,7 @@ use std::time::Duration;
 use axum::extract::{Query, State};
 use axum::response::Json;
 use foyer_backend::{Backend, BackendError};
-use foyer_schema::{
-    ControlKind, ControlValue, EntityId, Event, Parameter, ScaleCurve, TrackPatch,
-};
+use foyer_schema::{ControlKind, ControlValue, EntityId, Event, Parameter, ScaleCurve, TrackPatch};
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
@@ -79,7 +77,7 @@ pub async fn run_tests(
     };
     let picked: Vec<&Probe> = PROBES
         .iter()
-        .filter(|p| filter.as_ref().is_none_or(|ids| ids.contains(&p.id)))
+        .filter(|p| filter.as_ref().map_or(true, |ids| ids.contains(&p.id)))
         .collect();
 
     let started_all = std::time::Instant::now();
@@ -197,7 +195,10 @@ async fn probe_list_regions(state: Arc<AppState>) -> Result<String, String> {
     .map_err(|e| format!("list_regions: {e}"))?;
     Ok(format!(
         "track={} regions={} sample_rate={} len_samples={}",
-        track.id, regions.len(), meta.sample_rate, meta.length_samples,
+        track.id,
+        regions.len(),
+        meta.sample_rate,
+        meta.length_samples,
     ))
 }
 
@@ -318,7 +319,9 @@ async fn probe_audio_egress(state: Arc<AppState>) -> Result<String, String> {
     // + collect a few packets to prove the pipe is alive.
     let stream_id: u32 = 777;
     let fmt = AudioFormat::new_with_codec(48_000, 2, 960, AudioCodec::Opus);
-    let rx = state.audio_hub.spawn_test_tone_source(fmt, Duration::from_millis(300));
+    let rx = state
+        .audio_hub
+        .spawn_test_tone_source(fmt, Duration::from_millis(300));
     state
         .audio_hub
         .open_stream(stream_id, AudioSource::Master, fmt, rx)
@@ -350,7 +353,9 @@ async fn probe_audio_egress(state: Arc<AppState>) -> Result<String, String> {
     if packets == 0 {
         return Err("no opus packets emitted within 500 ms".into());
     }
-    Ok(format!("stream {stream_id}: {packets} opus packet(s), {bytes} bytes total"))
+    Ok(format!(
+        "stream {stream_id}: {packets} opus packet(s), {bytes} bytes total"
+    ))
 }
 
 async fn probe_event_broadcast(state: Arc<AppState>) -> Result<String, String> {
@@ -378,10 +383,8 @@ async fn probe_event_broadcast(state: Arc<AppState>) -> Result<String, String> {
             match rx.recv().await {
                 Ok(env) => match env.body {
                     Event::ControlUpdate { update } if update.id == mute_id => return Ok(()),
-                    Event::MeterBatch { values } => {
-                        if values.iter().any(|u| u.id == mute_id) {
-                            return Ok(());
-                        }
+                    Event::MeterBatch { values } if values.iter().any(|u| u.id == mute_id) => {
+                        return Ok(());
                     }
                     _ => {}
                 },
@@ -421,17 +424,41 @@ fn _ref_types() -> (Parameter, ScaleCurve, ControlKind) {
 }
 
 static PROBES: &[Probe] = &[
-    probe!("snapshot", "Backend returns a well-shaped session snapshot", probe_snapshot),
-    probe!("list_actions", "Action catalog includes transport.*", probe_list_actions),
-    probe!("set_control", "set_control on track gain does not error", probe_set_control),
+    probe!(
+        "snapshot",
+        "Backend returns a well-shaped session snapshot",
+        probe_snapshot
+    ),
+    probe!(
+        "list_actions",
+        "Action catalog includes transport.*",
+        probe_list_actions
+    ),
+    probe!(
+        "set_control",
+        "set_control on track gain does not error",
+        probe_set_control
+    ),
     probe!(
         "event_broadcast",
         "Broadcasts a control_update echo within 2 s of a set_control",
         probe_event_broadcast
     ),
-    probe!("list_regions", "list_regions for first audio track returns", probe_list_regions),
-    probe!("load_waveform", "load_waveform returns peaks for first region", probe_load_waveform),
-    probe!("update_track", "update_track renames + restores first track", probe_update_track),
+    probe!(
+        "list_regions",
+        "list_regions for first audio track returns",
+        probe_list_regions
+    ),
+    probe!(
+        "load_waveform",
+        "load_waveform returns peaks for first region",
+        probe_load_waveform
+    ),
+    probe!(
+        "update_track",
+        "update_track renames + restores first track",
+        probe_update_track
+    ),
     probe!(
         "transport_play_stop",
         "invoke_action transport.play + transport.stop dispatch cleanly",

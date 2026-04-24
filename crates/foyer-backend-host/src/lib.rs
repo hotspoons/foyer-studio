@@ -228,11 +228,7 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
-    async fn update_track(
-        &self,
-        id: EntityId,
-        patch: TrackPatch,
-    ) -> Result<Track, BackendError> {
+    async fn update_track(&self, id: EntityId, patch: TrackPatch) -> Result<Track, BackendError> {
         self.client
             .update_track(id, patch)
             .await
@@ -257,7 +253,11 @@ impl Backend for HostBackend {
         members: Vec<EntityId>,
     ) -> Result<(), BackendError> {
         self.client
-            .send_command(Command::CreateGroup { name, color, members })
+            .send_command(Command::CreateGroup {
+                name,
+                color,
+                members,
+            })
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
@@ -289,10 +289,7 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
-    async fn list_ports(
-        &self,
-        direction: Option<String>,
-    ) -> Result<Vec<EnginePort>, BackendError> {
+    async fn list_ports(&self, direction: Option<String>) -> Result<Vec<EnginePort>, BackendError> {
         self.client
             .list_ports(direction)
             .await
@@ -316,22 +313,14 @@ impl Backend for HostBackend {
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
-    async fn set_send_level(
-        &self,
-        send_id: EntityId,
-        level: f64,
-    ) -> Result<(), BackendError> {
+    async fn set_send_level(&self, send_id: EntityId, level: f64) -> Result<(), BackendError> {
         self.client
             .set_send_level(send_id, level)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
-    async fn add_midi_note(
-        &self,
-        region_id: EntityId,
-        note: MidiNote,
-    ) -> Result<(), BackendError> {
+    async fn add_midi_note(&self, region_id: EntityId, note: MidiNote) -> Result<(), BackendError> {
         self.client
             .add_midi_note(region_id, note)
             .await
@@ -373,14 +362,22 @@ impl Backend for HostBackend {
     }
 
     async fn undo(&self) -> Result<(), BackendError> {
-        self.client.undo().await.map_err(|e| BackendError::Other(e.to_string()))
+        self.client
+            .undo()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn redo(&self) -> Result<(), BackendError> {
-        self.client.redo().await.map_err(|e| BackendError::Other(e.to_string()))
+        self.client
+            .redo()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
     }
 
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {
-        self.client.list_plugins().await
+        self.client
+            .list_plugins()
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
@@ -388,7 +385,9 @@ impl Backend for HostBackend {
         &self,
         plugin_id: EntityId,
     ) -> Result<Vec<PluginPreset>, BackendError> {
-        self.client.list_plugin_presets(plugin_id).await
+        self.client
+            .list_plugin_presets(plugin_id)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn load_plugin_preset(
@@ -396,7 +395,9 @@ impl Backend for HostBackend {
         plugin_id: EntityId,
         preset_id: EntityId,
     ) -> Result<(), BackendError> {
-        self.client.load_plugin_preset(plugin_id, preset_id).await
+        self.client
+            .load_plugin_preset(plugin_id, preset_id)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
@@ -405,7 +406,9 @@ impl Backend for HostBackend {
         region_id: EntityId,
         patch_change: PatchChange,
     ) -> Result<(), BackendError> {
-        self.client.add_patch_change(region_id, patch_change).await
+        self.client
+            .add_patch_change(region_id, patch_change)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn update_patch_change(
@@ -414,7 +417,9 @@ impl Backend for HostBackend {
         patch_change_id: EntityId,
         patch: PatchChangePatch,
     ) -> Result<(), BackendError> {
-        self.client.update_patch_change(region_id, patch_change_id, patch).await
+        self.client
+            .update_patch_change(region_id, patch_change_id, patch)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn delete_patch_change(
@@ -422,7 +427,9 @@ impl Backend for HostBackend {
         region_id: EntityId,
         patch_change_id: EntityId,
     ) -> Result<(), BackendError> {
-        self.client.delete_patch_change(region_id, patch_change_id).await
+        self.client
+            .delete_patch_change(region_id, patch_change_id)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
@@ -431,14 +438,15 @@ impl Backend for HostBackend {
         region_id: EntityId,
         layout: SequencerLayout,
     ) -> Result<(), BackendError> {
-        self.client.set_sequencer_layout(region_id, layout).await
+        self.client
+            .set_sequencer_layout(region_id, layout)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
-    async fn clear_sequencer_layout(
-        &self,
-        region_id: EntityId,
-    ) -> Result<(), BackendError> {
-        self.client.clear_sequencer_layout(region_id).await
+    async fn clear_sequencer_layout(&self, region_id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .clear_sequencer_layout(region_id)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
@@ -447,7 +455,9 @@ impl Backend for HostBackend {
         lane_id: EntityId,
         mode: AutomationMode,
     ) -> Result<(), BackendError> {
-        self.client.set_automation_mode(lane_id, mode).await
+        self.client
+            .set_automation_mode(lane_id, mode)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn add_automation_point(
@@ -455,7 +465,9 @@ impl Backend for HostBackend {
         lane_id: EntityId,
         point: AutomationPoint,
     ) -> Result<(), BackendError> {
-        self.client.add_automation_point(lane_id, point).await
+        self.client
+            .add_automation_point(lane_id, point)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn update_automation_point(
@@ -465,7 +477,9 @@ impl Backend for HostBackend {
         new_time_samples: u64,
         value: f64,
     ) -> Result<(), BackendError> {
-        self.client.update_automation_point(lane_id, original_time_samples, new_time_samples, value).await
+        self.client
+            .update_automation_point(lane_id, original_time_samples, new_time_samples, value)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn delete_automation_point(
@@ -473,7 +487,9 @@ impl Backend for HostBackend {
         lane_id: EntityId,
         time_samples: u64,
     ) -> Result<(), BackendError> {
-        self.client.delete_automation_point(lane_id, time_samples).await
+        self.client
+            .delete_automation_point(lane_id, time_samples)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn replace_automation_lane(
@@ -481,7 +497,9 @@ impl Backend for HostBackend {
         lane_id: EntityId,
         points: Vec<AutomationPoint>,
     ) -> Result<(), BackendError> {
-        self.client.replace_automation_lane(lane_id, points).await
+        self.client
+            .replace_automation_lane(lane_id, points)
+            .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
     async fn set_loop_range(
@@ -530,7 +548,11 @@ impl Backend for HostBackend {
                 }
             }
         }
-        Ok(foyer_backend::synth_waveform(region_id, samples_per_peak, 240))
+        Ok(foyer_backend::synth_waveform(
+            region_id,
+            samples_per_peak,
+            240,
+        ))
     }
 }
 

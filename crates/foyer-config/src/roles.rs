@@ -48,7 +48,9 @@ pub struct RoleDef {
     pub deny: Vec<String>,
 }
 
-fn default_version() -> u32 { ROLES_SCHEMA_VERSION }
+fn default_version() -> u32 {
+    ROLES_SCHEMA_VERSION
+}
 
 impl RolesConfig {
     /// The bundled default, useful as a fallback when the user file is
@@ -117,15 +119,13 @@ pub fn load_or_seed_roles() -> Result<RolesConfig> {
 
 pub fn load_or_seed_roles_at(path: &Path) -> Result<RolesConfig> {
     if path.exists() {
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
-        let cfg: RolesConfig = serde_yaml::from_str(&raw)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let cfg: RolesConfig =
+            serde_yaml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
         return Ok(cfg);
     }
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     fs::write(path, DEFAULT_ROLES_YAML)
         .with_context(|| format!("write seed roles to {}", path.display()))?;

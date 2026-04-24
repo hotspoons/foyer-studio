@@ -43,19 +43,14 @@ async fn handle(socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
     let mut rx = None;
     for i in 0..60 {
         if let Some(sub) = state.audio_hub.subscribe(stream_id).await {
-            tracing::info!(
-                "/ws/audio/{stream_id} subscribed after {} ms",
-                i * 100
-            );
+            tracing::info!("/ws/audio/{stream_id} subscribed after {} ms", i * 100);
             rx = Some(sub);
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let Some(mut rx) = rx else {
-        tracing::warn!(
-            "/ws/audio/{stream_id} requested but hub has no such stream after 6 s wait"
-        );
+        tracing::warn!("/ws/audio/{stream_id} requested but hub has no such stream after 6 s wait");
         let _ = socket
             .close_with(axum::extract::ws::CloseFrame {
                 code: 4404,

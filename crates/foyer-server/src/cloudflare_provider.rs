@@ -160,11 +160,10 @@ impl CloudflareProvider {
     /// all three modes so cloudflared always points at a dedicated
     /// RBAC-enforcing surface instead of the trusted LAN-facing main
     /// server (see module docs).
-    async fn boot_auth_server(
-        &mut self,
-        state: std::sync::Arc<crate::AppState>,
-    ) -> Result<u16> {
-        let auth = start_auth_server(state).await.context("start auth server")?;
+    async fn boot_auth_server(&mut self, state: std::sync::Arc<crate::AppState>) -> Result<u16> {
+        let auth = start_auth_server(state)
+            .await
+            .context("start auth server")?;
         let port = auth.port;
         self.auth_server = Some(auth);
         self.target_port = port;
@@ -198,9 +197,7 @@ impl CloudflareProvider {
             .build()
             .context("build cloudflare http client")?;
 
-        tracing::info!(
-            "cloudflare: auto-provisioning tunnel for {hostname} -> {service_url}"
-        );
+        tracing::info!("cloudflare: auto-provisioning tunnel for {hostname} -> {service_url}");
         let provisioned = cloudflare_api::provision_tunnel(
             &http,
             &api_token,
@@ -272,12 +269,7 @@ impl CloudflareProvider {
         self.log_task = Some(task);
         self.child = Some(child);
 
-        let hostname = match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            rx,
-        )
-        .await
-        {
+        let hostname = match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
             Ok(Ok(h)) => h,
             Ok(Err(e)) => {
                 self.stop().await;
@@ -391,10 +383,7 @@ async fn parse_quick_output(
 
 /// Named-tunnel output drainer: same INFO-level logging, but no URL
 /// parsing (the hostname is already known from config).
-async fn drain_output(
-    stdout: tokio::process::ChildStdout,
-    stderr: tokio::process::ChildStderr,
-) {
+async fn drain_output(stdout: tokio::process::ChildStdout, stderr: tokio::process::ChildStderr) {
     let mut out_lines = tokio::io::BufReader::new(stdout).lines();
     let mut err_lines = tokio::io::BufReader::new(stderr).lines();
     let mut out_done = false;
@@ -413,10 +402,7 @@ async fn drain_output(
     }
 }
 
-fn try_extract_hostname(
-    line: &str,
-    tx: &mut Option<tokio::sync::oneshot::Sender<String>>,
-) {
+fn try_extract_hostname(line: &str, tx: &mut Option<tokio::sync::oneshot::Sender<String>>) {
     if tx.is_none() {
         return;
     }
@@ -424,9 +410,13 @@ fn try_extract_hostname(
     // several unrelated https:// URLs (TOS, docs) before the real
     // quick-tunnel URL. Matching the domain specifically avoids
     // latching onto the wrong one.
-    let Some(tc_idx) = line.find(".trycloudflare.com") else { return };
+    let Some(tc_idx) = line.find(".trycloudflare.com") else {
+        return;
+    };
     let prefix = &line[..tc_idx];
-    let Some(https_idx) = prefix.rfind("https://") else { return };
+    let Some(https_idx) = prefix.rfind("https://") else {
+        return;
+    };
     let rest = &line[https_idx..];
     let end = rest
         .find(|c: char| c.is_whitespace() || c == '|')
@@ -476,9 +466,7 @@ struct AuthServerHandle {
     shutdown: JoinHandle<()>,
 }
 
-async fn start_auth_server(
-    state: std::sync::Arc<crate::AppState>,
-) -> Result<AuthServerHandle> {
+async fn start_auth_server(state: std::sync::Arc<crate::AppState>) -> Result<AuthServerHandle> {
     use std::net::SocketAddr;
 
     let listener = tokio::net::TcpListener::bind(AUTH_SERVER_ADDR)
@@ -498,7 +486,8 @@ async fn start_auth_server(
     // addresses look like `127.0.0.1` when cloudflared forwards, so
     // peer-based detection is unreliable). The RBAC gate keys on this
     // extension: present → enforce policy; absent → trusted LAN.
-    let router = crate::build_http_router(state).await
+    let router = crate::build_http_router(state)
+        .await
         .layer(axum::Extension(crate::ws::TunnelOrigin));
     let service = router.into_make_service_with_connect_info::<SocketAddr>();
 
@@ -508,8 +497,6 @@ async fn start_auth_server(
         }
     });
 
-    tracing::info!(
-        "tunnel auth server listening on 127.0.0.1:{port} (serves full Foyer UI + WS)"
-    );
+    tracing::info!("tunnel auth server listening on 127.0.0.1:{port} (serves full Foyer UI + WS)");
     Ok(AuthServerHandle { port, shutdown })
 }

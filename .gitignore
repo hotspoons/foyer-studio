@@ -5,6 +5,11 @@ Cargo.lock.bak
 /web/styles/tw.build.css
 /.bin/
 
+# Playwright UI-test artifacts (specs themselves are tracked).
+/tests-ui/node_modules
+/tests-ui/report
+/tests-ui/test-results
+
 # Core dumps — sometimes a crashed hardour / foyer / shim dumps into the repo root.
 /core
 core.*

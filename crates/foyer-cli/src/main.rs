@@ -65,6 +65,17 @@ enum Command {
         #[arg(long)]
         web_root: Option<PathBuf>,
 
+        /// Extra web-asset directories layered ON TOP of `--web-root`.
+        /// Repeat to add more. Point this at a sibling dir holding
+        /// your own UI variant(s) so you don't have to edit the main
+        /// repo's `web/` to develop against Foyer. The server checks
+        /// overlays first (earlier flag = higher priority), falls
+        /// back to `--web-root`, and `/variants.json` scans every
+        /// root so any `ui-*/package.js` under an overlay appears
+        /// automatically in boot.js. See `DEVELOPMENT.md`.
+        #[arg(long = "web-overlay", value_name = "PATH")]
+        web_overlays: Vec<PathBuf>,
+
         /// Filesystem jail for the session picker. Overrides the config
         /// `launcher.jail`. Pass an empty string to opt out of jailing.
         #[arg(long)]
@@ -108,8 +119,7 @@ enum Command {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -136,9 +146,17 @@ async fn main() -> Result<()> {
             println!("{}", config_path(cli.config.as_deref())?.display());
             Ok(())
         }
-        Command::Configure { backend, force, dry_run } => {
-            configure(cli.config.as_deref(), config, backend.as_deref(), force, dry_run)
-        }
+        Command::Configure {
+            backend,
+            force,
+            dry_run,
+        } => configure(
+            cli.config.as_deref(),
+            config,
+            backend.as_deref(),
+            force,
+            dry_run,
+        ),
         Command::Serve {
             backend,
             project,
@@ -146,6 +164,7 @@ async fn main() -> Result<()> {
             socket,
             list_shims,
             web_root,
+            web_overlays,
             jail,
             tls_cert,
             tls_key,
@@ -181,7 +200,18 @@ async fn main() -> Result<()> {
             } else {
                 "127.0.0.1:3838".parse().unwrap()
             };
-            serve(config, backend, project, listen, socket, web_root, jail, tls).await
+            serve(
+                config,
+                backend,
+                project,
+                listen,
+                socket,
+                web_root,
+                web_overlays,
+                jail,
+                tls,
+            )
+            .await
         }
     }
 }
@@ -208,11 +238,12 @@ fn configure(
             // executable, and future DAWs will grow their own detection.
             continue;
         }
-        if b.executable.is_some() && !force {
-            println!("  id={} kind={:?} exec={} (kept — pass --force to re-detect)",
+        if let Some(existing) = b.executable.as_ref().filter(|_| !force) {
+            println!(
+                "  id={} kind={:?} exec={} (kept — pass --force to re-detect)",
                 b.id,
                 b.kind,
-                b.executable.as_ref().unwrap().display(),
+                existing.display(),
             );
             continue;
         }
@@ -293,6 +324,11 @@ fn list_available_shims() -> Result<()> {
     Ok(())
 }
 
+// Too-many-arguments: these all surface as independent CLI flags and
+// squashing them into a struct would just push the same fan-out one
+// layer down. Handler fn is the natural call site — live with the
+// count.
+#[allow(clippy::too_many_arguments)]
 async fn serve(
     config: Config,
     backend_override: Option<String>,
@@ -300,6 +336,7 @@ async fn serve(
     listen: SocketAddr,
     socket: Option<PathBuf>,
     web_root: Option<PathBuf>,
+    web_overlays: Vec<PathBuf>,
     jail_override: Option<PathBuf>,
     tls: Option<foyer_server::TlsConfig>,
 ) -> Result<()> {
@@ -330,13 +367,22 @@ async fn serve(
         tracing::info!("session picker jailed to {}", j.display());
     }
 
-    let web_root = web_root.or_else(|| {
-        let candidate = PathBuf::from("./web");
-        candidate.exists().then_some(candidate)
-    });
+    let web_root = resolve_web_root(web_root)?;
+    // Overlays are taken literally — callers can stack any number of
+    // sibling dirs on top of the base web_root to serve their own UI
+    // variants without editing the main repo. We validate existence
+    // up front so a typo fails fast instead of surfacing as a mystery
+    // 404 on a specific asset.
+    for overlay in &web_overlays {
+        if !overlay.exists() {
+            anyhow::bail!("--web-overlay {} does not exist", overlay.display());
+        }
+        tracing::info!("web overlay: {}", overlay.display());
+    }
     let server_cfg = ServerConfig {
         listen,
         web_root,
+        web_overlays,
         jail_root: jail.clone(),
         tls,
     };
@@ -356,9 +402,8 @@ async fn serve(
     // drive `launch_project` — which spawns Ardour and swaps the backend
     // in place. The active_backend_id still reads as "ardour" so the
     // picker chip lights up accordingly.
-    let is_launcher_mode = matches!(backend.kind, BackendKind::Ardour)
-        && socket.is_none()
-        && project.is_none();
+    let is_launcher_mode =
+        matches!(backend.kind, BackendKind::Ardour) && socket.is_none() && project.is_none();
 
     let initial_backend: Arc<dyn Backend> = match (backend.kind, socket.clone()) {
         (BackendKind::Ardour, Some(s)) => {
@@ -380,10 +425,7 @@ async fn serve(
             if let Ok(adv) = discovery::pick_single() {
                 match HostBackend::connect(adv.socket.clone()).await {
                     Ok(host) => {
-                        tracing::info!(
-                            "connected to advertised shim at {}",
-                            adv.socket.display()
-                        );
+                        tracing::info!("connected to advertised shim at {}", adv.socket.display());
                         connected = Some(host);
                     }
                     Err(e) => {
@@ -426,9 +468,9 @@ async fn serve(
     // can't take the server down.
     match cfg::load_or_seed_roles() {
         Ok(roles) => server.load_roles_policy(roles).await,
-        Err(e) => tracing::warn!(
-            "could not load roles.yaml ({e}) — falling back to bundled defaults"
-        ),
+        Err(e) => {
+            tracing::warn!("could not load roles.yaml ({e}) — falling back to bundled defaults")
+        }
     }
     // In launcher mode the backend that's actually running is the empty
     // stub, but the picker should treat the user's configured default as
@@ -441,9 +483,7 @@ async fn serve(
     // dismiss via the session switcher.
     server.scan_orphans().await;
     if is_launcher_mode {
-        tracing::info!(
-            "launcher mode active — pick a project in the browser to launch Ardour"
-        );
+        tracing::info!("launcher mode active — pick a project in the browser to launch Ardour");
     }
     server.run(server_cfg).await?;
     Ok(())
@@ -468,10 +508,7 @@ impl BackendSpawner for CliSpawner {
                     BackendKind::Stub => "stub".into(),
                     BackendKind::Ardour => "ardour".into(),
                 },
-                label: b
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| b.id.clone()),
+                label: b.label.clone().unwrap_or_else(|| b.id.clone()),
                 enabled: b.enabled,
                 requires_project: matches!(b.kind, BackendKind::Ardour),
             })
@@ -502,9 +539,8 @@ impl BackendSpawner for CliSpawner {
                 Ok(Arc::new(b))
             }
             BackendKind::Ardour => {
-                let project = project_path.ok_or_else(|| {
-                    anyhow!("backend `{backend_id}` requires a project path")
-                })?;
+                let project = project_path
+                    .ok_or_else(|| anyhow!("backend `{backend_id}` requires a project path"))?;
                 let exec = cfg_backend.executable.clone().ok_or_else(|| {
                     anyhow!("backend `{backend_id}` has no executable in config.yaml")
                 })?;
@@ -518,13 +554,9 @@ impl BackendSpawner for CliSpawner {
                 } else {
                     project.to_path_buf()
                 };
-                let socket = launch_and_wait_for_shim(
-                    &exec,
-                    &cfg_backend.args,
-                    &cfg_backend.env,
-                    &abs,
-                )
-                .await?;
+                let socket =
+                    launch_and_wait_for_shim(&exec, &cfg_backend.args, &cfg_backend.env, &abs)
+                        .await?;
                 let host = HostBackend::connect(socket.clone())
                     .await
                     .with_context(|| format!("connect to shim at {}", socket.display()))?;
@@ -780,7 +812,10 @@ fn daw_log_path() -> Result<PathBuf> {
 fn resolve_ardour_session_args(project: &std::path::Path) -> (PathBuf, String) {
     // Direct hit: caller handed us an .ardour file.
     if project.extension().and_then(|e| e.to_str()) == Some("ardour") {
-        let parent = project.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let parent = project
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
         let stem = project
             .file_stem()
             .and_then(|s| s.to_str())
@@ -866,6 +901,84 @@ fn redirect_short_wrapper(exec: &std::path::Path) -> Option<PathBuf> {
 /// script; we don't need to handle all edge cases, just paths that might
 /// contain spaces. Wraps the value in `'…'` and escapes any embedded
 /// single quotes by closing/escaping/reopening: `'` → `'\''`.
+/// Source of the web assets baked into this binary. Extracted to
+/// `$XDG_DATA_HOME/foyer/web/` on first run so users can edit in
+/// place; see `web/HACKING.md`.
+static BUNDLED_WEB: include_dir::Dir<'static> =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/../../web");
+
+/// Resolve the `web_root` the server should serve from.
+///
+/// Priority (first hit wins):
+///   1. `--web-root <path>` on the CLI (explicit override — what
+///      `just run` passes to serve the repo working copy for dev).
+///   2. `$XDG_DATA_HOME/foyer/web` — the canonical user-facing path
+///      where hackers drop new `ui-*` variants. Extracted from the
+///      binary's bundled assets on first boot; edits survive
+///      restarts and reinstalls.
+///
+/// There is deliberately no automatic `./web` fallback: two
+/// different working directories shouldn't silently change where
+/// Foyer serves from. If you want to hack the repo tree, pass
+/// `--web-root web` (the `just run` recipe does this for you).
+fn resolve_web_root(explicit: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    if let Some(p) = explicit {
+        if !p.exists() {
+            anyhow::bail!("--web-root {} does not exist", p.display());
+        }
+        return Ok(Some(p));
+    }
+    let data_dir = dirs::data_local_dir()
+        .ok_or_else(|| anyhow!("cannot resolve $XDG_DATA_HOME"))?
+        .join("foyer")
+        .join("web");
+    if !data_dir.join("index.html").exists() {
+        extract_bundled_web(&data_dir)
+            .with_context(|| format!("extracting bundled web/ to {}", data_dir.display()))?;
+    }
+    Ok(Some(data_dir))
+}
+
+/// First-run extract: write every file in `BUNDLED_WEB` to `dst`.
+/// Creates parent directories as needed and overwrites nothing (the
+/// existence check in `resolve_web_root` already guaranteed this is
+/// a fresh extract).
+fn extract_bundled_web(dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst).with_context(|| format!("mkdir -p {}", dst.display()))?;
+    tracing::info!("extracting bundled web/ to {}", dst.display());
+    write_dir_contents(&BUNDLED_WEB, dst)?;
+    // Drop a breadcrumb so users know where to hack and how to reset.
+    let readme = dst.join("INSTALLED-HERE.txt");
+    let _ = std::fs::write(
+        &readme,
+        "This directory was seeded from the Foyer binary's bundled web/ on\n\
+         first run. You can edit anything here — refresh the browser to see\n\
+         changes. See HACKING.md for recipes.\n\n\
+         To reset to the shipped assets: delete this folder and restart `foyer serve`.\n",
+    );
+    Ok(())
+}
+
+fn write_dir_contents(dir: &include_dir::Dir<'_>, dst: &Path) -> Result<()> {
+    for entry in dir.entries() {
+        match entry {
+            include_dir::DirEntry::Dir(d) => {
+                let sub = dst.join(d.path().file_name().unwrap_or_default());
+                std::fs::create_dir_all(&sub)
+                    .with_context(|| format!("mkdir -p {}", sub.display()))?;
+                write_dir_contents(d, &sub)?;
+            }
+            include_dir::DirEntry::File(f) => {
+                let name = f.path().file_name().unwrap_or_default();
+                let out = dst.join(name);
+                std::fs::write(&out, f.contents())
+                    .with_context(|| format!("write {}", out.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn shell_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');

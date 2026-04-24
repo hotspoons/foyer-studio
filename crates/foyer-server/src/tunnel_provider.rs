@@ -86,9 +86,13 @@ pub struct NgrokProvider {
 impl NgrokProvider {
     pub fn new(cfg: &foyer_schema::TunnelProviderConfig) -> anyhow::Result<Self> {
         match cfg {
-            foyer_schema::TunnelProviderConfig::Ngrok { auth_token, domain, .. } => {
-                Ok(Self { session: None, auth_token: auth_token.clone(), domain: domain.clone() })
-            }
+            foyer_schema::TunnelProviderConfig::Ngrok {
+                auth_token, domain, ..
+            } => Ok(Self {
+                session: None,
+                auth_token: auth_token.clone(),
+                domain: domain.clone(),
+            }),
             _ => anyhow::bail!("NgrokProvider created with non-ngrok config"),
         }
     }
@@ -97,9 +101,13 @@ impl NgrokProvider {
 #[cfg(feature = "ngrok")]
 #[async_trait::async_trait]
 impl TunnelProvider for NgrokProvider {
-    fn name(&self) -> &'static str { "ngrok" }
+    fn name(&self) -> &'static str {
+        "ngrok"
+    }
 
-    fn kind(&self) -> TunnelProviderKind { TunnelProviderKind::Ngrok }
+    fn kind(&self) -> TunnelProviderKind {
+        TunnelProviderKind::Ngrok
+    }
 
     async fn start(
         &mut self,

@@ -164,8 +164,12 @@ pub fn decode_peaks(
             let bucket = (rel / effective_spp).min(bucket_count as u64 - 1) as usize;
             let lo = &mut bucket_min[bucket];
             let hi = &mut bucket_max[bucket];
-            if v < *lo { *lo = v; }
-            if v > *hi { *hi = v; }
+            if v < *lo {
+                *lo = v;
+            }
+            if v > *hi {
+                *hi = v;
+            }
         }
         source_idx += frames as u64;
     }

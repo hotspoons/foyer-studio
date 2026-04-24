@@ -91,7 +91,7 @@ pub struct PatchChangePatch {
 // switches to a read-only view for it.
 
 /// One row in a beat-sequencer grid — a fixed pitch + label + channel
-/// + color swatch. Rows in a drum layout default to General MIDI
+/// and color swatch. Rows in a drum layout default to General MIDI
 /// percussion (channel 9, pitches 35..=81); pitched layouts can use
 /// any pitch/channel assignment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,7 +131,9 @@ pub struct SequencerCell {
     pub length_steps: u32,
 }
 
-fn is_zero_u32(n: &u32) -> bool { *n == 0 }
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
 
 /// One named beat pattern — a (rowIdx, stepIdx, velocity) cell list
 /// the user authored. Patterns are reused across the song timeline
@@ -234,12 +236,22 @@ pub struct SequencerLayout {
     pub active: bool,
 }
 
-fn sequencer_default_active() -> bool { true }
+fn sequencer_default_active() -> bool {
+    true
+}
 
-fn sequencer_default_version() -> u32 { 2 }
-fn sequencer_default_mode() -> String { "drum".into() }
-fn sequencer_default_resolution() -> u32 { 4 }
-fn sequencer_default_steps() -> u32 { 16 }
+fn sequencer_default_version() -> u32 {
+    2
+}
+fn sequencer_default_mode() -> String {
+    "drum".into()
+}
+fn sequencer_default_resolution() -> u32 {
+    4
+}
+fn sequencer_default_steps() -> u32 {
+    16
+}
 
 impl Default for SequencerLayout {
     fn default() -> Self {
@@ -345,13 +357,21 @@ pub fn expand_sequencer_layout(layout: &SequencerLayout, ppqn: u32) -> Vec<MidiN
 
     let mut out: Vec<MidiNote> = Vec::new();
     for slot in arrangement {
-        let Some(pat) = patterns.iter().find(|p| p.id == slot.pattern_id) else { continue };
+        let Some(pat) = patterns.iter().find(|p| p.id == slot.pattern_id) else {
+            continue;
+        };
         let bar_offset = (slot.bar as u64) * bar_ticks;
         for cell in &pat.cells {
             let row = cell.row as usize;
-            let Some(row_def) = layout.rows.get(row) else { continue };
-            if row_def.muted { continue; }
-            if layout.rows.iter().any(|r| r.soloed) && !row_def.soloed { continue; }
+            let Some(row_def) = layout.rows.get(row) else {
+                continue;
+            };
+            if row_def.muted {
+                continue;
+            }
+            if layout.rows.iter().any(|r| r.soloed) && !row_def.soloed {
+                continue;
+            }
             let start = bar_offset + (cell.step as u64) * step_ticks;
             // length_steps > 1 = pitched-mode long note. A cell with
             // length_steps == N fills N consecutive steps visually;
@@ -361,11 +381,16 @@ pub fn expand_sequencer_layout(layout: &SequencerLayout, ppqn: u32) -> Vec<MidiN
             // one short note per cell at `note_ticks` length.
             let len_steps = cell.length_steps.max(1) as u64;
             let length = if len_steps > 1 {
-                (len_steps * step_ticks).saturating_sub(step_ticks / 10).max(1)
+                (len_steps * step_ticks)
+                    .saturating_sub(step_ticks / 10)
+                    .max(1)
             } else {
                 note_ticks
             };
-            let id_str = format!("note.seq.{}.{}.{}.{}", slot.bar, slot.pattern_id, cell.row, cell.step);
+            let id_str = format!(
+                "note.seq.{}.{}.{}.{}",
+                slot.bar, slot.pattern_id, cell.row, cell.step
+            );
             out.push(MidiNote {
                 id: EntityId::new(id_str),
                 pitch: row_def.pitch,
@@ -378,7 +403,10 @@ pub fn expand_sequencer_layout(layout: &SequencerLayout, ppqn: u32) -> Vec<MidiN
         for (i, n) in pat.free_notes.iter().enumerate() {
             let mut cloned = n.clone();
             cloned.start_ticks = bar_offset + n.start_ticks;
-            cloned.id = EntityId::new(format!("note.seq.free.{}.{}.{i}", slot.bar, slot.pattern_id));
+            cloned.id = EntityId::new(format!(
+                "note.seq.free.{}.{}.{i}",
+                slot.bar, slot.pattern_id
+            ));
             out.push(cloned);
         }
     }
@@ -396,7 +424,7 @@ pub fn sequencer_layout_length_ticks(layout: &SequencerLayout, ppqn: u32) -> u64
     let last_bar = layout.arrangement.iter().map(|s| s.bar).max();
     match last_bar {
         Some(b) => (b as u64 + 1) * bar_ticks,
-        None if !layout.cells.is_empty() => bar_ticks,  // legacy v1
+        None if !layout.cells.is_empty() => bar_ticks, // legacy v1
         None => 0,
     }
 }
@@ -416,17 +444,17 @@ pub fn default_gm_drum_rows() -> Vec<SequencerRow> {
         }
     }
     vec![
-        row(36, "Kick",     "#f59e0b"),
-        row(38, "Snare",    "#a78bfa"),
-        row(37, "Rimshot",  "#6ee7b7"),
+        row(36, "Kick", "#f59e0b"),
+        row(38, "Snare", "#a78bfa"),
+        row(37, "Rimshot", "#6ee7b7"),
         row(42, "HH closed", "#22d3ee"),
-        row(46, "HH open",   "#67e8f9"),
-        row(44, "HH pedal",  "#38bdf8"),
-        row(49, "Crash",     "#fb7185"),
-        row(51, "Ride",      "#fda4af"),
-        row(41, "Low tom",   "#fbbf24"),
-        row(45, "Mid tom",   "#fcd34d"),
-        row(50, "Hi tom",    "#fde68a"),
+        row(46, "HH open", "#67e8f9"),
+        row(44, "HH pedal", "#38bdf8"),
+        row(49, "Crash", "#fb7185"),
+        row(51, "Ride", "#fda4af"),
+        row(41, "Low tom", "#fbbf24"),
+        row(45, "Mid tom", "#fcd34d"),
+        row(50, "Hi tom", "#fde68a"),
         row(39, "Hand clap", "#94a3b8"),
     ]
 }

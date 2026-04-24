@@ -32,9 +32,9 @@ pub use message::{
     SessionInfo,
 };
 pub use midi::{
-    default_gm_drum_rows, expand_sequencer_layout, sequencer_layout_length_ticks,
-    ArrangementSlot, MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, SequencerCell,
-    SequencerLayout, SequencerPattern, SequencerRow,
+    default_gm_drum_rows, expand_sequencer_layout, sequencer_layout_length_ticks, ArrangementSlot,
+    MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, SequencerCell, SequencerLayout,
+    SequencerPattern, SequencerRow,
 };
 pub use plugin::{PluginCatalogEntry, PluginFormat, PluginPreset, PluginRole};
 pub use session::{

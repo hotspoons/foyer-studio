@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foyer_backend::Backend;
-use foyer_schema::{Envelope, EntityId, Event, SessionInfo, SCHEMA_VERSION};
+use foyer_schema::{EntityId, Envelope, Event, SessionInfo, SCHEMA_VERSION};
 use futures::StreamExt;
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
@@ -124,7 +124,8 @@ impl SessionRegistry {
         self.sessions.write().await.insert(id.clone(), entry);
         // Broadcast open + updated list so UIs can slot the new
         // session into the switcher without a full refresh.
-        self.broadcast_event(Event::SessionOpened { session: info }).await;
+        self.broadcast_event(Event::SessionOpened { session: info })
+            .await;
         self.broadcast_event(Event::SessionList {
             sessions: self.list().await,
         })
@@ -197,7 +198,11 @@ impl SessionRegistry {
     /// Get the backend for a specific session, or `None` if no such
     /// session. Used by the WS command router.
     pub(crate) async fn backend(&self, id: &EntityId) -> Option<Arc<dyn Backend>> {
-        self.sessions.read().await.get(id).map(|e| e.backend.clone())
+        self.sessions
+            .read()
+            .await
+            .get(id)
+            .map(|e| e.backend.clone())
     }
 
     /// Get a live snapshot of every session, suitable for
