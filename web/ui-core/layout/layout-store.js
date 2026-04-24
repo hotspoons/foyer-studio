@@ -35,6 +35,11 @@ const NAMED_KEY = "foyer.layout.named.v1";
 const FOCUS_KEY = "foyer.layout.focus.v1";
 const FLOAT_KEY = "foyer.layout.floating.v1";
 const FAB_DOCK_KEY = "foyer.layout.dockedFabs.v1";
+// Set of FAB ids whose dock state has been explicitly decided —
+// either by a `defaultDocked` register (first-ever) or by a user
+// dock/undock action. Gates the "default to docked" logic so we
+// don't override a user's explicit undock on every reload.
+const FAB_SEEN_KEY = "foyer.layout.fabSeen.v1";
 const PLUGIN_FLOAT_KEY = "foyer.layout.pluginFloats.v1";
 const PLUGIN_VIS_KEY = "foyer.layout.pluginFloatsVisible.v1";
 
@@ -60,6 +65,10 @@ export class LayoutStore extends EventTarget {
     this._dockedFabs = (() => {
       try { return JSON.parse(localStorage.getItem(FAB_DOCK_KEY) || "{}") || {}; }
       catch { return {}; }
+    })();
+    this._dockSeen = (() => {
+      try { return new Set(JSON.parse(localStorage.getItem(FAB_SEEN_KEY) || "[]")); }
+      catch { return new Set(); }
     })();
     // Plugin floats live in their own layer (see
     // docs/DECISIONS.md #plugin-layer): separate from the tile grid and
@@ -121,6 +130,7 @@ export class LayoutStore extends EventTarget {
       localStorage.setItem(NAMED_KEY, JSON.stringify(this.named));
       localStorage.setItem(FLOAT_KEY, JSON.stringify(this._floating));
       localStorage.setItem(FAB_DOCK_KEY, JSON.stringify(this._dockedFabs));
+      localStorage.setItem(FAB_SEEN_KEY, JSON.stringify([...this._dockSeen]));
       localStorage.setItem(PLUGIN_FLOAT_KEY, JSON.stringify(this._pluginFloats));
       localStorage.setItem(PLUGIN_VIS_KEY, JSON.stringify(this._pluginFloatsVisible));
     } catch {}
@@ -139,6 +149,15 @@ export class LayoutStore extends EventTarget {
    */
   registerFab(id, meta, instance) {
     this._fabRegistry.set(id, { meta: meta || {}, instance: instance || null });
+    // First-ever sighting of a FAB with `defaultDocked: true` seeds
+    // it into the docked set. Subsequent reloads stay out of the
+    // user's way — `_dockSeen` records every id whose dock state has
+    // been deliberately decided (either by this seed or by a user
+    // dock/undock), so nothing here will override an explicit choice.
+    if (meta?.defaultDocked && !this._dockSeen.has(id) && !this._dockedFabs[id]) {
+      this._dockedFabs[id] = true;
+      this._dockSeen.add(id);
+    }
     this._emit();
   }
   unregisterFab(id) {
@@ -158,13 +177,20 @@ export class LayoutStore extends EventTarget {
   }
 
   dockFab(id) {
+    this._dockSeen.add(id);
     if (this._dockedFabs[id]) return;
     this._dockedFabs[id] = true;
     this._emit();
   }
 
   undockFab(id) {
-    if (!this._dockedFabs[id]) return;
+    this._dockSeen.add(id);
+    if (!this._dockedFabs[id]) {
+      // Still persist the `_dockSeen` update so a later register
+      // with `defaultDocked` doesn't re-seed.
+      this._emit();
+      return;
+    }
     delete this._dockedFabs[id];
     this._emit();
   }

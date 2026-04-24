@@ -11,6 +11,8 @@
 // At boot we subscribe to keydown in capture phase; a matching chord loads
 // the target preset or named layout and `preventDefault`s the event.
 
+import { isTypingTarget } from "../typing-guard.js";
+
 const KEY = "foyer.layout.bindings.v1";
 
 function load() {
@@ -62,10 +64,9 @@ export function installBindingsRuntime(layoutStore) {
   if (_installed) return;
   _installed = true;
   _handler = (ev) => {
-    // Don't hijack typing.
-    const t = ev.target;
-    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
-        || (t && t.isContentEditable)) return;
+    // Don't hijack typing. `composedPath()` so we see through shadow
+    // DOM into Lit component text inputs (chat composer, etc).
+    if (isTypingTarget(ev)) return;
     const combo = eventToCombo(ev);
     if (!combo) return;
     const entry = _map[combo];

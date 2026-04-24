@@ -26,6 +26,10 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 - [x] Transport bar grows a mic button when this browser is the assigned source for ≥1 track. Click starts mic ingress and wires the track's `input_port`; click again stops and clears. Button disappears when the assignment goes away (host unassign, peer leave, etc.).
 - [x] Live monitoring forced off for browser-sourced tracks — server sets `monitoring="off"` whenever an assignment lands, mixer strip shows `MON OFF` in place of the Auto/In/Disk triplet. No live collab over the browser leg; overdubs only.
 
+## Next issues
+- [ ] Let's have the access token in the link be a base64-encoded SHA of the username/password combo, not just the username/password combo
+- [ ] Disable space global binding if the role can't mess with the transport
+
 ## Bugs
 
 - [ ] (optionally scale aware) chord modifier keys for music sequence editor

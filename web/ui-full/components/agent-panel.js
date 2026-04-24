@@ -291,6 +291,7 @@ export class AgentPanel extends LitElement {
         accent: "accent",
         expandsRail: true,
         dockWidth: 400,
+        defaultDocked: true,
       },
       this,
     );

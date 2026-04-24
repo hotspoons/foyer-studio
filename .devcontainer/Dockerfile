@@ -35,6 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sudo \
       vim \
       less \
+      # bun's installer unpacks a zip into BUN_INSTALL
+      unzip \
       python3 \
       python3-pip \
       libssl-dev \
@@ -118,8 +120,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create vscode user (UID 1000) with passwordless sudo, mirroring the devcontainer convention.
+# Also add vscode to `audio` so `/dev/snd/*` nodes are readable when the
+# host passes them through via `--device=/dev/snd` (opt-in via
+# devcontainer.json — see the commented runArgs block there). Harmless
+# on Mac/Colima where /dev/snd doesn't exist at the container boundary.
 RUN groupadd --gid 1000 vscode \
     && useradd --uid 1000 --gid vscode --shell /bin/bash --create-home vscode \
+    && usermod -aG audio vscode \
     && echo 'vscode ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/vscode \
     && chmod 0440 /etc/sudoers.d/vscode
 
@@ -127,6 +134,15 @@ RUN groupadd --gid 1000 vscode \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
       | bash -s -- --to /usr/local/bin \
     && just --version
+
+# Install Bun (JS runtime / package manager) system-wide. We keep it in
+# /usr/local so non-interactive shells — `just ci`, CI subprocesses,
+# the Playwright harness's `exec bunx` — pick it up on PATH without
+# sourcing ~/.bashrc. The per-user install path (see
+# `.user-post-install.sh`) skips if `bun` is already on PATH, so this
+# is the single source of truth in a fresh container.
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
+    && bun --version
 
 # Install fastfetch (arch-aware)
 RUN ARCH=$(uname -m) \

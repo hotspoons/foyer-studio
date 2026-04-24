@@ -383,6 +383,7 @@ export class FoyerChatPanel extends LitElement {
         accent: "accent-2",
         expandsRail: true,
         dockWidth: 400,
+        defaultDocked: true,
       },
       this,
     );

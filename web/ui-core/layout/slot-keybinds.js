@@ -13,6 +13,7 @@
 //      mixer — they expect "send this to the left half" to Just Work.
 
 import { slotBounds, SLOT_SHORTCUTS } from "./slots.js";
+import { isTypingTarget } from "../typing-guard.js";
 
 let _installed = false;
 let _handler = null;
@@ -43,12 +44,10 @@ function matchSlot(ev) {
   return null;
 }
 
-function inTextInput(ev) {
-  const t = ev.target;
-  return !!(t instanceof HTMLInputElement
-         || t instanceof HTMLTextAreaElement
-         || (t && t.isContentEditable));
-}
+// Delegate to the shared typing guard so shadow-DOM text inputs (chat,
+// agent, renames inside Lit components) are detected too — a plain
+// `target instanceof` check stops at the shadow host.
+const inTextInput = (ev) => isTypingTarget(ev);
 
 /**
  * Move the topmost floating window to the named slot. If no floats are

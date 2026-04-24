@@ -30,7 +30,6 @@ export class RightDock extends LitElement {
     _open:   { state: true, type: Boolean },
     _width:  { state: true, type: Number },
     _panel:  { state: true, type: String },
-    _actions:{ state: true, type: Array },
     _minimized: { state: true, type: Array },
     _dropHighlight: { state: true, type: Boolean },
   };
@@ -134,13 +133,16 @@ export class RightDock extends LitElement {
   constructor() {
     super();
     const s = load();
-    this._open = s.open !== false;
+    // Default-closed now: the rail is always visible; the panel only
+    // opens when the user clicks a specific FAB. Keeps the workspace
+    // wide on first launch.
+    this._open = !!s.open;
     this._width = s.width || 280;
-    this._panel = s.panel || "actions";
-    this._actions = [];
+    // No hardcoded "actions" default — panel state is driven entirely
+    // by which FAB the user clicks (`fab:<id>`).
+    this._panel = s.panel || "";
     this._minimized = [];
     this._dropHighlight = false;
-    this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
     this._storeHandler = () => this.requestUpdate();
     this._layoutHandler = () => this._refreshMinimized();
     this._updateAttrs();
@@ -148,11 +150,6 @@ export class RightDock extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    const ws = window.__foyer?.ws;
-    if (ws) {
-      ws.addEventListener("envelope", this._envelopeHandler);
-      ws.send({ type: "list_actions" });
-    }
     window.__foyer?.store?.addEventListener("change", this._storeHandler);
     window.__foyer?.layout?.addEventListener("change", this._layoutHandler);
     // Expose self on the global so shadow-DOM-hidden siblings (FABs,
@@ -162,7 +159,6 @@ export class RightDock extends LitElement {
     this._refreshMinimized();
   }
   disconnectedCallback() {
-    window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     window.__foyer?.store?.removeEventListener("change", this._storeHandler);
     window.__foyer?.layout?.removeEventListener("change", this._layoutHandler);
     if (window.__foyer?.rightDock === this) window.__foyer.rightDock = null;
@@ -204,11 +200,6 @@ export class RightDock extends LitElement {
   _updateAttrs() {
     if (this._open) this.removeAttribute("collapsed");
     else this.setAttribute("collapsed", "");
-  }
-
-  _onEnvelope(env) {
-    const body = env?.body;
-    if (body?.type === "actions_list") this._actions = body.actions || [];
   }
 
   _persist() {
@@ -260,6 +251,10 @@ export class RightDock extends LitElement {
 
   render() {
     const style = this._open ? `width:${this._width}px` : "width:0";
+    // Everything above the minimized-floats section is now a dockable
+    // FAB — Actions, Session, Windows, Agent, Chat, Layouts. The rail
+    // just iterates them; users can tear any of them out to float or
+    // drag an existing floater back onto the rail to re-dock.
     return html`
       ${this._open ? html`
         <div class="resize" @pointerdown=${this._startResize}></div>
@@ -268,20 +263,7 @@ export class RightDock extends LitElement {
         </div>
       ` : null}
       <div class="rail">
-        <button class=${this._open && this._panel === "actions" ? "active" : ""}
-                @click=${() => this._toggle("actions")} title="Actions">
-          ${icon("list-bullet", 16)}
-        </button>
-        <button class=${this._open && this._panel === "session" ? "active" : ""}
-                @click=${() => this._toggle("session")} title="Session info">
-          ${icon("folder-open", 16)}
-        </button>
-        <button class=${this._open && this._panel === "windows" ? "active" : ""}
-                @click=${() => this._toggle("windows")}
-                title="Open windows — click to focus, × to close">
-          ${icon("squares-2x2", 16)}
-        </button>
-        ${this._renderDockedFabs()}
+        ${this._renderDockedFabs({ leadingSep: false })}
         ${this._minimized.length ? html`<div class="rail-sep"></div>` : null}
         ${this._minimized.map(
           (e) => html`
@@ -299,12 +281,29 @@ export class RightDock extends LitElement {
     `;
   }
 
-  _renderDockedFabs() {
+  _renderDockedFabs({ leadingSep = true } = {}) {
     const fabs = window.__foyer?.layout?.dockedFabs?.() || [];
     if (fabs.length === 0) return null;
+    // Stable, deterministic order so the rail doesn't reshuffle on
+    // reload — docked FABs come in via Map iteration order which
+    // reflects registration order (non-deterministic across dynamic
+    // imports). Core/app-critical FABs pinned to the top.
+    const ORDER = [
+      "foyer.actions",
+      "foyer.session-info",
+      "foyer.windows",
+      "foyer.agent",
+      "foyer.chat",
+      "foyer.layout-fab.v1",
+    ];
+    const rank = (id) => {
+      const i = ORDER.indexOf(id);
+      return i < 0 ? ORDER.length : i;
+    };
+    const sorted = [...fabs].sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
     return html`
-      <div class="rail-sep"></div>
-      ${fabs.map(
+      ${leadingSep ? html`<div class="rail-sep"></div>` : null}
+      ${sorted.map(
         ({ id, meta }) => html`
           <button
             class="dock-icon fab-dock"
@@ -444,13 +443,9 @@ export class RightDock extends LitElement {
   }
 
   _renderPanel() {
-    if (this._panel === "actions") return this._renderActions();
-    if (this._panel === "session") return this._renderSession();
-    if (this._panel === "windows") return html`<foyer-window-list></foyer-window-list>`;
-    // Docked FABs render their content inline in the dock panel so
-    // clicking a docked "Layouts" or "Agent" icon behaves the same as
-    // Actions / Session / Windows — slide-out rather than floating
-    // popover anchored to the icon.
+    // Every panel in the rail is now driven through the FAB registry.
+    // Actions / Session / Windows used to be hardcoded here; they're
+    // regular dockable FABs too (`foyer-actions-fab` etc.).
     if (this._panel?.startsWith("fab:")) {
       const id = this._panel.slice(4);
       const fab = window.__foyer?.layout?.fabInstance?.(id);
@@ -470,44 +465,6 @@ export class RightDock extends LitElement {
       `;
     }
     return null;
-  }
-
-  _renderActions() {
-    const byCat = {};
-    for (const a of this._actions) (byCat[a.category] ||= []).push(a);
-    const cats = Object.keys(byCat).sort();
-    return html`
-      <header>Actions</header>
-      <div class="content">
-        ${cats.map(c => html`
-          <div class="action-group-title">${c}</div>
-          ${byCat[c].map(a => html`
-            <div class="action-item" @click=${() => window.__foyer.ws.send({ type: "invoke_action", id: a.id })}>
-              <span style="flex:1">${a.label}</span>
-              ${a.shortcut ? html`<span style="font-family:var(--font-mono);font-size:10px;color:var(--color-text-muted)">${a.shortcut}</span>` : null}
-            </div>
-          `)}
-        `)}
-      </div>
-    `;
-  }
-
-  _renderSession() {
-    const s = window.__foyer?.store?.state.session;
-    if (!s) return html`<header>Session</header><div class="content" style="color:var(--color-text-muted)">No session loaded.</div>`;
-    return html`
-      <header>Session</header>
-      <div class="content" style="font-family:var(--font-mono);font-size:11px">
-        <div>schema: ${s.schema_version?.[0]}.${s.schema_version?.[1]}</div>
-        <div>tracks: ${s.tracks?.length ?? 0}</div>
-        ${s.tracks?.map(t => html`
-          <div style="margin-top:8px">
-            <div style="color:var(--color-accent-3);font-weight:600">${t.name}</div>
-            <div style="color:var(--color-text-muted)">${t.kind} · ${t.id}</div>
-          </div>
-        `)}
-      </div>
-    `;
   }
 }
 customElements.define("foyer-right-dock", RightDock);

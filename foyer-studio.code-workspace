@@ -1,42 +1,7 @@
 {
-  "folders": [
-    {
-      "name": "Foyer Studio",
-      "path": "."
-    },
-    {
-      "name": "Ardour",
-      "path": "../ardour"
-    }
-  ],
-  "settings": {
-    "terminal.integrated.shell.linux": "/bin/bash",
-    "terminal.integrated.fontFamily": "MesloLGS NF, FiraCode Nerd Font Mono, JetBrainsMono Nerd Font, monospace",
-    "terminal.integrated.customGlyphs": true,
-    "shellcheck.ignorePatterns": {
-      "**/*.env": true,
-      "**/*.env*": true,
-      "Justfile": true
-    },
-    "files.associations": {
-      "Justfile": "just",
-      "justfile": "just"
-    },
-    "rust-analyzer.linkedProjects": [
-      "./Cargo.toml"
+    "folders": [
+        {
+            "path": "."
+        }
     ]
-  },
-  "extensions": {
-    "recommendations": [
-      "rust-lang.rust-analyzer",
-      "vadimcn.vscode-lldb",
-      "tamasfe.even-better-toml",
-      "serayuzgur.crates",
-      "ms-azuretools.vscode-docker",
-      "editorconfig.editorconfig",
-      "timonwong.shellcheck",
-      "skellock.just",
-      "ms-vscode.cpptools"
-    ]
-  }
 }

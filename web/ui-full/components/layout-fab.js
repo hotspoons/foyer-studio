@@ -209,6 +209,7 @@ export class LayoutFab extends QuadrantFab {
       icon: "square-3-stack-3d",
       accent: "accent-2",
       expandsRail: false,
+      defaultDocked: true,
     };
   }
 

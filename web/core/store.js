@@ -223,16 +223,26 @@ export class Store extends EventTarget {
     return this.state.sessions.find((s) => s.id === id) || null;
   }
   /** Switch which session the UI focuses on. Doesn't touch the
-   *  sidecar's live backend — that's a SelectSession on the WS. */
+   *  sidecar's live backend — that's a SelectSession on the WS.
+   *
+   *  Always re-sends `select_session` + `request_snapshot`, even if
+   *  the id already matches `currentSessionId`. The reducer for
+   *  `session_list` auto-focuses the most recent open session by
+   *  directly assigning `currentSessionId` (no WS command fires), so
+   *  a subsequent user click on that same session would otherwise be
+   *  swallowed — feels broken, and also leaves the server's
+   *  `focus_session_id` lagging by one connect cycle. */
   setCurrentSession(id) {
-    if (this.state.currentSessionId === id) return;
-    this.state.currentSessionId = id;
-    // Dropped the snapshot so views re-render their loading state
-    // while the next SessionSnapshot arrives from the selected
-    // session's pump.
-    this.state.session = null;
-    this.dispatchEvent(new CustomEvent("sessions"));
-    this._emit();
+    const changed = this.state.currentSessionId !== id;
+    if (changed) {
+      this.state.currentSessionId = id;
+      // Drop the snapshot so views re-render their loading state
+      // while the next SessionSnapshot arrives from the selected
+      // session's pump.
+      this.state.session = null;
+      this.dispatchEvent(new CustomEvent("sessions"));
+      this._emit();
+    }
     if (this._ws) {
       try { this._ws.send({ type: "select_session", session_id: id }); } catch {}
       try { this._ws.requestSnapshot?.(); } catch {}

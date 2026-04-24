@@ -17,6 +17,7 @@
 // The `rectById` provider is injected so we don't hard-couple to the DOM.
 
 import { DIR } from "./tile-tree.js";
+import { isTypingTarget } from "../typing-guard.js";
 
 const STORAGE_MOD = "foyer.keymap.mod";
 
@@ -57,10 +58,11 @@ export class Keybinds {
   }
 
   _onKey(e) {
-    // Ignore when typing into an input. These checks gate BOTH the global
-    // transport keys below and the tiling chord set.
-    const t = e.target;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    // Ignore when typing into an input — including text entries inside
+    // shadow roots (chat composer, agent input, etc). `composedPath()`
+    // walks through Lit component boundaries that a plain `target.tagName`
+    // check can't see.
+    if (isTypingTarget(e)) return;
 
     // Global plugin-layer toggle: Ctrl+Shift+P hides/shows every plugin
     // window at once. Lives outside the Ctrl+Alt chord family so it doesn't

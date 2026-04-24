@@ -1,23 +1,31 @@
 #!/bin/bash
 set -x
 
-# Mark both workspace directories safe for git (permissions mismatch across bind mounts)
+# Mark workspace safe for git (permissions mismatch across bind mounts)
 git config --global --add safe.directory /workspaces/foyer-studio
+# Ardour lives under ext/ now — same bind mount as the main repo.
+git config --global --add safe.directory /workspaces/foyer-studio/ext/ardour
+# Legacy sibling layout — still honored so existing workstations
+# keep working until they migrate to `ext/`.
 git config --global --add safe.directory /workspaces/ardour
 
 #######################
-# Ardour sibling check
+# Ardour source tree
 #######################
-if [ ! -d "/workspaces/ardour" ]; then
-    echo "⚠️  ardour workspace not found at /workspaces/ardour"
-    echo ""
-    echo "This dev container expects ardour to be available as a sibling project."
-    echo "On the host, run from the foyer-studio repo:"
-    echo "  ./scripts/bootstrap-workspace.sh"
-    echo ""
-    echo "Continuing without ardour mount..."
+ARDOUR_REPO_EXT="/workspaces/foyer-studio/ext/ardour"
+ARDOUR_LEGACY_SIBLING="/workspaces/ardour"
+if [ -d "$ARDOUR_REPO_EXT/.git" ]; then
+    echo "✅ ardour detected at $ARDOUR_REPO_EXT (in-repo ext/)"
+elif [ -d "$ARDOUR_LEGACY_SIBLING/.git" ]; then
+    echo "✅ ardour detected at $ARDOUR_LEGACY_SIBLING (legacy sibling layout)"
+    echo "   (to migrate: mv $ARDOUR_LEGACY_SIBLING $ARDOUR_REPO_EXT — optional)"
 else
-    echo "✅ ardour sibling detected at /workspaces/ardour"
+    echo "⚠️  ardour source not found — shim builds will fail until you run:"
+    echo ""
+    echo "     just ardour clone"
+    echo "     just ardour build    # slow, one-time"
+    echo ""
+    echo "Continuing — stub-backend development (just run) works without ardour."
 fi
 
 #######################

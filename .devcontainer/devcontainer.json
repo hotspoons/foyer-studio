@@ -51,6 +51,29 @@
     // 2 GB leaves plenty of slack for multi-client sessions +
     // whatever else uses /dev/shm inside the dev workflow.
     "--shm-size=2g"
+    // ─── Linux host audio passthrough (AV Linux, etc.) ──────────────
+    //
+    // Uncomment the two lines below to hand the container direct
+    // access to ALSA device nodes. With this, the container-owned
+    // `jackd` (`just jack`) can drive real hardware instead of the
+    // `dummy` backend, turning the devcontainer into a usable DAW on
+    // native Linux hosts. The host's jackd/pipewire are NOT touched.
+    //
+    // Intentionally NOT enabled by default:
+    //   · On Mac/Colima `/dev/snd` doesn't exist in the Linux VM, so
+    //     `--device=/dev/snd` fails at container start. Devcontainer
+    //     JSON doesn't have a reliable conditional syntax for
+    //     runArgs, so we opt-in rather than gate.
+    //   · `--group-add=audio` is safe everywhere but only meaningful
+    //     when /dev/snd is mapped in.
+    //
+    // The `vscode` user is already in the `audio` group (set in the
+    // Dockerfile), so `/dev/snd/*` nodes are read/writable once
+    // passed through. `--privileged` above also provides the
+    // scheduling/memory caps RT audio needs.
+    //
+    // , "--device=/dev/snd"
+    // , "--group-add=audio"
   ],
   "containerEnv": {
     "CARGO_TERM_COLOR": "always"
@@ -93,7 +116,10 @@
   "initializeCommand": "sh -c 'mkdir -p \"$HOME/.claude\" \"$HOME/.local/share/opencode\" \"$HOME/.local/state/opencode\" \"$HOME/.config/opencode\" && touch \"$HOME/.claude.json\"'",
   "onCreateCommand": "bash .devcontainer/post-create.sh",
   "mounts": [
-    "source=${localWorkspaceFolder}/../ardour,target=/workspaces/ardour,type=bind,consistency=cached",
+    // Ardour lives under `ext/ardour/` inside this repo now (gitignored)
+    // — `just ardour clone` populates it. Legacy sibling checkouts at
+    // `../ardour` on the host are still honored by `scripts/dev/ardour.sh`
+    // if a user sets `FOYER_ARDOUR_DIR`; we no longer bind-mount them.
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude.json,target=/home/vscode/.claude.json,type=bind",
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/home/vscode/.claude,type=bind",
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.local/share/opencode,target=/home/vscode/.local/share/opencode,type=bind",

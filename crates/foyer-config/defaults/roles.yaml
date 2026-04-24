@@ -84,12 +84,17 @@ roles:
       - tunnel_start
       - tunnel_stop
       - launch_project
+      # chat_clear + chat_snapshot are admin-only (server enforces);
+      # deny here to keep the RBAC layer honest.
+      - chat_clear
+      - chat_snapshot
 
   - id: performer
     label: Performer
     description: >
       Send live audio or MIDI input into the session. Can see the
-      transport but can't drive it.
+      transport but can't drive it. Participates fully in the meta
+      chat (text + push-to-talk).
     allow:
       - subscribe
       - request_snapshot
@@ -115,10 +120,22 @@ roles:
       - list_actions
       - list_plugin_presets
       - tunnel_request_state
+      # chat + PTT — performers participate fully. Server gates
+      # chat_clear + chat_snapshot separately to admin-only.
+      - chat_send
+      - chat_history_request
+      - ptt_start
+      - ptt_stop
+      # track → browser-source routing: performers need to see the
+      # assignments (to decide whether to show the mic toolbar
+      # button), but only host/admin sets them.
+      - list_track_browser_sources
 
   - id: viewer
     label: Viewer / Listener
-    description: Watch and listen only. Read-only access.
+    description: >
+      Watch and listen only. Can join the meta chat (text-only —
+      no push-to-talk audio broadcast).
     allow:
       - subscribe
       - request_snapshot
@@ -140,3 +157,8 @@ roles:
       - list_actions
       - list_plugin_presets
       - tunnel_request_state
+      # Chat text + history only. PTT audio is withheld so a viewer
+      # can't interrupt the mix with unexpected voice.
+      - chat_send
+      - chat_history_request
+      - list_track_browser_sources

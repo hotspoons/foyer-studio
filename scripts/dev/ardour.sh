@@ -1,19 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ARDOUR_DIR="${FOYER_ARDOUR_DIR:-/workspaces/ardour}"
+# Resolve Ardour source tree. Priority:
+#   1. $FOYER_ARDOUR_DIR (explicit override)
+#   2. <repo>/ext/ardour (in-repo convention — gitignored)
+#   3. /workspaces/ardour (legacy sibling-workspace layout)
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+if [ -n "${FOYER_ARDOUR_DIR:-}" ]; then
+    ARDOUR_DIR="$FOYER_ARDOUR_DIR"
+elif [ -d "$REPO_ROOT/ext/ardour" ]; then
+    ARDOUR_DIR="$REPO_ROOT/ext/ardour"
+else
+    ARDOUR_DIR="/workspaces/ardour"
+fi
+
+ARDOUR_UPSTREAM="${FOYER_ARDOUR_UPSTREAM:-https://github.com/Ardour/ardour.git}"
 
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 ardour subcommands:
   help        Print this help
+  clone       Clone Ardour into $REPO_ROOT/ext/ardour (if not present)
   configure   Run waf configure --optimize
   build       Run waf build
   ensure      Soft-check build, auto-build only when needed
   check       Hard-check existing build
   clean       Run waf clean
   test        Run waf test
+
+Current ARDOUR_DIR: $ARDOUR_DIR
+Override with: FOYER_ARDOUR_DIR=/path/to/ardour
 EOF
+}
+
+do_clone() {
+    if [ -d "$ARDOUR_DIR/.git" ]; then
+        echo "ardour: already present at $ARDOUR_DIR"
+        return 0
+    fi
+    mkdir -p "$REPO_ROOT/ext"
+    local target="$REPO_ROOT/ext/ardour"
+    if [ -d "$target" ] && [ ! -d "$target/.git" ]; then
+        echo "ardour: $target exists but isn't a git checkout — refusing to clone into it"
+        exit 1
+    fi
+    echo "ardour: cloning $ARDOUR_UPSTREAM → $target (this is ~1 GB)"
+    git clone "$ARDOUR_UPSTREAM" "$target"
+    echo "ardour: done. Next: \`just ardour configure && just ardour build\`"
+    ARDOUR_DIR="$target"
 }
 
 latest_bin() {
@@ -71,6 +105,9 @@ shift || true
 case "$cmd" in
     help)
         usage
+        ;;
+    clone)
+        do_clone
         ;;
     configure)
         require_repo

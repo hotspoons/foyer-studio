@@ -37,6 +37,9 @@ import "./components/main-menu.js";
 import "./components/right-dock.js";
 import "./components/agent-panel.js";
 import "./components/chat-panel.js";
+import "./components/actions-fab.js";
+import "./components/session-info-fab.js";
+import "./components/windows-fab.js";
 import "./components/command-palette.js";
 import "./components/layout-fab.js";
 import "./components/automation-panel.js";
@@ -147,9 +150,6 @@ export class FoyerApp extends LitElement {
 
   constructor() {
     super();
-    this._status = "idle";
-    this._session = null;
-    this._sessions = [];
     this._projectLaunching = false;
     this._launchPath = "";
 
@@ -169,6 +169,16 @@ export class FoyerApp extends LitElement {
       this.store.attach(this.ws);
       installTransportReturn({ store: this.store, ws: this.ws });
     }
+    // Prime from the store's current state — bootstrap creates the
+    // store + ws before mounting this element, so greeting +
+    // session_list can land *before* our listener attaches and fire
+    // `sessions` into the void. Over a tunnel where the greeting is
+    // a few hundred ms slower than the render-ready signal, this is
+    // the common path. Without priming, `hasSessions` is `false`
+    // even with sessions open and the welcome screen gets stuck.
+    this._status = this.store.state.status || "idle";
+    this._session = this.store.state.session || null;
+    this._sessions = this.store.state.sessions || [];
     this.store.addEventListener("change", () => {
       this._status = this.store.state.status;
       this._session = this.store.state.session;
@@ -355,6 +365,9 @@ export class FoyerApp extends LitElement {
       <foyer-floating-tiles .store=${this.layout}></foyer-floating-tiles>
       <foyer-agent-panel></foyer-agent-panel>
       <foyer-chat-panel></foyer-chat-panel>
+      <foyer-actions-fab></foyer-actions-fab>
+      <foyer-session-fab></foyer-session-fab>
+      <foyer-windows-fab></foyer-windows-fab>
       <foyer-layout-fab .store=${this.layout}></foyer-layout-fab>
       <foyer-command-palette></foyer-command-palette>
       <foyer-automation-panel></foyer-automation-panel>

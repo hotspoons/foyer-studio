@@ -58,12 +58,25 @@ export function bootFoyerCore(opts = {}) {
   chat.attach();
   installTransportReturn({ store, ws });
 
+  // Fallback-timer handle — cleared the moment the greeting arrives,
+  // because the timer's job is "server is dead, paint something," NOT
+  // "variant is slow to mount." Over a Cloudflare tunnel the handshake
+  // eats a few hundred ms before the greeting even reaches us, then
+  // mountVariant kicks off an async import tree that can run past the
+  // timer's deadline. Without this cancel both mounts race and the
+  // fallback's `swap()` overwrites the real variant.
+  let fallbackTimer = null;
+
   // Drain ClientGreeting into the feature + variant registries.
   // The store already broadcasts `rbac` after handling the greeting;
   // we use `rbac` as our cue for "greeting has landed" without
   // adding a second listener path.
   const onFirstRbac = () => {
     store.removeEventListener("rbac", onFirstRbac);
+    if (fallbackTimer) {
+      clearTimeout(fallbackTimer);
+      fallbackTimer = null;
+    }
     const greeting = store.state.greeting || {};
     setFeatures(greeting.features || {});
     if (!opts.skipUi) {
@@ -90,14 +103,19 @@ export function bootFoyerCore(opts = {}) {
 
   // If the greeting never lands (server down, cold boot) paint the
   // fallback UI after a short grace period so the page is usable.
+  // The timer is cancelled in `onFirstRbac` above the moment a real
+  // greeting arrives; 2500 ms is generous enough for LAN + slow
+  // tunnel handshakes but short enough to feel snappy when the
+  // server is actually gone.
   if (!opts.skipUi) {
-    setTimeout(() => {
+    fallbackTimer = setTimeout(() => {
+      fallbackTimer = null;
       if (!_current) {
         mountVariant({ forceFallback: true }).catch((err) =>
           console.error("[foyer-core] fallback mount failed", err),
         );
       }
-    }, 1200);
+    }, 2500);
   }
 
   return globalThis.__foyer;

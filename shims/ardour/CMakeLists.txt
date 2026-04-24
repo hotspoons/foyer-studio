@@ -64,15 +64,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Locate the Ardour source tree. We need BOTH headers (under libs/*/)
-# and built libraries (under build/libs/*/). Allow override via:
-#   - `-DFOYER_ARDOUR_SOURCE=/abs/path/to/ardour`
-#   - `$FOYER_ARDOUR_BUILD_ROOT` env var
-#   - default `/workspaces/ardour` (matches the dev container).
+# and built libraries (under build/libs/*/). Resolution order:
+#   1. `-DFOYER_ARDOUR_SOURCE=/abs/path/to/ardour` — explicit CMake override.
+#   2. `$FOYER_ARDOUR_BUILD_ROOT` — env var, same semantics.
+#   3. `<repo>/ext/ardour`                — in-repo convention (gitignored).
+#   4. `/workspaces/ardour`               — legacy sibling-workspace layout.
+#
+# The in-repo `ext/ardour` is the documented location; the legacy
+# path stays as a fallback so existing workstations (Rich's colima
+# checkout, CI images that bind-mount ardour) keep working until
+# they migrate.
 if(NOT DEFINED FOYER_ARDOUR_SOURCE)
   if(DEFINED ENV{FOYER_ARDOUR_BUILD_ROOT})
     set(FOYER_ARDOUR_SOURCE "$ENV{FOYER_ARDOUR_BUILD_ROOT}")
   else()
-    set(FOYER_ARDOUR_SOURCE "/workspaces/ardour")
+    set(_foyer_repo_ardour "${CMAKE_CURRENT_SOURCE_DIR}/../../ext/ardour")
+    if(IS_DIRECTORY "${_foyer_repo_ardour}")
+      set(FOYER_ARDOUR_SOURCE "${_foyer_repo_ardour}")
+    else()
+      set(FOYER_ARDOUR_SOURCE "/workspaces/ardour")
+    endif()
   endif()
 endif()
 if(NOT IS_DIRECTORY "${FOYER_ARDOUR_SOURCE}")
