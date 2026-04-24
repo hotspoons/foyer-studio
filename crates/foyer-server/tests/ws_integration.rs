@@ -26,6 +26,7 @@ async fn spin_server() -> (u16, tokio::task::JoinHandle<()>) {
         tls: None,
         listen: addr,
         web_root: None,
+        web_overlays: Vec::new(),
         jail_root: None,
     };
     let h = tokio::spawn(async move {

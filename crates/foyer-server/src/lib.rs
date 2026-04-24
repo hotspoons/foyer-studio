@@ -629,15 +629,13 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
                 router = router.fallback_service(ServeDir::new(a).fallback(base));
             }
             [a, b] => {
-                router = router.fallback_service(
-                    ServeDir::new(a).fallback(ServeDir::new(b).fallback(base)),
-                );
+                router = router
+                    .fallback_service(ServeDir::new(a).fallback(ServeDir::new(b).fallback(base)));
             }
             [a, b, c] => {
                 router = router.fallback_service(
-                    ServeDir::new(a).fallback(
-                        ServeDir::new(b).fallback(ServeDir::new(c).fallback(base)),
-                    ),
+                    ServeDir::new(a)
+                        .fallback(ServeDir::new(b).fallback(ServeDir::new(c).fallback(base))),
                 );
             }
             [a, b, c, d, ..] => {
@@ -650,9 +648,8 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
                 }
                 router = router.fallback_service(
                     ServeDir::new(a).fallback(
-                        ServeDir::new(b).fallback(
-                            ServeDir::new(c).fallback(ServeDir::new(d).fallback(base)),
-                        ),
+                        ServeDir::new(b)
+                            .fallback(ServeDir::new(c).fallback(ServeDir::new(d).fallback(base))),
                     ),
                 );
             }
@@ -823,16 +820,15 @@ async fn variants_json(State(state): SharedState) -> impl IntoResponse {
     // discovery list.
     let overlays = state.web_overlays.read().await.clone();
     let base = state.web_root.read().await.clone();
-    let roots: Vec<PathBuf> = overlays
-        .into_iter()
-        .chain(base.into_iter())
-        .collect();
+    let roots: Vec<PathBuf> = overlays.into_iter().chain(base).collect();
     if roots.is_empty() {
         return Json(Reply { variants: vec![] });
     }
     let mut seen = std::collections::BTreeSet::new();
     for root in &roots {
-        let Ok(iter) = std::fs::read_dir(root) else { continue };
+        let Ok(iter) = std::fs::read_dir(root) else {
+            continue;
+        };
         for entry in iter.flatten() {
             let Ok(ty) = entry.file_type() else { continue };
             if !ty.is_dir() {

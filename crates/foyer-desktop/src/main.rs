@@ -119,6 +119,7 @@ fn run_host(
         tls: None,
         listen: actual,
         web_root: std::env::current_dir().ok().map(|d| d.join("web")),
+        web_overlays: Vec::new(),
         jail_root: None,
     };
 

@@ -901,11 +901,20 @@ fn redirect_short_wrapper(exec: &std::path::Path) -> Option<PathBuf> {
 /// script; we don't need to handle all edge cases, just paths that might
 /// contain spaces. Wraps the value in `'…'` and escapes any embedded
 /// single quotes by closing/escaping/reopening: `'` → `'\''`.
-/// Source of the web assets baked into this binary. Extracted to
-/// `$XDG_DATA_HOME/foyer/web/` on first run so users can edit in
-/// place; see `web/HACKING.md`.
-static BUNDLED_WEB: include_dir::Dir<'static> =
-    include_dir::include_dir!("$CARGO_MANIFEST_DIR/../../web");
+/// Source of the web assets baked into this binary. The path is
+/// resolved by [`../build.rs`](../build.rs) from the
+/// `FOYER_BUNDLED_WEB` env var (falling back to the repo's
+/// `web/`) and re-exported as a rustc env so `include_dir!` sees
+/// the literal path at macro expansion.
+///
+/// To ship a binary with a different UI baked in, rebuild with
+/// `FOYER_BUNDLED_WEB=/path/to/your/staged/web cargo build`. No
+/// source edit required — see `docs/DEVELOPMENT.md`.
+///
+/// At runtime the bundled tree is extracted to
+/// `$XDG_DATA_HOME/foyer/web/` on first run so end users can
+/// further hack the UI in place; see `web/HACKING.md`.
+static BUNDLED_WEB: include_dir::Dir<'static> = include_dir::include_dir!("$FOYER_BUNDLED_WEB");
 
 /// Resolve the `web_root` the server should serve from.
 ///

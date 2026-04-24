@@ -92,11 +92,22 @@ typo aborts immediately rather than surfacing as a mystery 404.
 ### Shipping your UI as a redistributable binary
 
 The runtime `--web-overlay` flag covers the live dev loop. To bake
-your UI into a redistributable `foyer` binary (so end users don't
-need to configure an overlay), edit the `BUNDLED_WEB` constant in
-[../crates/foyer-cli/src/main.rs](../crates/foyer-cli/src/main.rs) —
-point its `include_dir!` at your staged tree. Nothing else in the
-build needs to change.
+your UI into a redistributable `foyer` binary (so end users get
+your UI without configuring an overlay), set `FOYER_BUNDLED_WEB` at
+build time:
+
+```bash
+FOYER_BUNDLED_WEB=/path/to/my-staged-web cargo build --release --bin foyer
+```
+
+[../crates/foyer-cli/build.rs](../crates/foyer-cli/build.rs) reads
+that env var and threads it through to `include_dir!`, so the
+baked-in assets come from your dir instead of the repo's `web/`.
+Absolute or relative paths both work; the resolved directory is
+registered as `rerun-if-changed` so edits inside it trigger a
+rebuild on the next `cargo build`.
+
+Rebuilds with the env unset fall back to the repo's `web/`.
 
 ## Web build
 
