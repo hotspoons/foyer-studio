@@ -248,6 +248,18 @@ pub async fn start_tunnel(
         m.active_provider = Some(kind);
         // Persist the tunnel URL so it's available after restarts.
         m.active_provider_url = Some(hostname.clone());
+        // Rewrite every existing connection's share URL onto the new
+        // hostname. Quick tunnels rotate `*.trycloudflare.com` on
+        // every restart; a stale invite URL from the last run would
+        // 404. We reuse the token already baked into the old URL
+        // (`?token=<base64url(email:password)>`) so credentials
+        // remain valid — the hash on the server side didn't change.
+        let renamed = rewrite_connection_urls(&mut m.connections, &hostname);
+        if renamed > 0 {
+            tracing::info!(
+                "tunnel: rewrote {renamed} share URL(s) onto {hostname}"
+            );
+        }
         let _ = save_manifest(&*m).await;
     }
     broadcast_tunnel_state(&state).await;
@@ -260,6 +272,53 @@ pub async fn start_tunnel(
         },
     ).await;
     Ok(())
+}
+
+/// Rewrite each connection's `tunnel_url` so the host portion matches
+/// the current tunnel hostname. Extracts the existing `?token=...`
+/// from the old URL (so we don't need the clear-text password — the
+/// stored hash is unchanged and the token is URL-addressable data)
+/// and re-stitches it onto the new hostname. Returns how many entries
+/// were rewritten, for logging.
+///
+/// Connections with a malformed or tokenless URL are left alone —
+/// the invite is effectively dead either way and we'd rather surface
+/// that by leaving the old URL visible than quietly hand out something
+/// that won't actually authenticate.
+fn rewrite_connection_urls(
+    connections: &mut [foyer_schema::TunnelConnection],
+    hostname: &str,
+) -> usize {
+    let mut n = 0;
+    let scheme_prefix = if hostname.starts_with("http://") || hostname.starts_with("https://") {
+        String::new()
+    } else {
+        "https://".to_string()
+    };
+    for conn in connections.iter_mut() {
+        let Some(ref old_url) = conn.tunnel_url else { continue };
+        let Some(token) = extract_token_param(old_url) else { continue };
+        let new_url = format!("{scheme_prefix}{hostname}/?token={token}");
+        if Some(&new_url) != conn.tunnel_url.as_ref() {
+            conn.tunnel_url = Some(new_url);
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Pull `?token=<value>` out of a share URL. Lightweight parse — we
+/// don't want to pull `url::Url` into the hot loop and we control the
+/// exact shape we wrote in `create_token`. Returns `None` if the URL
+/// doesn't have a `token=` query param.
+fn extract_token_param(url: &str) -> Option<&str> {
+    let (_, query) = url.split_once('?')?;
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("token=") {
+            return Some(value);
+        }
+    }
+    None
 }
 
 pub async fn stop_tunnel(state: &AppState) {

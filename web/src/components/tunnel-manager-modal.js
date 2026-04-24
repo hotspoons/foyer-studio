@@ -678,7 +678,12 @@ export class TunnelManagerModal extends LitElement {
 
   _renderConnRow(c) {
     const fresh = this._justCreated[c.id];
-    const url = (fresh && fresh.url) || c.tunnel_url || "";
+    // Always prefer the server's `tunnel_url` — it's rewritten onto
+    // the current tunnel hostname after a tunnel restart. The
+    // `_justCreated` cache only exists so we can show the clear-text
+    // password once (which the server never re-broadcasts), so we
+    // never trust its `url` snapshot over the authoritative one.
+    const url = c.tunnel_url || "";
     const copyKey = `url-${c.id}`;
     return html`
       <div class="conn-row">
@@ -713,6 +718,11 @@ export class TunnelManagerModal extends LitElement {
   _renderFreshCredentials(c, fresh) {
     const urlKey = `fresh-url-${c.id}`;
     const pwKey = `fresh-pw-${c.id}`;
+    // Read the link from the server's `tunnel_url` so a tunnel
+    // restart (which rewrites every connection's URL onto the new
+    // hostname) reflects here too. Falls back to the one-shot
+    // `fresh.url` only if the connection hasn't landed in state yet.
+    const link = c.tunnel_url || fresh.url;
     return html`
       <div class="credentials-card">
         <div class="hint" style="margin:0 0 6px 0;color:var(--color-accent-3);">
@@ -733,9 +743,9 @@ export class TunnelManagerModal extends LitElement {
         </div>
         <div class="pair">
           <span class="k">Link</span>
-          <span class="v url-mono selectable">${fresh.url}</span>
+          <span class="v url-mono selectable">${link}</span>
           <button title="Copy URL"
-                  @click=${() => this._copy(urlKey, fresh.url)}>
+                  @click=${() => this._copy(urlKey, link)}>
             ${this._showCopied === urlKey ? "Copied" : "Copy"}
           </button>
         </div>

@@ -161,6 +161,8 @@ Mid term:
 
 Long term:
 
+- [ ] **Scope RBAC denials to offender + admins.** Today `forbidden_for_role` / `auth_required` errors broadcast to every connected client, so a viewer can see another viewer's denial banner flash by. Clean fix: add an optional `target_peer_id` field to `Event::Error` (or a new admin-only `Event::RbacDenied`) and extend `should_forward_event` in `crates/foyer-server/src/ws.rs` to route denials only to (a) the offending connection and (b) LAN/admin roles. Offender gets a concise "you can't do that"; host + admins get the full `{recipient, role_id, command}` payload for audit; other guests see nothing. Message already names the recipient in current builds (DECISION 38), so the host-visibility half is in place — this is the client-scope half.
+
 
 ### Resampler:
 - [ ] Add a foyer-audio crate (or module in foyer-backend) wrapping rubato::SincFixedIn with a small Resampler { in_rate, out_rate, channels } helper that pushes/pops f32 chunks.
