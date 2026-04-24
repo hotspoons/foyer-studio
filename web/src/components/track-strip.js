@@ -47,6 +47,7 @@ export class TrackStrip extends LitElement {
     overrideWidth: { type: Number },
     _renaming: { state: true, type: Boolean },
     _panOpen: { state: true, type: Boolean },
+    _panMode: { state: true, type: String },
   };
 
   static styles = css`
@@ -192,6 +193,8 @@ export class TrackStrip extends LitElement {
     this._soloCtl = null;
     this._recCtl = null;
     this._meterCtl = null;
+    this._panOpen = false;
+    this._panMode = "stereo";
   }
 
   connectedCallback() {
@@ -353,31 +356,15 @@ export class TrackStrip extends LitElement {
           </div>
         ` : null}
       </div>
-      ${d.plugins && (t.plugins || []).length ? html`
-        <div class="plugin-scroll">
-          <foyer-plugin-strip
-            .plugins=${t.plugins || []}
-            .maxLines=${d.pluginsLines}
-            .trackId=${t.id}
-            .trackName=${t.name}
-          ></foyer-plugin-strip>
-        </div>
-      ` : null}
-      ${t.pan ? html`
-        <div style="flex:0 0 auto;display:flex;flex-direction:column;gap:4px;">
-          <button style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:9px;cursor:pointer;padding:2px 0;"
-                  @click=${() => this._panOpen = !this._panOpen}>Pan ${this._panOpen ? "▲" : "▼"}</button>
-          ${this._panOpen ? html`
-            <div style="display:flex;align-items:center;gap:4px;">
-              <span style="font-size:8px;color:var(--color-text-muted)">L</span>
-              <input type="range" min="-1" max="1" step="0.01" style="flex:1;min-width:0"
-                     .value=${String(panVal)}
-                     @input=${(e) => this._setPan(e.currentTarget.value)}>
-              <span style="font-size:8px;color:var(--color-text-muted)">R</span>
-            </div>
-          ` : null}
-        </div>
-      ` : null}
+      <div class="plugin-scroll">
+        <foyer-plugin-strip
+          .plugins=${t.plugins || []}
+          .maxLines=${d.pluginsLines}
+          .trackId=${t.id}
+          .trackName=${t.name}
+        ></foyer-plugin-strip>
+      </div>
+      ${t.pan ? this._renderPanControl(t, panVal) : null}
       <div class="body">
         <foyer-fader
           .value=${gainNorm}
@@ -470,6 +457,67 @@ export class TrackStrip extends LitElement {
   _setBool(id, v) {
     if (!id) return;
     window.__foyer.ws.controlSet(id, v ? 1 : 0);
+  }
+
+  _renderPanControl(t, panVal) {
+    return html`
+      <div style="flex:0 0 auto;display:flex;flex-direction:column;gap:4px;">
+        <button style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:9px;cursor:pointer;padding:2px 0;"
+                @click=${() => this._panOpen = !this._panOpen}>
+          Pan ${this._panOpen ? "▲" : "▼"}
+        </button>
+        ${this._panOpen ? html`
+          <div style="display:flex;gap:4px;justify-content:center;">
+            <button style="background:${this._panMode === "stereo" ? "var(--color-accent)" : "transparent"};border:1px solid var(--color-border);border-radius:var(--radius-sm);color:${this._panMode === "stereo" ? "#fff" : "var(--color-text-muted)"};font-size:8px;cursor:pointer;padding:1px 4px;"
+                    @click=${() => this._panMode = "stereo"}>Stereo</button>
+            <button style="background:${this._panMode === "surround" ? "var(--color-accent)" : "transparent"};border:1px solid var(--color-border);border-radius:var(--radius-sm);color:${this._panMode === "surround" ? "#fff" : "var(--color-text-muted)"};font-size:8px;cursor:pointer;padding:1px 4px;"
+                    @click=${() => this._panMode = "surround"}>Surround</button>
+          </div>
+          ${this._panMode === "stereo" ? html`
+            <div style="display:flex;align-items:center;gap:4px;">
+              <span style="font-size:8px;color:var(--color-text-muted)">L</span>
+              <input type="range" min="-1" max="1" step="0.01" style="flex:1;min-width:0"
+                     .value=${String(panVal)}
+                     @input=${(e) => this._setPan(e.currentTarget.value)}>
+              <span style="font-size:8px;color:var(--color-text-muted)">R</span>
+            </div>
+            <div style="text-align:center;font-size:9px;color:var(--color-text)">${panVal.toFixed(2)}</div>
+          ` : html`
+            <div style="position:relative;width:100%;height:80px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-surface-elevated);cursor:crosshair;"
+                 @pointerdown=${this._onSurroundPointerDown}
+                 @pointermove=${(e) => { if (e.buttons & 1) this._onSurroundPointerMove(e); }}>
+              <div style="position:absolute;left:50%;top:50%;width:6px;height:6px;border-radius:50%;background:var(--color-accent);border:1px solid #fff;transform:translate(-50%,-50%);pointer-events:none;"
+                   id="pan-dot"></div>
+            </div>
+            <div style="text-align:center;font-size:8px;color:var(--color-text-muted)">X writes pan · Y preview</div>
+          `}
+        ` : null}
+      </div>
+    `;
+  }
+
+  _onSurroundPointerDown(ev) {
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const nx = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = ((ev.clientY - rect.top) / rect.height) * 2 - 1;
+    this._setPan(Math.max(-1, Math.min(1, nx)));
+    this._updateDot(ev.currentTarget, nx, ny);
+  }
+
+  _onSurroundPointerMove(ev) {
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const nx = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = ((ev.clientY - rect.top) / rect.height) * 2 - 1;
+    this._setPan(Math.max(-1, Math.min(1, nx)));
+    this._updateDot(ev.currentTarget, nx, ny);
+  }
+
+  _updateDot(pad, nx, ny) {
+    const dot = pad.querySelector("#pan-dot");
+    if (dot) {
+      dot.style.left = `${((nx + 1) * 0.5 * 100)}%`;
+      dot.style.top = `${((ny + 1) * 0.5 * 100)}%`;
+    }
   }
 
   // ── rename / color / right-click menu ──────────────────────────────

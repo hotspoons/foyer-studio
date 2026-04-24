@@ -156,7 +156,17 @@ export class StartupErrors extends LitElement {
       return;
     }
     if (body.type !== "error") return;
-    if (this._dismissed && Date.now() > this._captureUntil) return;
+    // RBAC denials should always surface, not just during the startup
+    // window — they describe user actions that failed *right now*.
+    // The modal's dismiss state resets automatically so a stray click
+    // after the initial capture window still pops a clear banner.
+    const isRbac = body.code === "forbidden_for_role" || body.code === "auth_required";
+    if (isRbac) {
+      this._dismissed = false;
+      this._captureUntil = Date.now() + CAPTURE_MS;
+    } else if (this._dismissed && Date.now() > this._captureUntil) {
+      return;
+    }
     // Keep a bounded ring so a spammy backend doesn't OOM the modal.
     const next = this._errors.concat([{ code: body.code || "error", message: body.message || "" }]);
     this._errors = next.slice(-MAX_ERRORS);

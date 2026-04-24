@@ -400,6 +400,10 @@ export class TrackEditorModal extends LitElement {
     });
   }
 
+  _setGroup(groupId) {
+    this._patch({ group_id: groupId || "" });
+  }
+
   _commitName(value) {
     const name = (value || "").trim();
     const t = this._track();
@@ -493,6 +497,7 @@ export class TrackEditorModal extends LitElement {
   _renderRoutingSection(t) {
     const session = window.__foyer?.store?.state?.session;
     const allTracks = session?.tracks || [];
+    const groups = session?.groups || [];
     // Master isn't a user-selectable bus target (that's the default
     // destination); sending to yourself is also nonsensical, filter.
     const busses = allTracks.filter(
@@ -501,7 +506,7 @@ export class TrackEditorModal extends LitElement {
     const sendableBuses = busses.filter((tt) => tt.kind === "bus");
     const sends = t.sends || [];
     const groupName = t.group_id
-      ? (session?.groups || []).find((g) => g.id === t.group_id)?.name || t.group_id
+      ? groups.find((g) => g.id === t.group_id)?.name || t.group_id
       : null;
 
     // Input dropdown: the currently-wired input port is the track's
@@ -524,7 +529,17 @@ export class TrackEditorModal extends LitElement {
         <h3>Routing</h3>
         <div class="row">
           <label>Group</label>
-          <span class="hint" style="color:var(--color-text)">${groupName || "—"}</span>
+          <select class="fld"
+            .value=${t.group_id || ""}
+            @change=${(e) => this._setGroup(e.currentTarget.value)}>
+            <option value="">—</option>
+            ${groups.map((g) => html`<option value=${g.id}>${g.name}</option>`)}
+          </select>
+          <button class="refresh"
+                  title="Open Group Manager"
+                  @click=${() => import("./group-manager-modal.js").then((m) => m.openGroupManager())}>
+            Manage…
+          </button>
         </div>
         <div class="row">
           <label>Pan</label>

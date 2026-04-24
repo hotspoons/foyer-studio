@@ -24,6 +24,7 @@ import "./components/layout-fab.js";
 import "./components/automation-panel.js";
 import "./components/startup-errors.js";
 import "./components/backend-lost-modal.js";
+import "./components/login-modal.js";
 import "./components/welcome-screen.js";
 import { bootAutomation } from "./components/automation-panel.js";
 import { installBindingsRuntime } from "./layout/layout-bindings.js";
@@ -334,6 +335,7 @@ export class FoyerApp extends LitElement {
       <foyer-automation-panel></foyer-automation-panel>
       <foyer-startup-errors></foyer-startup-errors>
       <foyer-backend-lost-modal></foyer-backend-lost-modal>
+      <foyer-login-modal></foyer-login-modal>
     `;
   }
 }

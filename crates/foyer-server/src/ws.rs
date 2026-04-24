@@ -18,24 +18,102 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, Extension, Query, State};
 use axum::response::IntoResponse;
 use std::net::{IpAddr, SocketAddr};
-use foyer_schema::{Command, ControlUpdate, Envelope, Event, SCHEMA_VERSION};
+use foyer_schema::{Command, ControlUpdate, Envelope, Event, TunnelProviderConfig, TunnelProviderKind, SCHEMA_VERSION};
 use futures::{SinkExt, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{AppState, SharedState};
+
+/// Marker inserted as a request extension by the tunnel-auth listener.
+/// Presence means "this request came in over the public tunnel"; absence
+/// means "LAN listener, trusted". The WS upgrade reads it to decide
+/// whether to enforce RBAC.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TunnelOrigin;
 
 pub(crate) async fn upgrade(
     ws: WebSocketUpgrade,
     Query(params): Query<HashMap<String, String>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): SharedState,
+    tunnel_origin: Option<Extension<TunnelOrigin>>,
 ) -> impl IntoResponse {
     let since: Option<u64> = params.get("since").and_then(|s| s.parse().ok());
     let origin = params.get("origin").cloned();
-    ws.on_upgrade(move |sock| handle(sock, state, since, origin, peer))
+    let token = params.get("token").cloned();
+    let is_tunnel = tunnel_origin.is_some();
+
+    // Resolve the per-connection role before the upgrade completes.
+    //   · LAN listener (is_tunnel=false): skip RBAC entirely.
+    //   · Tunnel listener, valid token: attach the token's role.
+    //   · Tunnel listener, missing/bad token: upgrade anyway, but tag
+    //     the connection as "auth-required" so the client can render
+    //     a login UI and retry with a token.
+    let auth = if is_tunnel {
+        resolve_tunnel_auth(&state, token.as_deref()).await
+    } else {
+        ConnectionAuth::Lan
+    };
+
+    ws.on_upgrade(move |sock| handle(sock, state, since, origin, peer, auth))
+}
+
+/// Per-connection authentication state. Drives the RBAC gate in
+/// `dispatch_command`.
+#[derive(Clone, Debug)]
+pub(crate) enum ConnectionAuth {
+    /// Trusted LAN listener — RBAC off, all commands allowed.
+    Lan,
+    /// Tunnel listener, token verified. `role_id` matches a `RoleDef`
+    /// entry in the loaded `RolesConfig`. `recipient` is the invite's
+    /// display name (usually the guest's email) — piped into the
+    /// greeting so the UI can say "logged in as Alice".
+    Authenticated {
+        role_id: String,
+        recipient: String,
+    },
+    /// Tunnel listener, no valid token. Client sees the greeting with
+    /// `auth_required: true` and surfaces a login modal. Until they
+    /// re-connect with a token, every command is rejected.
+    Unauthenticated,
+}
+
+impl ConnectionAuth {
+    pub fn is_tunnel(&self) -> bool {
+        !matches!(self, ConnectionAuth::Lan)
+    }
+    pub fn is_authenticated(&self) -> bool {
+        matches!(self, ConnectionAuth::Lan | ConnectionAuth::Authenticated { .. })
+    }
+}
+
+async fn resolve_tunnel_auth(state: &AppState, token: Option<&str>) -> ConnectionAuth {
+    let Some(token) = token else {
+        return ConnectionAuth::Unauthenticated;
+    };
+    // `verify_token` decodes the base64 (email:password), rehashes, and
+    // matches against the tunnel manifest. Returns the matched
+    // `TunnelConnection` on success — with role + recipient attached.
+    match crate::tunnel::verify_token(state, token).await {
+        Some(conn) => {
+            // Role enum → policy id. TunnelRole serde renames to
+            // snake_case which matches the roles.yaml ids.
+            let role_id = match conn.role {
+                foyer_schema::TunnelRole::Admin => "admin",
+                foyer_schema::TunnelRole::SessionController => "session_controller",
+                foyer_schema::TunnelRole::Performer => "performer",
+                foyer_schema::TunnelRole::Viewer => "viewer",
+            };
+            ConnectionAuth::Authenticated {
+                role_id: role_id.to_string(),
+                recipient: conn.recipient,
+            }
+        }
+        None => ConnectionAuth::Unauthenticated,
+    }
 }
 
 /// Enumerate URLs the sidecar is likely reachable at from other machines
@@ -105,6 +183,7 @@ async fn handle(
     since: Option<u64>,
     origin: Option<String>,
     peer: SocketAddr,
+    auth: ConnectionAuth,
 ) {
     let (mut tx_ws, mut rx_ws) = sock.split();
     let mut rx_broadcast = state.tx.subscribe();
@@ -114,14 +193,52 @@ async fn handle(
     // with the right context from frame one. Also includes the server's
     // reachable URLs so a local client can build a QR to share with a
     // phone or another machine on the LAN.
+    let is_local = is_local_addr(&peer);
+
+    // Mint a stable per-connection id — used in the greeting so the
+    // client can filter itself out of the peer list, and in every
+    // PeerJoined / PeerLeft broadcast.
+    let peer_id = uuid::Uuid::new_v4().simple().to_string();
+    let connection_role_id = match &auth {
+        ConnectionAuth::Authenticated { role_id, .. } => Some(role_id.clone()),
+        _ => None,
+    };
+    let peer_label = match &auth {
+        ConnectionAuth::Authenticated { recipient, .. } => recipient.clone(),
+        _ => if is_local { "host".to_string() } else { peer.to_string() },
+    };
+    let peer_info = foyer_schema::PeerInfo {
+        id: peer_id.clone(),
+        label: peer_label,
+        remote_addr: peer.to_string(),
+        is_local,
+        is_tunnel: auth.is_tunnel(),
+        role_id: connection_role_id.clone(),
+        connected_at: now_ms(),
+    };
+
     {
-        let is_local = is_local_addr(&peer);
         let server_host = std::env::var("FOYER_SERVER_HOSTNAME")
             .or_else(|_| hostname::get().map(|h| h.to_string_lossy().into_owned()))
             .unwrap_or_default();
         let port = state.listen_port.load(Ordering::Relaxed);
         let tls = state.tls_enabled.load(Ordering::Relaxed);
         let server_urls = reachable_urls(&server_host, port, tls);
+        // Compute the allow-list for this connection's role once at
+        // handshake time, so the client can hide/disable disallowed
+        // controls without re-implementing pattern matching.
+        let (role_id, role_allow, recipient) = match &auth {
+            ConnectionAuth::Lan => (None, Vec::new(), None),
+            ConnectionAuth::Authenticated { role_id, recipient } => {
+                let policy = state.roles_policy.read().await;
+                let allow = policy
+                    .role(role_id)
+                    .map(|r| r.allow.clone())
+                    .unwrap_or_default();
+                (Some(role_id.clone()), allow, Some(recipient.clone()))
+            }
+            ConnectionAuth::Unauthenticated => (None, Vec::new(), None),
+        };
         let greeting = Envelope {
             schema: SCHEMA_VERSION,
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
@@ -133,9 +250,49 @@ async fn handle(
                 server_host,
                 server_port: port,
                 server_urls,
+                is_tunnel: auth.is_tunnel(),
+                is_authenticated: auth.is_authenticated(),
+                role_id,
+                role_allow,
+                recipient,
+                peer_id: peer_id.clone(),
             },
         };
         let _ = send_env(&mut tx_ws, &greeting).await;
+    }
+
+    // Seed the new client with the current roster BEFORE registering
+    // ourselves, so the just-joined PeerJoined that we broadcast below
+    // doesn't arrive before the snapshot list (which would look like a
+    // duplicate on the client side — our own entry both in the list
+    // and in a join event).
+    {
+        let roster: Vec<foyer_schema::PeerInfo> =
+            state.peers.read().await.values().cloned().collect();
+        let env = Envelope {
+            schema: SCHEMA_VERSION,
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            session_id: None,
+            body: Event::PeerList { peers: roster },
+        };
+        let _ = send_env(&mut tx_ws, &env).await;
+    }
+
+    // Register + broadcast PeerJoined. Every client (including the one
+    // that just connected) receives the join through the broadcast
+    // channel; the new client filters its own entry via `peer_id` from
+    // the greeting.
+    state.peers.write().await.insert(peer_id.clone(), peer_info.clone());
+    {
+        let env = Envelope {
+            schema: SCHEMA_VERSION,
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            session_id: None,
+            body: Event::PeerJoined { peer: peer_info.clone() },
+        };
+        let _ = state.tx.send(env);
     }
 
     // Initial session roll-up: send the current list of open sessions
@@ -195,17 +352,22 @@ async fn handle(
     // Split pump: incoming commands (reader) vs outgoing events (writer).
     let reader_state = state.clone();
     let reader_origin = origin_tag.clone();
+    let reader_auth = auth.clone();
     let reader = tokio::spawn(async move {
         while let Some(frame) = rx_ws.next().await {
             let Ok(msg) = frame else { break };
             match msg {
                 Message::Text(t) => {
-                    if let Err(e) =
-                        dispatch_command(&reader_state, reader_origin.as_deref(), &t).await
+                    if let Err(e) = dispatch_command(
+                        &reader_state,
+                        reader_origin.as_deref(),
+                        &reader_auth,
+                        &t,
+                    )
+                    .await
                     {
                         tracing::warn!("client command rejected: {e}");
                     }
-                    // reader_state is Arc<AppState>, takes &Arc by ref
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -217,6 +379,15 @@ async fn handle(
     loop {
         match rx_broadcast.recv().await {
             Ok(env) => {
+                // Outbound RBAC filter: events that describe tunnel
+                // admin state (token minted, tunnel started, etc.)
+                // should only reach connections that could have
+                // initiated them. Unauthenticated tunnel guests see
+                // nothing but the greeting + error stream until they
+                // log in.
+                if !should_forward_event(&env.body, &auth, &state).await {
+                    continue;
+                }
                 if send_env(&mut tx_ws, &env).await.is_err() {
                     break;
                 }
@@ -234,6 +405,84 @@ async fn handle(
     }
 
     reader.abort();
+
+    // Remove from the peer roster + broadcast PeerLeft so everyone
+    // else's status bar prunes us.
+    state.peers.write().await.remove(&peer_id);
+    let env = Envelope {
+        schema: SCHEMA_VERSION,
+        seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+        origin: Some("server".into()),
+        session_id: None,
+        body: Event::PeerLeft { peer_id: peer_id.clone() },
+    };
+    let _ = state.tx.send(env);
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Decide whether a broadcast event should reach a given connection.
+///
+/// Rules:
+///   · LAN + Authenticated: everything except tunnel-admin events
+///     the role can't invoke. Prevents a Viewer from watching invite
+///     tokens roll past.
+///   · Unauthenticated: only `ClientGreeting` + `Error` + peer-roster
+///     events (for UI shell). Everything else is suppressed so a
+///     stranger hitting the tunnel URL without a token doesn't leak
+///     session content before logging in.
+///
+/// Events minted unicast via `send_env` (greeting, initial session
+/// list, PeerList snapshot) bypass this check — they only reach the
+/// connection they're intended for.
+async fn should_forward_event(
+    event: &Event,
+    auth: &ConnectionAuth,
+    state: &AppState,
+) -> bool {
+    match auth {
+        ConnectionAuth::Unauthenticated => {
+            matches!(
+                event,
+                Event::ClientGreeting { .. }
+                    | Event::Error { .. }
+                    | Event::PeerJoined { .. }
+                    | Event::PeerLeft { .. }
+                    | Event::PeerList { .. }
+            )
+        }
+        ConnectionAuth::Lan => true,
+        ConnectionAuth::Authenticated { role_id, .. } => {
+            if is_tunnel_admin_event(event) {
+                // Gate tunnel-admin events on the same permission
+                // that'd be required to *initiate* them. If the role
+                // can't create tokens, it shouldn't be watching them
+                // being minted by the host either.
+                state
+                    .roles_policy
+                    .read()
+                    .await
+                    .allows(role_id, "tunnel_create_token")
+            } else {
+                true
+            }
+        }
+    }
+}
+
+fn is_tunnel_admin_event(e: &Event) -> bool {
+    matches!(
+        e,
+        Event::TunnelState { .. }
+            | Event::TunnelUp { .. }
+            | Event::TunnelDown { .. }
+            | Event::TunnelTokenCreated { .. }
+    )
 }
 
 async fn send_env<S>(sink: &mut S, env: &Envelope<Event>) -> Result<(), axum::Error>
@@ -244,12 +493,142 @@ where
     sink.send(Message::Text(text)).await
 }
 
+/// Pull the wire-format "type" tag off a `Command`. This is the snake-
+/// case name serde emits (`Command` is `#[serde(tag = "type",
+/// rename_all = "snake_case")]`) — the same string the RBAC policy
+/// matches against. Falls back to `"unknown"` if serialization fails,
+/// which only happens for non-serializable inner state — effectively
+/// never in practice.
+fn command_tag(cmd: &Command) -> &'static str {
+    // Small match against the discriminant — the set of variants is
+    // closed and stable, so handwriting this keeps the hot path free
+    // of per-dispatch JSON allocation. Any new `Command` variant must
+    // be added here or it'll fall through to "unknown" and be denied
+    // for every non-admin role (safer than accidentally allowing).
+    match cmd {
+        Command::Subscribe => "subscribe",
+        Command::RequestSnapshot => "request_snapshot",
+        Command::ControlSet { .. } => "control_set",
+        Command::AudioEgressStart { .. } => "audio_egress_start",
+        Command::AudioEgressStop { .. } => "audio_egress_stop",
+        Command::AudioIngressOpen { .. } => "audio_ingress_open",
+        Command::AudioIngressClose { .. } => "audio_ingress_close",
+        Command::LatencyProbe { .. } => "latency_probe",
+        Command::ListActions { .. } => "list_actions",
+        Command::InvokeAction { .. } => "invoke_action",
+        Command::ListRegions { .. } => "list_regions",
+        Command::ListPlugins { .. } => "list_plugins",
+        Command::BrowsePath { .. } => "browse_path",
+        Command::OpenSession { .. } => "open_session",
+        Command::SaveSession { .. } => "save_session",
+        Command::UpdateRegion { .. } => "update_region",
+        Command::DeleteRegion { .. } => "delete_region",
+        Command::CreateRegion { .. } => "create_region",
+        Command::DuplicateRegion { .. } => "duplicate_region",
+        Command::ListWaveform { .. } => "list_waveform",
+        Command::ClearWaveformCache { .. } => "clear_waveform_cache",
+        Command::ListBackends { .. } => "list_backends",
+        Command::LaunchProject { .. } => "launch_project",
+        Command::ListSessions { .. } => "list_sessions",
+        Command::SelectSession { .. } => "select_session",
+        Command::CloseSession { .. } => "close_session",
+        Command::ReattachOrphan { .. } => "reattach_orphan",
+        Command::DismissOrphan { .. } => "dismiss_orphan",
+        Command::UpdateTrack { .. } => "update_track",
+        Command::DeleteTrack { .. } => "delete_track",
+        Command::ReorderTracks { .. } => "reorder_tracks",
+        Command::CreateGroup { .. } => "create_group",
+        Command::UpdateGroup { .. } => "update_group",
+        Command::DeleteGroup { .. } => "delete_group",
+        Command::AddPlugin { .. } => "add_plugin",
+        Command::RemovePlugin { .. } => "remove_plugin",
+        Command::MovePlugin { .. } => "move_plugin",
+        Command::ListPluginPresets { .. } => "list_plugin_presets",
+        Command::LoadPluginPreset { .. } => "load_plugin_preset",
+        Command::SavePluginPreset { .. } => "save_plugin_preset",
+        Command::OpenPluginGui { .. } => "open_plugin_gui",
+        Command::ClosePluginGui { .. } => "close_plugin_gui",
+        Command::AddNote { .. } => "add_note",
+        Command::UpdateNote { .. } => "update_note",
+        Command::DeleteNote { .. } => "delete_note",
+        Command::ReplaceRegionNotes { .. } => "replace_region_notes",
+        Command::AddPatchChange { .. } => "add_patch_change",
+        Command::UpdatePatchChange { .. } => "update_patch_change",
+        Command::DeletePatchChange { .. } => "delete_patch_change",
+        Command::SetSequencerLayout { .. } => "set_sequencer_layout",
+        Command::ClearSequencerLayout { .. } => "clear_sequencer_layout",
+        Command::SetTrackInput { .. } => "set_track_input",
+        Command::ListPorts { .. } => "list_ports",
+        Command::AddSend { .. } => "add_send",
+        Command::RemoveSend { .. } => "remove_send",
+        Command::SetSendLevel { .. } => "set_send_level",
+        Command::Undo { .. } => "undo",
+        Command::Redo { .. } => "redo",
+        Command::SetAutomationMode { .. } => "set_automation_mode",
+        Command::AddAutomationPoint { .. } => "add_automation_point",
+        Command::UpdateAutomationPoint { .. } => "update_automation_point",
+        Command::DeleteAutomationPoint { .. } => "delete_automation_point",
+        Command::ReplaceAutomationLane { .. } => "replace_automation_lane",
+        Command::Locate { .. } => "locate",
+        Command::SetLoopRange { .. } => "set_loop_range",
+        Command::AudioStreamOpen { .. } => "audio_stream_open",
+        Command::AudioStreamClose { .. } => "audio_stream_close",
+        Command::AudioSdpAnswer { .. } => "audio_sdp_answer",
+        Command::AudioIceCandidate { .. } => "audio_ice_candidate",
+        Command::TunnelCreateToken { .. } => "tunnel_create_token",
+        Command::TunnelRevokeToken { .. } => "tunnel_revoke_token",
+        Command::TunnelSetEnabled { .. } => "tunnel_set_enabled",
+        Command::TunnelStart { .. } => "tunnel_start",
+        Command::TunnelStop { .. } => "tunnel_stop",
+        Command::TunnelRequestState { .. } => "tunnel_request_state",
+    }
+}
+
 async fn dispatch_command(
     state: &std::sync::Arc<AppState>,
     origin: Option<&str>,
+    auth: &ConnectionAuth,
     text: &str,
 ) -> Result<(), DispatchError> {
     let env: Envelope<Command> = serde_json::from_str(text).map_err(DispatchError::Parse)?;
+
+    // ─── RBAC gate ───────────────────────────────────────────────────
+    // LAN connections pass through. Tunnel connections without a valid
+    // token are rejected outright (client should show its login modal).
+    // Authenticated tunnel connections get their role's allow/deny list
+    // checked against the command's wire tag.
+    if auth.is_tunnel() {
+        let tag = command_tag(&env.body);
+        match auth {
+            ConnectionAuth::Unauthenticated => {
+                broadcast_event(state, Event::Error {
+                    code: "auth_required".into(),
+                    message: format!(
+                        "login required to invoke '{tag}' — reconnect with a valid `?token=`"
+                    ),
+                })
+                .await;
+                return Ok(());
+            }
+            ConnectionAuth::Authenticated { role_id, recipient } => {
+                let allowed = state.roles_policy.read().await.allows(role_id, tag);
+                if !allowed {
+                    tracing::warn!(
+                        "RBAC: role '{role_id}' ({recipient}) denied '{tag}'"
+                    );
+                    broadcast_event(state, Event::Error {
+                        code: "forbidden_for_role".into(),
+                        message: format!(
+                            "role '{role_id}' is not permitted to invoke '{tag}'"
+                        ),
+                    })
+                    .await;
+                    return Ok(());
+                }
+            }
+            ConnectionAuth::Lan => unreachable!("is_tunnel() guarded"),
+        }
+    }
 
     match env.body {
         Command::Subscribe | Command::RequestSnapshot => {
@@ -1458,6 +1837,92 @@ async fn dispatch_command(
                 )
                 .await;
             }
+        }
+
+        // ─── Tunnel / remote access ─────────────────────────────────────
+        Command::TunnelCreateToken { recipient, role } => {
+            match crate::tunnel::create_token(state, recipient.clone(), role).await {
+                Ok((conn, token, password)) => {
+                    let url = conn.tunnel_url.clone()
+                        .unwrap_or_else(|| format!("http://localhost:3838/?token={token}"));
+                    tracing::info!("tunnel token created for {recipient}: {url}");
+                    broadcast_event(
+                        state,
+                        Event::TunnelTokenCreated {
+                            connection: conn,
+                            token,
+                            password,
+                            url,
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "tunnel_create_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::TunnelRevokeToken { id } => {
+            if let Err(e) = crate::tunnel::revoke_token(state, &id).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "tunnel_revoke_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::TunnelSetEnabled { enabled } => {
+            {
+                let mut m = state.tunnel_manifest.write().await;
+                m.enabled = enabled;
+                let _ = crate::tunnel::save_manifest(&*m).await;
+            }
+            crate::tunnel::broadcast_tunnel_state(state).await;
+        }
+        Command::TunnelStart { provider } => {
+            let tunnel_cfg = state.tunnel_cfg.read().await.clone();
+            let config = match provider {
+                TunnelProviderKind::Ngrok => TunnelProviderConfig::Ngrok {
+                    auth_token: tunnel_cfg.ngrok.as_ref().and_then(|c| c.auth_token.clone()),
+                    region: tunnel_cfg.ngrok.as_ref().and_then(|c| c.region.clone()),
+                    subdomain: tunnel_cfg.ngrok.as_ref().and_then(|c| c.subdomain.clone()),
+                    domain: tunnel_cfg.ngrok.as_ref().and_then(|c| c.domain.clone()),
+                },
+                TunnelProviderKind::Cloudflare => TunnelProviderConfig::Cloudflare {
+                    api_token: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.api_token.clone()),
+                    account_id: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.account_id.clone()),
+                    zone_id: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.zone_id.clone()),
+                    tunnel_name: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.tunnel_name.clone()),
+                    hostname: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.hostname.clone()),
+                    tunnel_token: tunnel_cfg.cloudflare.as_ref().and_then(|c| c.tunnel_token.clone()),
+                }
+            };
+            if let Err(e) = crate::tunnel::start_tunnel(state.clone(), provider, &config).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "tunnel_start_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::TunnelStop => {
+            crate::tunnel::stop_tunnel(state).await;
+        }
+        Command::TunnelRequestState => {
+            crate::tunnel::broadcast_tunnel_state(state).await;
         }
 
         Command::MovePlugin { .. }

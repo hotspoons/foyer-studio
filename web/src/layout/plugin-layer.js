@@ -67,8 +67,9 @@ export class PluginLayer extends LitElement {
       background: var(--color-surface-elevated);
       border-bottom: 1px solid var(--color-border);
       user-select: none;
-      cursor: move;
+      cursor: grab;
     }
+    header.dragging { cursor: grabbing; }
     header .label {
       flex: 1; min-width: 0;
       font-family: var(--font-sans);
@@ -294,45 +295,62 @@ export class PluginLayer extends LitElement {
     ]);
   }
 
+  /* ── resize ─────────────────────────────────────────────────────── */
   _startResize(ev, placed) {
     ev.preventDefault();
     ev.stopPropagation();
-    const entry = this._entries.find((e) => e.plugin_id === placed.id);
-    if (!entry) return;
+    const win = ev.currentTarget.closest(".pwin");
+    if (!win) return;
     const startX = ev.clientX;
     const startY = ev.clientY;
-    const startW = entry.w;
-    const startH = entry.h;
+    const startW = placed.w;
+    const startH = placed.h;
     const move = (e) => {
       const nw = Math.max(180, startW + (e.clientX - startX));
       const nh = Math.max(160, startH + (e.clientY - startY));
-      this.store.setPluginFloatSize(placed.id, nw, nh);
+      win.style.width  = `${nw}px`;
+      win.style.height = `${nh}px`;
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      const nw = parseFloat(win.style.width)  || placed.w;
+      const nh = parseFloat(win.style.height) || placed.h;
+      this.store.setPluginFloatSize(placed.id, nw, nh);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   }
 
+  /* ── drag ──────────────────────────────────────────────────────────
+   * Same pattern as foyer-window.js: manipulate the .pwin's inline
+   * style directly during the drag (zero Lit or store churn), then
+   * persist the final position to the layout store on pointerup.
+   */
   _startDrag(ev, placed) {
     ev.preventDefault();
     ev.stopPropagation();
+    const header = ev.currentTarget;
+    const win = header.closest(".pwin");
+    if (!win) return;
+    header.classList.add("dragging");
     const startX = ev.clientX;
     const startY = ev.clientY;
     const ox = placed.x;
     const oy = placed.y;
     const move = (e) => {
-      this.store.setPluginFloatPosition(
-        placed.id,
-        ox + (e.clientX - startX),
-        oy + (e.clientY - startY),
-      );
+      const nx = ox + (e.clientX - startX);
+      const ny = oy + (e.clientY - startY);
+      win.style.left = `${nx}px`;
+      win.style.top  = `${ny}px`;
     };
     const up = () => {
+      header.classList.remove("dragging");
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      const nx = parseFloat(win.style.left) || placed.x;
+      const ny = parseFloat(win.style.top)  || placed.y;
+      this.store.setPluginFloatPosition(placed.id, nx, ny);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);

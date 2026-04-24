@@ -15,6 +15,8 @@ export class StatusBar extends LitElement {
     _peers: { state: true, type: Array },
     _layoutTick: { state: true, type: Number },
     _greeting: { state: true, type: Object },
+    _rbac: { state: true, type: Object },
+    _peersOpen: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -124,11 +126,55 @@ export class StatusBar extends LitElement {
       border: 1px solid color-mix(in oklab, var(--color-accent) 40%, var(--color-border));
       border-radius: 999px;
       background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+      position: relative;
+      cursor: pointer;
     }
     .peer-dot {
       width: 6px; height: 6px; border-radius: 50%;
       background: var(--color-accent-3);
       box-shadow: 0 0 6px color-mix(in oklab, var(--color-accent) 40%, transparent);
+    }
+    .peers-popover {
+      position: absolute; bottom: 100%; left: 0; margin-bottom: 4px;
+      min-width: 220px;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      padding: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      z-index: 100;
+      text-transform: none; letter-spacing: normal;
+    }
+    .peers-popover .pl-row {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 6px;
+      font-size: 11px;
+      color: var(--color-text);
+    }
+    .peers-popover .pl-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #22c55e;
+      flex-shrink: 0;
+    }
+    .peers-popover .pl-dot.remote { background: var(--color-accent-3); }
+    .peers-popover .pl-label {
+      flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .peers-popover .pl-role {
+      font-size: 9px; color: var(--color-text-muted);
+      text-transform: uppercase; letter-spacing: 0.1em;
+    }
+    .role-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--color-text-muted);
+      padding: 2px 8px;
+      border: 1px solid var(--color-border);
+      border-radius: 999px;
+    }
+    .role-chip.unauthenticated {
+      color: var(--color-danger);
+      border-color: color-mix(in oklab, var(--color-danger) 60%, var(--color-border));
     }
     .layout-chip {
       display: inline-flex; align-items: center; gap: 5px;
@@ -188,6 +234,12 @@ export class StatusBar extends LitElement {
     };
     this._onLayoutChange = () => { this._layoutTick++; };
     this._greeting = null;
+    this._rbac = { isTunnel: false, isAuthenticated: true, roleId: null, recipient: null };
+    this._peersOpen = false;
+    this._onRbac = () => {
+      this._rbac = window.__foyer?.store?.rbac?.() || this._rbac;
+    };
+    this._onDocClick = () => { if (this._peersOpen) this._peersOpen = false; };
     this._onEnvelope = (ev) => {
       const body = ev.detail?.body;
       if (body?.type === "client_greeting") {
@@ -207,22 +259,28 @@ export class StatusBar extends LitElement {
     this._offThemeChange = onThemeChange(() => { this._theme = getTheme(); });
     document.addEventListener("fullscreenchange", this._onFsChange);
     window.__foyer?.store?.addEventListener("peers", this._onPeers);
+    window.__foyer?.store?.addEventListener("rbac", this._onRbac);
     window.__foyer?.layout?.addEventListener("change", this._onLayoutChange);
     window.__foyer?.ws?.addEventListener("envelope", this._onEnvelope);
     // Re-render on any store change so the "Unsaved" chip reflects
     // Session.dirty flips without polling.
     this._onStoreChange = () => this.requestUpdate();
     window.__foyer?.store?.addEventListener("change", this._onStoreChange);
-    this._peerTick = setInterval(this._onPeers, 3000);
+    document.addEventListener("pointerdown", this._onDocClick);
+    // Hydrate from whatever the store already knows (modal opened
+    // after greeting arrived).
+    this._onPeers();
+    this._onRbac();
   }
   disconnectedCallback() {
     this._offThemeChange?.();
     document.removeEventListener("fullscreenchange", this._onFsChange);
     window.__foyer?.store?.removeEventListener("peers", this._onPeers);
+    window.__foyer?.store?.removeEventListener("rbac", this._onRbac);
     window.__foyer?.layout?.removeEventListener("change", this._onLayoutChange);
     window.__foyer?.ws?.removeEventListener("envelope", this._onEnvelope);
     window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
-    clearInterval(this._peerTick);
+    document.removeEventListener("pointerdown", this._onDocClick);
     super.disconnectedCallback();
   }
 
@@ -344,12 +402,30 @@ export class StatusBar extends LitElement {
         ${this._peers.length
           ? html`<span
               class="peers"
-              title=${this._peers.map((p) => p.origin).join(", ")}
+              @click=${(e) => { e.stopPropagation(); this._peersOpen = !this._peersOpen; }}
             >
               <span class="peer-dot"></span>
               ${this._peers.length} peer${this._peers.length === 1 ? "" : "s"}
+              ${this._peersOpen ? html`
+                <div class="peers-popover" @click=${(e) => e.stopPropagation()}>
+                  ${this._peers.map((p) => html`
+                    <div class="pl-row">
+                      <span class="pl-dot ${p.is_local ? "" : "remote"}"></span>
+                      <span class="pl-label">${p.label || p.remote_addr || "—"}</span>
+                      <span class="pl-role">${p.role_id || (p.is_local ? "host" : "guest")}</span>
+                    </div>
+                  `)}
+                </div>
+              ` : null}
             </span>`
           : null}
+        ${this._rbac.isTunnel ? html`
+          <span class="role-chip ${this._rbac.isAuthenticated ? "" : "unauthenticated"}">
+            ${this._rbac.isAuthenticated
+              ? html`${this._rbac.recipient || "guest"} · ${this._rbac.roleId || "?"}`
+              : html`not signed in`}
+          </span>
+        ` : null}
         ${this._renderConnChip()}
         <foyer-session-switcher></foyer-session-switcher>
         ${this._renderSessionDirty()}

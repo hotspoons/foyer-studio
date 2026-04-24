@@ -13,12 +13,14 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { confirmChoice } from "./confirm-modal.js";
+import { isAllowed, onRbacChange } from "../rbac.js";
 
 export class SessionSwitcher extends LitElement {
   static properties = {
     _open: { state: true, type: Boolean },
     _sessions: { state: true },
     _currentId: { state: true, type: String },
+    _rbacTick: { state: true, type: Number },
   };
 
   static styles = css`
@@ -112,8 +114,10 @@ export class SessionSwitcher extends LitElement {
     this._open = false;
     this._sessions = [];
     this._currentId = null;
+    this._rbacTick = 0;
     this._onSessions = () => this._syncFromStore();
     this._onChange = () => this._syncFromStore();
+    this._offRbac = null;
     this._onDocClick = (ev) => {
       if (!this._open) return;
       if (ev.composedPath().includes(this)) return;
@@ -126,6 +130,7 @@ export class SessionSwitcher extends LitElement {
     const store = window.__foyer?.store;
     store?.addEventListener("sessions", this._onSessions);
     store?.addEventListener("change", this._onChange);
+    this._offRbac = onRbacChange(() => { this._rbacTick++; });
     document.addEventListener("click", this._onDocClick, true);
     this._syncFromStore();
   }
@@ -133,6 +138,7 @@ export class SessionSwitcher extends LitElement {
     const store = window.__foyer?.store;
     store?.removeEventListener("sessions", this._onSessions);
     store?.removeEventListener("change", this._onChange);
+    this._offRbac?.();
     document.removeEventListener("click", this._onDocClick, true);
     super.disconnectedCallback();
   }
@@ -207,14 +213,18 @@ export class SessionSwitcher extends LitElement {
             </div>
           `)}
           <div class="sep"></div>
-          <div class="action" @click=${() => this._browse()}>
-            <span>${icon("folder-open", 14)}</span>
-            <span>Open another project…</span>
-          </div>
-          <div class="action danger" @click=${() => this._close()}>
-            <span>${icon("x-mark", 14)}</span>
-            <span>Close current session</span>
-          </div>
+          ${isAllowed("launch_project") ? html`
+            <div class="action" @click=${() => this._browse()}>
+              <span>${icon("folder-open", 14)}</span>
+              <span>Open another project…</span>
+            </div>
+          ` : null}
+          ${isAllowed("close_session") ? html`
+            <div class="action danger" @click=${() => this._close()}>
+              <span>${icon("x-mark", 14)}</span>
+              <span>Close current session</span>
+            </div>
+          ` : null}
         </div>
       ` : null}
     `;

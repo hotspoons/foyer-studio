@@ -11,7 +11,7 @@ name = "foyer"
 path = "src/main.rs"
 
 [dependencies]
-foyer-server.workspace = true
+foyer-server = { workspace = true, default-features = true }
 foyer-schema.workspace = true
 foyer-backend.workspace = true
 foyer-backend-stub.workspace = true

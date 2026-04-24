@@ -4,6 +4,7 @@ import "./toggle.js";
 import "./number-scrub.js";
 import { ControlController } from "../store.js";
 import { icon } from "../icons.js";
+import { isAllowed, onRbacChange } from "../rbac.js";
 import {
   RETURN_MODE_LABELS,
   RETURN_MODE_TITLES,
@@ -131,9 +132,13 @@ export class TransportBar extends LitElement {
     // Repaint when the session.dirty flag flips — the Save button
     // enables/disables off that.
     store.addEventListener("change", this._onStoreChange);
+    // Repaint when RBAC state changes so gated buttons appear /
+    // disappear when the user logs in.
+    this._offRbac = onRbacChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
+    this._offRbac?.();
     super.disconnectedCallback();
   }
 
@@ -143,40 +148,52 @@ export class TransportBar extends LitElement {
     const loop = !!this._loopCtl?.value;
     const tempo = Number(this._tempoCtl?.value ?? 120);
     const returnMode = getReturnMode();
+    // `control_set` drives every transport button (play/stop/rec/loop/
+    // seek/tempo). Viewer/Performer roles don't have this permission,
+    // so the whole transport-control cluster disappears for them —
+    // leaving the tempo readout visible for context but not editable.
+    const canControl = isAllowed("control_set");
+    // Undo/Redo/Save route through invoke_action; session_controller
+    // and admin have it, viewer/performer don't.
+    const canEdit = isAllowed("invoke_action");
 
     return html`
-      <div class="row transport">
-        <div class="btn locate" title="Go to start (Home)" @click=${this._gotoStart}>${icon("backward-step", 16)}</div>
-        <div class="btn scrub"  title="Rewind 5 s" @click=${this._rewind}>${icon("backward", 16)}</div>
-        <div class="btn stop"   title="Stop" @click=${this._stop}>${icon("stop", 16)}</div>
-        <div class="btn play ${play ? "on" : ""}"
-             title="${play ? "Pause" : "Play"} (Space)"
-             @click=${() => this._setPlay(!play)}>${icon(play ? "pause" : "play", 16)}</div>
-        <div class="btn rec ${rec ? "on" : ""}"
-             title="Record arm (R)"
-             @click=${() => this._set("transport.recording", !rec)}>${icon("record", 16)}</div>
-        <div class="btn loop ${loop ? "on" : ""}"
-             title="Toggle loop (L)"
-             @click=${() => this._set("transport.looping", !loop)}>${icon("loop", 16)}</div>
-        <div class="btn scrub"  title="Fast forward 5 s" @click=${this._fastForward}>${icon("forward", 16)}</div>
-        <div class="btn locate" title="Go to end (End)" @click=${this._gotoEnd}>${icon("forward-step", 16)}</div>
-      </div>
-      <div class="btn return-mode"
-           title=${RETURN_MODE_TITLES[returnMode] + " — click to cycle"}
-           @click=${this._cycleReturnMode}>${RETURN_MODE_LABELS[returnMode]}</div>
-      <div class="sep"></div>
-      <div class="row">
-        <div class="btn edit"
-             title="Undo (${this._metaChord()}+Z)"
-             @click=${this._undo}>${icon("arrow-uturn-left", 14)}</div>
-        <div class="btn edit"
-             title="Redo (${this._metaChord()}+Shift+Z)"
-             @click=${this._redo}>${icon("arrow-uturn-right", 14)}</div>
-        <div class="btn save ${this._isDirty() ? "dirty" : ""}"
-             title="${this._isDirty() ? "Save session (unsaved changes)" : "Save session"}"
-             @click=${this._save}>${icon("document-save", 14)}</div>
-      </div>
-      <div class="sep"></div>
+      ${canControl ? html`
+        <div class="row transport">
+          <div class="btn locate" title="Go to start (Home)" @click=${this._gotoStart}>${icon("backward-step", 16)}</div>
+          <div class="btn scrub"  title="Rewind 5 s" @click=${this._rewind}>${icon("backward", 16)}</div>
+          <div class="btn stop"   title="Stop" @click=${this._stop}>${icon("stop", 16)}</div>
+          <div class="btn play ${play ? "on" : ""}"
+               title="${play ? "Pause" : "Play"} (Space)"
+               @click=${() => this._setPlay(!play)}>${icon(play ? "pause" : "play", 16)}</div>
+          <div class="btn rec ${rec ? "on" : ""}"
+               title="Record arm (R)"
+               @click=${() => this._set("transport.recording", !rec)}>${icon("record", 16)}</div>
+           <div class="btn loop ${loop ? "on" : ""}"
+                title="Toggle loop (L)"
+                @click=${() => this._set("transport.looping", !loop)}>${icon("loop", 16)}</div>
+          <div class="btn scrub"  title="Fast forward 5 s" @click=${this._fastForward}>${icon("forward", 16)}</div>
+          <div class="btn locate" title="Go to end (End)" @click=${this._gotoEnd}>${icon("forward-step", 16)}</div>
+        </div>
+        <div class="btn return-mode"
+             title=${RETURN_MODE_TITLES[returnMode] + " — click to cycle"}
+             @click=${this._cycleReturnMode}>${RETURN_MODE_LABELS[returnMode]}</div>
+        <div class="sep"></div>
+      ` : null}
+      ${canEdit ? html`
+        <div class="row">
+          <div class="btn edit"
+               title="Undo (${this._metaChord()}+Z)"
+               @click=${this._undo}>${icon("arrow-uturn-left", 14)}</div>
+          <div class="btn edit"
+               title="Redo (${this._metaChord()}+Shift+Z)"
+               @click=${this._redo}>${icon("arrow-uturn-right", 14)}</div>
+          <div class="btn save ${this._isDirty() ? "dirty" : ""}"
+               title="${this._isDirty() ? "Save session (unsaved changes)" : "Save session"}"
+               @click=${this._save}>${icon("document-save", 14)}</div>
+        </div>
+        <div class="sep"></div>
+      ` : null}
       <foyer-number
         label="Tempo"
         unit="BPM"
@@ -188,8 +205,9 @@ export class TransportBar extends LitElement {
         .coarseStep=${10}
         .precision=${1}
         .pxPerStep=${3}
-        @input=${this._onTempo}
-        @change=${this._onTempo}
+        ?disabled=${!canControl}
+        @input=${canControl ? this._onTempo : null}
+        @change=${canControl ? this._onTempo : null}
       ></foyer-number>
       <span class="spacer"></span>
       <span class="meta">Foyer · M4 transport</span>

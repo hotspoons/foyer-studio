@@ -85,12 +85,20 @@ export class FoyerWs extends EventTarget {
 
   _open() {
     const sep = this.url.includes("?") ? "&" : "?";
+    // Forward `?token=<...>` from the page URL into the WS handshake
+    // so tunnel guests authenticate automatically after clicking a
+    // share link. LAN users never have a token in their URL, so this
+    // is a harmless no-op for them.
+    const pageToken = typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("token")
+      : null;
     const url =
       this.url +
       sep +
       new URLSearchParams({
         origin: this.origin,
         ...(this._lastSeq > 0 ? { since: String(this._lastSeq) } : {}),
+        ...(pageToken ? { token: pageToken } : {}),
       }).toString();
 
     const ws = new WebSocket(url);

@@ -11,7 +11,7 @@ foyer-schema.workspace = true
 foyer-backend.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "process", "io-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures.workspace = true
 tracing.workspace = true
@@ -36,6 +36,35 @@ tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 # M6a audio egress pipeline: libopus bindings + rubato resampler.
 audiopus = { workspace = true }
 rubato = { workspace = true }
+# Tunnel / remote-access support: token hashing, key generation, temp manifest writes.
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+tempfile = "3"
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+# Embedded tunnel providers (pure Rust, no external executables).
+# WARNING: ngrok support is NOTIONAL / UNTESTED. It compiles and the code
+# path is wired through `NgrokProvider`, but it has not been exercised end
+# to end against a real ngrok account — cloudflared is the supported
+# provider today. Left behind the `ngrok` feature flag so it can be
+# revisited later without bit-rotting the code. Enable at your own risk:
+#     cargo build -p foyer-server --features ngrok
+ngrok = { version = "0.18", features = ["axum"], optional = true }
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+foyer-config.workspace = true
+open = "5"
+urlencoding = "2"
+# Explicit rustls with ring crypto provider to avoid runtime panic when
+# multiple providers (ring + aws-lc-rs) are present in the dependency tree.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[features]
+# Default is cloudflare-only. See the note on the `ngrok` dep above —
+# the ngrok path is notional and off by default until someone verifies
+# it end to end.
+default = []
+ngrok = ["dep:ngrok"]
 
 [dev-dependencies]
 foyer-backend-stub.workspace = true

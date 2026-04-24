@@ -420,6 +420,16 @@ async fn serve(
     };
 
     let server = Server::with_spawner(initial_backend, Some(spawner.clone()));
+    server.load_tunnel_config(&config.tunnel).await;
+    // Load RBAC policy — seeded from the bundled default on first run.
+    // Any IO error falls back to the bundled default so an ACL misfire
+    // can't take the server down.
+    match cfg::load_or_seed_roles() {
+        Ok(roles) => server.load_roles_policy(roles).await,
+        Err(e) => tracing::warn!(
+            "could not load roles.yaml ({e}) — falling back to bundled defaults"
+        ),
+    }
     // In launcher mode the backend that's actually running is the empty
     // stub, but the picker should treat the user's configured default as
     // the preferred target — so we report the config id as "active."

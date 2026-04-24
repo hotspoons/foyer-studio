@@ -648,6 +648,15 @@ export class BeatSequencer extends LitElement {
           || ev.detail === "transport.playing") {
         this.requestUpdate();
       }
+      // When the tempo changes (from any source — transport bar,
+      // automation, DAW timeline) re-persist the active sequencer
+      // layout so the server re-expands the notes at the new beat
+      // grid.  Without this, step counts are fixed but the tick→
+      // sample conversion changes silently, making the notes drift
+      // relative to the visual ruler until the user edits the grid.
+      if (ev.detail === "transport.tempo" && this.layout?.active) {
+        this._persistLayout();
+      }
     };
   }
 

@@ -204,7 +204,6 @@ export class PromptModal extends LitElement {
       <div class="modal" @click=${(e) => e.stopPropagation()}>
         <header>
           <span class="title">${this.title}</span>
-          <button title="Close" @click=${this._cancel}>${icon("x-mark", 12)}</button>
         </header>
         <div class="body">
           ${this.message

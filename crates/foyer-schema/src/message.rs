@@ -241,6 +241,41 @@ pub enum Event {
         /// are alternates (IPv6, additional NICs).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         server_urls: Vec<String>,
+        /// True when this connection arrived via the public tunnel
+        /// (auth listener). LAN connections see `false`. Clients use
+        /// this to decide whether to render remote-guest UX (login
+        /// modal when unauthenticated, role-restricted controls when
+        /// authenticated).
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_tunnel: bool,
+        /// True when the server has authenticated this connection —
+        /// always true on LAN; on tunnel requires a valid `?token=`.
+        /// `false` means the client should show its login UI; every
+        /// command will fail with `auth_required` until reconnected
+        /// with a valid token.
+        #[serde(default = "yes_bool")]
+        is_authenticated: bool,
+        /// RBAC role id for this connection. `None` on LAN (no gating);
+        /// on tunnel it matches a `RoleDef` in the roles config
+        /// (`admin`, `session_controller`, `performer`, `viewer`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role_id: Option<String>,
+        /// List of action tags the role is allowed to invoke — the UI
+        /// uses this to hide/disable disallowed controls for nicer UX.
+        /// For admin this might be `["*"]`; for viewer a concrete
+        /// enumeration. Server computes it from the policy at handshake
+        /// so the client doesn't need to re-implement pattern matching.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        role_allow: Vec<String>,
+        /// Invite recipient (usually email) — shown in the status bar
+        /// as "signed in as …" for tunnel guests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient: Option<String>,
+        /// This connection's own id. Matches the `PeerInfo.id` that
+        /// goes out in `PeerJoined` / `PeerList`; the client filters
+        /// its own entry out of the displayed roster using this.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        peer_id: String,
     },
 
     // ───── track / group / plugin lifecycle ─────────────────────────────
@@ -348,9 +383,62 @@ pub enum Event {
         stream_id: u32,
         candidate: IceCandidate,
     },
+
+    // ───── tunnel / remote access ───────────────────────────────────────
+    /// Full current tunnel state.  Emitted on connect and after any
+    /// mutation (create/revoke/toggle/hostname change).
+    TunnelState {
+        state: crate::tunnel::TunnelState,
+    },
+    /// A new tunnel just came up — the server has a public hostname.
+    TunnelUp {
+        provider: crate::tunnel::TunnelProviderKind,
+        hostname: String,
+        url: String,
+    },
+    /// The tunnel went down (process exited, network lost, etc).
+    TunnelDown {
+        provider: crate::tunnel::TunnelProviderKind,
+    },
+    /// A newly-minted credential pair, shown ONCE to the creator. The
+    /// server stores only the hash; these clear-text fields are never
+    /// re-broadcast after this event.
+    /// A peer (another open browser tab / connection) joined. Emitted
+    /// on every WS `handle()` startup. Clients build a live "who's
+    /// here" list from these plus `PeerLeft` events — more reliable
+    /// than sniffing envelope origins (which only shows peers who
+    /// have recently sent a command).
+    PeerJoined {
+        peer: PeerInfo,
+    },
+    /// A peer disconnected. Paired with `PeerJoined`.
+    PeerLeft {
+        peer_id: String,
+    },
+    /// Full roster of connected peers, sent to a newly-connected client
+    /// so it starts with accurate state rather than waiting to observe
+    /// joins. Includes the recipient's own entry — the client filters
+    /// its own via `ClientGreeting.peer_id`.
+    PeerList {
+        peers: Vec<PeerInfo>,
+    },
+    TunnelTokenCreated {
+        connection: crate::tunnel::TunnelConnection,
+        /// Opaque `base64url(email_norm:password)` — what clients put
+        /// in the `?token=` query parameter.
+        token: String,
+        /// Random password, shown once in the UI so the user can copy
+        /// it into an email / password manager.
+        password: String,
+        /// Convenience: the full share URL with the token baked in.
+        /// Everything a recipient needs to auto-log-in by clicking.
+        url: String,
+    },
 }
 
 fn is_zero_u16(n: &u16) -> bool { *n == 0 }
+fn is_false(b: &bool) -> bool { !*b }
+fn yes_bool() -> bool { true }
 
 fn default_region_kind() -> String { "midi".to_string() }
 
@@ -407,6 +495,34 @@ pub struct OrphanInfo {
 }
 
 fn is_zero_u64(n: &u64) -> bool { *n == 0 }
+
+/// One connected client. Tracked server-side and broadcast via
+/// `PeerJoined` / `PeerLeft` / `PeerList` so every client sees a
+/// consistent roster. `label` is the display string — `"host"` for
+/// LAN connections (the studio owner), or the invite recipient's
+/// email for tunnel guests.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeerInfo {
+    /// Server-assigned connection id (hex UUID). Stable for the
+    /// lifetime of the WS connection, distinct from any session id.
+    pub id: String,
+    /// Human-facing label — "host" for local/LAN, email for tunnel.
+    pub label: String,
+    /// Remote peer address (`127.0.0.1:54123` etc.).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remote_addr: String,
+    /// True for loopback / LAN. Drives the "host" styling in the UI.
+    pub is_local: bool,
+    /// True when this peer connected via the public tunnel.
+    pub is_tunnel: bool,
+    /// RBAC role id, when the peer authenticated via tunnel. `None`
+    /// for LAN (trusted, no role).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_id: Option<String>,
+    /// Unix epoch ms when the connection came up.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub connected_at: u64,
+}
 
 /// Metadata for a single backend entry in the sidecar's config — what
 /// the picker UI needs to render a "pick a DAW" dropdown.
@@ -829,6 +945,30 @@ pub enum Command {
         stream_id: u32,
         candidate: IceCandidate,
     },
+
+    // ───── tunnel / remote access ───────────────────────────────────────
+    /// Create a new shareable token for remote access.  The server
+    /// replies with the token (shown once) and a `TunnelState` event.
+    TunnelCreateToken {
+        recipient: String,
+        role: crate::tunnel::TunnelRole,
+    },
+    /// Revoke a previously-created token.
+    TunnelRevokeToken {
+        id: EntityId,
+    },
+    /// Toggle the global tunnel enable flag.
+    TunnelSetEnabled {
+        enabled: bool,
+    },
+    /// Start or restart the active tunnel provider (e.g. cloudflared).
+    TunnelStart {
+        provider: crate::tunnel::TunnelProviderKind,
+    },
+    /// Stop the active tunnel (local-only mode).
+    TunnelStop,
+    /// Ask the server for a `TunnelState` snapshot.
+    TunnelRequestState,
 }
 
 #[cfg(test)]

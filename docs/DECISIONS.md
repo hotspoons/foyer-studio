@@ -1491,3 +1491,315 @@ infers its value by walking the track's main output port connections at
 snapshot time and resolving them back to a sibling route id — if that
 lookup is ambiguous (connected to master, multiple buses, or unconnected),
 the field stays `None`.
+
+## 35. Cloudflare tunnel — auto-provision via REST API, no dashboard clickthrough
+
+**Date:** 2026-04-24
+
+**Decision.** The Cloudflare tunnel provider supports three modes,
+selected from `config.yaml` in priority order:
+
+1. **Auto-provision** — `api_token + account_id + hostname` (+ optional
+   `zone_id`, `tunnel_name`). The server calls the Cloudflare v4 REST API
+   directly to create-or-reuse a tunnel, push ingress config
+   (`hostname → http(s)://localhost:<foyer-port>`), and upsert the
+   proxied CNAME in the zone (auto-discovering the zone by longest-suffix
+   match against `hostname` if `zone_id` is omitted). Then runs
+   `cloudflared tunnel run --token <fetched-token>`. Named tunnels come
+   up with zero manual dashboard steps.
+2. **Raw token** — `tunnel_token + hostname`. User pasted a connector
+   token from the Zero Trust dashboard; ingress/DNS lives on the
+   dashboard side. We just spawn `cloudflared tunnel run --token ...`.
+3. **Quick tunnel** — everything empty. `cloudflared tunnel --url ...`
+   against a secondary stub server → `*.trycloudflare.com` URL.
+
+**Alternatives.** (a) Keep quick-tunnel-only and make the user do the
+dashboard setup themselves for named tunnels — rejected, the whole
+point is to feel like "I paste an API token and get a proper domain."
+(b) Use the `cloudflare-rs` community crate — rejected, it predates the
+`cfd_tunnel` endpoints we need (Tunnel config, run token, ingress) and
+is not actively maintained, so it'd save us nothing net. (c) Ship the
+`cloudflared` Go binary's `config.yml` credentials-file flow (requires
+`cloudflared tunnel login` + `cloudflared tunnel create` by the user,
+local `credentials.json`, local ingress yaml) — rejected, more manual
+setup than mode 2 and no advantage over API-driven mode 1.
+
+**Why.** Cloudflare does not publish a Rust SDK. The v4 REST API is
+small, stable, and well-documented; direct `reqwest` calls (~250 lines
+in `cloudflare_api.rs`) get us the full provisioning flow without
+pulling in an unmaintained wrapper. Every API function is idempotent
+where it matters (create-or-reuse tunnel, upsert DNS) so restarting the
+tunnel doesn't leave orphan objects in the account. The three-mode
+ladder means users can drop in at whatever level of automation they're
+comfortable with — quick tunnel for demos, raw token for paranoid-about-
+API-tokens setups, full auto for the happy path.
+
+**Ingress target.** Named tunnels point at `http(s)://localhost:<main-
+foyer-port>` directly, bypassing the quick-tunnel's secondary auth stub
+server. That stub was always a placeholder; the real auth/role-gating
+layer will land inside the main WS handler. For named tunnels the user
+*is* the account holder, so the lack of per-guest auth in front of the
+tunnel is the same trust model as LAN — public hostnames + token-gated
+access layered on via existing `TunnelRole` inside the WS handshake.
+
+## 36. Remote-access auth model — normalized-email + password combo hash; manifest (not Ardour XML) is the store
+
+**Date:** 2026-04-24
+
+**Decision.** A tunnel invite issues a credential pair, not a random
+token. The server:
+
+- Normalizes the email to trim + ASCII-lowercase, stores
+  `sha256(email_norm || ":" || password || PEPPER)` as
+  `TunnelConnection.token_hash`. Password is never stored clear-text.
+- Emits the clear-text password **once** in `Event::TunnelTokenCreated`
+  so the creator can copy it. Any reload before copy loses it.
+- Encodes the URL token as `base64url(email_norm:password)`; the
+  `?token=` query parameter on the share URL is sufficient to auto-
+  log-in, and `verify_token` decodes → re-hashes → matches.
+- Stores the manifest at `$XDG_DATA_HOME/foyer/tunnel-manifest.json`.
+  **Not** in Ardour XML session metadata despite the plan language.
+
+**Alternatives.**
+- Random opaque tokens (previous design) — rejected because the
+  username/password model is required for the "anonymous visitor sees
+  a login page" flow that layers on top.
+- Store hashes in Ardour session XML via custom surface metadata —
+  deferred. Requires shim changes, XML schema work, session-save/load
+  hooks, and collisions with Ardour's own XML versioning. The manifest
+  file gets us the whole auth model today; migrating into session XML
+  can be a separate pass without a wire-protocol break.
+- Store the email in cleartext on the connection, hash only the
+  password — considered; rejected because hashing the pair means a
+  manifest leak doesn't enumerate invitee emails for spam.
+
+**Why.** The email is also the username, so normalizing and salting
+together gives one hash to check instead of two-step (lookup by email,
+verify password). A 16-char password from an unambiguous alphabet (no
+0/O/1/l/I) is hand-typeable from a phone screen and the URL is the
+primary path anyway. The pepper is in-code not in the manifest, so a
+manifest-file leak alone doesn't yield a rainbow-table attack.
+
+**UI consequences.** The `TunnelTokenCreated` event now carries
+`password` alongside `token` and `url`. The modal caches
+`{ password, url, recipient }` per just-created connection id in
+memory, displays them in a "copy now" callout, and clears on explicit
+dismiss or reload. Post-dismiss, the connection row still offers
+Copy URL / QR / Email / Revoke — the URL alone contains the creds so
+re-sending by email still works without the clear-text password.
+
+## 37. Tunnel-servicing port is separate from the LAN port — RBAC lives on the tunnel side
+
+**Date:** 2026-04-24
+
+**Decision.** The main Foyer HTTP(S) listener (`AppState.listen_port`,
+default `127.0.0.1:3838`) stays open to every client that can reach it
+— i.e. the whole LAN. No auth, no role gating, no friction for the
+owner or anyone at the studio.
+
+All **tunnel traffic** runs through a separate process-local server on
+a dedicated port (`AUTH_SERVER_ADDR = 127.0.0.1:3839` in
+`cloudflare_provider.rs`). `cloudflared` in every mode — quick,
+auto-provision, raw-token — is pointed at that port, never at the main
+port. This separate server is where per-guest authentication and
+role-based command gating (`TunnelRole::allows_command`) will enforce
+privilege levels.
+
+**Current state.** The tunnel-side listener serves the same router
+(`crate::build_http_router`) as the main listener — tunnel guests see
+the real Foyer UI and the real WebSocket bus. They share the same
+`Arc<AppState>`, so commands from either side route into the same
+backend. **RBAC is not yet implemented** — at this moment, any guest
+who can reach the tunnel URL gets the same privileges a LAN owner
+does. This is a temporary state: the follow-ups below are what close
+the gap.
+
+**Alternatives.**
+- Single-port model (tunnel points at main server directly) — rejected.
+  That would either force every LAN client through login (breaks the
+  "studio LAN = trusted" model users want) or open the whole Foyer API
+  surface to whoever guesses a tunnel URL (breaks the security model).
+- Reverse-proxy the tunnel-port requests to the main port with a
+  gating middleware in between — a plausible future implementation
+  strategy for "main-bus proxy". Deferred until the stub is replaced.
+- Gate inside the main WS handler based on connection origin (`Origin:`
+  header, tunnel hostname) — rejected because Cloudflare Access + the
+  trycloudflare quick hostname don't give us reliable origin signaling
+  and header spoofing from other LAN tools would bypass it.
+
+**Why.** Two ports means the firewall between "trusted owner" and
+"authenticated guest" is enforced by the kernel rather than by a
+middleware layer on shared code paths — less chance of a shared-surface
+regression accidentally exposing owner-level commands to tunnel guests.
+Also makes it trivial for a user who *doesn't* want remote access to
+just leave the tunnel-side port closed (no cloudflared → no auth server
+→ nothing public).
+
+**Shared router, not a reverse proxy.** Both listeners call
+`build_http_router(state)` with the same `Arc<AppState>`, so the
+tunnel listener handles WS upgrades in-process instead of proxying to
+the main listener. Simpler, lower latency, and — crucially — the
+future RBAC middleware can introspect `ConnectInfo<SocketAddr>` and
+request extensions directly rather than reading headers bounced
+through a proxy hop. When RBAC lands, it layers on the tunnel
+router ONLY; the main router stays untouched.
+
+**Follow-ups required to close the privilege gap.**
+1. Tunnel-origin marker: the auth listener tags each connection with
+   a `TunnelContext` extension (so the main WS handler can branch on
+   "this is a tunnel guest" without relying on `127.0.0.1` peer checks
+   — cloudflared makes every tunnel connection look local).
+2. Token verification on WS handshake (hash `?token=` input against
+   `TunnelManifest.connections[].token_hash`, see DECISION 36). On
+   failure, close with a 401 equivalent; on success, stash the
+   matched `TunnelRole` alongside the marker.
+3. Role gating middleware: check `TunnelRole::allows_command(cmd_id)`
+   before each command reaches the backend; reject disallowed
+   commands with an `Event::Error { code: "forbidden_for_role" }`.
+4. Static-asset auth gate: the login page (DECISION 36 follow-up)
+   lives on the tunnel router ahead of the static fallback so guests
+   without a token see a credentials form rather than the raw app.
+
+## 38. RBAC is config-driven, enforced at WS action dispatch
+
+**Date:** 2026-04-24
+
+**Decision.** Role-based access control is driven by a YAML config
+file (`roles.yaml`), not by hardcoded Rust. The bundled default ships
+with the binary (`crates/foyer-config/defaults/roles.yaml`, `include_str!`-ed) and is copied to `$XDG_DATA_HOME/foyer/roles.yaml`
+on first run so operators can customize without recompiling.
+
+**Enforcement point.** One — `dispatch_command` in
+`crates/foyer-server/src/ws.rs`. Every incoming `Command` is mapped
+to its wire-format tag (the `#[serde(rename_all="snake_case")]` value
+of `type`, e.g. `tunnel_create_token`) via `command_tag()`. The tag is
+checked against `state.roles_policy.allows(role_id, tag)` before the
+command reaches the backend. Disallowed commands reply with
+`Event::Error { code: "forbidden_for_role", ... }` and never touch
+the backend. Unauthenticated tunnel connections reject every command
+with `code: "auth_required"`.
+
+**Skip condition.** LAN connections (main listener, no `TunnelOrigin`
+extension set) bypass RBAC entirely — the studio-network trust model
+from DECISION 37. Only tunnel connections (whether authenticated or
+not) hit the policy check.
+
+**Role definition shape.**
+```yaml
+- id: session_controller
+  label: Session Controller
+  description: ...
+  allow: ["*"]
+  deny: [add_track, delete_track, save_session, ...]
+```
+Patterns: `"*"` (all), `prefix.*` (dotted), `prefix_*` (underscore),
+`exact_name` (literal). Deny wins over allow. Four default roles
+(`admin`, `session_controller`, `performer`, `viewer`) — same taxonomy
+as `TunnelRole` in the schema.
+
+**Client mirror.** Server pushes the matched role's `allow` list to
+the client in `ClientGreeting.role_allow`. The client's
+`store.isAllowed(cmdTag)` re-uses the same pattern rules so UI can
+hide/disable disallowed controls for nicer UX — without moving the
+security boundary to the browser. The server's check is still the
+only enforcement.
+
+**Alternatives.**
+- Hardcoded `TunnelRole::allows_command` (previous state) — rejected
+  because operators asked to tune role permissions without a rebuild.
+- Per-variant match in Rust (explicit enumeration) — the tag lookup
+  *does* live in a match (`command_tag`), but the policy lookup is
+  dynamic, which is what makes config-driven possible.
+- serde_variant crate for zero-maintenance tag extraction — rejected
+  (new dep for one ~75-line match that must be touched when commands
+  are added anyway — the match is the forcing function that keeps
+  the policy config honest).
+
+**Login flow.** On tunnel origin without a valid `?token=`, the client
+receives a greeting with `is_authenticated: false` and shows a
+sign-in modal (`foyer-login-modal`). Submission encodes
+`base64url(email:password)` and rewrites `window.location` with the
+new `?token=`; a page reload re-handshakes through the now-authenticated
+WS. No cookies, no session table — the URL token is the single source
+of identity, hash-matched against the tunnel manifest per DECISION 36.
+
+**Event-level filter (outbound).** The writer loop in `handle()` now
+runs every outbound envelope through `should_forward_event(event,
+auth, state)` before sending. Rules:
+- Unauthenticated tunnel connections see only `ClientGreeting`,
+  `Error`, and the peer-roster events — enough to render the login
+  modal + status bar, nothing else.
+- Authenticated tunnel connections with a role that can't invoke
+  `tunnel_create_token` don't see `TunnelState`, `TunnelUp`,
+  `TunnelDown`, or `TunnelTokenCreated`. Keeps tunnel-admin state
+  private to the host and anyone they've explicitly made an admin.
+- LAN connections see everything.
+
+Unicast events (initial greeting, per-connection `PeerList` snapshot,
+catch-up from ring) bypass the filter since they're intended for a
+specific recipient, not the broadcast.
+
+**UI mirror (per-action gating).** A shared `web/src/rbac.js` module
+exposes `isAllowed(cmdTag)` + `isActionAllowed(actionId)`. The second
+function maps backend `Action` catalog ids (e.g. `session.save_as`,
+`edit.undo`) to the command tag they'd actually dispatch — client-only
+actions (zoom, toggle preferences) stay visible regardless of role,
+specific wire commands route to specific gates, and the rest fall
+through to generic `invoke_action` gating.
+
+Components with gates applied this pass:
+- `main-menu.js` — per-category action filter + Remote Access + recents.
+- `session-switcher.js` — hides Close / Open-Another when denied.
+- `transport-bar.js` — hides transport-control cluster (play/rec/loop/
+  seek/tempo) and undo/redo/save row when the role lacks `control_set`
+  or `invoke_action`; tempo readout stays visible as disabled context.
+- `command-palette.js` — filters the searchable action list.
+- `welcome-screen.js` — non-launch roles see a passive "waiting for
+  host" view instead of the picker + orphan recovery buttons.
+- `startup-errors.js` — `forbidden_for_role` + `auth_required` errors
+  bypass the startup-only capture window so stray post-gate clicks
+  produce a visible banner rather than silence.
+
+The server stays the enforcement point. UI gating exists purely so
+non-admin guests don't stare at denied buttons.
+
+**Future mixer pass.** The mixer strips, track editor, and plugin
+panels still render write-surfaces (faders, mute/solo, plugin
+editing) without per-control gating — tunnel guests clicking these
+will see the `forbidden_for_role` banner but controls stay visible.
+Moving these to the same `isAllowed` model is tracked as a follow-up
+in PLAN.md since it's a multi-component sweep, not a single
+touchpoint.
+
+## 39. Server-authoritative peer roster replaces origin-sniffing
+
+**Date:** 2026-04-24
+
+**Decision.** Connected-peer presence is tracked **server-side** in
+`AppState.peers: HashMap<String, PeerInfo>`, keyed by a server-assigned
+connection id minted at WS `handle()` startup. Join/leave events
+(`Event::PeerJoined`, `Event::PeerLeft`) broadcast through the existing
+channel; new clients receive a `PeerList` snapshot before their own
+join lands.
+
+**Problem.** The previous presence model derived peers from `origin`
+fields on received envelopes — i.e. a client showed up as a "peer"
+only once it had spoken. Tunnel guests who just listened (the
+`Viewer` role) never registered, and every peer required a 30s
+heartbeat-style timeout to prune.
+
+**PeerInfo.** Id, human label (`"host"` for LAN, invite recipient for
+tunnel), remote addr, `is_local`, `is_tunnel`, `role_id`, `connected_at`.
+Status bar renders the label + role; the LAN/host case is visually
+distinct (green dot vs accent dot).
+
+**Self filter.** Greeting now includes the client's own `peer_id`.
+The status bar filters that id out of the displayed roster so users
+don't see themselves in the list.
+
+**Why not keep client-side presence.** The origin-based approach
+couldn't tell the difference between "went offline" and "quiet". It
+also didn't see the host (who had origin `"backend"` / `"server"`
+stripped from user-visible presence). Moving to a server-authoritative
+model makes the data shape match reality — one connection, one entry,
+lifetime bounded by the WS socket.

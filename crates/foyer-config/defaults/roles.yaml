@@ -1,0 +1,142 @@
+# Foyer Studio — role-based access control policy.
+#
+# This file defines what each role is allowed to do. It's seeded from a
+# copy baked into the foyer binary on first run and dropped here for
+# user editing:
+#   $XDG_DATA_HOME/foyer/roles.yaml
+#
+# Delete it to regenerate on next launch. Keep `version` bumped in lock-
+# step with the bundled default so we can spot drift.
+#
+# ─── Matching rules ────────────────────────────────────────────────────
+#
+# Commands are identified by their wire-format "type" tag (what the
+# browser sends on the WebSocket). See `Command` in
+# crates/foyer-schema/src/message.rs — `#[serde(rename_all = "snake_case")]`
+# means each variant's wire name is snake_case. Examples:
+#   TrackAdd    → "track.add"   (not actually in Command today, just illustrative)
+#   DeleteTrack → "delete_track"
+#   ControlSet  → "control_set"
+#
+# Patterns in `allow` / `deny`:
+#   * "*"             — matches any command (the full-trust wildcard)
+#   * "foo_*"         — matches any command whose tag starts with "foo_"
+#   * "foo.*"         — matches any command whose tag starts with "foo."
+#                       (legacy dotted-namespace pattern, kept for
+#                       forward-compat with future namespaced commands)
+#   * "exact_name"    — literal match
+#
+# Deny wins over allow: a match in `deny` shuts a command off even if
+# `allow` would have permitted it. Useful for carving exceptions out of
+# wildcard allows ("admins minus some self-service stuff").
+#
+# ─── Connection sources ────────────────────────────────────────────────
+#
+# Roles defined here apply only to connections that arrived via the
+# tunnel listener (public internet). LAN/loopback connections skip the
+# RBAC check entirely — the LAN is the "studio network" trust zone and
+# running Foyer = being the owner.
+#
+# The role on a tunnel connection is decided by the token the guest
+# clicks: tokens are minted per-invite and carry a role id
+# (see `TunnelRole` in crates/foyer-schema/src/tunnel.rs). The role id
+# used in the URL-encoded credential must match one of the ids below.
+
+version: 1
+
+roles:
+  - id: admin
+    label: Admin
+    description: Full control — same privileges as a LAN owner.
+    allow:
+      - "*"
+
+  - id: session_controller
+    label: Session Controller
+    description: >
+      Operate the session — transport, mix, mute/solo, capture input.
+      Can't restructure the session (add/remove tracks, groups, plugins)
+      or manage tunnel tokens.
+    allow:
+      - "*"
+    deny:
+      - add_track
+      - delete_track
+      - reorder_tracks
+      - create_group
+      - update_group
+      - delete_group
+      - add_plugin
+      - remove_plugin
+      - move_plugin
+      - open_plugin_gui
+      - close_plugin_gui
+      - load_plugin_preset
+      - save_plugin_preset
+      - open_session
+      - save_session
+      - close_session
+      - undo
+      - redo
+      - tunnel_create_token
+      - tunnel_revoke_token
+      - tunnel_set_enabled
+      - tunnel_start
+      - tunnel_stop
+      - launch_project
+
+  - id: performer
+    label: Performer
+    description: >
+      Send live audio or MIDI input into the session. Can see the
+      transport but can't drive it.
+    allow:
+      - subscribe
+      - request_snapshot
+      - list_sessions
+      - select_session
+      - list_backends
+      - ping
+      - latency_probe
+      # audio streaming in + out
+      - audio_stream_open
+      - audio_stream_close
+      - audio_sdp_answer
+      - audio_ice_candidate
+      - audio_ingress_open
+      - audio_ingress_close
+      - audio_egress_start
+      - audio_egress_stop
+      # waveform + listing so the client can render the timeline
+      - list_waveform
+      - list_regions
+      - list_plugins
+      - list_ports
+      - list_actions
+      - list_plugin_presets
+      - tunnel_request_state
+
+  - id: viewer
+    label: Viewer / Listener
+    description: Watch and listen only. Read-only access.
+    allow:
+      - subscribe
+      - request_snapshot
+      - list_sessions
+      - select_session
+      - list_backends
+      - ping
+      - latency_probe
+      - audio_stream_open
+      - audio_stream_close
+      - audio_sdp_answer
+      - audio_ice_candidate
+      - audio_egress_start
+      - audio_egress_stop
+      - list_waveform
+      - list_regions
+      - list_plugins
+      - list_ports
+      - list_actions
+      - list_plugin_presets
+      - tunnel_request_state

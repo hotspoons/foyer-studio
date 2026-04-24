@@ -35,6 +35,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod roles;
+
+pub use roles::{load_or_seed_roles, load_or_seed_roles_at, roles_path, RoleDef, RolesConfig};
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +65,9 @@ pub struct Config {
     /// when I launch this install" fallback.
     #[serde(default)]
     pub server: ServerConfig,
+    /// Tunnel provider configuration (ngrok, cloudflare, etc.)
+    #[serde(default)]
+    pub tunnel: TunnelConfig,
     #[serde(default)]
     pub backends: Vec<BackendConfig>,
 }
@@ -85,6 +92,82 @@ pub struct ServerConfig {
 
 fn default_version() -> u32 { CONFIG_SCHEMA_VERSION }
 fn default_backend_id() -> String { "ardour".to_string() }
+
+/// Tunnel provider configuration stored in config.yaml.
+/// Both `ngrok` and `cloudflare` sections can coexist — the user picks
+/// which one to activate via the UI or CLI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TunnelConfig {
+    /// Ngrok-specific settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ngrok: Option<NgrokTunnelConfig>,
+    /// Cloudflare-specific settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare: Option<CloudflareTunnelConfig>,
+    /// Secondary server bind address for Cloudflare tunnel auth.
+    /// Defaults to 127.0.0.1:3839 (main server + 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NgrokTunnelConfig {
+    /// Ngrok auth token. Stored here so no env var is required.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub auth_token: Option<String>,
+    /// Region to request (us, eu, ap, au, sa, jp, in).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub region: Option<String>,
+    /// Subdomain for paid plans.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub subdomain: Option<String>,
+    /// Custom domain (paid feature).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub domain: Option<String>,
+}
+
+/// Tunnel credentials for Cloudflare. Three usable shapes, checked in
+/// priority order when the user clicks "enable":
+///
+///   1. **Auto-provision** — `api_token` + `account_id` + `hostname`
+///      (+ optional `zone_id`, `tunnel_name`). Server creates/reuses a
+///      Cloudflare Tunnel via the REST API, configures ingress, and
+///      upserts the DNS CNAME record. No manual dashboard steps needed.
+///   2. **Raw tunnel token** — `tunnel_token` + `hostname`. User pastes
+///      the connector token from the Zero Trust dashboard; ingress/DNS
+///      must already be set up there. Useful when the user won't hand
+///      over an API token.
+///   3. **Quick tunnel** — everything empty. Falls through to
+///      cloudflared's `--url` quick tunnel on `*.trycloudflare.com`. No
+///      account required, no persistence, URL rotates each launch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CloudflareTunnelConfig {
+    /// API token (Account:Cloudflare Tunnel:Edit + Zone:DNS:Edit).
+    /// Triggers auto-provision mode when set alongside `account_id` and
+    /// `hostname`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub api_token: Option<String>,
+    /// Account ID — copy from Cloudflare dashboard sidebar.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub account_id: Option<String>,
+    /// DNS zone ID. Optional — server auto-discovers via `GET /zones`
+    /// and longest-suffix match on `hostname` when omitted.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub zone_id: Option<String>,
+    /// Tunnel name for create-or-reuse. Defaults to a slug derived from
+    /// `hostname`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tunnel_name: Option<String>,
+    /// Public hostname to serve on (e.g. `studio.example.com`). Required
+    /// for the two named-tunnel modes; omit for a quick tunnel.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub hostname: Option<String>,
+    /// Raw Tunnel token pasted from the dashboard. Skips the API flow —
+    /// use this when you don't want to hand over an API token and are
+    /// happy configuring ingress/DNS on the dashboard yourself.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tunnel_token: Option<String>,
+}
 
 /// Picker + recent-files behavior.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -213,18 +296,13 @@ pub fn seed_default() -> Config {
     });
     Config {
         version: CONFIG_SCHEMA_VERSION,
-        // Default to Ardour — Foyer Studio is an Ardour control surface
-        // first and foremost. The stub exists for UI development and is
-        // selected explicitly via `--backend stub` (or `just run-stub`).
         default_backend: "ardour".into(),
         launcher: LauncherConfig {
-            // Seed the picker jail at the user's audio/Music dir so the
-            // session picker "just works" on first launch. Users who want
-            // to browse more broadly can edit this to `/` or another root.
             jail: default_launcher_jail(),
             recent: Vec::new(),
         },
         server: ServerConfig::default(),
+        tunnel: TunnelConfig::default(),
         backends,
     }
 }

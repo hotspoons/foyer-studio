@@ -661,6 +661,7 @@ export class TimelineView extends LitElement {
     if (next < 0 || next >= tracks.length) return;
     const order = tracks.map((t) => t.id);
     [order[idx], order[next]] = [order[next], order[idx]];
+    console.log("[foyer] reorder_tracks sent:", order);
     window.__foyer?.ws?.send({ type: "reorder_tracks", ordered_ids: order });
   }
 
@@ -1038,6 +1039,10 @@ export class TimelineView extends LitElement {
             @click=${() => this.zoomToSelection()}
             title="Zoom to the current timeline selection"
           >Zoom to selection</button>
+          <button
+            @click=${() => this._setLoopToSelection()}
+            title="Set loop start/end from current selection"
+          >Loop selection</button>
         ` : null}
         <span style="flex:1"></span>
         <foyer-viz-picker></foyer-viz-picker>

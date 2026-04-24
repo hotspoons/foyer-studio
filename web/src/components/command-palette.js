@@ -2,6 +2,7 @@
 // exposes via list_actions. Arrow keys navigate, enter invokes.
 
 import { LitElement, html, css, nothing } from "lit";
+import { isActionAllowed } from "../rbac.js";
 
 export class CommandPalette extends LitElement {
   static properties = {
@@ -147,9 +148,13 @@ export class CommandPalette extends LitElement {
   _close() { this._open = false; this.removeAttribute("open"); }
 
   _filtered() {
+    // RBAC: hide actions the current role can't invoke. The palette
+    // is a power-user surface — showing denied items just to watch
+    // clicks silently fail would be worse than not showing them.
+    const permitted = this._actions.filter(a => isActionAllowed(a.id));
     const q = this._query.trim().toLowerCase();
-    if (!q) return this._actions;
-    return this._actions.filter(a =>
+    if (!q) return permitted;
+    return permitted.filter(a =>
       a.label.toLowerCase().includes(q) ||
       a.category.toLowerCase().includes(q) ||
       a.id.toLowerCase().includes(q)

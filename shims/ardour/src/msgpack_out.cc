@@ -342,32 +342,36 @@ encode_transport_state (Session& session)
 		o.str ("dir");  o.str ("event");
 		o.str ("type"); o.str ("meter_batch");
 		o.str ("values");
-		// Fields: tempo, playing, recording, position
-		o.array (4);
+		// Fields: tempo, playing, recording, looping, position
+			o.array (5);
 
-		o.map (2);
-		o.str ("id");    o.str ("transport.tempo");
-		o.str ("value"); o.f64 (Temporal::TempoMap::fetch ()->metric_at (Temporal::timepos_t (session.transport_sample ())).tempo ().note_types_per_minute ());
+			o.map (2);
+			o.str ("id");    o.str ("transport.tempo");
+			o.str ("value"); o.f64 (Temporal::TempoMap::fetch ()->metric_at (Temporal::timepos_t (session.transport_sample ())).tempo ().note_types_per_minute ());
 
-		o.map (2);
-		o.str ("id");    o.str ("transport.playing");
-		// FSM has 5 motion states (Stopped, Rolling, DeclickToStop,
-		// DeclickToLocate, WaitingForLocate). Only `Rolling` means we're
-		// actually playing — `!stopped()` incorrectly reads `true` while
-		// the FSM is in a transient post-load WaitingForLocate state.
-		o.str ("value"); o.b (session.transport_state_rolling ());
+			o.map (2);
+			o.str ("id");    o.str ("transport.playing");
+			// FSM has 5 motion states (Stopped, Rolling, DeclickToStop,
+			// DeclickToLocate, WaitingForLocate). Only `Rolling` means we're
+			// actually playing — `!stopped()` incorrectly reads `true` while
+			// the FSM is in a transient post-load WaitingForLocate state.
+			o.str ("value"); o.b (session.transport_state_rolling ());
 
-		o.map (2);
-		o.str ("id");    o.str ("transport.recording");
-		// `actively_recording()` only returns true mid-record (armed +
-		// rolling). For the UI toggle "is the record button lit" we
-		// want the arm state, not the rolling-and-capturing state —
-		// `get_record_enabled()` = `record_status() >= Enabled`.
-		o.str ("value"); o.b (session.get_record_enabled ());
+			o.map (2);
+			o.str ("id");    o.str ("transport.recording");
+			// `actively_recording()` only returns true mid-record (armed +
+			// rolling). For the UI toggle "is the record button lit" we
+			// want the arm state, not the rolling-and-capturing state —
+			// `get_record_enabled()` = `record_status() >= Enabled`.
+			o.str ("value"); o.b (session.get_record_enabled ());
 
-		o.map (2);
-		o.str ("id");    o.str ("transport.position");
-		o.str ("value"); o.f64 (static_cast<double> (session.transport_sample ()));
+			o.map (2);
+			o.str ("id");    o.str ("transport.looping");
+			o.str ("value"); o.b (session.get_play_loop ());
+
+			o.map (2);
+			o.str ("id");    o.str ("transport.position");
+			o.str ("value"); o.f64 (static_cast<double> (session.transport_sample ()));
 	});
 }
 

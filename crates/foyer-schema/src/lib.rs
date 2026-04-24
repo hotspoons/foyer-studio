@@ -16,6 +16,7 @@ pub mod midi;
 pub mod plugin;
 pub mod session;
 pub mod timeline;
+pub mod tunnel;
 pub mod value;
 
 pub use action::{Action, ActionCategory};
@@ -27,7 +28,8 @@ pub use fs::{FsEntry, FsEntryKind, PathListing};
 pub use id::EntityId;
 pub use io::{EnginePort, IoDirection, IoPort};
 pub use message::{
-    BackendInfo, Command, ControlUpdate, Envelope, Event, OrphanInfo, Patch, Seq, SessionInfo,
+    BackendInfo, Command, ControlUpdate, Envelope, Event, OrphanInfo, Patch, PeerInfo, Seq,
+    SessionInfo,
 };
 pub use midi::{
     default_gm_drum_rows, expand_sequencer_layout, sequencer_layout_length_ticks,
@@ -39,6 +41,10 @@ pub use session::{
     Bus, Group, GroupPatch, PluginInstance, Send, Session, Track, TrackKind, TrackPatch, Transport,
 };
 pub use timeline::{Region, RegionPatch, TimelineMeta, WaveformPeaks, WaveformRequest};
+pub use tunnel::{
+    TunnelConnection, TunnelCreateToken, TunnelManifest, TunnelProviderConfig, TunnelProviderKind,
+    TunnelRevokeToken, TunnelRole, TunnelState, TunnelUp,
+};
 pub use value::{
     AutomationLane, AutomationMode, AutomationPoint, ControlKind, ControlValue, Parameter,
     ScaleCurve,

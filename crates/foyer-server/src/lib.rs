@@ -13,6 +13,9 @@
 mod audio;
 mod audio_opus;
 mod audio_ws;
+mod cloudflare_api;
+mod cloudflared_dl;
+mod cloudflare_provider;
 mod dev;
 mod ingress_ws;
 mod files;
@@ -20,7 +23,9 @@ mod jail;
 pub mod orphans;
 mod ring;
 mod sessions;
-mod ws;
+mod tunnel;
+mod tunnel_provider;
+pub(crate) mod ws;
 
 pub use jail::{Jail, JailError};
 
@@ -190,6 +195,43 @@ pub(crate) struct AppState {
     /// window-per-sidecar case today; a per-connection override can
     /// layer on top later without breaking this default.
     pub(crate) focus_session_id: RwLock<Option<EntityId>>,
+
+    // ─── remote-access tunnel state ────────────────────────────────────
+    /// In-memory tunnel manifest (connections, roles, enabled flag).
+    /// Backed by `$XDG_DATA_HOME/foyer/tunnel-manifest.json`.
+    pub(crate) tunnel_manifest: Arc<RwLock<foyer_schema::TunnelManifest>>,
+    /// Active tunnel provider (ngrok, cloudflared, …).  Held in an
+    /// Arc<Mutex<…>> so the provider-specific shutdown logic runs
+    /// polymorphically without the caller knowing which one it is.
+    pub(crate) tunnel_provider: Mutex<Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<Box<dyn crate::tunnel_provider::TunnelProvider>>,
+        >
+    >>,
+    /// Hostname reported by the active tunnel.
+    pub(crate) tunnel_hostname: RwLock<Option<String>>,
+    /// Configuration snapshot from config.yaml (tunnel.ngrok, tunnel.cloudflare).
+    /// Injected by the CLI after it reads the file so WS handlers can start
+    /// tunnels with stored tokens rather than env vars.
+    pub(crate) tunnel_cfg: RwLock<foyer_config::TunnelConfig>,
+    /// Directory of static web assets. Captured into AppState so the
+    /// tunnel-auth listener can rebuild the same router (with the same
+    /// static fallback) as the main LAN listener. Set by `Server::run`
+    /// from `Config::web_root` before either listener comes up.
+    pub(crate) web_root: RwLock<Option<PathBuf>>,
+    /// RBAC policy loaded from `$XDG_DATA_HOME/foyer/roles.yaml`
+    /// (seeded from the binary on first run). Queried on each
+    /// tunnel-origin command dispatch; LAN connections skip it. Stored
+    /// in an RwLock so the CLI's `--reload-roles` path (future) can
+    /// hot-swap without restarting the server.
+    pub(crate) roles_policy: RwLock<foyer_config::RolesConfig>,
+    /// Live connection roster, keyed by the server-assigned
+    /// connection id. Populated by the WS `handle()` on connect and
+    /// pruned on disconnect; broadcast to every client via
+    /// `PeerJoined` / `PeerLeft` / `PeerList` events. Gives the status
+    /// bar a reliable "who's here" view that — unlike the old
+    /// origin-sniffing — includes tunnel guests and quiet observers.
+    pub(crate) peers: RwLock<HashMap<String, foyer_schema::PeerInfo>>,
 }
 
 impl AppState {
@@ -350,8 +392,37 @@ impl Server {
             sessions,
             orphans: RwLock::new(Vec::new()),
             focus_session_id: RwLock::new(None),
+            tunnel_manifest: Arc::new(RwLock::new(foyer_schema::TunnelManifest::default())),
+            tunnel_provider: Mutex::new(None),
+            tunnel_hostname: RwLock::new(None),
+            tunnel_cfg: RwLock::new(foyer_config::TunnelConfig::default()),
+            web_root: RwLock::new(None),
+            // Bundled default keeps the server usable even if the CLI
+            // forgets to call `load_roles_policy` — fails closed on
+            // bad inputs, permissive on admin, which matches the
+            // "LAN is trusted" baseline.
+            roles_policy: RwLock::new(foyer_config::RolesConfig::bundled_default()),
+            peers: RwLock::new(HashMap::new()),
         });
         Self { state }
+    }
+
+    /// Load tunnel configuration from the parsed config.yaml so WS handlers
+    /// can read tokens without env vars.
+    pub async fn load_tunnel_config(&self, cfg: &foyer_config::TunnelConfig) {
+        *self.state.tunnel_cfg.write().await = cfg.clone();
+        tracing::info!("tunnel config loaded — ngrok: {}, cloudflare: {}",
+            cfg.ngrok.is_some().then_some("yes").unwrap_or("no"),
+            cfg.cloudflare.is_some().then_some("yes").unwrap_or("no")
+        );
+    }
+
+    /// Install the RBAC policy. CLI calls this at startup with the
+    /// seeded-or-loaded `roles.yaml` contents. See `foyer_config::roles`.
+    pub async fn load_roles_policy(&self, cfg: foyer_config::RolesConfig) {
+        let role_ids: Vec<&str> = cfg.roles.iter().map(|r| r.id.as_str()).collect();
+        tracing::info!("RBAC policy loaded — roles: [{}]", role_ids.join(", "));
+        *self.state.roles_policy.write().await = cfg;
     }
 
     /// Record which backend entry is currently live. Called by the CLI
@@ -402,35 +473,14 @@ impl Server {
             *self.state.pump_handle.lock().await = Some(handle);
         }
 
-        let mut router = Router::new()
-            .route("/ws", get(ws::upgrade))
-            .route("/ws/audio/:stream_id", get(audio_ws::upgrade))
-            .route("/ws/ingress/:stream_id", get(ingress_ws::upgrade))
-            .route("/files/*path", get(files::serve_file))
-            .route("/console", get(console_tail))
-            .route("/qr", get(qr_svg));
-
-        // Dev-only integration probe harness. Gated on FOYER_DEV=1 so
-        // production runs don't expose a side-channel for backend
-        // mutation. Probes (see `dev.rs`) exercise the backend via
-        // the same paths the WS handler uses, plus event-broadcast
-        // observation where applicable.
-        if dev::enabled() {
-            tracing::info!("FOYER_DEV=1 — mounting /dev/run-tests + /dev/list-tests");
-            router = router
-                .route("/dev/run-tests", get(dev::run_tests))
-                .route("/dev/list-tests", get(dev::list_tests));
-        }
-
-        let mut router = router
-            .with_state(self.state.clone())
-            .layer(TraceLayer::new_for_http())
-            .layer(CorsLayer::permissive());
-
-        if let Some(root) = config.web_root.clone() {
+        // Stash web_root on state so the tunnel-auth listener can rebuild
+        // the same router without a separate Config handoff.
+        *self.state.web_root.write().await = config.web_root.clone();
+        if let Some(root) = &config.web_root {
             tracing::info!("serving static files from {}", root.display());
-            router = router.fallback_service(ServeDir::new(root));
         }
+
+        let router = build_http_router(self.state.clone()).await;
 
         self.state
             .listen_port
@@ -447,6 +497,10 @@ impl Server {
         let service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
 
         if let Some(tls) = &config.tls {
+            // Pin the rustls crypto provider to `ring` so the TLS path
+            // doesn't panic when multiple providers are present in the
+            // dependency tree (e.g. `aws-lc-rs` pulled by another crate).
+            let _ = rustls::crypto::ring::default_provider().install_default();
             // HTTPS / WSS path — required for mobile browsers on LAN
             // IPs because AudioWorklet refuses to load outside a
             // secure context. `axum-server` with `tls-rustls` uses
@@ -474,6 +528,48 @@ impl Server {
         }
         Ok(())
     }
+}
+
+/// Build the HTTP+WS router that both the main LAN listener and the
+/// tunnel-auth listener serve. Centralizing this is what makes "tunnel
+/// traffic sees the real Foyer UI, not a stub" work without
+/// duplicating every route — both listeners share `AppState`, so
+/// commands from either route into the same backend.
+///
+/// RBAC layer (future): when it lands, it will be a middleware
+/// applied *only to the router instance served on the auth port* —
+/// e.g. `tunnel_router.layer(TunnelRbacLayer::new(state))`. The main
+/// listener's router stays untouched, preserving "LAN = trusted"
+/// without a shared-surface regression risk. See DECISION 37.
+pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
+    let mut router = Router::new()
+        .route("/ws", get(ws::upgrade))
+        .route("/ws/audio/:stream_id", get(audio_ws::upgrade))
+        .route("/ws/ingress/:stream_id", get(ingress_ws::upgrade))
+        .route("/files/*path", get(files::serve_file))
+        .route("/console", get(console_tail))
+        .route("/qr", get(qr_svg));
+
+    // Dev-only integration probe harness. Gated on FOYER_DEV=1 so
+    // production runs don't expose a side-channel for backend
+    // mutation. Probes (see `dev.rs`) exercise the backend via the
+    // same paths the WS handler uses, plus event-broadcast observation.
+    if dev::enabled() {
+        tracing::info!("FOYER_DEV=1 — mounting /dev/run-tests + /dev/list-tests");
+        router = router
+            .route("/dev/run-tests", get(dev::run_tests))
+            .route("/dev/list-tests", get(dev::list_tests));
+    }
+
+    let web_root = state.web_root.read().await.clone();
+    let mut router = router
+        .with_state(state)
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive());
+    if let Some(root) = web_root {
+        router = router.fallback_service(ServeDir::new(root));
+    }
+    router
 }
 
 /// Background task: subscribe to the backend and funnel every event into the broadcast,

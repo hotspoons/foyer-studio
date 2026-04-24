@@ -1310,12 +1310,20 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
 			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
-				auto ctrl = schema_map::resolve (shim->session (), snap.id);
+				auto& session = shim->session ();
+				auto ctrl = schema_map::resolve (session, snap.id);
 				if (!ctrl) {
 					PBD::warning << "foyer_shim: unknown control id: " << snap.id << endmsg;
 					return;
 				}
+				// Wrap each ControlSet in a reversible command so it
+				// becomes a single undo step. Without this,
+				// AutomationControl::set_value may silently drop its
+				// internal undo registration because there is no active
+				// UndoTransaction.
+				session.begin_reversible_command ("Foyer control change");
 				ctrl->set_value (snap.value, Controllable::UseGroup);
+				session.commit_reversible_command ();
 				// No manual echo — the Controllable::Changed signal will
 				// fire and our SignalBridge will emit the corresponding
 				// `control.update`.
@@ -2108,6 +2116,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				PBD::warning << "foyer_shim: reorder_tracks: ids=";
 				for (auto const& x : snap.ordered_track_ids) PBD::warning << x << " ";
 				PBD::warning << endmsg;
+				ARDOUR::PresentationInfo::ChangeSuspender cs;
 				ARDOUR::PresentationInfo::order_t order = 0;
 				for (auto const& tid : snap.ordered_track_ids) {
 					const std::string sid = tid.rfind ("track.", 0) == 0 ? tid.substr (6) : tid;
@@ -2130,7 +2139,13 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					}
 					r->set_presentation_order (order++);
 				}
-				shim->session ().resort_routes ();
+				// NOTE: resort_routes() is for the processing graph, not
+				// presentation order. It does not need to be called here.
+				// The snapshot will be built from snapshot_tracked_routes()
+				// which sorts by presentation_info().order().
+				PBD::warning << "foyer_shim: reorder_tracks done"
+				             << " n_routes=" << by_sid.size ()
+				             << endmsg;
 				auto bytes = msgpack_out::encode_patch_reload ();
 				shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
@@ -2307,10 +2322,115 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 					}
 				}
-			});
-			break;
-		}
-		case DecodedCmd::Kind::InvokeAction: {
+            });
+            break;
+        }
+        case DecodedCmd::Kind::CreateGroup: {
+            DecodedCmd snap = cmd;
+            FoyerShim* shim = &_shim;
+            _shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+                auto& session = shim->session ();
+                auto rg = session.new_route_group (snap.group_name);
+                if (!rg) {
+                    PBD::warning << "foyer_shim: create_group failed for '" << snap.group_name << "'" << endmsg;
+                    return;
+                }
+                if (!snap.group_color.empty ()) {
+                    // Convert #RRGGBB[AA] hex string to uint32_t rgba.
+                    uint32_t rgba = 0;
+                    const std::string& h = snap.group_color;
+                    if (h.size () >= 7 && h[0] == '#') {
+                        rgba = std::stoul (h.substr (1, 6), nullptr, 16) << 8 | 0xff;
+                        if (h.size () >= 9) {
+                            rgba = std::stoul (h.substr (1, 8), nullptr, 16);
+                        }
+                    }
+                    if (rgba != 0) rg->set_rgba (rgba);
+                }
+                for (auto const& tid : snap.group_members) {
+                    if (tid.rfind ("track.", 0) != 0) continue;
+                    const std::string sid = tid.substr (6);
+                    auto routes = schema_map::safe_get_routes (session);
+                    for (auto const& r : *routes) {
+                        if (!r) continue;
+                        std::ostringstream tmp; tmp << r->id ();
+                        if (tmp.str () == sid) { rg->add (r); break; }
+                    }
+                }
+                auto bytes = msgpack_out::encode_patch_reload ();
+                shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+            });
+            break;
+        }
+        case DecodedCmd::Kind::UpdateGroup: {
+            DecodedCmd snap = cmd;
+            FoyerShim* shim = &_shim;
+            _shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+                auto& session = shim->session ();
+                if (snap.id.rfind ("group.", 0) != 0) return;
+                const std::string gid = snap.id.substr (6);
+                std::shared_ptr<RouteGroup> rg;
+                for (auto const& g : session.route_groups ()) {
+                    std::ostringstream tmp; tmp << g->id ();
+                    if (tmp.str () == gid) { rg = g; break; }
+                }
+                if (!rg) {
+                    PBD::warning << "foyer_shim: update_group: unknown id " << snap.id << endmsg;
+                    return;
+                }
+                if (snap.has_group_patch_name) rg->set_name (snap.group_patch_name);
+                if (snap.has_group_patch_color) {
+                    uint32_t rgba = 0;
+                    const std::string& h = snap.group_patch_color;
+                    if (h.size () >= 7 && h[0] == '#') {
+                        rgba = std::stoul (h.substr (1, 6), nullptr, 16) << 8 | 0xff;
+                        if (h.size () >= 9) {
+                            rgba = std::stoul (h.substr (1, 8), nullptr, 16);
+                        }
+                    }
+                    if (rgba != 0) rg->set_rgba (rgba);
+                }
+                if (snap.has_group_patch_members) {
+                    // Rebuild membership: remove all then add listed.
+                    for (auto const& r : schema_map::safe_get_routes (session).operator*()) {
+                        if (r && r->route_group () == rg) rg->remove (r);
+                    }
+                    for (auto const& tid : snap.group_patch_members) {
+                        if (tid.rfind ("track.", 0) != 0) continue;
+                        const std::string sid = tid.substr (6);
+                        for (auto const& r : schema_map::safe_get_routes (session).operator*()) {
+                            if (!r) continue;
+                            std::ostringstream tmp; tmp << r->id ();
+                            if (tmp.str () == sid) { rg->add (r); break; }
+                        }
+                    }
+                }
+                auto bytes = msgpack_out::encode_patch_reload ();
+                shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+            });
+            break;
+        }
+        case DecodedCmd::Kind::DeleteGroup: {
+            if (cmd.id.empty ()) break;
+            DecodedCmd snap = cmd;
+            FoyerShim* shim = &_shim;
+            _shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+                auto& session = shim->session ();
+                if (snap.id.rfind ("group.", 0) != 0) return;
+                const std::string gid = snap.id.substr (6);
+                for (auto const& g : session.route_groups ()) {
+                    std::ostringstream tmp; tmp << g->id ();
+                    if (tmp.str () == gid) {
+                        session.remove_route_group (g);
+                        break;
+                    }
+                }
+                auto bytes = msgpack_out::encode_patch_reload ();
+                shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+            });
+            break;
+        }
+        case DecodedCmd::Kind::InvokeAction: {
 			if (cmd.id.empty ()) break;
 			// Action verbs live in the Session — they allocate SessionEvents
 			// and walk routes, so (like UpdateTrack) we post onto the shim

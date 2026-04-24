@@ -10,6 +10,7 @@ import { openSettings } from "./settings-modal.js";
 import { promptText } from "./prompt-modal.js";
 import { load as loadRecents, forget as forgetRecent, touch as touchRecent, clearAll as clearRecents } from "../recents.js";
 import { launchProjectGuarded } from "../session-launch.js";
+import { isAllowed, isActionAllowed } from "../rbac.js";
 
 // Category → menu label + order. Categories not listed are skipped.
 const MENU_ORDER = [
@@ -38,6 +39,7 @@ export class MainMenu extends LitElement {
   static properties = {
     _actions: { state: true, type: Array },
     _openMenu: { state: true, type: String },
+    _rbacTick: { state: true, type: Number },
   };
 
   static styles = css`
@@ -174,6 +176,8 @@ export class MainMenu extends LitElement {
     super();
     this._actions = [];
     this._openMenu = "";
+    this._rbacTick = 0;
+    this._onRbac = () => { this._rbacTick++; };
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
     this._onDocDown = (e) => {
       if (!this._openMenu) return;
@@ -196,11 +200,23 @@ export class MainMenu extends LitElement {
       ws.addEventListener("envelope", this._envelopeHandler);
       ws.send({ type: "list_actions" });
     }
+    window.__foyer?.store?.addEventListener("rbac", this._onRbac);
   }
   disconnectedCallback() {
     document.removeEventListener("pointerdown", this._onDocDown, true);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
+    window.__foyer?.store?.removeEventListener("rbac", this._onRbac);
     super.disconnectedCallback();
+  }
+
+  /// Only show the Remote Access (tunnel manager) menu item when the
+  /// current user can actually invite + revoke tokens. LAN users see
+  /// it always; tunnel admins see it; everyone else (viewer/performer/
+  /// session_controller) doesn't.
+  _canManageTunnels() {
+    return isAllowed("tunnel_create_token")
+      && isAllowed("tunnel_revoke_token")
+      && isAllowed("tunnel_start");
   }
 
   _onEnvelope(env) {
@@ -211,7 +227,13 @@ export class MainMenu extends LitElement {
   }
 
   _byCategory(cat) {
-    return this._actions.filter(a => a.category === cat);
+    // Filter by role: actions the current connection can't invoke are
+    // hidden from every menu. LAN users see everything; tunnel guests
+    // only see what their role permits. See web/src/rbac.js for the
+    // per-action mapping.
+    return this._actions.filter(a =>
+      a.category === cat && isActionAllowed(a.id),
+    );
   }
 
   _invoke(a) {
@@ -399,6 +421,21 @@ export class MainMenu extends LitElement {
             `;
           })}
           ${cat === "session" ? this._renderRecentSubmenu() : null}
+          ${cat === "session" && this._canManageTunnels() ? html`
+            <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
+            <div class="item" @click=${() => { this._openMenu = ""; import("./tunnel-manager-modal.js").then((m) => m.openTunnelManager()); }}>
+              <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("globe-alt", 11)}</span>
+              <span class="label">Remote Access…</span>
+              <span class="shortcut">Share</span>
+            </div>
+          ` : null}
+          ${cat === "track" ? html`
+            <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
+            <div class="item" @click=${() => { this._openMenu = ""; import("./group-manager-modal.js").then((m) => m.openGroupManager()); }}>
+              <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("users", 11)}</span>
+              <span class="label">Group Manager…</span>
+            </div>
+          ` : null}
         </div>
       ` : null}
     `;
@@ -410,6 +447,10 @@ export class MainMenu extends LitElement {
    *  `SessionOpened` in the store, so opening an entry here
    *  automatically promotes it to the top next time the menu opens. */
   _renderRecentSubmenu() {
+    // Opening a recent project invokes `launch_project` server-side;
+    // hide the whole submenu if the current role can't swap sessions
+    // (tunnel guests of any non-admin role).
+    if (!isAllowed("launch_project")) return null;
     const recents = loadRecents();
     if (recents.length === 0) {
       return html`

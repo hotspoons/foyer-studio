@@ -17,6 +17,7 @@ import { LitElement, html, css } from "lit";
 import { icon } from "../icons.js";
 import { load as loadRecents, touch as touchRecent, forget as forgetRecent, clearAll } from "../recents.js";
 import { launchProjectGuarded } from "../session-launch.js";
+import { isAllowed, onRbacChange } from "../rbac.js";
 
 export class WelcomeScreen extends LitElement {
   static properties = {
@@ -284,6 +285,7 @@ export class WelcomeScreen extends LitElement {
     store?.addEventListener("change", this._onStore);
     store?.addEventListener("orphans", this._onOrphans);
     store?.addEventListener("sessions", this._onSessions);
+    this._offRbac = onRbacChange(() => this.requestUpdate());
     this._refresh();
   }
   disconnectedCallback() {
@@ -291,6 +293,7 @@ export class WelcomeScreen extends LitElement {
     store?.removeEventListener("change", this._onStore);
     store?.removeEventListener("orphans", this._onOrphans);
     store?.removeEventListener("sessions", this._onSessions);
+    this._offRbac?.();
     super.disconnectedCallback();
   }
 
@@ -409,6 +412,42 @@ export class WelcomeScreen extends LitElement {
     const recents = this._recents || [];
     const orphanGroups = this._groupOrphans(this._orphans || []);
     const openSessions = this._sessions || [];
+    const canLaunch = isAllowed("launch_project");
+    // Tunnel guests without project-launch rights can't drive the
+    // welcome screen forward — the project picker, orphan recovery,
+    // and recents all end in a launch. Show them a passive "waiting"
+    // state instead so the app doesn't look broken.
+    if (!canLaunch) {
+      return html`
+        <div class="panel">
+          <header>
+            <span class="brand">Foyer Studio</span>
+            <span class="sub">
+              Waiting for the host to open a session. Once they do, the
+              workspace will appear here automatically.
+            </span>
+          </header>
+          ${openSessions.length > 0 ? html`
+            <section class="open">
+              <h3>Open sessions</h3>
+              <div class="open-list">
+                ${openSessions.map((s) => html`
+                  <div class="open-row" @click=${() => this._switchToOpen(s)}>
+                    <span class="icon">${icon("musical-note", 18)}</span>
+                    <div>
+                      <div class="name">${s.name || "(unnamed)"}${s.dirty ? " •" : ""}</div>
+                      <div class="path">${s.path || "(no path)"}</div>
+                    </div>
+                    <span class="tag">${s.backend_id}</span>
+                    <span></span>
+                  </div>
+                `)}
+              </div>
+            </section>
+          ` : null}
+        </div>
+      `;
+    }
     return html`
       <div class="panel">
         <header>

@@ -54,6 +54,21 @@ export class Store extends EventTarget {
       // don't own their own region state (mixer strip chips,
       // agent tools) can query without a dedicated subscription.
       regionsByTrack: new Map(),
+      // ── RBAC (populated from ClientGreeting) ─────────────────────
+      // Filled on each handshake so components can gate UI without
+      // re-implementing policy. `isTunnel` false means LAN → no
+      // gating. `isAuthenticated` false on tunnel means the client
+      // should show its login modal. `roleAllow` is an allowlist of
+      // wire-tag patterns (same language as roles.yaml) so the
+      // client can mirror the server's decisions. LAN defaults to
+      // admin-equivalent (isAuthenticated=true, no gate).
+      rbac: {
+        isTunnel: false,
+        isAuthenticated: true,
+        roleId: null,
+        roleAllow: [],
+        recipient: null,
+      },
     };
     // Transport-position reconciliation state.
     this._lastTransportSeq = 0;
@@ -64,6 +79,46 @@ export class Store extends EventTarget {
     if (typeof window !== "undefined") {
       this._peerPruneInterval = setInterval(() => this._prunePeers(), 3000);
     }
+  }
+
+  // ── RBAC helpers ───────────────────────────────────────────────────
+  /**
+   * True when the current connection's role allows a given command
+   * tag. LAN connections always return true (no gating); tunnel
+   * connections consult `rbac.roleAllow` using the same pattern rules
+   * the server uses. Unauthenticated tunnel connections deny
+   * everything so the UI encourages sign-in.
+   *
+   * Pattern rules (mirrored from crates/foyer-config/src/roles.rs):
+   *   "*"           → any command
+   *   "prefix.*"    → "prefix" or "prefix.foo"
+   *   "prefix_*"    → starts with "prefix_"
+   *   "exact_name"  → literal
+   */
+  isAllowed(cmdTag) {
+    const rbac = this.state.rbac;
+    if (!rbac.isTunnel) return true;           // LAN = trusted
+    if (!rbac.isAuthenticated) return false;   // tunnel w/o token = deny all
+    for (const pattern of rbac.roleAllow || []) {
+      if (pattern === "*") return true;
+      if (pattern.endsWith(".*")) {
+        const prefix = pattern.slice(0, -2);
+        if (cmdTag === prefix || cmdTag.startsWith(prefix + ".")) return true;
+        continue;
+      }
+      if (pattern.endsWith("*")) {
+        const prefix = pattern.slice(0, -1);
+        if (cmdTag.startsWith(prefix)) return true;
+        continue;
+      }
+      if (pattern === cmdTag) return true;
+    }
+    return false;
+  }
+
+  /** Current RBAC snapshot — reacts to "rbac" event. */
+  rbac() {
+    return this.state.rbac;
   }
 
   // ── track selection ────────────────────────────────────────────────
@@ -113,28 +168,20 @@ export class Store extends EventTarget {
     return this.state.selectedTrackIds.has(id);
   }
 
-  /** Peers we've observed messages from in the last 10s (excludes self). */
-  activePeers(windowMs = 10_000) {
-    const now = Date.now();
-    const out = [];
-    for (const [origin, ts] of this.state.peers) {
-      if (origin && origin !== this.state.selfOrigin && now - ts < windowMs) {
-        out.push({ origin, lastSeen: ts });
-      }
-    }
-    return out;
+  /// Everyone currently connected, excluding this browser's own entry.
+  /// The server is the authority — this is a direct mirror of the
+  /// `peers` map it broadcasts, so tunnel guests show up alongside LAN
+  /// connections with no timing games or heartbeat logic needed.
+  activePeers() {
+    const self = this.state.selfPeerId;
+    return [...this.state.peers.values()].filter((p) => p.id !== self);
   }
 
+  /// Legacy no-op; server-driven roster doesn't need pruning (clients
+  /// drop entries on PeerLeft). Kept so the interval tick doesn't
+  /// explode on old builds that still schedule it.
   _prunePeers() {
-    const now = Date.now();
-    let pruned = false;
-    for (const [origin, ts] of this.state.peers) {
-      if (now - ts > 30_000) {
-        this.state.peers.delete(origin);
-        pruned = true;
-      }
-    }
-    if (pruned) this.dispatchEvent(new CustomEvent("peers"));
+    // intentionally empty — peers are authoritative from the server
   }
 
   /** Current value for a control ID, or undefined if unknown. */
@@ -249,14 +296,53 @@ export class Store extends EventTarget {
     ) {
       return;
     }
-    // Presence bookkeeping.
-    const origin = env?.origin;
-    if (origin && origin !== this.state.selfOrigin) {
-      const prev = this.state.peers.get(origin);
-      this.state.peers.set(origin, Date.now());
-      if (!prev) this.dispatchEvent(new CustomEvent("peers"));
-    }
+    // Presence: the server drives the `peers` map via
+    // PeerJoined/PeerLeft/PeerList events — see the reducer cases
+    // below. No origin-sniffing here.
     switch (body.type) {
+      case "client_greeting": {
+        // Mirror server-side RBAC state so components can gate UI
+        // without re-parsing envelopes themselves. `isTunnel` drives
+        // login-modal visibility; `roleAllow` drives per-control
+        // hide/disable decisions via `isAllowed()`.
+        this.state.rbac = {
+          isTunnel: !!body.is_tunnel,
+          isAuthenticated: body.is_authenticated !== false,
+          roleId: body.role_id || null,
+          roleAllow: Array.isArray(body.role_allow) ? body.role_allow : [],
+          recipient: body.recipient || null,
+        };
+        // Our own connection id — used to filter our entry out of the
+        // connected-peers list so the user doesn't see themselves.
+        this.state.selfPeerId = body.peer_id || "";
+        this.dispatchEvent(new CustomEvent("rbac"));
+        this.dispatchEvent(new CustomEvent("peers"));
+        break;
+      }
+      case "peer_list": {
+        // Replace the whole map — this lands before joins/leaves start
+        // streaming, so it's a clean reset on reconnect.
+        this.state.peers = new Map();
+        for (const p of body.peers || []) {
+          this.state.peers.set(p.id, p);
+        }
+        this.dispatchEvent(new CustomEvent("peers"));
+        break;
+      }
+      case "peer_joined": {
+        if (body.peer?.id) {
+          this.state.peers.set(body.peer.id, body.peer);
+          this.dispatchEvent(new CustomEvent("peers"));
+        }
+        break;
+      }
+      case "peer_left": {
+        if (body.peer_id && this.state.peers.has(body.peer_id)) {
+          this.state.peers.delete(body.peer_id);
+          this.dispatchEvent(new CustomEvent("peers"));
+        }
+        break;
+      }
       case "session_snapshot": {
         this.state.session = body.session;
         // Seed the controls map with all known parameter values.
