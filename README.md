@@ -1,19 +1,42 @@
 # Foyer Studio
 
-A web-native, DAW-agnostic control surface and modern UI for
-professional audio workstations. Ardour is the first supported
-engine; the architecture is deliberately generic above the `.so`
-boundary so adding Reaper, Bitwig (where possible), or a custom DAW
-backend is a contained task.
+A web-native, remote-collaborative control surface for professional
+DAWs. Ardour is the first — and today, only — backend; the
+architecture is deliberately generic above the shim boundary so
+adding Reaper, Bitwig, or a custom engine is a contained task.
 
 **Not a browser-based DAW.** Foyer doesn't run the audio graph — the
-host DAW does, with its native low-latency path. Foyer replaces the
-*UI* with something that treats 2026 browser capabilities as the
-minimum target: tiling + floating window management, per-channel
-resizing, schema-driven plugin panels, CRDT-ready collaboration
-primitives, and a keyboard-first command model.
+host DAW does, over its native low-latency path. Foyer replaces the
+UI with something that treats modern browser capabilities as the
+minimum target: tiling + floating windows, schema-driven plugin
+panels, keyboard-first commands, and real-time collaboration over
+WebSockets and Cloudflare tunnels.
 
-## Architecture
+## What's it for?
+
+Use cases I had in mind when I built it (over the course of one
+very caffeinated week, with heavy LLM assistance):
+
+- **Sharing a mix-in-progress** with a performer and making live
+  changes while they give feedback, without them being in the same
+  room. Screen-share-with-audio exists; this is more fun.
+- **A remote performer laying a track** into the host's session.
+- **Real-time collaboration** on the mix, effects, timeline, or
+  instruments — multiple browsers into one session, each with a
+  scoped RBAC role.
+- **Accessible, hackable UIs.** Reprojecting the DAW's state into
+  a web UI opens up things you can't easily do in a pro-grade DAW
+  shell: a MIDI-only Cakewalk-style surface, a phone transport
+  remote, a kid-friendly touch interface, etc.
+- **Feature compositions on top of the engine.** There's a simple
+  beat + piano-roll sequencer shipped today that generates MIDI
+  and saves the sequencer data in a region-data extension inside
+  the `.ardour` file. My 8-year-old loves playing with Hydrogen
+  and frankly so do I.
+
+## Architecture (the one-paragraph version)
+
+Three layers, each with a strict job:
 
 ```
  Ardour (or any DAW)
@@ -38,183 +61,140 @@ primitives, and a keyboard-first command model.
                                                └──────────────────────┘
 ```
 
-**The shim is a thin event translator.** It subscribes to libardour
-signals and forwards them as the DAW-agnostic `foyer-schema`
-vocabulary over a Unix socket — no UX logic, no policy, just
-translation. Keeping the shim narrow is what lets adding a second
-backend (Reaper, Bitwig, a custom engine) come down to "write
-another shim" rather than "rewrite Foyer." Each shim naturally
-inherits whatever license its host DAW requires for linking; the
-Rust sidecar and web UI sit above that boundary and can be licensed
-separately from any one shim. See
-[docs/DECISIONS.md](docs/DECISIONS.md) entry 15.
+- The **C++ shim** is a thin Ardour control surface plugin. It
+  translates between Ardour's internal vocabulary and Foyer's
+  DAW-agnostic wire schema. No UX logic, no state, no policy.
+- The **Rust sidecar** (`foyer` binary, axum-based) owns the state
+  store, RBAC enforcement, Cloudflare tunneling, audio routing, and
+  the HTTP/WS surface the browser talks to.
+- The **web UI** is plain ES modules + Lit + Tailwind, no build
+  step at ship time. Three-tier split so a third party can replace
+  any tier (including the whole UI) without owning the wire
+  protocol, the audio path, or the state store.
 
-**The web UI is a three-tier split.** `foyer-core` (renderless —
-ws, store, RBAC, registries) → `foyer-ui-core` (shared primitives —
-tiling, widgets, fallback shell) → one or more `ui-*` variants (the
-opinionated UIs; `ui-full` is what ships). Third parties can
-replace any tier below theirs — React / Svelte / native — without
-owning the wire protocol, state, or audio path. See
-[docs/DECISIONS.md](docs/DECISIONS.md) entry 40.
+Deeper walkthrough in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Capabilities
+## What works today
 
-Full table lives in [docs/STATUS.md](docs/STATUS.md). Highlights:
-
-- Stub backend + live Ardour backend with hot-swap
-- Tile + floating-window WM, keyboard-first chords, user layouts
-- Schema-driven mixer, timeline, plugin panels; embedded track
+- Stub backend + live Ardour backend with hot-swap between the two
+- Tiling + floating window manager, keyboard-first chords,
+  per-user saved layouts
+- Schema-driven mixer, timeline, and plugin panels; embedded track
   editor; multi-track selection + batch ops
 - Transport — play / stop / record / loop / return-on-stop modes;
-  tempo + loop-range writes persist through the shim
-- Real audio egress from the master tap (Opus or raw f32 over WS)
-- Cloudflare tunnel auto-provision + per-invite RBAC for remote
-  guests (see [DECISIONS 35–38](docs/DECISIONS.md))
-- Hot-serve UI assets from `$XDG_DATA_HOME/foyer/web/` with
-  runtime overlay dirs for third-party UIs (see
-  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md))
+  tempo and loop-range writes persist through the shim
+- Real-time audio egress from the master tap (Opus by default, raw
+  f32 over WS for fidelity-critical sessions)
+- Real-time audio ingress — a remote performer's mic lands on an
+  Ardour soft port, armable and recordable
+- Cloudflare tunnel auto-provision with per-invite RBAC; relay
+  chat + push-to-talk audio between collaborators
+- A simple beat + piano-roll sequencer that writes MIDI into
+  `.ardour` regions via a data extension
 
-## Quick start
-
-Dev container is Debian trixie with Rust + audio deps preinstalled.
-From the repo root:
-
-```bash
-just run                         # serves web/, default backend from config.yaml
-just run --backend stub          # stub-only, no shim or JACK needed
-```
-
-Then open <http://127.0.0.1:3838>. A fresh install boots in
-"launcher" mode with an empty stub; pick a project folder in the
-Session view and Foyer spawns Ardour via the shim, then atomically
-swaps the backend without dropping your browser connection.
-
-**Full Ardour path** (may build Ardour + shim once on first run):
-
-```bash
-just ardour ensure
-just shim check
-```
-
-**Dev-only integration probes:**
-
-```bash
-FOYER_DEV=1 just run &
-curl -s http://127.0.0.1:3838/dev/run-tests | jq
-```
-
-Returns pass/fail for each probe (snapshot shape, control echo,
-region list, waveform decode, track rename, transport round-trip).
-Same probes surface in the **Diagnostics** view.
-
-**Playwright smoke + agent probe:**
-
-```bash
-just test-ui            # Playwright suite against the running server
-just ui-probe dump      # JSON snapshot of store/rbac/peers
-just ui-probe screenshot /tmp/foyer.png
-just ci                 # fmt + clippy + cargo test + UI smoke (matches PR gate)
-```
-
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full dev
-workflow (building your own UI, overlays, ship-your-own-binary,
-testing).
-
-## Project layout
-
-```
-crates/                    Rust workspace
-  foyer-schema             wire types (Session/Track/Parameter/Event/…)
-  foyer-ipc                length-prefixed MsgPack frames (shim ↔ sidecar)
-  foyer-backend            Backend trait — DAW-agnostic
-  foyer-backend-stub       in-memory fake session for demo mode
-  foyer-backend-host       generic IPC client for any shim
-  foyer-server             axum WS + HTTP + jail + tunnel + RBAC
-  foyer-config             YAML config + XDG + roles + tunnel manifest
-  foyer-cli                `foyer` binary; bundles web/ via include_dir!
-  foyer-desktop            wry + tao native wrapper (no Electron)
-
-shims/
-  ardour                   C++ control surface plugin (.so); GPL-contained
-
-web/                       Three-tier UI tree (see HACKING + DEVELOPMENT)
-  boot.js                  fetches /variants.json, dynamic-imports variants
-  index.html               import map for lit + foyer-core + foyer-ui-core
-  core/                    foyer-core — renderless: ws, store, RBAC, audio, registries
-  ui-core/                 foyer-ui-core — primitives: tiling, widgets, fallback
-  ui-full/                 shipping UI variant (one of many possible ui-*/)
-  vendor/                  vendored ES modules (Lit — no npm)
-  styles/                  Tailwind v4 standalone CLI output
-
-tests-ui/                  Playwright harness (outside web/ so not bundled)
-scripts/dev/               helper scripts invoked by the Justfile
-docs/                      DECISIONS, DEVELOPMENT, PLAN, STATUS, TODO, KEYBOARD
-```
-
-## Conventions
-
-Durable rules, not stylistic preferences. Each is enforced in code
-review and logged in [docs/DECISIONS.md](docs/DECISIONS.md).
-
-- **No Node at ship time.** `web/` is plain ES modules + import map,
-  vendored deps only. Bun + Playwright are dev-time tooling in
-  [tests-ui/](tests-ui); they never enter the shipping binary.
-  Tailwind uses the standalone CLI in [.bin/](.bin/).
-- **Per-layer licensing.** `shims/ardour/` inherits GPLv2+ because
-  it statically links `libardour`. The Rust sidecar + web UI sit
-  above the IPC boundary and ship under non-copyleft terms. Future
-  shims (Reaper SDK, JUCE-based engines) carry their own license.
-- **Rust primary, C++ minimized.** The shim's only job is
-  translation. Anything above that (state, protocol, auth,
-  collaboration) is Rust.
-- **DAW-agnostic schema.** Types in
-  [foyer-schema](crates/foyer-schema) describe domain entities
-  (Session, Track, Parameter) — never Ardour specifics.
-- **One-way web dependency arrow.** `core → ui-core → ui-*`. Never
-  import the other way; push up through a registry instead. See
-  [docs/DECISIONS.md](docs/DECISIONS.md) entry 40.
-- **Decisions get written down.** Real architectural tradeoffs
-  append to [DECISIONS.md](docs/DECISIONS.md) as a numbered entry.
-- **`just` over ad-hoc scripts.** Every recurring workflow lives in
-  the [Justfile](Justfile). A green `just ci` == a green PR check.
-
-## Where to read next
-
-- **Agent context:** [AGENTS.md](AGENTS.md) — cold-start brief for
-  coding agents, with `window.__foyer` probe recipes.
-- **Develop + test:** [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) —
-  run, overlay your own UI, ship a derived binary, CI gate.
-- **Write a UI variant:** [web/HACKING.md](web/HACKING.md) —
-  renderer recipes, widget overrides, feature gates.
-- **Current state:** [docs/STATUS.md](docs/STATUS.md) +
-  [docs/PLAN.md](docs/PLAN.md) — capability table + backlog.
-- **Why things are the way they are:**
-  [docs/DECISIONS.md](docs/DECISIONS.md) — every architectural
-  call logged as an ADR.
-- **Keyboard + gestures:** [docs/KEYBOARD.md](docs/KEYBOARD.md).
-- **Wire contract:**
-  [crates/foyer-schema/src/message.rs](crates/foyer-schema/src/message.rs) —
-  every other layer is downstream of this file.
-
-## License
+## Licensing
 
 Layer-scoped:
 
-- **`shims/ardour/`** — GPLv2+, because it statically links
-  `libardour`. Standard practice for anything that touches the
-  Ardour internals.
-- **Rust sidecar + web UI** — TBD; sits above a documented IPC
-  boundary and isn't derivative of any single shim, so it's
-  licensed separately from whichever shim the user is running.
+- **`shims/ardour/`** — GPLv2+ because it statically links
+  `libardour`. Standard practice for anything linking Ardour
+  internals.
+- **Rust sidecar + web UI** — Apache-2.0. They sit above the IPC
+  boundary and are not derivative of any single shim. Replacing
+  Ardour with a different backend doesn't touch the Apache parts.
 
-Future shims for other engines (Reaper, JUCE-based hosts,
-commercial SDKs) will each carry their own license terms
-appropriate to how they link against their respective host. See
+Future shims for other engines (Reaper SDK, JUCE-based hosts,
+commercial SDKs) will each carry their own license terms. See
 [docs/DECISIONS.md](docs/DECISIONS.md) entry 15 for the long
 version.
 
-Foyer is an attempt to build a modern editing surface around
-Ardour's mature audio engine — not a replacement for it. Without
-Ardour's decades of work on real-time audio, a recording / mixing
-surface like this one wouldn't exist; the separation below is an
-engineering boundary, not a tribute vacuum.
+## Running it
+
+Right now there's no packaged `foyer` binary or prebuilt Ardour
+shim. The dev container is the supported way to run — it handles
+the C++ toolchain, Ardour's deps, JACK, and the sidecar build.
+Windows, Mac, and Linux hosts all work; only native Linux hosts
+can currently pass real audio hardware through.
+
+Prerequisites:
+
+- Docker Desktop (Mac/Windows) or Docker Engine (Linux), running
+- VS Code (or any IDE that reads `.devcontainer/devcontainer.json`)
+- The **Dev Containers** VS Code extension
+
+Steps:
+
+```bash
+git clone https://github.com/hotspoons/foyer-studio.git
+cd foyer-studio
+code .
+```
+
+In VS Code: when the notification appears, click **Reopen in
+Container** (or run **Dev Containers: Rebuild and Reopen in
+Container** from the command palette, `Ctrl+Shift+P` /
+`Cmd+Shift+P`).
+
+The first build takes ~5–10 minutes. Subsequent opens are
+instant.
+
+Then open a terminal inside the container (**Terminal → New
+Terminal**) and:
+
+```bash
+just run                  # default
+# or
+just run-tls              # HTTPS; required if you'll reach it from another device on the LAN
+```
+
+The first `just run` clones and builds Ardour (~20 minutes on an
+Apple Silicon MBP, longer on slower hosts), compiles the shim and
+sidecar, then starts serving on port `3838`. It also launches a
+`jackd` daemon with a dummy backend for the headless Ardour
+session to connect to.
+
+Open <http://127.0.0.1:3838> (or <https://127.0.0.1:3838> if you
+used `run-tls`). To share the session off-host, use **Session →
+Remote Access...** to open a Cloudflare tunnel, then invite
+collaborators via the role picker.
+
+### Linux hosts — passing real hardware
+
+Native Linux hosts can expose ALSA devices to the container so the
+container-owned `jackd` drives real hardware. Uncomment the
+`--device=/dev/snd` and `--group-add=audio` lines in
+[.devcontainer/devcontainer.json](.devcontainer/devcontainer.json)
+(around line 75) and rebuild the container. Mac/Windows Docker VMs
+don't expose audio devices, so on those hosts you're limited to
+the browser's `getUserMedia` / `AudioContext` paths — fine for
+remote collaboration but not for driving studio gear directly
+from the container.
+
+## Reading further
+
+- [**docs/ARCHITECTURE.md**](docs/ARCHITECTURE.md) — three-layer
+  walkthrough, wire contract, conventions baked into the codebase.
+- [**docs/DEVELOPMENT.md**](docs/DEVELOPMENT.md) — running the
+  container, overlaying your own UI variants, testing, CI gate.
+- [**docs/SECURITY.md**](docs/SECURITY.md) — tunnel and RBAC
+  threat model; who the owner is, what each role can do.
+- [**docs/DECISIONS.md**](docs/DECISIONS.md) — every architectural
+  tradeoff logged as a numbered ADR, with rejected alternatives.
+- [**docs/KEYBOARD.md**](docs/KEYBOARD.md) — keyboard and gesture
+  reference for the shipping UI.
+- [**web/HACKING.md**](web/HACKING.md) — writing a new UI variant
+  without forking the main tree.
+- [**AGENTS.md**](AGENTS.md) — cold-start brief for coding agents
+  (Claude Code, Cursor, Aider) working in this repo.
+
+## Credit where it's due
+
+Foyer would not exist without the last 20+ years of work Paul
+Davis, Robin Gareus, and the rest of the Ardour community have
+poured into JACK and Ardour. If you get value out of this, **please
+[go support Ardour](https://community.ardour.org/donate)**. Foyer
+is a modern editing surface around Ardour's mature audio engine —
+not a replacement for it.
+
+Contributions, issues, and feedback welcome at
+<https://github.com/hotspoons/foyer-studio>.

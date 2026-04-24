@@ -6,6 +6,7 @@ default:
     @echo ""
     @echo "Subcommands:"
     @./scripts/dev/ardour.sh help
+    @./scripts/dev/autovocoder.sh help
     @./scripts/dev/shim.sh help
     @./scripts/dev/tw.sh help
     @./scripts/dev/jack.sh help
@@ -13,6 +14,7 @@ default:
 prep:
     ./scripts/dev/tw.sh check
     ./scripts/dev/ardour.sh ensure
+    ./scripts/dev/autovocoder.sh ensure
     ./scripts/dev/jack.sh start
     ./scripts/dev/shim.sh check
     ./scripts/dev/nuke-web-install.sh
@@ -138,6 +140,9 @@ tw-build:
 
 ardour cmd='help' *args='':
     ./scripts/dev/ardour.sh {{cmd}} {{args}}
+
+autovocoder cmd='help' *args='':
+    ./scripts/dev/autovocoder.sh {{cmd}} {{args}}
 
 shim cmd='help' *args='':
     ./scripts/dev/shim.sh {{cmd}} {{args}}
