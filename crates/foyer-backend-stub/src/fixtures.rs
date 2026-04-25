@@ -501,6 +501,7 @@ pub(crate) fn default_inserts_for(slug: &str) -> Vec<PluginInstance> {
             uri: Some(uri.into()),
             bypassed: false,
             params: params_for(uri, &full),
+            current_preset: None,
         }
     };
     match slug {

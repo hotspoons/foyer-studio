@@ -358,18 +358,45 @@ export class PluginStrip extends LitElement {
     try { return JSON.parse(raw); } catch { return null; }
   }
 
+  /// True when the active drag offers our custom MIME payload.
+  /// `dataTransfer.types` is readable during `dragover` (unlike
+  /// `getData()`, which returns "" until `drop` fires for security
+  /// reasons). Without this gate, dragover never calls preventDefault
+  /// and the browser cancels the drop — the `@drop` handler never
+  /// runs, breaking reorder + cross-track drag.
+  _isFoyerPluginDrag(ev) {
+    const types = ev.dataTransfer?.types;
+    if (!types) return false;
+    // `types` is a DOMStringList in some browsers, an Array in others.
+    // Both expose `includes` via the iterator; fall back to manual scan.
+    if (typeof types.includes === "function") {
+      return types.includes("application/x-foyer-plugin");
+    }
+    for (let i = 0; i < types.length; i++) {
+      if (types[i] === "application/x-foyer-plugin") return true;
+    }
+    return false;
+  }
+
   _onDragOver(ev, idx) {
     // Must preventDefault to make the element a valid drop target.
     // Even when the drop would be a no-op (same index on same track)
     // we accept so the user gets consistent hover feedback.
-    const payload = this._parseDragPayload(ev);
-    if (!payload) {
+    if (!this._isFoyerPluginDrag(ev)) {
       // If no Foyer payload, don't interfere with native browser DnD
       // (text dragged from elsewhere, etc).
       return;
     }
     ev.preventDefault();
-    ev.dataTransfer.dropEffect = ev.altKey || ev.ctrlKey ? "copy" : "move";
+    // Copy modifier set:
+    //   · Alt / Ctrl  — original cross-platform "duplicate while drag"
+    //     gesture; matches Reaper / file-manager conventions.
+    //   · Cmd / Shift — Cmd is the Mac primary modifier; Shift is the
+    //     gesture Rich asked for explicitly. Both also flip move → copy.
+    // Holding any of them shows the copy cursor and the drop handler
+    // performs add-only (no remove of the source plugin).
+    const copy = ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey;
+    ev.dataTransfer.dropEffect = copy ? "copy" : "move";
     // Visual insertion indicator — highlight the row this drop would
     // slot the plugin before.
     this._dropIdx = idx;
@@ -394,7 +421,10 @@ export class PluginStrip extends LitElement {
     const ws = window.__foyer?.ws;
     if (!ws) return;
     const sameTrack = payload.track_id === this.trackId;
-    const copy = ev.altKey || ev.ctrlKey;
+    // Same modifier set as `_onDragOver` (alt/ctrl/cmd/shift). Within
+    // a single track this turns reorder into duplicate-in-place;
+    // across tracks it turns move into copy.
+    const copy = ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey;
     if (sameTrack && !copy) {
       // Reorder within this strip. `new_index` is the 0-based slot
       // the plugin should end up at AFTER removal of the source.
@@ -418,17 +448,27 @@ export class PluginStrip extends LitElement {
       if (!payload.plugin_uri) return;
       const isFromExistingTrack = !!(payload.track_id && payload.plugin_id);
       const isMove = isFromExistingTrack && !copy;
+      const isDuplicate = isFromExistingTrack && copy;
       // Wrap the add+remove pair in one undo group so a cross-track
       // drag lands as a single Ctrl+Z (otherwise the user'd have to
       // undo the add then the remove, and the intermediate state
       // would briefly show the plugin on both tracks). PLAN 177.
-      const label = isMove ? "Foyer move plugin" : "Foyer add plugin";
+      const label = isMove
+        ? "Foyer move plugin"
+        : isDuplicate
+        ? "Foyer duplicate plugin"
+        : "Foyer add plugin";
       ws.send({ type: "undo_group_begin", name: label });
+      // For duplicate (drag from an existing plugin with copy modifier),
+      // pass `clone_from` so the shim seeds the new instance with the
+      // source's parameter values + bypass state. Without it the user
+      // gets a fresh default plugin and has to re-dial every knob.
       ws.send({
         type: "add_plugin",
         track_id: this.trackId,
         plugin_uri: payload.plugin_uri,
         index: targetIdx,
+        ...(isDuplicate ? { clone_from: payload.plugin_id } : {}),
       });
       if (isMove) {
         ws.send({ type: "remove_plugin", plugin_id: payload.plugin_id });

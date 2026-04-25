@@ -31,6 +31,12 @@ pub struct PluginInstance {
     pub uri: Option<String>,
     pub bypassed: bool,
     pub params: Vec<Parameter>,
+    /// URI of the preset most recently applied to this instance, or
+    /// `None` when the plugin is in its native default state. Lets the
+    /// preset selector pre-select the active preset's name on session
+    /// reload without the user re-applying.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub current_preset: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

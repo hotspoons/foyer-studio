@@ -863,6 +863,14 @@ pub enum Command {
         plugin_uri: String,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         index: Option<u32>,
+        /// If set, the new plugin instance is seeded with the parameter
+        /// values + bypass state of this existing plugin. Used by the
+        /// drag-to-duplicate UI gesture. Plugin must be the same URI;
+        /// the host clones at the param level (no XML round-trip), so
+        /// type mismatches silently no-op the copy and you get a fresh
+        /// default plugin on the target track.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        clone_from: Option<EntityId>,
     },
     RemovePlugin {
         plugin_id: EntityId,

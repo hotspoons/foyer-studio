@@ -285,6 +285,11 @@ enumerate_plugins (std::shared_ptr<Route> route)
 		pd.uri      = plug->unique_id ();
 		// Ardour treats "active" as "not bypassed"; invert for schema.
 		pd.bypassed = !pi->active ();
+		// `last_preset()` carries the most recently applied preset (or
+		// the saved preset if loaded from a session). Empty `uri` means
+		// "no preset active" — left as "" on the wire so the UI shows
+		// the placeholder.
+		pd.current_preset = plug->last_preset ().uri;
 
 		// Synthetic bypass parameter — matches the stub's shape so the web
 		// plugin panel can render the same switch regardless of backend.

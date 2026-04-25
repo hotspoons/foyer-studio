@@ -118,6 +118,12 @@ struct PluginDesc {
 	std::string uri;
 	bool        bypassed;
 	std::vector<ParamDesc> params;
+	/// URI of the preset most recently applied to this plugin instance,
+	/// or empty if the plugin is in its native default state. Sourced
+	/// from `Plugin::last_preset()`. Lets the UI's preset selector
+	/// display the active preset name after a session reload without
+	/// the user re-applying.
+	std::string current_preset;
 };
 
 /// Build Foyer-schema plugin descriptions for every `PluginInsert` on `route`.

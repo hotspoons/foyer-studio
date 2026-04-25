@@ -1364,11 +1364,12 @@ async fn dispatch_command(
             track_id,
             plugin_uri,
             index,
+            clone_from,
         } => {
             if let Err(e) = state
                 .backend()
                 .await
-                .add_plugin(track_id, plugin_uri, index)
+                .add_plugin(track_id, plugin_uri, index, clone_from)
                 .await
             {
                 broadcast_event(
@@ -2264,8 +2265,28 @@ async fn dispatch_command(
             broadcast_track_browser_sources(state).await;
         }
 
-        Command::MovePlugin { .. }
-        | Command::SavePluginPreset { .. }
+        Command::MovePlugin {
+            plugin_id,
+            new_index,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .move_plugin(plugin_id, new_index)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "move_plugin_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::SavePluginPreset { .. }
         | Command::OpenPluginGui { .. }
         | Command::ClosePluginGui { .. }
         | Command::AudioSdpAnswer { .. }

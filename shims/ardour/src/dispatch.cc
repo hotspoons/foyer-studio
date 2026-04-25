@@ -226,6 +226,7 @@ struct DecodedCmd
 		InvokeAction,
 		AddPlugin,
 		RemovePlugin,
+		MovePlugin,
 		SaveSession,
 		AddNote,
 		UpdateNote,
@@ -268,8 +269,10 @@ struct DecodedCmd
 	std::string id;
 	std::string track_id;
 	std::string plugin_uri;   // Command::AddPlugin
-	std::string plugin_id;    // Command::RemovePlugin (= "plugin.<pid>")
+	std::string plugin_id;    // Command::RemovePlugin / MovePlugin (= "plugin.<pid>")
 	std::string preset_id;    // Command::LoadPluginPreset (preset URI)
+	std::uint32_t move_new_index = 0;  // Command::MovePlugin {new_index}
+	std::string clone_from;   // Command::AddPlugin {clone_from?} (= "plugin.<pid>")
 	double value = 0.0;
 
 	// Audio stream fields (AudioStreamOpen / Close / IngressOpen).
@@ -928,6 +931,12 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.plugin_id)) return out;
 				} else if (k == "preset_id") {
 					if (!in.read_str (out.preset_id)) return out;
+				} else if (k == "clone_from") {
+					if (!in.read_str (out.clone_from)) return out;
+				} else if (k == "new_index") {
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.move_new_index = static_cast<std::uint32_t> (v);
 				} else if (k == "port_name") {
 					// SetTrackInput { track_id, port_name }: stash in
 					// the same slot UpdateTrack's patch_input_port uses
@@ -1102,6 +1111,7 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "invoke_action")      out.kind = DecodedCmd::Kind::InvokeAction;
 			else if (cmd_type == "add_plugin")         out.kind = DecodedCmd::Kind::AddPlugin;
 			else if (cmd_type == "remove_plugin")      out.kind = DecodedCmd::Kind::RemovePlugin;
+			else if (cmd_type == "move_plugin")        out.kind = DecodedCmd::Kind::MovePlugin;
 			else if (cmd_type == "save_session")       out.kind = DecodedCmd::Kind::SaveSession;
 			else if (cmd_type == "add_note")           out.kind = DecodedCmd::Kind::AddNote;
 			else if (cmd_type == "update_note")        out.kind = DecodedCmd::Kind::UpdateNote;
@@ -1917,14 +1927,39 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			FoyerShim* shim = &_shim;
 			_shim.call_slot (MISSING_INVALIDATOR, [shim, plugin_id, preset_id] () {
 				bool ok = schema_map::load_plugin_preset (shim->session (), plugin_id, preset_id);
-				if (!ok) {
-					PBD::warning << "foyer_shim: load_plugin_preset: failed for "
-					             << plugin_id << " / " << preset_id << endmsg;
+				PBD::warning << "foyer_shim: [preset] load_plugin_preset plugin_id="
+				             << plugin_id << " preset_id=" << preset_id
+				             << " ok=" << ok << endmsg;
+				// Some plugin hosts (notably the LV2 host) don't fire
+				// per-parameter `Controllable::Changed` after a preset
+				// applies — the values DO change but the UI never hears
+				// about it. Push a `track_updated` so the browser
+				// re-snapshots the plugin's params with their new
+				// values from a single round-trip.
+				if (ok) {
+					if (auto pi = schema_map::find_plugin_insert_by_foyer_id (shim->session (), plugin_id)) {
+						std::ostringstream tid;
+						auto routes = schema_map::safe_get_routes (shim->session ());
+						for (auto const& r : *routes) {
+							if (!r) continue;
+							for (uint32_t i = 0;; ++i) {
+								auto p = r->nth_plugin (i);
+								if (!p) break;
+								if (p.get () == static_cast<ARDOUR::Processor*> (pi.get ())) {
+									tid << "track." << r->id ();
+									break;
+								}
+							}
+							if (!tid.str ().empty ()) break;
+						}
+						if (!tid.str ().empty ()) {
+							auto bytes = msgpack_out::encode_track_updated (shim->session (), tid.str ());
+							if (!bytes.empty ()) {
+								shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+							}
+						}
+					}
 				}
-				// Preset load re-writes parameter values on the plugin;
-				// Ardour's parameter-changed signals already re-emit each
-				// controllable so clients will see the new values drift
-				// in via the normal control-update stream.
 			});
 			break;
 		}
@@ -2723,6 +2758,43 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					PBD::warning << "foyer_shim: add_plugin: Route::add_processor failed for " << snap.plugin_uri << endmsg;
 					return;
 				}
+				// Clone params from source plugin when the duplicate
+				// gesture asked for it. We do this AFTER add_processor
+				// so the new PluginInsert is fully initialized — its
+				// `_shadow_data` (LV2) / parameter cache exists for
+				// `set_parameter` to write into. The route's get_state()
+				// after the copy then captures the new plugin already
+				// populated, so the MementoCommand+TrackUpdated below
+				// see the cloned values without a second pass.
+				if (!snap.clone_from.empty ()) {
+					auto src_pi = schema_map::find_plugin_insert_by_foyer_id (session, snap.clone_from);
+					if (src_pi && src_pi->plugin () && pi->plugin ()) {
+						auto src_plug = src_pi->plugin ();
+						// Bypass mirror — `active()` is "not bypassed".
+						if (src_pi->active ()) pi->activate ();
+						else                   pi->deactivate ();
+						// Plugin::set_parameter is protected; the public
+						// path is the per-param AutomationControl on the
+						// PluginInsert. Walk source params, read the
+						// current value via Plugin::get_parameter (public),
+						// write via dst's AutomationControl::set_value.
+						const std::uint32_t pcount = src_plug->parameter_count ();
+						for (std::uint32_t p = 0; p < pcount; ++p) {
+							if (!src_plug->parameter_is_control (p)) continue;
+							if (!src_plug->parameter_is_input (p)) continue;
+							const float val = src_plug->get_parameter (p);
+							auto dst_ac = pi->automation_control (
+							    Evoral::Parameter (ARDOUR::PluginAutomation, 0, p));
+							if (dst_ac) {
+								dst_ac->set_value (val, PBD::Controllable::NoGroup);
+							}
+						}
+					} else if (!src_pi) {
+						PBD::warning << "foyer_shim: add_plugin: clone_from id not found: "
+						             << snap.clone_from
+						             << " (proceeding with default-state plugin)" << endmsg;
+					}
+				}
 				session.add_command (new MementoCommand<ARDOUR::Route> (
 				    *route, &before, &route->get_state ()));
 				if (own_txn) session.commit_reversible_command ();
@@ -2792,6 +2864,96 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					if (!bytes.empty ()) {
 						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 					}
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::MovePlugin: {
+			if (cmd.plugin_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto& session = shim->session ();
+				auto target_pi = schema_map::find_plugin_insert_by_foyer_id (session, snap.plugin_id);
+				if (!target_pi) {
+					PBD::warning << "foyer_shim: move_plugin: plugin not found: "
+					             << snap.plugin_id << endmsg;
+					return;
+				}
+				// Find the route that hosts this PluginInsert.
+				std::shared_ptr<ARDOUR::Route> route;
+				{
+					std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
+					for (auto const& r : *routes) {
+						if (!r) continue;
+						for (uint32_t i = 0;; ++i) {
+							auto p = r->nth_plugin (i);
+							if (!p) break;
+							if (p.get () == static_cast<ARDOUR::Processor*> (target_pi.get ())) {
+								route = r; break;
+							}
+						}
+						if (route) break;
+					}
+				}
+				if (!route) {
+					PBD::warning << "foyer_shim: move_plugin: host route not located for "
+					             << snap.plugin_id << endmsg;
+					return;
+				}
+
+				// Build the new visible-processor order. `Route::reorder_processors`
+				// expects the full list of `display_to_user()` processors in the
+				// new order; missing ones are treated as deleted (route.cc:2178)
+				// so we MUST include every visible processor, not just plugins.
+				// `new_index` is the 0-based slot the moved plugin should occupy
+				// among PluginInserts after the move — translate to the visible
+				// list's position by counting non-target plugins as we walk.
+				ARDOUR::Route::ProcessorList visible;
+				route->foreach_processor (
+				    [&visible] (std::weak_ptr<ARDOUR::Processor> wp) {
+				        auto p = wp.lock ();
+				        if (p && p->display_to_user ()) visible.push_back (p);
+				    });
+
+				ARDOUR::Route::ProcessorList new_order;
+				bool inserted = false;
+				std::uint32_t plugin_seen = 0;
+				for (auto const& p : visible) {
+					if (p.get () == static_cast<ARDOUR::Processor*> (target_pi.get ())) {
+						continue; // remove from current slot
+					}
+					const bool is_plugin =
+					    static_cast<bool> (std::dynamic_pointer_cast<ARDOUR::PluginInsert> (p));
+					if (is_plugin && plugin_seen == snap.move_new_index && !inserted) {
+						new_order.push_back (target_pi);
+						inserted = true;
+					}
+					new_order.push_back (p);
+					if (is_plugin) ++plugin_seen;
+				}
+				if (!inserted) new_order.push_back (target_pi);
+
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer move plugin");
+				XMLNode& before = route->get_state ();
+				if (route->reorder_processors (new_order, nullptr) != 0) {
+					delete &before;
+					if (own_txn) session.commit_reversible_command ();
+					PBD::warning << "foyer_shim: move_plugin: reorder_processors failed for "
+					             << snap.plugin_id << " new_index=" << snap.move_new_index << endmsg;
+					return;
+				}
+				session.add_command (new MementoCommand<ARDOUR::Route> (
+				    *route, &before, &route->get_state ()));
+				if (own_txn) session.commit_reversible_command ();
+
+				std::ostringstream tid;
+				tid << "track." << route->id ();
+				auto bytes = msgpack_out::encode_track_updated (session, tid.str ());
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 				}
 			});
 			break;

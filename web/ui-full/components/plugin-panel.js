@@ -24,6 +24,8 @@ export class PluginPanel extends LitElement {
     trackName: { type: String },
     /** Header-only layout when true; hides group body. */
     minimized: { type: Boolean, reflect: true },
+    /** Reactive: presets returned by the shim for the current plugin. */
+    _presets: { state: true, type: Array },
   };
 
   static styles = css`
@@ -87,6 +89,33 @@ export class PluginPanel extends LitElement {
     }
     header .bypass:hover { border-color: var(--color-accent); color: var(--color-text); }
 
+    header select.presets {
+      flex: 0 0 auto;
+      width: 120px;
+      min-width: 0;
+      max-width: 120px;
+      box-sizing: border-box;
+      font-size: 10px;
+      padding: 3px 6px;
+      background: var(--color-surface);
+      color: var(--color-text);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    header select.presets:hover { border-color: var(--color-accent); }
+    header select.presets:disabled { opacity: 0.4; cursor: default; }
+    header .bypass { flex: 0 0 auto; }
+    /* The brand/URI block is the elastic part — it gets the leftover
+       space and shrinks before the controls do. */
+    header > div:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+    header > div:first-child .uri,
+    header > div:first-child .brand {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
     .groups {
       flex: 1 1 auto;
       overflow: auto;
@@ -134,12 +163,20 @@ export class PluginPanel extends LitElement {
     this.plugin = null;
     this.trackName = "";
     this.minimized = false;
+    this._presets = [];
+    this._presetsForPluginId = "";
+    /// Preset id the user picked (or that the plugin reported as
+    /// loaded). Drives the dropdown's selected value so the chosen
+    /// preset name stays visible after applying. Cleared when the
+    /// bound plugin instance changes.
+    this._selectedPresetId = "";
     this._onControl = (ev) => {
       const id = ev.detail;
       const p = this.plugin;
       if (!p) return;
       if (p.params?.some((x) => x.id === id)) this.requestUpdate();
     };
+    this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
     this._measured = false;
   }
 
@@ -147,11 +184,61 @@ export class PluginPanel extends LitElement {
     super.connectedCallback();
     window.__foyer?.store?.addEventListener("control", this._onControl);
     window.__foyer?.store?.addEventListener("change", this._onControl);
+    window.__foyer?.ws?.addEventListener("envelope", this._envelopeHandler);
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("control", this._onControl);
     window.__foyer?.store?.removeEventListener("change", this._onControl);
+    window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     super.disconnectedCallback();
+  }
+
+  /** When the bound plugin changes, lazily fetch its presets. */
+  willUpdate(changed) {
+    if (changed.has("plugin")) {
+      const id = this.plugin?.id;
+      if (id && id !== this._presetsForPluginId) {
+        this._presetsForPluginId = id;
+        this._presets = [];
+        // Different plugin instance → drop any preset selection from
+        // the prior one. The shim's `current_preset` field on the
+        // plugin descriptor (when populated) re-seeds it on the next
+        // snapshot.
+        this._selectedPresetId = "";
+        window.__foyer?.ws?.send({ type: "list_plugin_presets", plugin_id: id });
+      }
+      // Adopt any current_preset the snapshot carries (post-load,
+      // sessions saved with a preset applied).
+      const fromSnap = this.plugin?.current_preset;
+      if (fromSnap && fromSnap !== this._selectedPresetId) {
+        this._selectedPresetId = fromSnap;
+      }
+    }
+  }
+
+  _onEnvelope(env) {
+    const body = env?.body;
+    if (!body) return;
+    if (body.type === "plugin_presets_listed"
+        && body.plugin_id === this._presetsForPluginId) {
+      this._presets = body.presets || [];
+    }
+  }
+
+  _onPresetChange(ev) {
+    const presetId = ev.target.value;
+    if (!presetId || !this.plugin?.id) return;
+    this._selectedPresetId = presetId;
+    window.__foyer?.ws?.send({
+      type: "load_plugin_preset",
+      plugin_id: this.plugin.id,
+      preset_id: presetId,
+    });
+    // Hand focus back to the document so global keyboard shortcuts
+    // (Space → transport play/pause, etc.) aren't swallowed by the
+    // still-focused <select>. Without this, the next Space press
+    // re-opens the dropdown instead of toggling transport.
+    ev.target.blur();
   }
 
   /**
@@ -201,6 +288,10 @@ export class PluginPanel extends LitElement {
       groups.get(key).push(param);
     }
 
+    const presets = this._presets || [];
+    const factory = presets.filter((pp) => pp.is_factory !== false);
+    const user    = presets.filter((pp) => pp.is_factory === false);
+
     return html`
       <header>
         <div>
@@ -211,6 +302,31 @@ export class PluginPanel extends LitElement {
           ${p.uri ? html`<div class="uri">${p.uri}</div>` : null}
         </div>
         <span class="spacer"></span>
+        <select
+          class="presets"
+          title="Load preset"
+          ?disabled=${presets.length === 0}
+          .value=${this._selectedPresetId || ""}
+          @change=${(e) => this._onPresetChange(e)}
+        >
+          <option value="" disabled ?selected=${!this._selectedPresetId}>
+            ${presets.length === 0 ? "No presets" : "Load preset…"}
+          </option>
+          ${factory.length > 0 ? html`
+            <optgroup label="Factory">
+              ${factory.map((pp) => html`
+                <option value=${pp.id} title=${pp.id}
+                        ?selected=${pp.id === this._selectedPresetId}>${pp.name || pp.id}</option>
+              `)}
+            </optgroup>` : null}
+          ${user.length > 0 ? html`
+            <optgroup label="User">
+              ${user.map((pp) => html`
+                <option value=${pp.id} title=${pp.id}
+                        ?selected=${pp.id === this._selectedPresetId}>${pp.name || pp.id}</option>
+              `)}
+            </optgroup>` : null}
+        </select>
         <button
           class="bypass"
           ?data-on=${bypassOn}

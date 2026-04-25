@@ -162,11 +162,24 @@ case "$cmd" in
         # `foyer configure --backend ardour --force` with
         # FOYER_ARDOUR_BUILD_ROOT pinned to the resolved ARDOUR_DIR
         # so detection finds the binary deterministically.
-        (
-            cd "$REPO_ROOT"
-            FOYER_ARDOUR_BUILD_ROOT="$ARDOUR_DIR" \
-                cargo run --quiet --bin foyer -- configure --backend ardour --force
-        )
+        #
+        # Fast path: if config.yaml already contains the resolved
+        # executable line, skip the `cargo run` entirely. Even with
+        # `--quiet` and a warm target dir, cargo pays a couple seconds
+        # for workspace lock + dep graph rebuild. `just prep` runs on
+        # every `just run`, so that overhead lands on every dev tick.
+        bin="$(latest_bin)"
+        config_yaml="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/config.yaml"
+        if [ -n "$bin" ] && [ -f "$config_yaml" ] \
+             && grep -qF "  executable: $bin" "$config_yaml"; then
+            echo "  id=ardour exec=$bin (config up-to-date, skipped configure)"
+        else
+            (
+                cd "$REPO_ROOT"
+                FOYER_ARDOUR_BUILD_ROOT="$ARDOUR_DIR" \
+                    cargo run --quiet --bin foyer -- configure --backend ardour --force
+            )
+        fi
         ;;
     clean)
         require_repo

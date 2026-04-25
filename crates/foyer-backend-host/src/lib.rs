@@ -87,14 +87,18 @@ impl Backend for HostBackend {
         track_id: EntityId,
         plugin_uri: String,
         index: Option<u32>,
+        clone_from: Option<EntityId>,
     ) -> Result<(), BackendError> {
         // Shim applies on the event loop + emits a TrackUpdated event
-        // when the plugin lands on the route. Fire-and-forget.
+        // when the plugin lands on the route. Fire-and-forget. When
+        // `clone_from` is set, the shim copies the source plugin's
+        // params into the new instance before the TrackUpdated fires.
         self.client
             .send_command(Command::AddPlugin {
                 track_id,
                 plugin_uri,
                 index,
+                clone_from,
             })
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
@@ -103,6 +107,22 @@ impl Backend for HostBackend {
     async fn remove_plugin(&self, plugin_id: EntityId) -> Result<(), BackendError> {
         self.client
             .send_command(Command::RemovePlugin { plugin_id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn move_plugin(
+        &self,
+        plugin_id: EntityId,
+        new_index: u32,
+    ) -> Result<(), BackendError> {
+        // Shim reorders on the event loop and emits a TrackUpdated when
+        // the new processor order lands. Fire-and-forget.
+        self.client
+            .send_command(Command::MovePlugin {
+                plugin_id,
+                new_index,
+            })
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }

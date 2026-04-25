@@ -310,6 +310,86 @@ encode_control_update (Session& session, const Controllable& c)
 }
 
 namespace {
+
+// Compact param-map emitter for transport / track-level fixed params
+// (gain, pan, mute, etc.). Used by both snapshot and TrackUpdated.
+void
+emit_named_param (Out& o, const std::string& id, const char* label,
+                  const char* kind, bool is_bool, double num_val, bool bool_val)
+{
+	o.map (5);
+	o.str ("id");    o.str (id);
+	o.str ("kind");  o.str (kind);
+	o.str ("label"); o.str (label);
+	o.str ("scale"); o.str ("linear");
+	o.str ("value");
+	if (is_bool) o.b (bool_val); else o.f64 (num_val);
+}
+
+// Plugin-param emitter — variable map shape that includes range, unit,
+// and enum_labels when present. MUST be the same shape on the snapshot
+// and track_updated paths, otherwise an in-place track update wipes
+// the descriptor metadata the client renders dropdowns / ranges from
+// (combo boxes go empty, ranges fall back to defaults).
+void
+emit_plugin_param (Out& o, const schema_map::ParamDesc& p)
+{
+	std::size_t n = 5; // id, kind, label, scale, value
+	if (!p.unit.empty ()) ++n;
+	if (p.has_range) ++n;
+	if (!p.enum_labels.empty ()) ++n;
+	o.map (n);
+	o.str ("id");    o.str (p.id);
+	o.str ("kind");  o.str (p.kind);
+	o.str ("label"); o.str (p.label);
+	o.str ("scale"); o.str (p.scale);
+	if (p.has_range) {
+		o.str ("range");
+		o.array (2);
+		o.f64 ((double) p.lower);
+		o.f64 ((double) p.upper);
+	}
+	if (!p.unit.empty ()) { o.str ("unit"); o.str (p.unit); }
+	if (!p.enum_labels.empty ()) {
+		o.str ("enum_labels");
+		o.array (p.enum_labels.size ());
+		for (auto const& s : p.enum_labels) o.str (s);
+	}
+	o.str ("value");
+	// Booleans for triggers, ints for enums/discrete, else float.
+	if (p.kind == "trigger") {
+		o.b (p.value >= 0.5);
+	} else if (p.kind == "enum" || p.kind == "discrete") {
+		o.i ((std::int64_t) p.value);
+	} else {
+		o.f64 (p.value);
+	}
+}
+
+// Plugin descriptor emitter — variable map shape so optional fields
+// (`current_preset`) only appear when set. Shared so the snapshot and
+// track_updated paths emit the same wire shape; if they drift, an
+// in-place track refresh wipes the metadata the client depends on.
+void
+emit_plugin_desc (Out& o, const schema_map::PluginDesc& pd)
+{
+	std::size_t n = 5; // id, name, uri, bypassed, params
+	const bool emit_preset = !pd.current_preset.empty ();
+	if (emit_preset) ++n;
+	o.map (n);
+	o.str ("id");       o.str (pd.id);
+	o.str ("name");     o.str (pd.name);
+	o.str ("uri");      o.str (pd.uri);
+	o.str ("bypassed"); o.b (pd.bypassed);
+	if (emit_preset) {
+		o.str ("current_preset");
+		o.str (pd.current_preset);
+	}
+	o.str ("params");
+	o.array (pd.params.size ());
+	for (auto const& p : pd.params) emit_plugin_param (o, p);
+}
+
 // Verbose state dump we scatter through the transport paths so bugs
 // like "play lights on at load" can be diagnosed from daw.log.
 std::string
@@ -482,37 +562,7 @@ encode_session_snapshot (Session& session,
 		}
 
 		auto emit_param_full = [&] (const schema_map::ParamDesc& p) {
-			// Variable map shape — omit keys we don't have.
-			std::size_t n = 5; // id, kind, label, scale, value
-			if (!p.unit.empty ()) ++n;
-			if (p.has_range) ++n;
-			if (!p.enum_labels.empty ()) ++n;
-			o.map (n);
-			o.str ("id");    o.str (p.id);
-			o.str ("kind");  o.str (p.kind);
-			o.str ("label"); o.str (p.label);
-			o.str ("scale"); o.str (p.scale);
-			if (p.has_range) {
-				o.str ("range");
-				o.array (2);
-				o.f64 ((double) p.lower);
-				o.f64 ((double) p.upper);
-			}
-			if (!p.unit.empty ()) { o.str ("unit"); o.str (p.unit); }
-			if (!p.enum_labels.empty ()) {
-				o.str ("enum_labels");
-				o.array (p.enum_labels.size ());
-				for (auto const& s : p.enum_labels) o.str (s);
-			}
-			o.str ("value");
-			// Booleans for triggers, ints for enums/discrete, else float.
-			if (p.kind == "trigger") {
-				o.b (p.value >= 0.5);
-			} else if (p.kind == "enum" || p.kind == "discrete") {
-				o.i ((std::int64_t) p.value);
-			} else {
-				o.f64 (p.value);
-			}
+			emit_plugin_param (o, p);
 		};
 
 		o.str ("groups");
@@ -700,14 +750,7 @@ encode_session_snapshot (Session& session,
 				o.str ("plugins");
 				o.array (plugins.size ());
 				for (auto const& pd : plugins) {
-					o.map (5);
-					o.str ("id");       o.str (pd.id);
-					o.str ("name");     o.str (pd.name);
-					o.str ("uri");      o.str (pd.uri);
-					o.str ("bypassed"); o.b (pd.bypassed);
-					o.str ("params");
-					o.array (pd.params.size ());
-					for (auto const& p : pd.params) emit_param_full (p);
+					emit_plugin_desc (o, pd);
 				}
 			}
 
@@ -1228,25 +1271,6 @@ encode_region_removed (const std::string& track_id, const std::string& region_id
 	});
 }
 
-namespace {
-
-// Compact param-map emitter shared by TrackUpdated. Keeps the wire-shape
-// identical to what `encode_session_snapshot` emits for the same field.
-void
-emit_named_param (Out& o, const std::string& id, const char* label,
-                  const char* kind, bool is_bool, double num_val, bool bool_val)
-{
-	o.map (5);
-	o.str ("id");    o.str (id);
-	o.str ("kind");  o.str (kind);
-	o.str ("label"); o.str (label);
-	o.str ("scale"); o.str ("linear");
-	o.str ("value");
-	if (is_bool) o.b (bool_val); else o.f64 (num_val);
-}
-
-} // namespace
-
 std::vector<std::uint8_t>
 encode_track_updated (Session& session, const std::string& track_id)
 {
@@ -1378,21 +1402,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 			o.str ("plugins");
 			o.array (plugins.size ());
 			for (auto const& pd : plugins) {
-				o.map (5);
-				o.str ("id");       o.str (pd.id);
-				o.str ("name");     o.str (pd.name);
-				o.str ("uri");      o.str (pd.uri);
-				o.str ("bypassed"); o.b (pd.bypassed);
-				o.str ("params");
-				o.array (pd.params.size ());
-				for (auto const& p : pd.params) {
-					o.map (5);
-					o.str ("id");    o.str (p.id);
-					o.str ("kind");  o.str (p.kind);
-					o.str ("label"); o.str (p.label);
-					o.str ("scale"); o.str (p.scale);
-					o.str ("value"); o.f64 (p.value);
-				}
+				emit_plugin_desc (o, pd);
 			}
 		}
 
