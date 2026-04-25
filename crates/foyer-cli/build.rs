@@ -30,7 +30,9 @@ fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let profile = std::env::var("PROFILE").unwrap_or_default();
-    let env_override = std::env::var("FOYER_BUNDLED_WEB").ok().filter(|s| !s.is_empty());
+    let env_override = std::env::var("FOYER_BUNDLED_WEB")
+        .ok()
+        .filter(|s| !s.is_empty());
     let force_watch = std::env::var("FOYER_BUNDLE_WATCH_DEBUG")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);

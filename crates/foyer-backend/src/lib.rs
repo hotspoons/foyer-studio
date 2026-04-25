@@ -207,11 +207,7 @@ pub trait Backend: Send + Sync + 'static {
     async fn remove_plugin(&self, _plugin_id: EntityId) -> Result<(), BackendError> {
         Err(BackendError::Other("remove_plugin not supported".into()))
     }
-    async fn move_plugin(
-        &self,
-        _plugin_id: EntityId,
-        _new_index: u32,
-    ) -> Result<(), BackendError> {
+    async fn move_plugin(&self, _plugin_id: EntityId, _new_index: u32) -> Result<(), BackendError> {
         Err(BackendError::Other("move_plugin not supported".into()))
     }
     async fn browse_path(

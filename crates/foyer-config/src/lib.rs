@@ -215,7 +215,9 @@ pub struct BackendConfig {
     pub stub_test_tone: bool,
 }
 
-fn is_default_false(b: &bool) -> bool { !*b }
+fn is_default_false(b: &bool) -> bool {
+    !*b
+}
 
 fn yes() -> bool {
     true

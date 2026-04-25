@@ -111,11 +111,7 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
-    async fn move_plugin(
-        &self,
-        plugin_id: EntityId,
-        new_index: u32,
-    ) -> Result<(), BackendError> {
+    async fn move_plugin(&self, plugin_id: EntityId, new_index: u32) -> Result<(), BackendError> {
         // Shim reorders on the event loop and emits a TrackUpdated when
         // the new processor order lands. Fire-and-forget.
         self.client
