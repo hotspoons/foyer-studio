@@ -211,11 +211,10 @@ jobs:
             arch: arm64
             shim_ext: dylib
     env:
-      # Pin to a specific master SHA — the shim source uses APIs
-      # added after tag 9.2 (`PBD::RWLock`, 2-arg `IO::connect`).
-      # Bump when the shim grows compat shims and we can target
-      # tagged Ardour again.
-      ARDOUR_TAG: "a1d709fd14"
+      # Track the official Ardour release tag. Shipped shims have to
+      # be ABI-compatible with the user's installed Ardour, so master
+      # is off-limits. Bump in lockstep with each new tag.
+      ARDOUR_TAG: "9.2"
     steps:
       - uses: actions/checkout@v4
 

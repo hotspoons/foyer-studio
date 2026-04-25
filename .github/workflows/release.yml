@@ -25,9 +25,9 @@ on:
   workflow_dispatch:
     inputs:
       ardour_tag:
-        description: "Ardour git ref the shim is built against — tag (9.2), branch (master), or commit SHA. Defaults to a master SHA because the shim source uses post-9.2 APIs."
+        description: "Ardour release tag the shim is built against (e.g. 9.2 — Ardour tags are major.minor only)"
         required: false
-        default: "a1d709fd14"
+        default: "9.2"
       release_tag:
         description: "Release tag name (e.g. v0.1.0). Empty = artifact-only run"
         required: false
@@ -63,7 +63,7 @@ jobs:
             arch: arm64
             with_shim: true
     env:
-      ARDOUR_TAG: ${{ github.event.inputs.ardour_tag || 'a1d709fd14' }}
+      ARDOUR_TAG: ${{ github.event.inputs.ardour_tag || '9.2' }}
       ASSET_NAME: foyer-${{ matrix.os_label }}-${{ matrix.arch }}.zip
     steps:
       - uses: actions/checkout@v4

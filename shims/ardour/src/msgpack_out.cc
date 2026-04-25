@@ -786,7 +786,7 @@ encode_session_snapshot (Session& session,
 					if (!alist) continue;
 					std::vector<std::pair<std::uint64_t, double>> pts;
 					{
-						PBD::RWLock::ReaderLock lm (alist->lock ());
+						Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
 						for (auto const* ev : alist->events ()) {
 							if (!ev) continue;
 							const auto sp = ev->when.samples ();
@@ -1474,7 +1474,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 				if (!alist) continue;
 				std::vector<std::pair<std::uint64_t, double>> pts;
 				{
-					PBD::RWLock::ReaderLock lm (alist->lock ());
+					Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
 					for (auto const* ev : alist->events ()) {
 						if (!ev) continue;
 						const auto sp = ev->when.samples ();

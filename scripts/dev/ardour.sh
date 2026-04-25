@@ -15,14 +15,12 @@ else
 fi
 
 ARDOUR_UPSTREAM="${FOYER_ARDOUR_UPSTREAM:-https://github.com/Ardour/ardour.git}"
-# Pin the Ardour ref the shim is built against. Accepts a tag
-# (`9.2`), branch name (`master`), or commit SHA. Default is a
-# specific master commit because the shim source uses APIs added
-# after tag 9.2 — `PBD::RWLock` and the 2-arg `IO::connect`. Until
-# the shim grows `#if ARDOUR_VERSION_AT_LEAST(...)` compat shims,
-# we have to track post-9.2 master to compile cleanly. Bump this
-# to whatever SHA you've been hacking against locally.
-ARDOUR_TAG="${ARDOUR_TAG:-a1d709fd14}"
+# Pin the Ardour version we build against. ABI compatibility with
+# the user's installed Ardour matters more than master parity — a
+# shim built against master won't load into a stable Ardour install.
+# Track tags only. Ardour tags are `<major>.<minor>` (e.g. `9.2`,
+# not `9.2.0`).
+ARDOUR_TAG="${ARDOUR_TAG:-9.2}"
 
 usage() {
     cat <<EOF
@@ -274,6 +272,21 @@ case "$cmd" in
             do_clone
         fi
         ensure_tags
+        # Switch the working tree to $ARDOUR_TAG when it doesn't
+        # match. Skip if there are local modifications — user may be
+        # mid-hack and we don't want to clobber. Triggers a rebuild
+        # below since the .so files will be stale for the new ref.
+        current_ref="$(git -C "$ARDOUR_DIR" describe --tags --always 2>/dev/null || echo unknown)"
+        if [ "$current_ref" != "$ARDOUR_TAG" ]; then
+            if [ -n "$(git -C "$ARDOUR_DIR" status --porcelain)" ]; then
+                echo "ardour: ⚠ uncommitted changes — staying on $current_ref (target: $ARDOUR_TAG)"
+            else
+                echo "ardour: switching $current_ref → $ARDOUR_TAG"
+                git -C "$ARDOUR_DIR" -c advice.detachedHead=false checkout "$ARDOUR_TAG"
+                # Force a rebuild — cached .o/.so files are stale.
+                rm -f "$ARDOUR_DIR/build/gtk2_ardour/ardev_common_waf.sh"
+            fi
+        fi
         need_build=0
         bin="$(latest_bin)"
         if [ -z "$bin" ] || [ ! -x "$bin" ]; then

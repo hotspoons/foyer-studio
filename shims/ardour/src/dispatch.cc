@@ -2033,7 +2033,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					if (port) {
 						port->disconnect_all ();
 						if (!snap.patch_input_port.empty ()) {
-							const int rv = io->connect (port, snap.patch_input_port);
+							const int rv = io->connect (port, snap.patch_input_port, nullptr);
 							if (rv != 0) {
 								PBD::error << "foyer_shim: set_track_input: connect("
 								           << port->name () << " → " << snap.patch_input_port
@@ -2375,7 +2375,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						if (port) {
 							port->disconnect_all ();
 							if (!snap.patch_input_port.empty ()) {
-								const int rv = io->connect (port, snap.patch_input_port);
+								const int rv = io->connect (port, snap.patch_input_port, nullptr);
 								if (rv != 0) {
 									PBD::error << "foyer_shim: update_track: connect("
 									           << port->name () << " → " << snap.patch_input_port
@@ -2418,7 +2418,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 									if (bus_in && bus_in->n_ports ().n_audio () > 0) {
 										auto bus_port = bus_in->audio (0);
 										if (bus_port) {
-											out_io->connect (out_port, bus_port->name ());
+											out_io->connect (out_port, bus_port->name (), nullptr);
 										}
 									}
 								} else {
@@ -3185,7 +3185,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// value-mismatch snap-back when dragging.
 				std::vector<std::pair<Temporal::samplepos_t, double>> pts;
 				{
-					PBD::RWLock::ReaderLock lm (alist->lock ());
+					Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
 					pts.reserve (alist->events ().size ());
 					for (auto const* ev : alist->events ()) {
 						if (!ev) continue;
