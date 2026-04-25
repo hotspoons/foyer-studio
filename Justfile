@@ -115,20 +115,46 @@ test-ui-ci:
         fi
         cargo build --bin foyer
     fi
+    # Sanity: print binary metadata so a CI log shows what we're
+    # about to launch (helps when "ERR_CONNECTION_REFUSED" is the
+    # only signal Playwright gives us).
+    echo "==> launching $bin"
+    file "$bin" || true
+    "$bin" --version 2>&1 || echo "(no --version, proceeding)"
     # Use the repo's working web/ so CI validates the tree that just
     # got committed — NOT whatever happens to be extracted in the
     # runner's $XDG_DATA_HOME. Without this flag the CLI serves the
     # install dir (the canonical hackability target for users).
+    log=/tmp/foyer-ci.log
     "$bin" serve \
         --backend stub --listen 127.0.0.1:3838 --web-root web \
-        > /tmp/foyer-ci.log 2>&1 &
+        > "$log" 2>&1 &
     server_pid=$!
     trap "kill $server_pid 2>/dev/null || true" EXIT
-    # Poll readiness — don't hard-sleep.
+    # Poll readiness — and FAIL LOUD when it never comes up. Previous
+    # version proceeded to Playwright regardless, which buried the
+    # actual error (panic, missing libc dep, port collision, etc.) in
+    # `ERR_CONNECTION_REFUSED` from the test side.
+    ready=0
     for _ in $(seq 1 30); do
-        if curl -fsS -o /dev/null http://127.0.0.1:3838/ 2>/dev/null; then break; fi
+        if curl -fsS -o /dev/null http://127.0.0.1:3838/ 2>/dev/null; then
+            ready=1
+            break
+        fi
+        # Bail early if the server already exited.
+        if ! kill -0 "$server_pid" 2>/dev/null; then
+            break
+        fi
         sleep 0.5
     done
+    if [ "$ready" -ne 1 ]; then
+        echo "==> foyer never bound 127.0.0.1:3838" >&2
+        echo "==> server_pid=$server_pid alive? $(kill -0 "$server_pid" 2>/dev/null && echo yes || echo no)" >&2
+        echo "==> --- $log ---" >&2
+        cat "$log" >&2 || true
+        echo "==> --- end log ---" >&2
+        exit 1
+    fi
     ./scripts/dev/ui-test.sh
 
 # Full gate — mirrors what CI runs on a PR. Any failure = not ready

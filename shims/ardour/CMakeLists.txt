@@ -149,8 +149,31 @@ if(APPLE)
     RESULT_VARIABLE FOYER_BREW_RESULT)
   if(FOYER_BREW_RESULT EQUAL 0 AND IS_DIRECTORY "${FOYER_BREW_PREFIX}/include")
     message(STATUS "Foyer shim: Homebrew include dir → ${FOYER_BREW_PREFIX}/include")
-    set(FOYER_BREW_INCLUDE "${FOYER_BREW_PREFIX}/include")
+    list(APPEND FOYER_BREW_INCLUDES "${FOYER_BREW_PREFIX}/include")
   endif()
+
+  # Keg-only formulas don't symlink into ${FOYER_BREW_PREFIX}/include —
+  # their headers stay under each formula's own prefix. The shim
+  # transitively includes Ardour's libpbd/file_archive.h, which does
+  # `#include <archive.h>` — that header lives at
+  # `$(brew --prefix libarchive)/include/archive.h`. Without this
+  # explicit lookup, the shim build fails on macOS with
+  # "fatal error: 'archive.h' file not found" even when libarchive is
+  # installed. Add additional formulas to KEG_ONLY_FORMULAS as we hit
+  # them.
+  set(KEG_ONLY_FORMULAS libarchive)
+  foreach(formula IN LISTS KEG_ONLY_FORMULAS)
+    execute_process(
+      COMMAND brew --prefix ${formula}
+      OUTPUT_VARIABLE _formula_prefix
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE _formula_result
+      ERROR_QUIET)
+    if(_formula_result EQUAL 0 AND IS_DIRECTORY "${_formula_prefix}/include")
+      message(STATUS "Foyer shim: keg-only ${formula} include → ${_formula_prefix}/include")
+      list(APPEND FOYER_BREW_INCLUDES "${_formula_prefix}/include")
+    endif()
+  endforeach()
 endif()
 
 # ── Ardour library search ──────────────────────────────────────
@@ -211,6 +234,12 @@ target_compile_definitions(foyer_shim PRIVATE
   WAF_BUILD
 )
 
+# Match Ardour's own build: silence the GLib-2.62-deprecated noise
+# (`GTimeVal`, etc.) that Ardour's vendored ydk/ytk/ydkmm headers
+# emit on every Ardour-header include. Ardour upstream lives with
+# this; we don't fix it — just don't drown the build log in it.
+target_compile_options(foyer_shim PRIVATE -Wno-deprecated-declarations)
+
 target_include_directories(foyer_shim PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -221,8 +250,8 @@ target_include_directories(foyer_shim PRIVATE
 # other brew-installed system headers Ardour pulls in transitively)
 # resolves. No-op on Linux where /usr/include is on the default
 # system path.
-if(FOYER_BREW_INCLUDE)
-  target_include_directories(foyer_shim PRIVATE "${FOYER_BREW_INCLUDE}")
+if(FOYER_BREW_INCLUDES)
+  target_include_directories(foyer_shim PRIVATE ${FOYER_BREW_INCLUDES})
 endif()
 
 # Ardour's build-tree configurator writes generated headers (e.g.

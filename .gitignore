@@ -36,3 +36,8 @@ vgcore.*
 /ext/
 
 .claude/*
+
+# Per-developer overrides for `.env`. `.env` itself IS committed (it
+# holds project defaults like ARDOUR_TAG); `.env.local` is for local
+# overrides that shouldn't be shared.
+.env.local

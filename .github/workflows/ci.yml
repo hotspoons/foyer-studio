@@ -9,6 +9,12 @@ on:
     branches: ['**']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      ardour_tag:
+        description: "Ardour ref to build the shim against. Empty = use the value in .env."
+        required: false
+        default: ""
 
 # Cancel in-flight runs for the same ref when a new push lands.
 # Saves the matrix from chewing through obsolete commits while you're
@@ -180,6 +186,14 @@ jobs:
             tests-ui/report
             tests-ui/test-results
           retention-days: 14
+      - name: Upload foyer server log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: foyer-ci-log
+          path: /tmp/foyer-ci.log
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Build the C++ Ardour shim per platform and publish each library as
   # an artifact so reviewers can grab them from the Actions tab without
@@ -210,13 +224,25 @@ jobs:
             os: macos
             arch: arm64
             shim_ext: dylib
-    env:
-      # Track the official Ardour release tag. Shipped shims have to
-      # be ABI-compatible with the user's installed Ardour, so master
-      # is off-limits. Bump in lockstep with each new tag.
-      ARDOUR_TAG: "9.2"
     steps:
       - uses: actions/checkout@v4
+
+      # Resolve ARDOUR_TAG: workflow_dispatch input wins, otherwise
+      # read from `.env` (the project default, committed to the repo).
+      # Setting it here writes to $GITHUB_ENV so subsequent steps —
+      # including the cache key, which is evaluated per-step — see it.
+      - name: Resolve ARDOUR_TAG
+        run: |
+          if [ -n "${{ github.event.inputs.ardour_tag }}" ]; then
+            echo "ARDOUR_TAG=${{ github.event.inputs.ardour_tag }}" >> "$GITHUB_ENV"
+            echo "::notice::ARDOUR_TAG=${{ github.event.inputs.ardour_tag }} (workflow_dispatch override)"
+          elif [ -f .env ]; then
+            grep -E '^ARDOUR_TAG=' .env >> "$GITHUB_ENV"
+            echo "::notice::ARDOUR_TAG sourced from .env"
+          else
+            echo "::error::No ARDOUR_TAG set and no .env file present"
+            exit 1
+          fi
 
       - name: Install shim + Ardour build deps (Linux)
         if: matrix.os == 'linux'

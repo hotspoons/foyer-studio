@@ -25,9 +25,9 @@ on:
   workflow_dispatch:
     inputs:
       ardour_tag:
-        description: "Ardour release tag the shim is built against (e.g. 9.2 — Ardour tags are major.minor only)"
+        description: "Ardour ref to build the shim against (e.g. 9.2 / master / a SHA). Empty = use the value in .env."
         required: false
-        default: "9.2"
+        default: ""
       release_tag:
         description: "Release tag name (e.g. v0.1.0). Empty = artifact-only run"
         required: false
@@ -63,10 +63,26 @@ jobs:
             arch: arm64
             with_shim: true
     env:
-      ARDOUR_TAG: ${{ github.event.inputs.ardour_tag || '9.2' }}
       ASSET_NAME: foyer-${{ matrix.os_label }}-${{ matrix.arch }}.zip
     steps:
       - uses: actions/checkout@v4
+
+      # Resolve ARDOUR_TAG: workflow_dispatch input wins, otherwise
+      # read from `.env` (the project default, committed to the repo).
+      # Setting it here writes to $GITHUB_ENV so subsequent steps —
+      # including the cache key, which is evaluated per-step — see it.
+      - name: Resolve ARDOUR_TAG
+        run: |
+          if [ -n "${{ github.event.inputs.ardour_tag }}" ]; then
+            echo "ARDOUR_TAG=${{ github.event.inputs.ardour_tag }}" >> "$GITHUB_ENV"
+            echo "::notice::ARDOUR_TAG=${{ github.event.inputs.ardour_tag }} (workflow_dispatch override)"
+          elif [ -f .env ]; then
+            grep -E '^ARDOUR_TAG=' .env >> "$GITHUB_ENV"
+            echo "::notice::ARDOUR_TAG sourced from .env"
+          else
+            echo "::error::No ARDOUR_TAG set and no .env file present"
+            exit 1
+          fi
 
       - name: Install Linux build deps
         if: matrix.os_label == 'linux'

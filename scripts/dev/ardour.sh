@@ -5,7 +5,10 @@ set -euo pipefail
 #   1. $FOYER_ARDOUR_DIR (explicit override)
 #   2. <repo>/ext/ardour (in-repo convention — gitignored)
 #   3. /workspaces/ardour (legacy sibling-workspace layout)
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# Resolve via BASH_SOURCE so this works whether the script is invoked
+# directly (./scripts/dev/ardour.sh) or sourced (`source scripts/dev/ardour.sh`).
+# $0 is the shell when sourced, which gave us REPO_ROOT="/" silently.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 if [ -n "${FOYER_ARDOUR_DIR:-}" ]; then
     ARDOUR_DIR="$FOYER_ARDOUR_DIR"
 elif [ -d "$REPO_ROOT/ext/ardour" ]; then
@@ -15,11 +18,27 @@ else
 fi
 
 ARDOUR_UPSTREAM="${FOYER_ARDOUR_UPSTREAM:-https://github.com/Ardour/ardour.git}"
-# Pin the Ardour version we build against. ABI compatibility with
-# the user's installed Ardour matters more than master parity — a
-# shim built against master won't load into a stable Ardour install.
-# Track tags only. Ardour tags are `<major>.<minor>` (e.g. `9.2`,
-# not `9.2.0`).
+# Source project + per-dev .env files for ARDOUR_TAG and friends.
+# Precedence: shell env > .env.local (gitignored) > .env (committed).
+# `set -a` exports every assignment, so `ARDOUR_TAG=...` lines in the
+# files become real env vars; `set +a` turns it off after.
+load_env_file() {
+    [ -f "$1" ] || return 0
+    set -a
+    # shellcheck disable=SC1090
+    . "$1"
+    set +a
+}
+__foyer_env_already_set="${ARDOUR_TAG:+1}"
+if [ -z "$__foyer_env_already_set" ]; then
+    load_env_file "$REPO_ROOT/.env"
+    load_env_file "$REPO_ROOT/.env.local"
+fi
+unset __foyer_env_already_set
+
+# Ardour git ref the shim is built against. Default lives in `.env`.
+# Final fallback (when no .env exists) is `9.2`. ABI compatibility
+# with the user's installed Ardour matters more than master parity.
 ARDOUR_TAG="${ARDOUR_TAG:-9.2}"
 
 usage() {
@@ -150,6 +169,14 @@ do_configure() {
     local cppflags="${CPPFLAGS:-}"
     local ldflags="${LDFLAGS:-}"
     local pkg_path="${PKG_CONFIG_PATH:-}"
+    # Ardour's vendored ydk/ytk/ydkmm/ytkmm uses GLib types deprecated
+    # since 2.62 (GTimeVal etc.) — every gtk2_ardour compile unit
+    # emits dozens of `-Wdeprecated-declarations` warnings. Ardour
+    # upstream lives with this; we'd just rather not have it flood
+    # CI logs. Suppress the warning class globally during the Ardour
+    # build. Doesn't affect correctness — the symbols still link.
+    local cflags="${CFLAGS:-} -Wno-deprecated-declarations"
+    local cxxflags="${CXXFLAGS:-} -Wno-deprecated-declarations"
 
     # macOS: Ardour's wscript probes boost via `check_cxx` against
     # `<boost/version.hpp>` and pulls every other dep through pkg-config.
@@ -199,6 +226,8 @@ do_configure() {
     (
         cd "$ARDOUR_DIR"
         CPPFLAGS="$cppflags" \
+        CFLAGS="$cflags" \
+        CXXFLAGS="$cxxflags" \
         LDFLAGS="$ldflags" \
         PKG_CONFIG_PATH="$pkg_path" \
         python3 waf configure --optimize "${extra_args[@]}"
@@ -283,8 +312,18 @@ case "$cmd" in
             else
                 echo "ardour: switching $current_ref → $ARDOUR_TAG"
                 git -C "$ARDOUR_DIR" -c advice.detachedHead=false checkout "$ARDOUR_TAG"
-                # Force a rebuild — cached .o/.so files are stale.
+                # `waf` incremental builds can leave stale objects when
+                # source moves a lot (e.g. removed classes like
+                # PBD::Mutex/RWLock between master ↔ tag). The headless
+                # binary was the symptom: it kept its old name
+                # (`hardour-9.2.591`) and stale undefined-symbol refs
+                # because not every .o was rebuilt. Clean wipe of
+                # generated outputs forces a fresh build, ~30 min, but
+                # only once per ref switch.
+                echo "ardour: cleaning stale build outputs for ref switch"
+                ( cd "$ARDOUR_DIR" && python3 waf clean >/dev/null 2>&1 || true )
                 rm -f "$ARDOUR_DIR/build/gtk2_ardour/ardev_common_waf.sh"
+                rm -rf "$ARDOUR_DIR"/build/headless "$ARDOUR_DIR"/build/gtk2_ardour
             fi
         fi
         need_build=0

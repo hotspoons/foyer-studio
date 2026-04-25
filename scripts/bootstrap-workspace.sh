@@ -13,10 +13,26 @@ FOYER_REPO="https://github.com/foyer-studio/foyer-studio.git"
 # Always use Ardour proper and fetch release tags from there. Ardour's waf
 # configure reads version/tag metadata and can fail on tagless clones.
 ARDOUR_REPO="https://github.com/Ardour/ardour.git"
-# The Ardour ref (tag/branch/SHA) the shim ABI is locked to. Same
-# default as scripts/dev/ardour.sh and the CI workflows. Override with
-# `ARDOUR_TAG=9.1 ./scripts/bootstrap-workspace.sh` to track a
-# different version.
+# Source project + per-dev .env files for ARDOUR_TAG and friends.
+# Precedence: shell env > .env.local (gitignored) > .env (committed).
+# Bootstrap may run before the foyer-studio repo is cloned — guard
+# the path lookup so we don't crash in fresh-setup mode.
+__foyer_repo="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)"
+if [ -n "$__foyer_repo" ] && [ -z "${ARDOUR_TAG:-}" ]; then
+    for f in "$__foyer_repo/.env" "$__foyer_repo/.env.local"; do
+        if [ -f "$f" ]; then
+            set -a
+            # shellcheck disable=SC1090
+            . "$f"
+            set +a
+        fi
+    done
+fi
+unset __foyer_repo
+
+# Ardour ref (tag/branch/SHA) the shim ABI is locked to. Default
+# lives in `.env`; final fallback is `9.2`. Override with shell env:
+# `ARDOUR_TAG=master ./scripts/bootstrap-workspace.sh`.
 ARDOUR_TAG="${ARDOUR_TAG:-9.2}"
 EDITOR_CMD="${FOYER_WORKSPACE_EDITOR:-code}"
 
