@@ -70,6 +70,16 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev
+      # macOS pulls libopus through `audiopus_sys`, which (when
+      # pkg-config can't locate Opus) falls back to building libopus
+      # from source via autoreconf — failing on a vanilla runner that
+      # doesn't ship autoconf/automake/libtool. We want a self-contained
+      # binary that doesn't require the end user to `brew install opus`,
+      # so let the static source build succeed by providing the
+      # autotools toolchain. Cocoa/WebKit are already on the system.
+      - name: Install autotools for audiopus_sys (macOS)
+        if: matrix.os == 'macos'
+        run: brew install autoconf automake libtool
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -193,7 +203,7 @@ jobs:
             arch: arm64
             shim_ext: dylib
     env:
-      ARDOUR_TAG: 9.2.0
+      ARDOUR_TAG: "9.2"
     steps:
       - uses: actions/checkout@v4
 
@@ -223,7 +233,11 @@ jobs:
       - name: Install shim + Ardour build deps (macOS)
         if: matrix.os == 'macos'
         run: |
-          brew install cmake pkg-config glibmm@2.66 libsigc++@2 libxml2 \
+          # autoconf/automake/libtool: needed by Ardour's waf build
+          # chain and by audiopus_sys (which CI doesn't link here, but
+          # parity with the rust matrix avoids surprises).
+          brew install cmake pkg-config autoconf automake libtool \
+            glibmm@2.66 libsigc++@2 libxml2 \
             libsndfile libsamplerate fftw liblo taglib readline lrdf lilv \
             serd sord sratom suil lv2 rubberband cairomm@1.14 \
             gtkmm pangomm@2.46 boost aubio cppunit vamp-plugin-sdk

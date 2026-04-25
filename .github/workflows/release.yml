@@ -9,7 +9,7 @@ name: release
 # Each zip contains the Rust `foyer` binary and the per-platform shim
 # (`libfoyer_shim.so` on Linux, `libfoyer_shim.dylib` on macOS) plus
 # README/LICENSE. The shim is ABI-locked to the Ardour minor version
-# named by `ardour_tag`; for now we ship a single pin (9.2.0) and grow
+# named by `ardour_tag`; for now we ship a single pin (9.2) and grow
 # the matrix when API drift forces it. See docs/TODO.md "Multi-Ardour
 # version plan" for the long-term shape.
 #
@@ -25,9 +25,9 @@ on:
   workflow_dispatch:
     inputs:
       ardour_tag:
-        description: "Ardour git tag to build the shim against"
+        description: "Ardour git tag to build the shim against (e.g. 9.2 — Ardour tags are major.minor only)"
         required: false
-        default: "9.2.0"
+        default: "9.2"
       release_tag:
         description: "Release tag name (e.g. v0.1.0). Empty = artifact-only run"
         required: false
@@ -60,7 +60,7 @@ jobs:
             os_label: macos
             arch: arm64
     env:
-      ARDOUR_TAG: ${{ github.event.inputs.ardour_tag || '9.2.0' }}
+      ARDOUR_TAG: ${{ github.event.inputs.ardour_tag || '9.2' }}
       ASSET_NAME: foyer-${{ matrix.os_label }}-${{ matrix.arch }}.zip
     steps:
       - uses: actions/checkout@v4
@@ -98,8 +98,12 @@ jobs:
         if: matrix.os_label == 'macos'
         run: |
           # Homebrew already on the runner; updating is slow and not
-          # strictly needed.
-          brew install cmake pkg-config glibmm@2.66 libsigc++@2 libxml2 \
+          # strictly needed. autoconf/automake/libtool are needed by
+          # `audiopus_sys` (cargo dep, builds libopus from source so
+          # the released binary is self-contained — no `brew install
+          # opus` requirement on end users).
+          brew install cmake pkg-config autoconf automake libtool \
+            glibmm@2.66 libsigc++@2 libxml2 \
             libsndfile libsamplerate fftw liblo taglib readline lrdf lilv \
             serd sord sratom suil lv2 rubberband cairomm@1.14 \
             gtkmm pangomm@2.46 boost aubio cppunit vamp-plugin-sdk

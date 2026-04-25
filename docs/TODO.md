@@ -67,7 +67,8 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   - **Shipped 2026-04-25 (scaffolding):**
     - [release.yml](../.github/workflows/release.yml) — 4-cell matrix
       `{ubuntu-24.04, ubuntu-24.04-arm, macos-13, macos-14}`, builds Ardour
-      @ `ARDOUR_TAG` (default `9.2.0`), shim, and `foyer` release; bundles
+      @ `ARDOUR_TAG` (default `9.2` — Ardour tags are `<major>.<minor>` only),
+      shim, and `foyer` release; bundles
       each cell into `foyer-<os>-<arch>.zip` and attaches them (plus a
       mirrored `install.sh`) to a GitHub release on `v*` tag push.
       `workflow_dispatch` exposes `ardour_tag` + `release_tag` inputs so
@@ -76,7 +77,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
       slow ~30 min path, repeats are fast.
     - [scripts/dev/ardour.sh](../scripts/dev/ardour.sh) — `do_clone` is now
       `git clone --depth 1 --branch $ARDOUR_TAG`, parameterized by an
-      `ARDOUR_TAG` env (default `9.2.0`).
+      `ARDOUR_TAG` env (default `9.2`).
     - [scripts/release/bundle.sh](../scripts/release/bundle.sh) — packages
       `foyer` + `libfoyer_shim.{so,dylib}` + LICENSE + LICENSE-GPL + a
       copy of `install.sh` + a README into the per-platform zip. Driven
@@ -103,7 +104,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
       enumerate exhaustively). Iterate the dep blocks in `release.yml`
       until a green run lands.
     - Multi-Ardour-version matrix. Today the matrix is single-axis on
-      Ardour 9.2.0; growing to `{9.0.0, 9.1.0, 9.2.0}` is a `matrix.include`
+      Ardour 9.2; growing to `{9.0, 9.1, 9.2}` is a `matrix.include`
       expansion + a `compat.h` of `#if`-guarded shims for the two known
       drift points. Defer until a 9.3 release shows up and forces it.
     - macOS code signing. The shipped `.dylib` is unsigned; the install

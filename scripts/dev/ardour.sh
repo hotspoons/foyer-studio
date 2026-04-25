@@ -15,11 +15,11 @@ else
 fi
 
 ARDOUR_UPSTREAM="${FOYER_ARDOUR_UPSTREAM:-https://github.com/Ardour/ardour.git}"
-# Pin the Ardour version we build against. The shim ABI surface
-# changes between major.minor versions (DECISION: track the minor;
-# patch versions are ABI-compatible). Override with `ARDOUR_TAG=9.1.0`
-# in the environment for matrix builds across versions.
-ARDOUR_TAG="${ARDOUR_TAG:-9.2.0}"
+# Pin the Ardour version we build against. Ardour tags releases as
+# `<major>.<minor>` (no patch — e.g. `9.2`, not `9.2.0`). Override
+# with `ARDOUR_TAG=9.1` in the environment for matrix builds across
+# versions.
+ARDOUR_TAG="${ARDOUR_TAG:-9.2}"
 
 usage() {
     cat <<EOF
@@ -35,7 +35,7 @@ ardour subcommands:
 
 Current ARDOUR_DIR: $ARDOUR_DIR
 Current ARDOUR_TAG: $ARDOUR_TAG
-Override with: FOYER_ARDOUR_DIR=/path/to/ardour, ARDOUR_TAG=9.2.0
+Override with: FOYER_ARDOUR_DIR=/path/to/ardour, ARDOUR_TAG=9.2
 EOF
 }
 

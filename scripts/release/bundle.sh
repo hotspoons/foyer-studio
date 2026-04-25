@@ -72,7 +72,7 @@ asset_name="$bundle_name.zip"
 dist_dir="$ROOT_DIR/dist"
 staging="$dist_dir/$bundle_name"
 
-rm -rf "$staging" "$dist_dir/$asset_name"
+rm -rf "${staging:?}" "${dist_dir:?}/${asset_name:?}"
 mkdir -p "$staging"
 
 cp "$FOYER_BIN" "$staging/foyer"
@@ -113,7 +113,7 @@ Uninstall:
   ./install.sh uninstall            # remove binary + shim
   ./install.sh uninstall --purge    # also wipe ~/.local/share/foyer/
 
-Built against Ardour ${ARDOUR_TAG:-9.2.0}. The shim is ABI-locked to
+Built against Ardour ${ARDOUR_TAG:-9.2}. The shim is ABI-locked to
 the Ardour minor version above; using it with a different Ardour
 build is undefined behavior.
 EOF
