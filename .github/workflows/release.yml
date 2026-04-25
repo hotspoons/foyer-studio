@@ -53,12 +53,15 @@ jobs:
           - runner: ubuntu-24.04
             os_label: linux
             arch: x86_64
+            with_shim: true
           - runner: ubuntu-24.04-arm
             os_label: linux
             arch: arm64
+            with_shim: true
           - runner: macos-14
             os_label: macos
             arch: arm64
+            with_shim: true
     env:
       ARDOUR_TAG: ${{ github.event.inputs.ardour_tag || '9.2' }}
       ASSET_NAME: foyer-${{ matrix.os_label }}-${{ matrix.arch }}.zip
@@ -98,18 +101,22 @@ jobs:
         if: matrix.os_label == 'macos'
         run: |
           # Homebrew already on the runner; updating is slow and not
-          # strictly needed. autoconf/automake/libtool are needed by
-          # `audiopus_sys` (cargo dep, builds libopus from source so
-          # the released binary is self-contained — no `brew install
-          # opus` requirement on end users).
+          # strictly needed.
+          # - autoconf/automake/libtool: needed by `audiopus_sys` (cargo
+          #   dep, builds libopus from source so the released binary is
+          #   self-contained — no `brew install opus` requirement on end
+          #   users) and by Ardour's waf chain.
+          # - libarchive/libogg/flac: required by Ardour wscript
+          #   pkg-config checks (libarchive is keg-only — surfaced via
+          #   PKG_CONFIG_PATH below).
           brew install cmake pkg-config autoconf automake libtool \
-            glibmm@2.66 libsigc++@2 libxml2 \
+            glibmm@2.66 libsigc++@2 libxml2 libarchive libogg flac \
             libsndfile libsamplerate fftw liblo taglib readline lrdf lilv \
             serd sord sratom suil lv2 rubberband cairomm@1.14 \
             gtkmm pangomm@2.46 boost aubio cppunit vamp-plugin-sdk
           # Some keg-only formulas need their pkg-config dirs surfaced.
           {
-            echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix readline)/lib/pkgconfig:$(brew --prefix glibmm@2.66)/lib/pkgconfig:$(brew --prefix libsigc++@2)/lib/pkgconfig:$(brew --prefix cairomm@1.14)/lib/pkgconfig:$(brew --prefix pangomm@2.46)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+            echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix readline)/lib/pkgconfig:$(brew --prefix glibmm@2.66)/lib/pkgconfig:$(brew --prefix libsigc++@2)/lib/pkgconfig:$(brew --prefix cairomm@1.14)/lib/pkgconfig:$(brew --prefix pangomm@2.46)/lib/pkgconfig:$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
           } >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -121,8 +128,11 @@ jobs:
 
       # Ardour clone + build dir cache. Key includes the tag so a tag
       # bump invalidates cleanly. Restoring this is the difference
-      # between a 30 s build and a 30 min build.
+      # between a 30 s build and a 30 min build. Skipped on cells
+      # that don't ship the shim — no point cloning Ardour we won't
+      # use.
       - name: Cache Ardour source + build
+        if: matrix.with_shim
         id: cache-ardour
         uses: actions/cache@v4
         with:
@@ -130,11 +140,11 @@ jobs:
           key: ardour-${{ matrix.os_label }}-${{ matrix.arch }}-${{ env.ARDOUR_TAG }}-v1
 
       - name: Clone Ardour @ ${{ env.ARDOUR_TAG }}
-        if: steps.cache-ardour.outputs.cache-hit != 'true'
+        if: matrix.with_shim && steps.cache-ardour.outputs.cache-hit != 'true'
         run: ./scripts/dev/ardour.sh clone
 
       - name: Configure + build Ardour (slow — ~15-30 min, cached)
-        if: steps.cache-ardour.outputs.cache-hit != 'true'
+        if: matrix.with_shim && steps.cache-ardour.outputs.cache-hit != 'true'
         run: |
           ./scripts/dev/ardour.sh configure
           ./scripts/dev/ardour.sh build
@@ -146,6 +156,7 @@ jobs:
         run: cargo build --release --bin foyer
 
       - name: Build shim
+        if: matrix.with_shim
         run: |
           cmake -S shims/ardour -B shims/ardour/cmake-build \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -156,6 +167,9 @@ jobs:
         env:
           OS_LABEL: ${{ matrix.os_label }}
           ARCH: ${{ matrix.arch }}
+          # Tells bundle.sh to ship a foyer-only zip when there's no
+          # shim for this platform yet.
+          FOYER_SKIP_SHIM: ${{ matrix.with_shim && '0' || '1' }}
         run: ./scripts/release/bundle.sh
 
       - name: Upload artifact

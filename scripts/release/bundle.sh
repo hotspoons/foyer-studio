@@ -54,15 +54,21 @@ esac
 
 FOYER_BIN="${FOYER_BIN:-$ROOT_DIR/target/release/foyer}"
 SHIM_LIB="${SHIM_LIB:-$ROOT_DIR/shims/ardour/cmake-build/libfoyer_shim.$shim_ext}"
+# Set FOYER_SKIP_SHIM=1 to ship a foyer-only bundle (used today on
+# macOS, where the Ardour shim build is deferred). Bundle still
+# includes everything else — README explains how to build the shim
+# locally.
+SKIP_SHIM="${FOYER_SKIP_SHIM:-0}"
 
 if [ ! -x "$FOYER_BIN" ]; then
     echo "bundle: foyer binary missing at $FOYER_BIN" >&2
     echo "bundle: run \`cargo build --release --bin foyer\` first" >&2
     exit 1
 fi
-if [ ! -f "$SHIM_LIB" ]; then
+if [ "$SKIP_SHIM" != "1" ] && [ ! -f "$SHIM_LIB" ]; then
     echo "bundle: shim library missing at $SHIM_LIB" >&2
     echo "bundle: run \`./scripts/dev/shim.sh build\` (needs Ardour built)" >&2
+    echo "bundle: or set FOYER_SKIP_SHIM=1 for a foyer-only bundle" >&2
     exit 1
 fi
 
@@ -77,15 +83,50 @@ mkdir -p "$staging"
 
 cp "$FOYER_BIN" "$staging/foyer"
 chmod 0755 "$staging/foyer"
-cp "$SHIM_LIB" "$staging/libfoyer_shim.$shim_ext"
-chmod 0644 "$staging/libfoyer_shim.$shim_ext"
+if [ "$SKIP_SHIM" != "1" ]; then
+    cp "$SHIM_LIB" "$staging/libfoyer_shim.$shim_ext"
+    chmod 0644 "$staging/libfoyer_shim.$shim_ext"
+fi
 
 cp "$ROOT_DIR/LICENSE" "$staging/LICENSE"
-cp "$ROOT_DIR/shims/ardour/LICENSE-GPL" "$staging/LICENSE-GPL"
+# LICENSE-GPL is only relevant when the shim is bundled.
+if [ "$SKIP_SHIM" != "1" ]; then
+    cp "$ROOT_DIR/shims/ardour/LICENSE-GPL" "$staging/LICENSE-GPL"
+fi
 cp "$ROOT_DIR/install.sh" "$staging/install.sh"
 chmod 0755 "$staging/install.sh"
 
-cat > "$staging/README.txt" <<EOF
+if [ "$SKIP_SHIM" = "1" ]; then
+    cat > "$staging/README.txt" <<EOF
+Foyer Studio — $OS_LABEL/$ARCH (foyer only)
+============================================
+
+Contents:
+  foyer                       Web-native control-surface server (Apache-2.0)
+  install.sh                  One-shot installer (mirror of repo HEAD)
+
+This bundle is foyer-only — the Ardour shim isn't shipped on $OS_LABEL/$ARCH
+yet. The 'foyer' binary works against the stub backend (demo mode) and can
+talk to a remote Ardour over the network. To run against a local Ardour you
+need libfoyer_shim built locally:
+
+  git clone https://github.com/foyer-studio/foyer-studio
+  cd foyer-studio
+  just ardour ensure       # clones + builds Ardour (slow, one-time)
+  just shim install        # builds + drops the .dylib into Ardour's surfaces
+
+Quick install (foyer binary only):
+  ./install.sh install --from-bundle .
+
+Or from the network:
+  curl -fsSL https://github.com/foyer-studio/foyer-studio/releases/latest/download/install.sh | bash
+
+Uninstall:
+  ./install.sh uninstall            # remove binary
+  ./install.sh uninstall --purge    # also wipe ~/.local/share/foyer/
+EOF
+else
+    cat > "$staging/README.txt" <<EOF
 Foyer Studio — $OS_LABEL/$ARCH
 ================================
 
@@ -117,6 +158,7 @@ Built against Ardour ${ARDOUR_TAG:-9.2}. The shim is ABI-locked to
 the Ardour minor version above; using it with a different Ardour
 build is undefined behavior.
 EOF
+fi
 
 mkdir -p "$dist_dir"
 ( cd "$dist_dir" && zip -qr "$asset_name" "$bundle_name" )

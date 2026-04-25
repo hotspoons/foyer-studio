@@ -120,20 +120,31 @@ install_files() {
     local foyer_src="$source_dir/foyer"
     local shim_src="$source_dir/libfoyer_shim.$SHIM_EXT"
     [ -x "$foyer_src" ] || [ -f "$foyer_src" ] || die "missing $foyer_src in bundle"
-    [ -f "$shim_src" ] || die "missing $shim_src in bundle"
 
-    mkdir -p "$BIN_DIR" "$SURFACES_DIR"
+    mkdir -p "$BIN_DIR"
     install -m 0755 "$foyer_src" "$BIN_DIR/foyer"
-    install -m 0644 "$shim_src" "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT"
     note "installed $BIN_DIR/foyer"
-    note "installed $SURFACES_DIR/libfoyer_shim.$SHIM_EXT"
+
+    # Bundle may or may not include the shim — macOS bundles ship
+    # foyer-only today (see bundle.sh's FOYER_SKIP_SHIM path).
+    if [ -f "$shim_src" ]; then
+        mkdir -p "$SURFACES_DIR"
+        install -m 0644 "$shim_src" "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT"
+        note "installed $SURFACES_DIR/libfoyer_shim.$SHIM_EXT"
+    else
+        note "bundle has no shim for $OS/$ARCH — installing foyer only."
+        note "  to use foyer with a local Ardour, build the shim from source:"
+        note "  https://github.com/$REPO#build-the-shim-from-source"
+    fi
 
     # Strip the quarantine xattr macOS slaps on downloaded archives —
     # without this Gatekeeper blocks dlopen of the shim and refuses to
     # exec the foyer binary on first launch.
     if [ "$OS" = "macos" ]; then
         xattr -dr com.apple.quarantine "$BIN_DIR/foyer" 2>/dev/null || true
-        xattr -dr com.apple.quarantine "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT" 2>/dev/null || true
+        if [ -f "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT" ]; then
+            xattr -dr com.apple.quarantine "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT" 2>/dev/null || true
+        fi
     fi
 }
 

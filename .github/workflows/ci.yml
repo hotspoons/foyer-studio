@@ -197,7 +197,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # See note on the rust job: macOS is arm64 only.
         include:
           - runner: ubuntu-24.04
             os: linux
@@ -242,14 +241,21 @@ jobs:
       - name: Install shim + Ardour build deps (macOS)
         if: matrix.os == 'macos'
         run: |
-          # autoconf/automake/libtool: needed by Ardour's waf build
-          # chain and by audiopus_sys (which CI doesn't link here, but
-          # parity with the rust matrix avoids surprises).
+          # autoconf/automake/libtool: needed by Ardour's waf build chain.
+          # libarchive/libogg/flac: required by Ardour wscript pkg-config
+          # checks (libarchive is keg-only on macOS — pkg-config path
+          # surfaced below).
           brew install cmake pkg-config autoconf automake libtool \
-            glibmm@2.66 libsigc++@2 libxml2 \
+            glibmm@2.66 libsigc++@2 libxml2 libarchive libogg flac \
             libsndfile libsamplerate fftw liblo taglib readline lrdf lilv \
             serd sord sratom suil lv2 rubberband cairomm@1.14 \
             gtkmm pangomm@2.46 boost aubio cppunit vamp-plugin-sdk
+          # Surface keg-only formulas to pkg-config. Without libarchive
+          # here, Ardour configure fails on the `libarchive >= 3.0.0`
+          # check.
+          {
+            echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix readline)/lib/pkgconfig:$(brew --prefix glibmm@2.66)/lib/pkgconfig:$(brew --prefix libsigc++@2)/lib/pkgconfig:$(brew --prefix cairomm@1.14)/lib/pkgconfig:$(brew --prefix pangomm@2.46)/lib/pkgconfig:$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          } >> "$GITHUB_ENV"
           {
             echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix readline)/lib/pkgconfig:$(brew --prefix glibmm@2.66)/lib/pkgconfig:$(brew --prefix libsigc++@2)/lib/pkgconfig:$(brew --prefix cairomm@1.14)/lib/pkgconfig:$(brew --prefix pangomm@2.46)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
           } >> "$GITHUB_ENV"

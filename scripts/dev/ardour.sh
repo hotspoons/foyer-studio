@@ -78,7 +78,41 @@ require_repo() {
 }
 
 do_configure() {
-    (cd "$ARDOUR_DIR" && python3 waf configure --optimize)
+    local extra_args=()
+    local cppflags="${CPPFLAGS:-}"
+    local ldflags="${LDFLAGS:-}"
+    local pkg_path="${PKG_CONFIG_PATH:-}"
+
+    # macOS: Ardour's wscript probes boost via `check_cxx` against
+    # `<boost/version.hpp>` and pulls every other dep through pkg-config.
+    # Homebrew installs to /opt/homebrew (Apple Silicon) or /usr/local
+    # (Intel); `brew --prefix` resolves the right one. Without these
+    # hints waf can't find boost (header search) or the keg-only
+    # `libarchive` (pkg-config), which fails configure with
+    # "Checking for boost library >= 1.68 : no" or "libarchive: not
+    # found".
+    if [ "$(uname -s)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+        local brew_prefix
+        brew_prefix="$(brew --prefix)"
+        cppflags="-I$brew_prefix/include ${cppflags}"
+        ldflags="-L$brew_prefix/lib ${ldflags}"
+        # `libarchive` is keg-only on macOS so its .pc lives under the
+        # formula's own prefix, not the global lib/pkgconfig.
+        if brew --prefix libarchive >/dev/null 2>&1; then
+            pkg_path="$(brew --prefix libarchive)/lib/pkgconfig:$pkg_path"
+        fi
+        if brew --prefix boost >/dev/null 2>&1; then
+            extra_args+=("--boost-include=$(brew --prefix boost)/include")
+        fi
+    fi
+
+    (
+        cd "$ARDOUR_DIR"
+        CPPFLAGS="$cppflags" \
+        LDFLAGS="$ldflags" \
+        PKG_CONFIG_PATH="$pkg_path" \
+        python3 waf configure --optimize "${extra_args[@]}"
+    )
 }
 
 do_build() {
