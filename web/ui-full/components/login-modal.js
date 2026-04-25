@@ -3,18 +3,23 @@
 // Shown when the server's ClientGreeting marks this connection as
 // `is_tunnel && !is_authenticated` — i.e. the guest reached the
 // tunnel URL without a valid `?token=` query parameter. Collects
-// username (email) + password, encodes them into the URL token the
-// server expects (`base64url(email:password)`), and reconnects by
-// rewriting `window.location` so the WebSocket handshake picks up
-// the new token automatically.
+// username (email) + password, POSTs them to `/login` where the
+// server runs `verify_credentials` (hash the inputs with the same
+// pepper used at invite time, match against the stored
+// `token_hash`). On success the server returns the digest URL token,
+// which we plug into `?token=` and reload — the WS handshake then
+// authorizes via the normal token path.
+//
+// We deliberately do NOT compute the digest client-side: keeping the
+// hashing on the server keeps the pepper out of the browser bundle
+// and lets the auth algorithm evolve without a client release. The
+// trade-off is that the typed password crosses the wire — fine for
+// our threat model (TLS terminates at the Cloudflare edge for tunnel
+// guests, and LAN guests are on the same network anyway).
 //
 // The modal is non-dismissible — until the user signs in or navigates
 // away the WS layer can't accept any commands, so showing a
 // dismissible overlay would leave the app in a half-broken state.
-//
-// Email normalization (trim + ASCII-lowercase) matches the server's
-// `normalize_email` in `crates/foyer-server/src/tunnel.rs` so the
-// hash computed on either side matches.
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
@@ -128,17 +133,7 @@ export class LoginModal extends LitElement {
     }
   }
 
-  /// URL-safe base64 encode a UTF-8 string (matches Rust's
-  /// base64::URL_SAFE_NO_PAD). window.btoa operates on binary strings,
-  /// so we UTF-8-encode first to get correct output for non-ASCII.
-  _encodeToken(email, password) {
-    const raw = `${email.trim().toLowerCase()}:${password}`;
-    // UTF-8 → binary-string shim so btoa accepts multi-byte chars.
-    const utf8 = unescape(encodeURIComponent(raw));
-    return btoa(utf8).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  }
-
-  _submit() {
+  async _submit() {
     const email = this._email.trim();
     const pw = this._password;
     if (!email || !pw) {
@@ -147,7 +142,35 @@ export class LoginModal extends LitElement {
     }
     this._busy = true;
     this._error = "";
-    const token = this._encodeToken(email, pw);
+    let token;
+    try {
+      const res = await fetch("/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: pw }),
+      });
+      if (res.status === 401) {
+        this._error = "Email or password is incorrect.";
+        this._busy = false;
+        return;
+      }
+      if (!res.ok) {
+        this._error = `Sign-in failed (${res.status}).`;
+        this._busy = false;
+        return;
+      }
+      const body = await res.json();
+      token = body.token;
+    } catch (e) {
+      this._error = "Network error — try again.";
+      this._busy = false;
+      return;
+    }
+    if (!token) {
+      this._error = "Server returned no token.";
+      this._busy = false;
+      return;
+    }
     // Rewrite the URL so the WS layer picks up `?token=` on reconnect.
     // Full reload is intentional — the app's websocket + store state
     // should all restart against the new identity, and a reload is

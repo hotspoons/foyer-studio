@@ -97,9 +97,12 @@ async fn resolve_tunnel_auth(state: &AppState, token: Option<&str>) -> Connectio
     let Some(token) = token else {
         return ConnectionAuth::Unauthenticated;
     };
-    // `verify_token` decodes the base64 (email:password), rehashes, and
-    // matches against the tunnel manifest. Returns the matched
-    // `TunnelConnection` on success — with role + recipient attached.
+    // The URL token is `base64url(sha256_bytes(email:password|pepper))`
+    // — the *digest* of the credentials, not the credentials themselves.
+    // `verify_token` decodes it back to a hex hash and matches the
+    // tunnel manifest directly. The form-login path
+    // (`verify_credentials`) hashes the typed inputs and matches the
+    // same stored hash — both flows arrive at the same comparison.
     match crate::tunnel::verify_token(state, token).await {
         Some(conn) => {
             // Role enum → policy id. TunnelRole serde renames to

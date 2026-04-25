@@ -441,8 +441,10 @@ pub enum Event {
     },
     TunnelTokenCreated {
         connection: crate::tunnel::TunnelConnection,
-        /// Opaque `base64url(email_norm:password)` — what clients put
-        /// in the `?token=` query parameter.
+        /// Opaque `base64url(sha256(email_norm:password|pepper))` —
+        /// the credential digest, base64'd. Goes in the `?token=`
+        /// query parameter. Not reversible to the original credentials;
+        /// the server matches it directly against the stored hash.
         token: String,
         /// Random password, shown once in the UI so the user can copy
         /// it into an email / password manager.

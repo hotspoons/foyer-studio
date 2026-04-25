@@ -1554,9 +1554,15 @@ token. The server:
   `TunnelConnection.token_hash`. Password is never stored clear-text.
 - Emits the clear-text password **once** in `Event::TunnelTokenCreated`
   so the creator can copy it. Any reload before copy loses it.
-- Encodes the URL token as `base64url(email_norm:password)`; the
-  `?token=` query parameter on the share URL is sufficient to auto-
-  log-in, and `verify_token` decodes → re-hashes → matches.
+- Encodes the URL token as
+  `base64url(sha256_bytes(email_norm:password|pepper))` — i.e. the
+  same digest that's stored, base64'd instead of hex'd. The token is
+  not reversible to the original credentials. `verify_token` decodes
+  the base64 back to 32 bytes, hex-encodes, and matches the stored
+  hash directly. The form-login path (`POST /login`) takes typed
+  email+password, calls `verify_credentials` (hash + match), and
+  hands back the same digest token for the client to redirect with.
+  Both paths converge on the same comparison.
 - Stores the manifest at `$XDG_DATA_HOME/foyer/tunnel-manifest.json`.
   **Not** in Ardour XML session metadata despite the plan language.
 
@@ -1717,11 +1723,14 @@ only enforcement.
 
 **Login flow.** On tunnel origin without a valid `?token=`, the client
 receives a greeting with `is_authenticated: false` and shows a
-sign-in modal (`foyer-login-modal`). Submission encodes
-`base64url(email:password)` and rewrites `window.location` with the
-new `?token=`; a page reload re-handshakes through the now-authenticated
-WS. No cookies, no session table — the URL token is the single source
-of identity, hash-matched against the tunnel manifest per DECISION 36.
+sign-in modal (`foyer-login-modal`). Submission `POST`s the typed
+email+password to `/login`; the server hashes them with the
+manifest's pepper, matches against the stored `token_hash`, and
+returns the matching `base64url(sha256(...))` digest token. The
+client redirects with `?token=...` and the page reloads through the
+now-authenticated WS. No cookies, no session table — the URL token
+is the single source of identity, and its decoded bytes are the
+hash itself.
 
 **Event-level filter (outbound).** The writer loop in `handle()` now
 runs every outbound envelope through `should_forward_event(event,

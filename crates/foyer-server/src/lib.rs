@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use foyer_backend::{Backend, PcmTx};
 use foyer_schema::{BackendInfo, EntityId, Envelope, Event, SCHEMA_VERSION};
@@ -633,6 +633,15 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
         .route("/files/*path", get(files::serve_file))
         .route("/console", get(console_tail))
         .route("/qr", get(qr_svg))
+        // Form-login bridge for tunnel guests who reached the URL
+        // without `?token=...`. POST `{email, password}` → server
+        // hashes them with the same pepper, matches against the
+        // tunnel manifest, and returns the matching digest token
+        // (`base64url(sha256(email:password|pepper))`) on success.
+        // The client then redirects with `?token=...` and the WS
+        // handshake authorizes via the normal token path. Two surface
+        // entry points (form, URL token); one server-side comparison.
+        .route("/login", post(login_post))
         // Discovery endpoint for web UI variants — `boot.js` calls
         // this to learn which `ui-*/package.js` packages are available
         // under the served web_root, so users can drop a new variant
@@ -857,6 +866,45 @@ struct ConsoleReply {
 /// Empty list when the web_root is unset or nothing matches. Order
 /// is not stable — the browser doesn't depend on order (each
 /// variant's `match` score decides which one wins).
+/// `POST /login` — convert a form-typed `{email, password}` into the
+/// digest URL token. Server runs `verify_credentials` (hash inputs +
+/// match against the tunnel manifest); on success returns the
+/// `base64url(sha256(...))` token the client redirects with. On
+/// failure returns 401 — no enumeration distinction between bad
+/// password and unknown email, deliberately. Tunnels-disabled also
+/// returns 401 to avoid leaking that detail.
+///
+/// This is the second entry point into the tunnel auth surface. The
+/// first is the URL `?token=<digest>` query parameter consumed at WS
+/// handshake. Both converge at the same stored hash comparison; the
+/// difference is just which side derives the digest.
+#[derive(serde::Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(serde::Serialize)]
+struct LoginReply {
+    token: String,
+}
+
+async fn login_post(
+    State(state): SharedState,
+    axum::Json(req): axum::Json<LoginRequest>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+    use axum::Json;
+    if crate::tunnel::verify_credentials(&state, &req.email, &req.password)
+        .await
+        .is_none()
+    {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({}))).into_response();
+    }
+    let token = crate::tunnel::token_for_credentials(&req.email, &req.password);
+    (StatusCode::OK, Json(LoginReply { token })).into_response()
+}
+
 async fn variants_json(State(state): SharedState) -> impl IntoResponse {
     use axum::Json;
     #[derive(serde::Serialize)]

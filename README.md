@@ -12,28 +12,6 @@ minimum target: tiling + floating windows, schema-driven plugin
 panels, keyboard-first commands, and real-time collaboration over
 WebSockets and Cloudflare tunnels.
 
-## What's it for?
-
-Use cases I had in mind when I built it (over the course of one
-very caffeinated week, with heavy LLM assistance):
-
-- **Sharing a mix-in-progress** with a performer and making live
-  changes while they give feedback, without them being in the same
-  room. Screen-share-with-audio exists; this is more fun.
-- **A remote performer laying a track** into the host's session.
-- **Real-time collaboration** on the mix, effects, timeline, or
-  instruments — multiple browsers into one session, each with a
-  scoped RBAC role.
-- **Accessible, hackable UIs.** Reprojecting the DAW's state into
-  a web UI opens up things you can't easily do in a pro-grade DAW
-  shell: a MIDI-only Cakewalk-style surface, a phone transport
-  remote, a kid-friendly touch interface, etc.
-- **Feature compositions on top of the engine.** There's a simple
-  beat + piano-roll sequencer shipped today that generates MIDI
-  and saves the sequencer data in a region-data extension inside
-  the `.ardour` file. My 8-year-old loves playing with Hydrogen
-  and frankly so do I.
-
 ## Architecture (the one-paragraph version)
 
 Three layers, each with a strict job:
@@ -111,7 +89,7 @@ version.
 ## Running it
 
 Right now there's no packaged `foyer` binary or prebuilt Ardour
-shim. The dev container is the supported way to run — it handles
+shim. The dev container is the only way to run it at the moment — it handles
 the C++ toolchain, Ardour's deps, JACK, and the sidecar build.
 Windows, Mac, and Linux hosts all work; only native Linux hosts
 can currently pass real audio hardware through.

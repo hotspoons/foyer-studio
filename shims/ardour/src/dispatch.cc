@@ -44,8 +44,11 @@
 #include "ardour/track.h"
 #include "evoral/Note.h"
 #include "evoral/PatchChange.h"
+#include "ardour/automation_list.h"
 #include "pbd/controllable.h"
 #include "pbd/error.h"
+#include "pbd/memento_command.h"
+#include "pbd/stateful_diff_command.h"
 #include "temporal/beats.h"
 #include "temporal/timeline.h"
 
@@ -1322,13 +1325,30 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					return;
 				}
 				// Wrap each ControlSet in a reversible command so it
-				// becomes a single undo step. Without this,
-				// AutomationControl::set_value may silently drop its
-				// internal undo registration because there is no active
-				// UndoTransaction.
+				// becomes a single undo step. `set_value()` doesn't
+				// auto-record into the open transaction — for an
+				// AutomationControl we capture the underlying
+				// AutomationList state before + after and add a
+				// `MementoCommand<AutomationList>` so undo actually has
+				// a diff to roll back. Plain Controllables (rare here —
+				// fader/pan/mute/solo are all AutomationControl) get
+				// the wrap without a memento; the empty txn is silently
+				// dropped by Ardour on commit.
+				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (ctrl);
+				std::shared_ptr<ARDOUR::AutomationList> alist = ac ? ac->alist () : nullptr;
+				XMLNode* before = alist ? &alist->get_state () : nullptr;
+				const auto depth_before = session.undo_redo ().undo_depth ();
 				session.begin_reversible_command ("Foyer control change");
 				ctrl->set_value (snap.value, Controllable::UseGroup);
+				if (alist && before) {
+					session.add_command (new MementoCommand<ARDOUR::AutomationList> (
+					    *alist, before, &alist->get_state ()));
+				}
 				session.commit_reversible_command ();
+				PBD::warning << "foyer_shim: [undo] control_set id=" << snap.id
+				             << " has_alist=" << (alist ? 1 : 0)
+				             << " undo_depth " << depth_before << " -> "
+				             << session.undo_redo ().undo_depth () << endmsg;
 				// No manual echo — the Controllable::Changed signal will
 				// fire and our SignalBridge will emit the corresponding
 				// `control.update`.
@@ -1361,10 +1381,18 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					PBD::warning << "foyer_shim: update_region: unknown region id: " << snap.id << endmsg;
 					return;
 				}
-				// See PLAN 177 + DeleteRegion handler for the pattern.
+				// Ardour-canonical pattern for region property edits:
+				// `clear_changes()` snapshots the before-state into the
+				// region's PropertyList, do the mutations, then add a
+				// `StatefulDiffCommand` that captures the diff into the
+				// open undo transaction. Without the diff capture the
+				// undo entry is empty and Ctrl+Z is a no-op. See
+				// editor_ops.cc nudge_regions for the same idiom.
 				auto& session = shim->session ();
 				const bool own_txn = (self->_undo_group_depth == 0);
+				const auto depth_before = session.undo_redo ().undo_depth ();
 				if (own_txn) session.begin_reversible_command ("Foyer update region");
+				hit.region->clear_changes ();
 				if (snap.has_patch_start) {
 					hit.region->set_position (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_start)));
 				}
@@ -1377,7 +1405,12 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (snap.has_patch_muted) {
 					hit.region->set_muted (snap.patch_muted);
 				}
+				session.add_command (new PBD::StatefulDiffCommand (hit.region));
 				if (own_txn) session.commit_reversible_command ();
+				PBD::warning << "foyer_shim: [undo] update_region id=" << snap.id
+				             << " own_txn=" << own_txn
+				             << " undo_depth " << depth_before << " -> "
+				             << session.undo_redo ().undo_depth () << endmsg;
 				auto bytes = msgpack_out::encode_region_updated (session, snap.id);
 				if (!bytes.empty ()) {
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
@@ -1400,15 +1433,14 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// signal bridge relays it; we don't re-emit here.
 				//
 				// Wrap the playlist mutation in a reversible-command
-				// transaction so Ardour's undo stack sees it as a
-				// discrete user op (PLAN 177). When the client has
-				// an outer undo group open (multi-region delete),
-				// that outer group owns the transaction — skip our
-				// own begin/commit pair so we don't nest them.
+				// transaction with a `StatefulDiffCommand` capturing
+				// the playlist's before/after diff — without that, the
+				// undo entry is empty and Ctrl+Z does nothing.
 				auto& session = shim->session ();
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer delete region");
 				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
+				std::shared_ptr<ARDOUR::Playlist> hit_pl;
 				for (auto const& r : *routes) {
 					if (!r) continue;
 					auto track = std::dynamic_pointer_cast<Track> (r);
@@ -1416,9 +1448,14 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					auto pl = track->playlist ();
 					if (!pl) continue;
 					if (pl->region_by_id (hit.region->id ())) {
+						pl->clear_changes ();
 						pl->remove_region (hit.region);
+						hit_pl = pl;
 						break;
 					}
+				}
+				if (hit_pl) {
+					session.add_command (new PBD::StatefulDiffCommand (hit_pl));
 				}
 				if (own_txn) session.commit_reversible_command ();
 			});
@@ -2151,6 +2188,13 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				auto& session = shim->session ();
 				const bool own_txn = (self->_undo_group_depth == 0);
+				// Track delete is not reversible at the session level
+				// from outside the GUI — `Session::remove_route` does
+				// not capture an undo memento, and reconstructing a
+				// removed Route from XML is non-trivial. We still open
+				// a transaction so a parent undo group can keep its
+				// shape, but don't add a command — the empty txn is
+				// dropped on commit.
 				if (own_txn) session.begin_reversible_command ("Foyer delete track");
 				session.remove_route (route);
 				if (own_txn) session.commit_reversible_command ();
@@ -2167,6 +2211,12 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
 				auto& session = shim->session ();
 				const bool own_txn = (self->_undo_group_depth == 0);
+				// Reorder writes PresentationInfo::order on each route.
+				// PresentationInfo is its own Stateful object reachable
+				// per-route; an undo memento would need to capture each
+				// affected route's PI state. Deferring — the current
+				// txn is opened but no command is added, so undo is a
+				// no-op for reorder. Tracked as a follow-up.
 				if (own_txn) session.begin_reversible_command ("Foyer reorder tracks");
 				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
 				std::map<std::string, std::shared_ptr<Route>> by_sid;
@@ -2270,6 +2320,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer update track");
+				route->clear_changes ();
 				if (snap.has_patch_name) {
 					route->set_name (snap.patch_name);
 				}
@@ -2383,6 +2434,12 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					}
 				}
 
+				// Capture the route's property-bag diff (covers name +
+				// any other Stateful properties touched above). Port
+				// connections + RouteGroup membership are not in the
+				// property bag — those mutations don't yet round-trip
+				// through undo.
+				session.add_command (new PBD::StatefulDiffCommand (route));
 				if (group_changed) {
 					if (own_txn) session.commit_reversible_command ();
 					auto bytes = msgpack_out::encode_patch_reload ();
@@ -2525,8 +2582,40 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				else if (id == "transport.goto_end")   { session.request_locate (session.current_end_sample ()); }
 
 				// Edit — Session has these directly, no GUI needed.
-				else if (id == "edit.undo")        { session.undo (1); }
-				else if (id == "edit.redo")        { session.redo (1); }
+				// After undo/redo, the rollback flips object state via
+				// `set_state()` calls. Those don't reliably re-fire the
+				// per-property signals our SignalBridge subscribes to —
+				// the browser would keep showing the pre-undo state
+				// even though the session has rolled back. We push a
+				// `patch_reload` event so the client refetches a clean
+				// snapshot. Heavier than per-property echoes but
+				// bulletproof: any object touched by undo gets surfaced.
+				else if (id == "edit.undo") {
+					const auto before = session.undo_redo ().undo_depth ();
+					session.undo (1);
+					const auto after = session.undo_redo ().undo_depth ();
+					PBD::warning << "foyer_shim: [undo] edit.undo undo_depth "
+					             << before << " -> " << after
+					             << " redo_depth=" << session.undo_redo ().redo_depth ()
+					             << endmsg;
+					if (after < before) {
+						auto bytes = msgpack_out::encode_patch_reload ();
+						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+					}
+				}
+				else if (id == "edit.redo") {
+					const auto before = session.undo_redo ().redo_depth ();
+					session.redo (1);
+					const auto after = session.undo_redo ().redo_depth ();
+					PBD::warning << "foyer_shim: [undo] edit.redo redo_depth "
+					             << before << " -> " << after
+					             << " undo_depth=" << session.undo_redo ().undo_depth ()
+					             << endmsg;
+					if (after < before) {
+						auto bytes = msgpack_out::encode_patch_reload ();
+						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+					}
+				}
 				// cut/copy/paste live in the GUI `Editor` action
 				// manager and aren't reachable from headless hardour;
 				// surface that as a user-visible error so the toast
@@ -2642,12 +2731,20 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer add plugin");
+				// Route::add_processor / remove_processor don't auto-
+				// record undo — the GUI captures it via a
+				// MementoCommand<Route> snapshotting full route XML
+				// before/after. We mirror that pattern.
+				XMLNode& before = route->get_state ();
 				auto pi = std::make_shared<ARDOUR::PluginInsert> (session, session, plug);
 				if (route->add_processor (pi, ARDOUR::PreFader, nullptr, true) != 0) {
+					delete &before;
 					if (own_txn) session.commit_reversible_command ();
 					PBD::warning << "foyer_shim: add_plugin: Route::add_processor failed for " << snap.plugin_uri << endmsg;
 					return;
 				}
+				session.add_command (new MementoCommand<ARDOUR::Route> (
+				    *route, &before, &route->get_state ()));
 				if (own_txn) session.commit_reversible_command ();
 				// Success — ask the signal bridge to re-emit the route's
 				// snapshot so clients see the new plugin instance.
@@ -2697,12 +2794,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer remove plugin");
+				XMLNode& before = target_route->get_state ();
 				std::string affected_track;
 				if (target_route->remove_processor (target_proc) == 0) {
+					session.add_command (new MementoCommand<ARDOUR::Route> (
+					    *target_route, &before, &target_route->get_state ()));
 					std::ostringstream tid;
 					tid << target_route->id ();
 					affected_track = "track." + tid.str ();
 				} else {
+					delete &before;
 					PBD::warning << "foyer_shim: remove_plugin: Route::remove_processor failed" << endmsg;
 				}
 				if (own_txn) session.commit_reversible_command ();
@@ -2911,7 +3012,10 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (!alist) return;
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer add automation point");
+				XMLNode& before = alist->get_state ();
 				alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_point.time_samples)), snap.auto_point.value);
+				session.add_command (new MementoCommand<ARDOUR::AutomationList> (
+				    *alist, &before, &alist->get_state ()));
 				if (own_txn) session.commit_reversible_command ();
 				auto bytes = msgpack_out::encode_track_updated (session, schema_map::track_id_for_control (session, snap.lane_id));
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
@@ -2932,6 +3036,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (!alist) return;
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer move automation point");
+				XMLNode& before = alist->get_state ();
 				// Rebuild the lane around the point at `auto_orig_time`.
 				// Matching on (time,value) is fragile because the UI sends
 				// the *new* value; using nearest-time replacement avoids
@@ -2968,6 +3073,8 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				for (auto const& pt : pts) {
 					alist->add (Temporal::timepos_t (pt.first), pt.second);
 				}
+				session.add_command (new MementoCommand<ARDOUR::AutomationList> (
+				    *alist, &before, &alist->get_state ()));
 				if (own_txn) session.commit_reversible_command ();
 				auto bytes = msgpack_out::encode_track_updated (session, schema_map::track_id_for_control (session, snap.lane_id));
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
@@ -2988,9 +3095,12 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (!alist) return;
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer delete automation point");
+				XMLNode& before = alist->get_state ();
 				alist->erase (
 					Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_point.time_samples)),
 					snap.auto_point.value);
+				session.add_command (new MementoCommand<ARDOUR::AutomationList> (
+				    *alist, &before, &alist->get_state ()));
 				if (own_txn) session.commit_reversible_command ();
 				auto bytes = msgpack_out::encode_track_updated (session, schema_map::track_id_for_control (session, snap.lane_id));
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
@@ -3014,11 +3124,14 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// builds when replacing the entire lane.
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer replace automation lane");
+				XMLNode& before = alist->get_state ();
 				alist->clear ();
 				for (auto const& pt : snap.auto_points) {
 					alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (pt.time_samples)), pt.value);
 				}
 				alist->mark_dirty ();
+				session.add_command (new MementoCommand<ARDOUR::AutomationList> (
+				    *alist, &before, &alist->get_state ()));
 				if (own_txn) session.commit_reversible_command ();
 				auto bytes = msgpack_out::encode_track_updated (session, schema_map::track_id_for_control (session, snap.lane_id));
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);

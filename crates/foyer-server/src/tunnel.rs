@@ -50,9 +50,24 @@ pub async fn save_manifest(manifest: &TunnelManifest) -> anyhow::Result<()> {
 // ─── Credential hashing + generation ─────────────────────────────────
 //
 // Auth model: each connection is identified by an email + password pair.
-// The server stores `sha256(normalize(email):password|pepper)` — never
-// the password itself. The URL token is `base64url(normalize(email):password)`,
-// which clients pass as `?token=<...>` and we decode to rehash and match.
+// The server stores `sha256(email_norm:password|pepper)` (hex-encoded).
+// The URL token is `base64url(sha256_bytes(email_norm:password|pepper))`
+// — i.e. the same digest, base64'd instead of hex'd. The token is *not*
+// reversible: an invite URL leaking does not directly expose the
+// recipient's email or the generated password. (It still grants access
+// to whoever holds it — that's the trust model. This is theater on top
+// of an opaque-bearer-token design, not bank-grade auth.)
+//
+// Two paths can authenticate:
+//
+//   1. URL token (`?token=<base64url>`): decode → 32 bytes → hex →
+//      direct match against stored `token_hash`. No knowledge of the
+//      original credentials required by the server side.
+//
+//   2. Form login (`verify_credentials`): hash the user-typed
+//      email+password with the same pepper, match against stored
+//      `token_hash`. Inputs are clear text on the wire to the server
+//      but never written anywhere.
 //
 // Email normalization is trim + ASCII-lowercase. This avoids a user
 // getting locked out because they typed `Bob@EXAMPLE.com` at login
@@ -68,40 +83,50 @@ fn normalize_email(s: &str) -> String {
     s.trim().to_ascii_lowercase()
 }
 
-/// sha256(`email_norm:password` || pepper), hex-encoded. Pepper keeps
-/// the stored hashes from being trivially rainbow-table'd if the
-/// manifest file leaks.
-fn hash_credentials(email_norm: &str, password: &str) -> String {
+/// Raw 32-byte sha256 digest of `email_norm:password|pepper`. Internal
+/// helper — callers either hex-encode (storage) or base64url-encode
+/// (URL token) the result. Pepper keeps the stored hashes from being
+/// trivially rainbow-table'd if the manifest file leaks.
+fn digest_credentials(email_norm: &str, password: &str) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(email_norm.as_bytes());
     hasher.update(b":");
     hasher.update(password.as_bytes());
     hasher.update(HASH_PEPPER.as_bytes());
-    hex::encode(hasher.finalize())
+    hasher.finalize().into()
 }
 
-/// Base64url-encoded `email_norm:password` — the opaque URL token.
+/// Hex-encoded credential digest. This is what we persist in
+/// `TunnelConnection.token_hash` and what we match against on auth.
+fn hash_credentials(email_norm: &str, password: &str) -> String {
+    hex::encode(digest_credentials(email_norm, password))
+}
+
+/// Base64url-encoded credential digest — the opaque URL token.
 /// `URL_SAFE_NO_PAD` so the string is drop-in for a `?token=` query
-/// parameter without percent-encoding surprises.
+/// parameter without percent-encoding surprises. 32 raw bytes → 43
+/// chars unpadded base64url.
+///
+/// **Not reversible**: the token contains the digest, not the
+/// credentials. To authorize, the server decodes the b64 back to
+/// bytes, hex-encodes, and compares to the stored hash.
 fn encode_token(email_norm: &str, password: &str) -> String {
-    let raw = format!("{email_norm}:{password}");
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
+    let digest = digest_credentials(email_norm, password);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
-/// Inverse of `encode_token`. Returns `(email_norm, password)` on
-/// success, `None` on malformed input. Callers use this during WS
-/// handshake to locate and authorize a connection.
-fn decode_token(token: &str) -> Option<(String, String)> {
+/// Decode a URL token to its hex hash form, ready for direct match
+/// against `TunnelConnection.token_hash`. Returns `None` if the token
+/// isn't valid base64url or doesn't decode to exactly 32 bytes.
+fn decode_token_to_hash(token: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token.as_bytes())
         .ok()?;
-    let s = std::str::from_utf8(&bytes).ok()?;
-    let (email, password) = s.split_once(':')?;
-    if email.is_empty() || password.is_empty() {
+    if bytes.len() != 32 {
         return None;
     }
-    Some((email.to_string(), password.to_string()))
+    Some(hex::encode(bytes))
 }
 
 /// Random 16-char password. Alphabet excludes visually-ambiguous
@@ -131,8 +156,9 @@ fn looks_like_email(s: &str) -> bool {
 ///
 /// The returned tuple is `(connection, token, password)`:
 ///   · `connection` is what gets stored and broadcast to clients.
-///   · `token` is the opaque `base64url(email:password)` string — used
-///     in the share URL as `?token=<...>`.
+///   · `token` is the opaque `base64url(sha256(email:password|pepper))`
+///     string — used in the share URL as `?token=<...>`. Not reversible
+///     to the original credentials; the token IS the digest.
 ///   · `password` is the raw clear-text password, shown once in the UI.
 ///     Never persisted server-side.
 pub async fn create_token(
@@ -202,12 +228,11 @@ pub async fn revoke_token(state: &AppState, id: &foyer_schema::EntityId) -> anyh
 }
 
 /// Validate a tunnel URL token against the manifest. The token is
-/// `base64url(email_norm:password)`; we decode it, recompute the
-/// credential hash, and match against the connections list.
+/// `base64url(sha256_bytes(...))`; decoding gives us the hash directly,
+/// no knowledge of the original credentials needed.
 #[allow(dead_code)]
 pub async fn verify_token(state: &AppState, token: &str) -> Option<TunnelConnection> {
-    let (email_norm, password) = decode_token(token)?;
-    let hash = hash_credentials(&email_norm, &password);
+    let hash = decode_token_to_hash(token)?;
     let m = state.tunnel_manifest.read().await;
     if !m.enabled {
         return None;
@@ -215,10 +240,12 @@ pub async fn verify_token(state: &AppState, token: &str) -> Option<TunnelConnect
     m.connections.iter().find(|c| c.token_hash == hash).cloned()
 }
 
-/// Validate a raw (email, password) pair — for a login form endpoint
-/// that doesn't use the URL token. Mirrors `verify_token` but takes
-/// clear-text inputs and normalizes the email before hashing.
-#[allow(dead_code)]
+/// Validate a raw (email, password) pair — for the form-login endpoint
+/// that doesn't use the URL token. Hashes the inputs with the same
+/// pepper used at invite time and matches against the stored
+/// `token_hash`. The returned `TunnelConnection` carries role +
+/// recipient; the form-login handler uses it to mint the matching
+/// digest token to send back to the client.
 pub async fn verify_credentials(
     state: &AppState,
     email: &str,
@@ -231,6 +258,16 @@ pub async fn verify_credentials(
         return None;
     }
     m.connections.iter().find(|c| c.token_hash == hash).cloned()
+}
+
+/// Mint the URL token for a given (email, password) pair. Used by the
+/// form-login bridge: after `verify_credentials` succeeds, the server
+/// regenerates the token deterministically from the same inputs and
+/// hands it back so the client can redirect with `?token=...`. Same
+/// digest as the invite URL — `base64url(sha256(...|pepper))`.
+pub fn token_for_credentials(email: &str, password: &str) -> String {
+    let email_norm = normalize_email(email);
+    encode_token(&email_norm, password)
 }
 
 // ─── Provider lifecycle ──────────────────────────────────────────────
@@ -267,8 +304,8 @@ pub async fn start_tunnel(
         // hostname. Quick tunnels rotate `*.trycloudflare.com` on
         // every restart; a stale invite URL from the last run would
         // 404. We reuse the token already baked into the old URL
-        // (`?token=<base64url(email:password)>`) so credentials
-        // remain valid — the hash on the server side didn't change.
+        // (`?token=<base64url(digest)>`) so existing invites remain
+        // valid — the stored hash didn't change.
         let renamed = rewrite_connection_urls(&mut m.connections, &hostname);
         if renamed > 0 {
             tracing::info!("tunnel: rewrote {renamed} share URL(s) onto {hostname}");
