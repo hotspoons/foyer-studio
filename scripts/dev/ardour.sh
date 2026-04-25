@@ -162,6 +162,19 @@ do_configure() {
             ldflags="-L$libarchive_prefix/lib ${ldflags}"
             pkg_path="$libarchive_prefix/lib/pkgconfig:$pkg_path"
         fi
+        # `raptor` (raptor2) ships headers under `include/raptor2/` on
+        # Homebrew, so `<raptor.h>` doesn't resolve via the default
+        # `-I$brew_prefix/include`. lrdf.h `#include`s it directly,
+        # and that include trickles into libardour units (e.g.
+        # `audio_library.cc`) that aren't tagged with the LRDF uselib,
+        # so the per-cell pkg-config flags don't reach them. Surface
+        # raptor2's include dir globally.
+        if brew --prefix raptor >/dev/null 2>&1; then
+            local raptor_prefix
+            raptor_prefix="$(brew --prefix raptor)"
+            cppflags="-I$raptor_prefix/include/raptor2 -I$raptor_prefix/include ${cppflags}"
+            ldflags="-L$raptor_prefix/lib ${ldflags}"
+        fi
         if brew --prefix boost >/dev/null 2>&1; then
             extra_args+=("--boost-include=$(brew --prefix boost)/include")
         fi
