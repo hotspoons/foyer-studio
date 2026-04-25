@@ -37,6 +37,19 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 - [ ] Quantization grid on UI (hideable) based on BPMs. Ability to drag waveforms and sequences to snap to it with a modifer
 - [ ] Tunnel clients don't hear audio until they open the mixer once, we need audio always on for them and not reliant on a UI tweak
 - [ ] Chat notifications don't show on docked FAB, only floating FAB for chat. Need this to show on the FAB and we need a toast or what ever they are called if chats come in and the chat UI isn't open
+- [ ] Restore old slide-out panel behavior for docked FABs, it was a much nicer design
+- [ ] Clicking "Unsaved" should launch a confirmation dialog "Would you like to save"? Save/Cancel. Maybe replace with a disk icon, no text
+- [ ] The widget prompting to save the layout is way too big, maybe just make this an icon with a grid or something that lights up yellow when the layout is unsaved, don't inject the whole name in it
+- [ ] Solo states don't seem to be well synced on the front end. When I load a project that had a soloed channel, it doesn't reflect on the UI and I have solo and unsolo everything to get the channels in a good state. We need to take a good look at this
+- [ ] Undo/redo in the midi editor doesn't repaint the notes, it should always sync with the back end
+- [ ] Undo/redo icons are 90 degrees off, they should be the same as the title bar
+- [ ] Icon padding in undo/redo/music icon for midi channel in midi editor is skewed to the top, the icons are top heavy
+- [ ] Slide out midi form is too cramped - consider just having it be a small modal over top of the midi roll that can be dismisses instead of sliding out
+- [ ] No midi instrument/patch form in the beat editor! Need this to match the piano roll
+- [ ] The tiling controls on the tiled windows (mixer and timeline) are dubious and don't really do anything. Let's get rid of them and drop the code
+- [ ] Clicking the tiled window picker (mixer and timeline) renders the pop-up in the upper-left corner always, not where you would expect
+- [ ] Create MacOS and Linux builds (arm64 and amd64) against 9.2 tag, fix the tag in the clone process for this repo, come up with plan for building plugins for multiple versions of ardour codebase (Let's plan to support Ardour 9.0 and newer) - and is there a free tier for github runners? How can we build this? I have a Mac but I am running from a dev container - can I mount the darwin SDK into the dev container? Help me out
+
 
 ## Bugs
 
@@ -122,7 +135,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     `crates/foyer-server/src/ws.rs` to route denials only to the offending connection +
     LAN/admin roles. Message already names the recipient in current builds (DECISION 38);
     this is the client-scope half.
-- [ ] Add read-only, transport-only, and admin roles with API keys
+- [x] Add read-only, transport-only, and admin roles with API keys
   - Roles already config-driven (DECISION 38) but API-key-to-role mapping isn't wired.
     Shape: `roles.yaml` gains an `api_keys: {key_hash: role_id}` section; server accepts
     `Authorization: Bearer <key>` on WS handshake and resolves to the role.
@@ -134,7 +147,10 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   - Bundle the specific plugin binaries + presets into the session archive so a session
     opens with the same plugin state on another machine (or a shipping
     Foyer container). Export a full Foyer container that includes the plugins used
-    during the session in addition to the audio.
+    during the session in addition to the audio. 
+    - Big task, maybe defer to a DAW vendor and don't quit my day job. But containers/
+    OverlayFS with split compute environment snapshots and working project files would 
+    be a good fit for fixing DAW bitrot issues
 
 ## Resampler (audio ingress / egress sample-rate handling)
 

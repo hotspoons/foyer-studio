@@ -171,7 +171,6 @@ export class WindowList extends LitElement {
       dockedFabs.length === 0;
 
     return html`
-      <header>Windows</header>
       <div class="content">
         ${allEmpty
           ? html`<div class="empty">No windows open — use the "New" menu.</div>`

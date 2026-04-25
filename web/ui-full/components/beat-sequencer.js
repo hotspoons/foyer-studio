@@ -243,7 +243,7 @@ export class BeatSequencer extends LitElement {
     :host {
       display: flex; flex-direction: column;
       width: 100%; height: 100%; min-height: 0;
-      background: var(--color-surface);
+      background: transparent;
       color: var(--color-text);
       font-family: var(--font-sans);
       font-size: 11px;

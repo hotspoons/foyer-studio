@@ -22,25 +22,22 @@ import {
 // bottom where they're out of the way until you specifically want one.
 // Default-visible set excludes the single-view layouts; users can flip them
 // on through the "Show hidden" toggle.
+// Layout presets are tile-tree templates. Mixer + Timeline are the
+// only tile-class views; Plugins / Console / Diagnostics / Projects
+// are widgets now and live in the right-dock's widget layer, so they
+// don't appear here. Removed: every preset that included `plugins`
+// or `session` as a tile slot.
 const PRESET_ORDER = [
   { id: "mixer-left-timeline-right",    label: "Mixer + Timeline",        tag: "M · T" },
   { id: "timeline-left-mixer-right",    label: "Timeline + Mixer",        tag: "T · M" },
   { id: "timeline-over-mixer",          label: "Timeline over Mixer",     tag: "stack" },
   { id: "mixer-over-timeline",          label: "Mixer over Timeline",     tag: "stack" },
   { id: "everything",                   label: "Everything",              tag: "full" },
-  { id: "timeline-left-mixer-over-plugins", label: "Timeline · Mixer / Plugins", tag: "tall+2" },
-  { id: "session+timeline+mixer",       label: "Projects · Timeline · Mixer", tag: "3-col" },
-  { id: "session+timeline-over-mixer",  label: "Projects · Timeline / Mixer", tag: "tri" },
-  { id: "session-left-timeline-right",  label: "Projects + Timeline",     tag: "P · T" },
-  { id: "plugins-left-mixer-right",     label: "Plugins + Mixer",         tag: "P · M" },
-  { id: "mixer-left-plugins-right",     label: "Mixer + Plugins",         tag: "M · P" },
   { id: "mixer",                        label: "Mixer only",              tag: "single" },
   { id: "timeline",                     label: "Timeline only",           tag: "single" },
-  { id: "plugins",                      label: "Plugins only",            tag: "single" },
-  { id: "session",                      label: "Projects only",           tag: "single" },
 ];
 
-const DEFAULT_HIDDEN = new Set(["mixer", "timeline", "plugins", "session"]);
+const DEFAULT_HIDDEN = new Set(["mixer", "timeline"]);
 
 const CONFIG_KEY = "foyer.layout.preset-config.v1";
 

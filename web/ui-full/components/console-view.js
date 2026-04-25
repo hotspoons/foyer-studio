@@ -30,7 +30,7 @@ export class ConsoleView extends LitElement {
       flex-direction: column;
       flex: 1;
       overflow: hidden;
-      background: var(--color-surface);
+      background: transparent;
     }
     .toolbar {
       display: flex;
@@ -183,7 +183,6 @@ export class ConsoleView extends LitElement {
   render() {
     return html`
       <div class="toolbar">
-        <span>DAW console</span>
         <span class="path" title=${this._path}>${this._path}</span>
         <span class="spacer"></span>
         <button

@@ -12,6 +12,7 @@ import { FoyerWs } from "foyer-core/ws.js";
 import { Store } from "foyer-core/store.js";
 import { applyTheme } from "foyer-ui-core/theme.js";
 import { installTransportReturn } from "foyer-core/transport-return.js";
+import { audioController } from "foyer-core/audio/master-controller.js";
 
 import { LayoutStore } from "foyer-ui-core/layout/layout-store.js";
 import { Keybinds } from "foyer-ui-core/layout/keybinds.js";
@@ -35,10 +36,15 @@ import "./components/status-bar.js";
 import "./components/transport-bar.js";
 import "./components/main-menu.js";
 import "./components/right-dock.js";
-import "./components/agent-panel.js";
+// Agent panel disabled — leaving the import OUT (and the tag below
+// commented) parks the chat-agent surface without deleting the file.
+// Revisit when the agent integration is re-enabled.
+// import "./components/agent-panel.js";
 import "./components/chat-panel.js";
-import "./components/actions-fab.js";
-import "./components/session-info-fab.js";
+// Actions + Session-info FABs removed — they didn't add value over
+// the menu bar / project picker. The components remain on disk but
+// nothing imports them, so they're not registered with the FAB
+// registry and don't appear in the rail.
 import "./components/windows-fab.js";
 import "./components/command-palette.js";
 import "./components/layout-fab.js";
@@ -195,6 +201,44 @@ export class FoyerApp extends LitElement {
     this.layout = new LayoutStore();
     this.layout.addEventListener("change", () => this.requestUpdate());
 
+    // Auto-hide the widgets layer when the user clicks back into a
+    // core tile. The layer's renderers are pos:fixed children of the
+    // app shell, so a real tile-leaf click cannot bubble up THROUGH a
+    // visible widget — that means we only get here when the tile was
+    // actually the click target. Walk the composed path looking for
+    // `foyer-tile-leaf` (the tile-content wrapper) or any node with
+    // `data-tile-click="dismiss"`. A widget click stays inside the
+    // widget's own subtree and we ignore it.
+    this._onDocClickForWidgets = (ev) => {
+      const path = ev.composedPath?.() || [];
+      let hitTile = false;
+      let hitWidget = false;
+      for (const n of path) {
+        if (!n || !n.tagName) continue;
+        const tag = n.tagName.toLowerCase();
+        if (tag === "foyer-tile-leaf" || tag === "foyer-tile-container") {
+          hitTile = true;
+          break;
+        }
+        // Anything with explicit dismiss opt-out short-circuits.
+        if (n.dataset?.tileClick === "ignore") return;
+        // Inside a widget — let the layer keep its current visibility.
+        if (
+          tag === "foyer-floating-tiles"
+          || tag === "foyer-plugin-layer"
+          || tag === "foyer-right-dock"
+          || tag === "foyer-plugin-panel"
+        ) {
+          hitWidget = true;
+          break;
+        }
+      }
+      if (hitTile && !hitWidget) {
+        this.layout.notifyTileClicked();
+      }
+    };
+    document.addEventListener("pointerdown", this._onDocClickForWidgets, true);
+
     // User-defined chords for layouts (preset or named) fire before Keybinds.
     installBindingsRuntime(this.layout);
     // Rectangle-style slot chords (Ctrl+Alt+Shift+<key>) snap the focused
@@ -234,9 +278,17 @@ export class FoyerApp extends LitElement {
       ws: this.ws,
       store: this.store,
       layout: this.layout,
+      audio: audioController,
       workspaceRect: () => this._workspaceRect(),
       windowIndex: this.windowIndex,
     });
+
+    // Boot the master-bus audio listener as a singleton owned by the
+    // app shell, not by the mixer view. This unblocks tunnel guests
+    // who haven't opened the mixer yet (TODO 38) and survives mixer
+    // mount/unmount cycles. The mixer's toggle becomes a thin
+    // observer of this controller's state.
+    audioController.attach(this.ws, this.store);
   }
 
   /**
@@ -363,10 +415,9 @@ export class FoyerApp extends LitElement {
       </div>
       <foyer-plugin-layer .store=${this.layout}></foyer-plugin-layer>
       <foyer-floating-tiles .store=${this.layout}></foyer-floating-tiles>
-      <foyer-agent-panel></foyer-agent-panel>
+      <!-- <foyer-agent-panel></foyer-agent-panel> disabled, see import comment -->
       <foyer-chat-panel></foyer-chat-panel>
-      <foyer-actions-fab></foyer-actions-fab>
-      <foyer-session-fab></foyer-session-fab>
+      <!-- <foyer-actions-fab>, <foyer-session-fab> retired -->
       <foyer-windows-fab></foyer-windows-fab>
       <foyer-layout-fab .store=${this.layout}></foyer-layout-fab>
       <foyer-command-palette></foyer-command-palette>

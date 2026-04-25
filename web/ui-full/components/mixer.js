@@ -10,7 +10,8 @@ import "./track-strip.js";
 import { DENSITIES, loadMixerSettings, saveMixerSettings } from "foyer-core/mixer-density.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { icon } from "foyer-ui-core/icons.js";
-import { AudioListener } from "foyer-core/audio/audio-listener.js";
+// AudioListener is owned by foyer-core/audio/master-controller.js now;
+// the mixer just observes via window.__foyer.audio. Import removed.
 
 export class Mixer extends LitElement {
   static properties = {
@@ -18,7 +19,7 @@ export class Mixer extends LitElement {
     _density: { state: true, type: String },
     _widthMode: { state: true, type: String },
     _widthOverrides: { state: true, type: Object },
-    _listening: { state: true, type: Boolean },
+    // _listening is a getter on audioController state; not Lit-tracked.
   };
 
   static styles = css`
@@ -140,101 +141,30 @@ export class Mixer extends LitElement {
     this._density = s.density;
     this._widthMode = s.widthMode;
     this._widthOverrides = s.widthOverrides || {};
-    this._listening = false;
-    this._applyingListenPref = false;
-    /** @type {AudioListener | null} */
-    this._listener = null;
+  }
+
+  /// True iff the master-bus listener is currently running. Sourced
+  /// from the global `audioController` (TODO 38) so the mixer button
+  /// stays in sync regardless of who started/stopped it.
+  get _listening() {
+    return !!window.__foyer?.audio?.isOn?.();
   }
 
   connectedCallback() {
     super.connectedCallback();
-    // Listen-state restore has two paths:
-    //   1. Explicit saved pref in localStorage → honor it immediately,
-    //      no greeting needed. This path also handles the common
-    //      case where the mixer mounts on a session switch (the
-    //      greeting fired once, at WS connect, so it's long gone
-    //      by the time we get here on a fresh mount).
-    //   2. No saved pref → wait for the greeting, then default based
-    //      on `is_local` (off for local, on for remote).
-    // Previous version relied on a `store.state._greeting` fallback
-    // that never actually got populated — the greeting lived in
-    // status-bar's private state, so cases where the greeting fired
-    // before the mixer mounted left the saved pref unapplied.
+    // The mixer no longer owns the listener — `audioController`
+    // (boot-mounted in app.js) does. We just observe its `change`
+    // events to keep the toggle button in sync, and re-render on
+    // store changes so things like density/width updates land.
     this._onStoreChange = () => this.requestUpdate();
     window.__foyer?.store?.addEventListener("change", this._onStoreChange);
-    this._onGreeting = (ev) => {
-      const body = ev?.detail?.body;
-      if (!body) return;
-      if (body.type === "client_greeting") {
-        this._applyListenPref(!!body.is_local);
-      } else if (body.type === "backend_swapped" || body.type === "session_opened") {
-        // Session changed — the old listener's stream belongs to the
-        // previous shim and is dead. Tear it down so the saved-pref
-        // branch below can spin up a fresh one against the new
-        // backend's master tap.
-        if (this._listening) {
-          this._cleanupListener();
-          this._listening = false;
-          // Deliberately NOT saving "0" here — the user's saved
-          // preference should survive across switches. Just apply
-          // the pref again to restart if wanted.
-        }
-        this._applyListenPref(null);
-      }
-    };
-    window.__foyer?.ws?.addEventListener("envelope", this._onGreeting);
-    // Apply the saved pref right away. Remote-session / no-pref case
-    // falls through here (`wantOn = null`) and waits for the greeting.
-    this._applyListenPref(null);
+    this._onAudioChange = () => this.requestUpdate();
+    window.__foyer?.audio?.addEventListener?.("change", this._onAudioChange);
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
-    window.__foyer?.ws?.removeEventListener("envelope", this._onGreeting);
-    this._cleanupListener();
+    window.__foyer?.audio?.removeEventListener?.("change", this._onAudioChange);
     super.disconnectedCallback();
-  }
-
-  _applyListenPref(isLocal) {
-    // `_listening` flips true only after start() resolves. Between
-    // the `new AudioListener` call and that resolution we have a
-    // second in-flight, so guard with `_applyingListenPref` to stop
-    // rapid `session_opened` / `backend_swapped` replays from
-    // stacking up concurrent listener starts (each overwrote
-    // `_listener` and orphaned the previous one mid-handshake,
-    // which is what the "monitoring keeps turning off" regression
-    // was really observing).
-    if (this._listening || this._applyingListenPref) return;
-    // Tunnel guests always want Listen on — they have no hardware
-    // connection to the DAW's output and the whole point of the
-    // tunnel session is hearing what the host is playing. The
-    // toggle itself is hidden from their UI (see render()), so
-    // the saved localStorage pref is bypassed in this branch.
-    // PLAN 158.
-    const rbac = window.__foyer?.store?.state?.rbac;
-    const isTunnel = !!rbac?.isTunnel;
-    let wantOn;
-    if (isTunnel) {
-      wantOn = true;
-    } else {
-      const saved = localStorage.getItem("foyer.listen.master");
-      if (saved === "1") wantOn = true;
-      else if (saved === "0") wantOn = false;
-      else if (isLocal === null) return; // no pref + no greeting yet — wait
-      else wantOn = !isLocal;
-    }
-    if (wantOn) {
-      this._applyingListenPref = true;
-      this._toggleListen(true)
-        .catch(() => {})
-        .finally(() => { this._applyingListenPref = false; });
-    }
-  }
-
-  // (connectedCallback + disconnectedCallback are defined above — the
-  // listener cleanup + store-change wiring lives there now.)
-  _cleanupListener() {
-    this._listener?.stop();
-    this._listener = null;
   }
 
   /** Mixers overflow horizontally on big sessions, but the browser's
@@ -256,55 +186,14 @@ export class Mixer extends LitElement {
     );
   };
 
-  _toggleListen = async (silent = false) => {
-    if (this._listening) {
-      try { await this._listener?.stop(); } catch {}
-      this._listener = null;
-      this._listening = false;
-      // Persist user's preference: off.
-      localStorage.setItem("foyer.listen.master", "0");
-      return;
-    }
-    // Master-out preview: listens on the sidecar's synthesized test
-    // tone today; will flip to the real Ardour master as soon as the
-    // shim-side `Route::output()` tap lands.
-    const ws = window.__foyer?.ws;
-    if (!ws) return;
-    const baseUrl = location.origin.replace(/^http/, "ws");
+  _toggleListen = async () => {
+    // Thin wrapper — the controller decides start vs stop based on
+    // its own state, persists the user pref, and emits `change` so
+    // the button re-renders.
     try {
-      // Codec override via URL: `?audio_codec=raw_f32_le` bypasses
-      // Opus entirely so we can A/B the decoder against the raw
-      // PCM path. Useful when debugging decoder-specific issues
-      // like the half-pitch symptom we hit on 2026-04-20.
-      const params = new URLSearchParams(location.search);
-      const codec = params.get("audio_codec") || "opus";
-      this._listener = new AudioListener({
-        ws,
-        baseUrl,
-        sourceKind: "master",
-        codec,
-      });
-      console.info(`[mixer] Listen starting with codec=${codec}`);
-      await this._listener.start();
-      this._listening = true;
-      localStorage.setItem("foyer.listen.master", "1");
+      await window.__foyer?.audio?.toggle?.();
     } catch (e) {
-      console.error("[mixer] listen failed:", e);
-      this._listener = null;
-      this._listening = false;
-      // Only nag with a dialog on explicit user clicks. Auto-restore
-      // paths (page refresh, session switch) pass silent=true so a
-      // stale saved pref doesn't pop a modal on every refresh.
-      if (!silent) {
-        import("foyer-ui-core/widgets/confirm-modal.js").then(({ confirmAction }) => {
-          confirmAction({
-            title: "Listen failed",
-            message: `Couldn't start the master-out listener:\n\n${e.message}`,
-            confirmLabel: "OK",
-            cancelLabel: "Close",
-          });
-        });
-      }
+      console.error("[mixer] listen toggle failed:", e);
     }
   };
 

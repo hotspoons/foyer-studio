@@ -1435,6 +1435,26 @@ async fn dispatch_command(
                     );
                     be_rx
                 }
+                Err(foyer_backend::BackendError::AudioEgressUnavailable) => {
+                    // Typed "this backend has nothing to play" signal
+                    // (e.g. stub backend with test tone disabled).
+                    // Surface a clean error to the client and DON'T
+                    // fall back to the sidecar test tone — the user
+                    // wants silence, not a 440 Hz reference, when
+                    // there's no DAW connected.
+                    tracing::info!(
+                        "open_egress stream_id={stream_id}: backend declined audio (silent)"
+                    );
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "audio_egress_unavailable".into(),
+                            message: "backend has no audio source — connect a DAW to listen".into(),
+                        },
+                    )
+                    .await;
+                    return Ok(());
+                }
                 Err(e) => {
                     tracing::warn!("open_egress failed ({e}); falling back to sidecar test tone");
                     // 1-hour cap is a liveness guard, not a UX

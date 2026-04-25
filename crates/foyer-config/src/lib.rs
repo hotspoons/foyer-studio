@@ -206,7 +206,16 @@ pub struct BackendConfig {
     /// Env vars to inject into the child process.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, String>,
+    /// Stub-only: emit a 440 Hz reference tone on egress streams.
+    /// Off by default — the stub is silent so a launcher-mode user
+    /// hitting "Listen" doesn't get a sine in their headphones
+    /// before they've connected a DAW. Useful for end-to-end audio
+    /// path debugging. CLI `--stub-test-tone` overrides this.
+    #[serde(default, skip_serializing_if = "is_default_false")]
+    pub stub_test_tone: bool,
 }
+
+fn is_default_false(b: &bool) -> bool { !*b }
 
 fn yes() -> bool {
     true
@@ -289,6 +298,7 @@ pub fn seed_default() -> Config {
         executable: None,
         args: Vec::new(),
         env: Default::default(),
+        stub_test_tone: false,
     }];
     backends.push(BackendConfig {
         id: "ardour".into(),
@@ -298,6 +308,7 @@ pub fn seed_default() -> Config {
         executable: detect_ardour_executable(),
         args: Vec::new(),
         env: Default::default(),
+        stub_test_tone: false,
     });
     Config {
         version: CONFIG_SCHEMA_VERSION,

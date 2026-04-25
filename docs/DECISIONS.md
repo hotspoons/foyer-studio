@@ -1896,3 +1896,104 @@ match the `foyer-window` idiom, which is the one users compared
 them to. Keep the "snowflake" status only where it's earned;
 plugin windows get the same dumb direct-manipulation model as
 everything else.
+
+## 42. Widgets layer — unified umbrella over plugin floats + free-floating tiles
+
+**Date:** 2026-04-25
+
+**Context.** The right-dock had grown a confusing mix of overlapping
+window types: `<foyer-plugin-layer>` (auto-packed plugin parameter
+windows, z-index 850), `<foyer-floating-tiles>` (free-position
+tear-out tiles for views like console / diagnostics, z-index 900),
+and a lingering set of "system" surfaces — Plugins / Projects /
+Console / Diagnostics — duplicated as both Launch-menu tile-class
+views AND content the user could rip out into floats. The redundancy
+showed: a "Projects" tile that re-rendered the same picker the
+welcome modal already provided, FABs the user never opened, and no
+clear answer to "is this thing a tile or a window?"
+
+**Decision.** Define a single conceptual *widgets layer* that is the
+home for everything that floats above the tile grid:
+plugin parameter windows, track/region editors, beat sequencer,
+piano roll, console, diagnostics, plugins picker. The layer is a
+*concept*, not a single component — the existing `plugin-layer.js`
+and `floating-tiles.js` continue to render their respective
+populations because their UX legitimately differs (plugin-layer
+auto-packs and disables free move; floating-tiles is free position
+with slot snapping). What unifies them is shared state in
+`LayoutStore` and a dedicated dock UI in `right-dock.js`:
+
+- `widgetsVisible: bool` (default true). Both renderers gate their
+  output on this flag, so flipping it once hides every widget.
+- `widgetsSticky: bool` (default false). When false, a click on a
+  core tile auto-hides the widgets layer (the global handler in
+  `app.js` walks `composedPath` looking for `<foyer-tile-leaf>` and
+  calls `LayoutStore.notifyTileClicked()`). When true, dismiss
+  requires the dock's eye toggle.
+- `tileAllWidgets() / minimizeAllWidgets() / restoreAllWidgets()` —
+  group controls surfaced as buttons in the dock.
+- `allWidgets()` — normalized inventory of `{kind, id, view,
+  minimized, z}` across both renderers, used by the dock to draw a
+  single "open windows" list with per-widget icons.
+
+`right-dock.js` now hosts a "widgets dock" section in the rail
+(below the docked-FAB strip), with the visibility eye, sticky
+lock, "+" spawn menu (Console / Diagnostics / Plugins), the
+open-widget list, and the three group-control buttons. The rail
+also retains the legacy minimized-floats area for the FABs the
+user docks via drag.
+
+**Surfaces removed:**
+- *Projects* tile-class view (`view: "session"`) — the
+  `<foyer-session-view>` element survives only as the body of
+  `<foyer-project-picker-modal>` (the canonical "open a project"
+  flow). Removed from `LAUNCH_VIEWS`, `DEFAULT_VIEWS` (nav-bar),
+  `floating-tiles._renderView` switch, `DEFAULT_STICKY_SLOT`, and
+  every preset in `layout-fab.js`.
+- *Plugins / Console / Diagnostics* removed from `LAUNCH_VIEWS`;
+  they now spawn from the widgets-dock "+" menu and render as
+  free-floating tiles inside the widgets layer.
+- *Actions / Session / Agent* FABs — retired or disabled. The
+  Actions and Session FABs duplicated functionality already on the
+  menu bar; the Agent FAB is parked (commented import) until the
+  agent integration is re-enabled. `right-dock.js` ORDER list
+  trimmed accordingly.
+
+**Slide-out panel restored.** Tapping a docked FAB icon opens the
+right-dock's left-of-rail slide-out panel containing the FAB's
+`dockPanelContent()` (resizable, persists open state + width).
+This is the 4/22 design; the brief 4/24 "Dock overhaul" experiment
+that gave each FAB its own pos:fixed popover was reverted because
+it lost the resize affordance and shrunk the workspace
+inconsistently across FABs. The pos:fixed `_renderDockedPanel` in
+`quadrant-fab.js` is left in place but inert (gated on
+`_open === true`, which no path now sets while docked).
+
+**Alternatives considered.**
+- *Merge plugin-layer + floating-tiles into one component.*
+  Rejected. The two have legitimately different UX (auto-pack
+  vs. free-position with slots, no-drag vs. drag-anywhere); a
+  unified component would be a switch statement on `kind` for
+  every interaction with no real win.
+- *Make widgets a true z-overlay (no flex partition with tiles).*
+  Rejected. Rich's preference: stop at the workspace edge so the
+  dock stays clickable. The current design has the dock as a flex
+  sibling of the workspace, so the slide-out genuinely shrinks
+  the tile grid rather than overlaying it.
+- *Auto-dismiss widgets on click outside, including dock clicks.*
+  Rejected. The dock is the management surface for the widgets
+  layer; covering or auto-hiding it on its own click is hostile.
+  `app.js` excludes `<foyer-right-dock>` from the dismiss path.
+
+**Why.** Two failure modes the unification fixes: the user couldn't
+tell what was a tile vs. what was a window, and the pre-existing
+"Projects" tile was a worse copy of a UI that already had a
+dedicated home. Keeping the two renderers separate while unifying
+their state + dock means we got the cleanup without rewriting
+every drag, resize, slot-snap, and packer code path.
+
+**Failure mode if re-introduced.** "Add Projects back as a tile-
+class view because the welcome screen is hard to find." If the
+welcome screen / Session menu is hard to find, fix THAT — don't
+duplicate the picker into a tile slot. The duplication was the
+problem; reach for the canonical surface.

@@ -156,6 +156,12 @@ export class StartupErrors extends LitElement {
       return;
     }
     if (body.type !== "error") return;
+    // The stub backend (and any backend that lacks an audio source)
+    // emits `audio_egress_unavailable` whenever a peer opens the
+    // master listener. That's expected on first load — the silence
+    // is the truth, not an error worth pestering the user with.
+    // The DAW console still logs it.
+    if (body.code === "audio_egress_unavailable") return;
     // RBAC denials should always surface, not just during the startup
     // window — they describe user actions that failed *right now*.
     // The modal's dismiss state resets automatically so a stray click

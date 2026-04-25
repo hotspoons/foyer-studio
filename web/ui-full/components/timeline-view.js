@@ -852,6 +852,17 @@ export class TimelineView extends LitElement {
         content: seq,
         width: 1100,
         height: 560,
+        // Same reasoning as the MIDI editor — retarget the live
+        // sequencer to the new region rather than spawning a dup.
+        onReuse: (existingSeq) => {
+          if (!existingSeq) return;
+          existingSeq.regionId = seq.regionId;
+          existingSeq.regionName = seq.regionName;
+          existingSeq.notes = seq.notes;
+          existingSeq.layout = seq.layout;
+          existingSeq.trackId = seq.trackId;
+          existingSeq.trackRegions = seq.trackRegions;
+        },
       });
       const win = seq.closest("foyer-window");
       win?.addEventListener("close", () => {
@@ -1452,6 +1463,20 @@ export class TimelineView extends LitElement {
         content: editor,
         width: 1040,
         height: 680,
+        // Reusing an already-open MIDI editor: retarget the live
+        // editor element to the newly-clicked region instead of
+        // letting openWindow swap nodes (which would orphan the
+        // editor's internal state — selection, scroll, undo). The
+        // newly-created `editor` arg is discarded.
+        onReuse: (existingEditor) => {
+          if (!existingEditor) return;
+          existingEditor.notes = editor.notes;
+          existingEditor.regionId = editor.regionId;
+          existingEditor.regionName = editor.regionName;
+          existingEditor.sequencerLayout = editor.sequencerLayout;
+          existingEditor.readOnly = editor.readOnly;
+          existingEditor.trackId = editor.trackId;
+        },
       });
       // foyer-window dispatches `close` when the user clicks X /
       // presses Escape / clicks the backdrop. Clean up our listener

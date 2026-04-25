@@ -40,6 +40,15 @@ pub enum BackendError {
     NoSuchPath(String),
     #[error("unknown action: {0}")]
     UnknownAction(EntityId),
+    /// The backend has no audio source to expose right now (e.g.
+    /// the stub backend with its test tone disabled). The WS layer
+    /// uses this to distinguish "backend declined audio, don't
+    /// fall back" from a transient error worth retrying with the
+    /// sidecar test tone. Listener-side this surfaces as a clean
+    /// "no audio available" rather than ringing the user with a
+    /// 440 Hz reference.
+    #[error("audio egress unavailable on this backend")]
+    AudioEgressUnavailable,
     #[error("{0}")]
     Other(String),
 }

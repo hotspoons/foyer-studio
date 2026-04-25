@@ -13,13 +13,13 @@ import { registerView, listViews, currentView } from "foyer-core/registry/views.
 // Register the shipping UI's view catalog. Alternate UIs declare
 // their own set (or override individual entries by re-registering
 // with the same id + their own label/icon/order).
+// Tile-class views only. Plugins / Console / Diagnostics moved to the
+// widgets layer (right-dock spawn menu); Projects is a modal
+// (`<foyer-project-picker-modal>`), reachable from the welcome screen
+// + Session menu rather than living in this list.
 const DEFAULT_VIEWS = [
   { id: "mixer",    label: "Mixer",    icon: "adjustments-horizontal", order: 10, elementTag: "foyer-mixer" },
   { id: "timeline", label: "Timeline", icon: "list-bullet",            order: 20, elementTag: "foyer-timeline-view" },
-  { id: "plugins",  label: "Plugins",  icon: "puzzle-piece",           order: 30, elementTag: "foyer-plugins-view" },
-  { id: "session",  label: "Projects", icon: "folder-open",            order: 40, elementTag: "foyer-session-view" },
-  { id: "console",  label: "Console",  icon: "command-line",           order: 50, elementTag: "foyer-console-view" },
-  { id: "diagnostics", label: "Diagnostics", icon: "wrench-screwdriver", order: 60, elementTag: "foyer-diagnostics" },
 ];
 for (const v of DEFAULT_VIEWS) registerView(v);
 

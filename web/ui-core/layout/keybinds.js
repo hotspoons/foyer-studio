@@ -18,6 +18,7 @@
 
 import { DIR } from "./tile-tree.js";
 import { isTypingTarget } from "../typing-guard.js";
+import { isActionAllowed } from "foyer-core/rbac.js";
 
 const STORAGE_MOD = "foyer.keymap.mod";
 
@@ -132,9 +133,23 @@ export class Keybinds {
     // These run OUTSIDE the Ctrl+Alt chord family so they work regardless of
     // focus.
     if ((e.key === " " || e.code === "Space") && !e.altKey && !e.metaKey) {
-      e.preventDefault();
       const ws = window.__foyer?.ws;
       if (!ws) return;
+      // RBAC gate: read-only / performer roles can't drive transport
+      // (server rejects `invoke_action`). Skip the keystroke entirely
+      // — DON'T preventDefault — so spacebar falls through to native
+      // page-scroll / button-press behavior. Without this gate the
+      // user mashes space, sees nothing happen, and the WS server
+      // emits a forbidden_for_role error toast for every press, which
+      // was breaking remote sessions (TODO 31).
+      const wantId = e.ctrlKey ? "transport.record" : null;
+      if (wantId) {
+        if (!isActionAllowed(wantId)) return;
+      } else {
+        if (!isActionAllowed("transport.play")
+            && !isActionAllowed("transport.stop")) return;
+      }
+      e.preventDefault();
       if (e.ctrlKey) {
         ws.send({ type: "invoke_action", id: "transport.record" });
       } else {

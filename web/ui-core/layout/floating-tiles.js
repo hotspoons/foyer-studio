@@ -61,7 +61,6 @@ const VIEW_LABELS = {
   mixer: "Mixer",
   timeline: "Timeline",
   plugins: "Plugins",
-  session: "Projects",
   console: "Console",
   preview: "Preview",
   plugin_panel: "Plugin",
@@ -309,8 +308,15 @@ export class FloatingTiles extends LitElement {
   }
 
   render() {
-    const shown = this._entries.filter((e) => !e.minimized);
-    const minimized = this._entries.filter((e) => e.minimized);
+    // Tile-class floats (Mixer, Timeline tear-outs, etc.) always
+    // render — they belong to the mature tile-grid surface and
+    // aren't subject to the widgets-layer visibility flag. Only
+    // widget-class entries (Console, Diagnostics, Track editor,
+    // Beat sequencer, …) respect `widgetsVisible` (DECISION 42).
+    const layerVisible = this.store?.widgetsVisible?.() ?? true;
+    const showWidget = (e) => e.kind !== "widget" || layerVisible;
+    const shown = this._entries.filter((e) => !e.minimized && showWidget(e));
+    const minimized = this._entries.filter((e) => e.minimized && showWidget(e));
     const topId = shown.length ? shown[shown.length - 1].id : null;
     return html`
       ${repeat(
@@ -515,8 +521,13 @@ export class FloatingTiles extends LitElement {
         return html`<foyer-timeline-view .session=${session}></foyer-timeline-view>`;
       case "plugins":
         return html`<foyer-plugins-view></foyer-plugins-view>`;
-      case "session":
-        return html`<foyer-session-view></foyer-session-view>`;
+      // `session` (Projects browser) is no longer a tile-class view.
+      // It still exists as a modal body inside `<foyer-project-picker-modal>`
+      // — the canonical "open project" UI. Spawning it as a free-floating
+      // widget produced a redundant surface (the screenshot Rich nuked),
+      // so we removed the case. Anyone who has a stale `session` entry
+      // in their saved float list falls through to the empty default
+      // arm below, which is a safe no-op.
       case "console":
         return html`<foyer-console-view></foyer-console-view>`;
       case "diagnostics":

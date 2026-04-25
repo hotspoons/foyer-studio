@@ -26,13 +26,15 @@ const MENU_ORDER = [
 // A built-in "Launch" menu that spawns views into the workspace. Lives in
 // the top menu bar (always reachable — can't be covered by a floating window
 // because the top chrome has a higher z-index than floating tiles).
+//
+// Only the two core tile-class views (mixer + timeline) belong here.
+// Everything else lives in the widgets layer and is spawned via the
+// right-dock's widget "+" menu — see `right-dock.js` SPAWNABLE_WIDGETS.
+// Project picking is reachable through the Session menu (Open) and the
+// welcome screen, both of which open `<foyer-project-picker-modal>`.
 const LAUNCH_VIEWS = [
   { view: "mixer",       label: "Mixer",       icon: "adjustments-horizontal" },
   { view: "timeline",    label: "Timeline",    icon: "list-bullet" },
-  { view: "plugins",     label: "Plugins",     icon: "puzzle-piece" },
-  { view: "session",     label: "Projects",    icon: "folder-open" },
-  { view: "console",     label: "Console",     icon: "command-line" },
-  { view: "diagnostics", label: "Diagnostics", icon: "check-circle" },
 ];
 
 export class MainMenu extends LitElement {

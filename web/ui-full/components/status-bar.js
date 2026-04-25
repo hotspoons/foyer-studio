@@ -3,6 +3,7 @@ import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { cycleTheme, getTheme, onThemeChange, THEME_META } from "foyer-ui-core/theme.js";
 import { promptText } from "foyer-ui-core/widgets/prompt-modal.js";
+import { confirmAction } from "foyer-ui-core/widgets/confirm-modal.js";
 import { showShareModal } from "foyer-ui-core/widgets/share-modal.js";
 import "./main-menu.js";
 import "./session-switcher.js";
@@ -317,15 +318,32 @@ export class StatusBar extends LitElement {
   _renderSessionDirty() {
     const s = window.__foyer?.store?.state?.session;
     if (!s?.dirty) return null;
+    // Compact disk icon — no text. Click prompts a save confirmation
+    // ("Save unsaved changes?" → Save / Cancel) and dispatches the
+    // `session.save` action on confirm. Saves a status-bar slot vs.
+    // the previous "● Unsaved" pill.
     return html`
-      <span class="conn" title="Session has unsaved changes"
-            style="color: var(--color-warning); border-color: color-mix(in oklab, var(--color-warning) 60%, var(--color-border));">
-        <span style="width:6px; height:6px; border-radius:50%; background: var(--color-warning);
-                     box-shadow: 0 0 6px color-mix(in oklab, var(--color-warning) 60%, transparent);"></span>
-        <span>Unsaved</span>
-      </span>
+      <button
+        class="conn"
+        title="Session has unsaved changes — click to save"
+        style="color: var(--color-warning); border-color: color-mix(in oklab, var(--color-warning) 60%, var(--color-border)); cursor: pointer; background: transparent;"
+        @click=${this._promptSaveSession}
+      >
+        ${icon("document-save", 12)}
+      </button>
     `;
   }
+
+  _promptSaveSession = async () => {
+    const ok = await confirmAction({
+      title: "Save session",
+      message: "Save the current changes to this project?",
+      confirmLabel: "Save",
+      cancelLabel: "Cancel",
+    });
+    if (!ok) return;
+    window.__foyer?.ws?.send({ type: "invoke_action", id: "session.save" });
+  };
 
   _renderLayoutChip() {
     void this._layoutTick; // touch the tick prop so Lit re-renders on change
@@ -335,21 +353,25 @@ export class StatusBar extends LitElement {
     const id = layout.currentLayoutIdentity?.();
     // Hide entirely when the user hasn't diverged from their last load.
     if (!dirty && !id) return null;
-    const label = dirty
-      ? (id ? `Save "${id.name}"` : "Save layout")
-      : `layout: ${id.name}`;
+    // Icon-only — no name injection. The chip is a tile-grid glyph
+    // that lights yellow when the current layout has diverged from
+    // the loaded baseline. Tooltip carries the full context.
     const title = dirty
       ? (id
           ? `Current layout differs from "${id.name}" — click to save`
           : "You have an unsaved layout — click to save")
       : `Loaded ${id.kind} "${id.name}"`;
+    const dirtyStyle = dirty
+      ? "color: var(--color-warning); border-color: color-mix(in oklab, var(--color-warning) 60%, var(--color-border));"
+      : "";
     return html`
       <button
         class="layout-chip ${dirty ? "dirty" : ""}"
         title=${title}
+        style=${dirtyStyle}
         @click=${this._saveLayout}
       >
-        ${label}
+        ${icon("squares-2x2", 12)}
       </button>
     `;
   }

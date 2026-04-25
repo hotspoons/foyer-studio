@@ -56,6 +56,13 @@ pub struct StubBackend {
     /// Handle to the meter-tick task — aborted on drop so repeated
     /// backend-swaps don't leak a tick task per swap.
     meter_handle: Option<tokio::task::JoinHandle<()>>,
+    /// When true, `open_egress` emits a 440 Hz reference sine. When
+    /// false (the default) the stub refuses egress with a typed
+    /// `AudioEgressUnavailable` error so the WS layer doesn't fall
+    /// back to its sidecar test tone either — silent until a real
+    /// DAW backend takes over. Opt-in via CLI `--stub-test-tone`
+    /// or `backends[id=stub].stub_test_tone: true` in config.
+    test_tone: bool,
 }
 
 impl Drop for StubBackend {
@@ -78,6 +85,7 @@ impl StubBackend {
             regions: Arc::new(Mutex::new(regions::RegionStore::new())),
             waveforms: Arc::new(Mutex::new(waveform::WaveformCache::new())),
             meter_handle: None,
+            test_tone: false,
         };
         backend.meter_handle = Some(backend.spawn_meter_tick());
         backend
@@ -100,7 +108,16 @@ impl StubBackend {
             regions: Arc::new(Mutex::new(regions::RegionStore::new())),
             waveforms: Arc::new(Mutex::new(waveform::WaveformCache::new())),
             meter_handle: None,
+            test_tone: false,
         }
+    }
+
+    /// Enable the 440 Hz reference test tone on egress streams.
+    /// Off by default — the stub is silent until a real DAW backend
+    /// takes over. Useful for end-to-end audio path debugging.
+    pub fn with_test_tone(mut self, on: bool) -> Self {
+        self.test_tone = on;
+        self
     }
 
     /// Attach a jail so filesystem browsing works against the given root.
@@ -171,6 +188,16 @@ impl Backend for StubBackend {
         _source: AudioSource,
         format: AudioFormat,
     ) -> Result<PcmRx, BackendError> {
+        // Default behavior: silent. Returning the typed
+        // `AudioEgressUnavailable` error tells the WS layer NOT to
+        // fall back to its sidecar test tone — the user hears
+        // nothing, which is what they want when no DAW is connected
+        // and they're just sitting on the stub launcher. Flip
+        // `--stub-test-tone` on the CLI (or set `stub_test_tone:
+        // true` under the stub backend in config.yaml) to opt in.
+        if !self.test_tone {
+            return Err(BackendError::AudioEgressUnavailable);
+        }
         let (tx, rx) = mpsc::channel::<PcmFrame>(64);
         // Emit a 440 Hz sine at the negotiated rate until the receiver
         // closes. Frequency + amplitude match the sidecar's
@@ -588,8 +615,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn egress_stream_produces_frames() {
-        let b = StubBackend::new();
+    async fn egress_stream_produces_frames_when_test_tone_enabled() {
+        // The default stub is silent (`AudioEgressUnavailable`); the
+        // test tone is opt-in via `with_test_tone(true)`. The
+        // generator behavior we're checking — frame size, channel
+        // count, stream id round-trip — is what the test exercises.
+        let b = StubBackend::new().with_test_tone(true);
         let fmt = AudioFormat::new(48_000, 2, 128);
         let mut rx = b.open_egress(1, AudioSource::Master, fmt).await.unwrap();
         let f = tokio::time::timeout(Duration::from_millis(200), rx.recv())
@@ -598,6 +629,17 @@ mod tests {
             .expect("closed");
         assert_eq!(f.stream_id, 1);
         assert_eq!(f.samples.len(), 128 * 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn egress_default_is_silent() {
+        // Without `with_test_tone(true)`, the stub declines egress
+        // with the typed `AudioEgressUnavailable` error so the WS
+        // layer knows not to fall back to its sidecar test tone.
+        let b = StubBackend::new();
+        let fmt = AudioFormat::new(48_000, 2, 128);
+        let res = b.open_egress(1, AudioSource::Master, fmt).await;
+        assert!(matches!(res, Err(BackendError::AudioEgressUnavailable)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

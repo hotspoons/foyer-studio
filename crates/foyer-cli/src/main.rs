@@ -94,6 +94,15 @@ enum Command {
         /// PEM-encoded TLS private key matching `--tls-cert`.
         #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+
+        /// Make the stub backend emit its 440 Hz reference test tone
+        /// on egress streams. Off by default — without this flag the
+        /// stub is silent until a real DAW backend takes over, which
+        /// is what most users want when they hit "Listen" with no
+        /// project loaded. When enabled here, also overrides
+        /// `backends[id=stub].stub_test_tone` from config.yaml.
+        #[arg(long, default_value_t = false)]
+        stub_test_tone: bool,
     },
     /// Print the resolved config and exit.
     Backends,
@@ -169,6 +178,7 @@ async fn main() -> Result<()> {
             jail,
             tls_cert,
             tls_key,
+            stub_test_tone,
         } => {
             if list_shims {
                 return list_available_shims();
@@ -211,6 +221,7 @@ async fn main() -> Result<()> {
                 web_overlays,
                 jail,
                 tls,
+                stub_test_tone,
             )
             .await
         }
@@ -340,6 +351,7 @@ async fn serve(
     web_overlays: Vec<PathBuf>,
     jail_override: Option<PathBuf>,
     tls: Option<foyer_server::TlsConfig>,
+    stub_test_tone: bool,
 ) -> Result<()> {
     // Resolve backend: CLI override wins, then config default.
     let backend = match backend_override.as_deref() {
@@ -391,9 +403,22 @@ async fn serve(
     // Build the initial backend. For Ardour with an explicit --socket the
     // CLI can shortcut the spawner; for everything else we route through
     // the same CliSpawner the WS layer uses, so there's one code path.
+    // Resolve the stub test-tone flag: CLI overrides config. The
+    // CLI flag is always-on once specified; config is the per-user
+    // persisted default. Plumbed into the spawner so every stub
+    // instance (launcher mode + explicit `--backend stub` + runtime
+    // backend swap to stub) sees the same answer.
+    let stub_test_tone_resolved = stub_test_tone
+        || config
+            .backends
+            .iter()
+            .find(|b| b.id == "stub")
+            .map(|b| b.stub_test_tone)
+            .unwrap_or(false);
     let spawner = Arc::new(CliSpawner {
         config: config.clone(),
         jail: jail.clone(),
+        stub_test_tone: stub_test_tone_resolved,
     });
     let initial_backend_id = backend.id.clone();
 
@@ -448,7 +473,7 @@ async fn serve(
                         "no Ardour shim advertised — booting empty launcher; pick a project \
                          in the session view to spawn Ardour"
                     );
-                    let mut b = StubBackend::launcher();
+                    let mut b = StubBackend::launcher().with_test_tone(stub_test_tone_resolved);
                     if let Some(root) = &jail {
                         b = b.with_jail(root.clone());
                     }
@@ -495,6 +520,10 @@ async fn serve(
 struct CliSpawner {
     config: Config,
     jail: Option<PathBuf>,
+    /// Resolved value of CLI `--stub-test-tone` ORed with
+    /// `backends[id=stub].stub_test_tone`. Stamped onto every stub
+    /// instance the spawner builds.
+    stub_test_tone: bool,
 }
 
 #[async_trait::async_trait]
@@ -530,7 +559,7 @@ impl BackendSpawner for CliSpawner {
         }
         match cfg_backend.kind {
             BackendKind::Stub => {
-                let mut b = StubBackend::new();
+                let mut b = StubBackend::new().with_test_tone(self.stub_test_tone);
                 if let Some(root) = &self.jail {
                     b = b.with_jail(root.clone());
                 }

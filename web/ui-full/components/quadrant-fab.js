@@ -261,12 +261,17 @@ export class QuadrantFab extends LitElement {
   }
 
   render() {
-    // When docked to the right rail the button is rendered by <foyer-right-dock>,
-    // not here. The panel still lives in this component — but only when the
-    // dock has routed us open (via the `open` property).
+    // Docked mode: rail icon lives in <foyer-right-dock>, FAB button
+    // is hidden (no fixed-position circle next to the rail). When the
+    // rail icon is clicked, `openFromDock()` flips `_open` and we render
+    // the docked panel here — INSIDE this component's shadow root so
+    // QuadrantFab's `.panel` / `.grip` CSS scope cleanly. (The earlier
+    // experiment where the right-dock rendered the FAB's content via a
+    // template lost the scoped styles and looked unstyled — see
+    // DECISION 42.)
     if (this._isDocked()) {
-      if (!this._open) return html``;
-      return this._renderDockedPanel();
+      if (this._open) return this._renderDockedPanel();
+      return html``;
     }
     const quadrant = computePanelLayout({
       fabRight: this._fabRight,
@@ -371,6 +376,12 @@ export class QuadrantFab extends LitElement {
   dockPanelContent() {
     return this._renderPanelContent();
   }
+  /** Whether `dockPanelContent()` already includes its own header.
+   *  When `false` (the default for QuadrantFab), the right-dock's
+   *  slide-out wraps the content in a `<header>` showing the FAB's
+   *  label. Subclasses with custom chrome (chat, …) override to
+   *  `true` and the slide-out omits the wrapper. */
+  dockPanelHasOwnHeader() { return false; }
   /** Called by the right-dock when a docked FAB's panel is opened.
    *  Subclasses override to kick off lazy fetches. */
   onDockPanelOpen() {}

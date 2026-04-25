@@ -51,7 +51,10 @@ export class TrackEditorModal extends LitElement {
     :host {
       display: flex; flex-direction: column;
       width: 100%; height: 100%; min-height: 0;
-      background: var(--color-surface);
+      /* Transparent so the foyer-window frosted shell shows
+       * through. Internal blocks (.row, .strip, .card) keep their
+       * own surface colors where needed. */
+      background: transparent;
       font-family: var(--font-sans);
     }
     .card {

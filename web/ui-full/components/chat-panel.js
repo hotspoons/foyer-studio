@@ -420,6 +420,9 @@ export class FoyerChatPanel extends LitElement {
   toggleFromDock(t) { if (this._open) this.closeFromDock(); else this.openFromDock(t); }
 
   dockPanelContent() { return this._renderPanelBody({ compact: true }); }
+  /** Chat's compact body brings its own header with action buttons,
+   *  so the slide-out should NOT add its own outer header. */
+  dockPanelHasOwnHeader() { return true; }
 
   onDockPanelOpen() { this._onOpen(); }
 
@@ -643,7 +646,21 @@ export class FoyerChatPanel extends LitElement {
 
   render() {
     if (this._isDocked()) {
-      return this._open ? html`<div class="panel" style=${this._dockStyle()} role="dialog" aria-label="Foyer chat">${this._renderPanelBody({ compact: true })}</div>` : nothing;
+      // Docked: rail icon in <foyer-right-dock>; rail click flips
+      // `_open` via `toggleFromDock()` and we render our docked
+      // panel here, inside chat-panel's shadow root, so all the
+      // .transcript / .composer / .msg styles apply. Going through
+      // the right-dock's slide-out (an earlier approach) put the
+      // template in a different shadow root and dropped scoped CSS,
+      // which Rich flagged as broken on 2026-04-25.
+      if (this._open) {
+        return html`
+          <div class="panel" style=${this._dockStyle()} role="dialog" aria-label="Foyer chat">
+            ${this._renderPanelBody({ compact: true })}
+          </div>
+        `;
+      }
+      return nothing;
     }
     const fabStyle = `right: ${this._fabRight}px; bottom: ${this._fabBottom}px`;
     const unread = this._unreadCount;

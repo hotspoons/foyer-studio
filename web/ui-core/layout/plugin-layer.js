@@ -164,7 +164,14 @@ export class PluginLayer extends LitElement {
 
   _refresh() {
     this._entries = this.store?.pluginFloats?.() || [];
-    this._visible = this.store?.pluginFloatsVisible?.() ?? true;
+    // Plugin layer hides when EITHER its own toggle is off (legacy
+    // "hide all plugin windows" gesture) OR the umbrella widgets-layer
+    // is hidden. Both feed the same `_visible` so existing render
+    // paths and the right-click context-menu copy don't need to know
+    // which axis flipped.
+    const ownVisible = this.store?.pluginFloatsVisible?.() ?? true;
+    const layerVisible = this.store?.widgetsVisible?.() ?? true;
+    this._visible = ownVisible && layerVisible;
     this._repack();
   }
 

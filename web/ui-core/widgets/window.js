@@ -38,22 +38,20 @@ const MIN_H = 200;
 const CHROME_FALLBACK_PX = 100;
 
 /**
- * Measure the height of Foyer's top chrome — the area covered by
- * the main menu + transport bar that sits at z-index 1300+ above
- * floating windows. Used by `_clampToViewport` to keep window title
- * bars below the chrome where the user can grab them. Probes a few
- * known DOM hooks; falls back to a sensible default if nothing
- * matches (single-page-app fragments where the chrome hasn't
- * mounted yet).
+ * Top edge below which a foyer-window must sit. Was a probe of
+ * `foyer-main-menu` / `foyer-nav-bar` etc., but those live inside the
+ * status-bar's shadow root so `document.querySelector` never found
+ * them — every window fell back to the 100px default and the user
+ * couldn't drag track-editor flush with the workspace top (Rich, 2026
+ * -04-25). The right answer is the same authoritative rect that the
+ * floating-tiles renderer uses, so widget-class windows from both
+ * surfaces line up identically.
  */
 function measureChromeTop() {
-  for (const sel of ["foyer-main-menu", "foyer-nav-bar", ".app-chrome-top"]) {
-    const el = document.querySelector(sel);
-    if (el) {
-      const rect = el.getBoundingClientRect();
-      const bottom = rect.top + rect.height;
-      if (bottom > 0 && bottom < 400) return Math.ceil(bottom);
-    }
+  const fn = (typeof window !== "undefined") && window.__foyer?.workspaceRect;
+  if (typeof fn === "function") {
+    const r = fn();
+    if (r && Number.isFinite(r.top) && r.top >= 0) return Math.ceil(r.top);
   }
   return CHROME_FALLBACK_PX;
 }
@@ -81,6 +79,7 @@ export class FoyerWindow extends LitElement {
     storageKey:  { type: String, attribute: "storage-key" },
     backdrop:    { type: Boolean, reflect: true },
     maximized:   { type: Boolean, reflect: true },
+    minimized:   { type: Boolean, reflect: true },
     // Default initial dimensions if nothing stored.
     initWidth:   { type: Number, attribute: "init-width" },
     initHeight:  { type: Number, attribute: "init-height" },
@@ -103,6 +102,14 @@ export class FoyerWindow extends LitElement {
     :host([maximized]) {
       z-index: 1400;
     }
+    /* Widgets layer hides the foyer-window when widgetsVisible flips
+     * false (auto-hide-on-tile-click + dock toggle). The "minimized"
+     * attribute is the same idea but per-window: the dock can stash
+     * a single window and restore it later. */
+    :host([hidden-by-layer]),
+    :host([minimized]) {
+      display: none;
+    }
     .backdrop { display: none; }
     :host([backdrop]) .backdrop {
       display: block;
@@ -114,10 +121,18 @@ export class FoyerWindow extends LitElement {
     .win {
       position: absolute;
       display: flex; flex-direction: column;
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
+      /* Frosted-glass shell — widget-class windows read as visually
+       * distinct from the opaque tile-class views (mixer, timeline)
+       * underneath. The translucent background + backdrop-blur
+       * surfaces context while keeping content legible. */
+      background: color-mix(in oklab, var(--color-surface) 72%, transparent);
+      backdrop-filter: blur(18px) saturate(130%);
+      -webkit-backdrop-filter: blur(18px) saturate(130%);
+      border: 1px solid color-mix(in oklab, var(--color-border) 70%, transparent);
       border-radius: var(--radius-lg, 8px);
-      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+      box-shadow:
+        0 18px 50px rgba(0, 0, 0, 0.55),
+        inset 0 1px 0 color-mix(in oklab, white 8%, transparent);
       overflow: hidden;
       pointer-events: auto;
       min-width: ${MIN_W}px;
@@ -127,13 +142,19 @@ export class FoyerWindow extends LitElement {
       top: 0 !important; left: 0 !important;
       width: 100vw !important; height: 100vh !important;
       border-radius: 0;
+      /* Maximized = fullscreen utility surface; frosted treatment
+       * loses its purpose (nothing to see underneath), so we go
+       * fully opaque to avoid the dimmed look. */
+      background: var(--color-surface);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
     }
     header {
       flex: 0 0 auto;
       display: flex; align-items: center; gap: 10px;
       padding: 8px 10px 8px 14px;
-      background: var(--color-surface-elevated);
-      border-bottom: 1px solid var(--color-border);
+      background: color-mix(in oklab, var(--color-surface-elevated) 82%, transparent);
+      border-bottom: 1px solid color-mix(in oklab, var(--color-border) 60%, transparent);
       cursor: grab;
       user-select: none;
     }
@@ -164,7 +185,11 @@ export class FoyerWindow extends LitElement {
       flex: 1; min-height: 0;
       display: flex; flex-direction: column;
       overflow: hidden;
-      background: var(--color-surface);
+      /* Transparent so the frosted shell shows through the gaps
+       * between the slotted content's own opaque blocks. The
+       * inner element (track-editor, midi-editor, etc.) brings
+       * whatever density of background it wants. */
+      background: transparent;
     }
     ::slotted(*) { flex: 1; min-height: 0; }
 
@@ -192,11 +217,21 @@ export class FoyerWindow extends LitElement {
     this.storageKey = "";
     this.backdrop = false;
     this.maximized = false;
+    this.minimized = false;
     this.initWidth = 960;
     this.initHeight = 640;
 
     this._x = 0; this._y = 0;
     this._w = this.initWidth; this._h = this.initHeight;
+    // Stable per-instance id used as the layout-store registration key.
+    // Storage key is reused when present (dedupes a foyer-window opened
+    // twice with the same identity to a single dock entry).
+    this._layoutId = "";
+    this._onWidgetsLayerChange = () => {
+      const visible = window.__foyer?.layout?.widgetsVisible?.() ?? true;
+      if (!visible) this.setAttribute("hidden-by-layer", "");
+      else this.removeAttribute("hidden-by-layer");
+    };
 
     this._onKeydown = (e) => {
       if (e.key === "Escape") {
@@ -225,11 +260,65 @@ export class FoyerWindow extends LitElement {
     }
     this._clampToViewport();
     document.addEventListener("keydown", this._onKeydown);
+    // Register with the widgets layer so the right-dock lists this
+    // window and the layer's visibility/sticky/minimize-all controls
+    // affect it. foyer-window instances are dialog-class widgets by
+    // definition (track editor, MIDI editor, beat sequencer); they
+    // belong in the dock alongside Console + Diagnostics.
+    this._registerWithLayer();
+    window.__foyer?.layout?.addEventListener?.("change", this._onWidgetsLayerChange);
+    // Apply the current layer-visibility state on mount in case the
+    // layer was already hidden when we opened.
+    this._onWidgetsLayerChange();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     document.removeEventListener("keydown", this._onKeydown);
+    window.__foyer?.layout?.removeEventListener?.("change", this._onWidgetsLayerChange);
+    this._unregisterFromLayer();
+  }
+
+  _registerWithLayer() {
+    const layout = window.__foyer?.layout;
+    if (!layout?.registerExternalWidget) return;
+    this._layoutId =
+      this.storageKey ||
+      `foyer-window:${Math.random().toString(36).slice(2)}`;
+    layout.registerExternalWidget(this._layoutId, {
+      title: this.title || "Window",
+      icon: this.icon || "document",
+      view: this.title?.toLowerCase().split(" ")[0] || "widget",
+      focus: () => {
+        this.minimized = false;
+        // Bring above siblings — the simplest portable z-bump that
+        // works without managing a global stack ourselves.
+        try { this.parentNode?.appendChild(this); } catch {}
+        this._persist();
+      },
+      close: () => this._emitClose(),
+      setMinimized: (on) => {
+        this.minimized = !!on;
+        this._persist();
+      },
+      tileTo: (rect) => {
+        if (!rect) return;
+        this._x = Math.round(rect.x);
+        this._y = Math.round(rect.y);
+        this._w = Math.max(MIN_W, Math.round(rect.w));
+        this._h = Math.max(MIN_H, Math.round(rect.h));
+        this.maximized = false;
+        this.minimized = false;
+        this._clampToViewport();
+        this.requestUpdate();
+        this._persist();
+      },
+    });
+  }
+  _unregisterFromLayer() {
+    if (!this._layoutId) return;
+    window.__foyer?.layout?.unregisterExternalWidget?.(this._layoutId);
+    this._layoutId = "";
   }
 
   _emitClose() {
@@ -341,6 +430,11 @@ export class FoyerWindow extends LitElement {
           ${this.icon ? html`<span class="title-icon">${icon(this.icon, 14)}</span>` : null}
           <h2>${this.title || ""}</h2>
           <span class="spacer"></span>
+          <button title="Minimize to dock"
+                  @click=${() => { this.minimized = true; this._persist();
+                    window.__foyer?.layout?.setExternalMinimized?.(this._layoutId, true); }}>
+            ${icon("minus", 14)}
+          </button>
           <button title=${this.maximized ? "Restore" : "Maximize"}
                   @click=${() => this._toggleMax()}>
             ${icon(this.maximized ? "arrows-pointing-in" : "arrows-pointing-out", 14)}
@@ -367,8 +461,50 @@ customElements.define("foyer-window", FoyerWindow);
 /**
  * Convenience helper to open a window around a content element. Returns
  * a detach function that removes the window.
+ *
+ * Idempotent on `storageKey`: a second `openWindow` for an already-open
+ * window focuses + un-minimizes the existing instance instead of stacking
+ * a duplicate. Any new `content` passed on a re-open is dropped — the
+ * caller is asked to mutate the existing inner element if it needs to
+ * change state. (Track editor, MIDI editor, beat sequencer all share
+ * this codepath.)
  */
-export function openWindow({ title, icon, storageKey, content, width, height, backdrop = false }) {
+export function openWindow({ title, icon, storageKey, content, width, height, backdrop = false, onReuse }) {
+  if (storageKey) {
+    const existing = document.querySelector(
+      `foyer-window[storage-key="${CSS.escape(storageKey)}"]`,
+    );
+    if (existing) {
+      existing.minimized = false;
+      // If the caller passed fresh content, hand it to `onReuse` so the
+      // caller can mutate the existing inner element instead of letting
+      // us stack a duplicate (beat-sequencer, midi-editor reuse a single
+      // storageKey across regions and need this hook to retarget).
+      if (typeof onReuse === "function") {
+        try {
+          const existingContent = existing.firstElementChild;
+          onReuse(existingContent, content);
+        } catch (e) { console.warn("openWindow onReuse failed", e); }
+      } else if (content && content !== existing.firstElementChild) {
+        // No reuse hook + caller passed new content — replace inline.
+        try {
+          while (existing.firstChild) existing.removeChild(existing.firstChild);
+          existing.appendChild(content);
+        } catch {}
+      }
+      if (title) existing.title = title;
+      try {
+        document.body.appendChild(existing); // bump above siblings
+      } catch {}
+      try {
+        const layoutId = existing._layoutId;
+        if (layoutId) {
+          window.__foyer?.layout?.setExternalMinimized?.(layoutId, false);
+        }
+      } catch {}
+      return () => existing.remove();
+    }
+  }
   const w = document.createElement("foyer-window");
   if (title) w.title = title;
   if (icon) w.icon = icon;

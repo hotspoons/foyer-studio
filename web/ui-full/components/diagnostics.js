@@ -27,7 +27,7 @@ export class DiagnosticsView extends LitElement {
       height: 100%;
       font-family: var(--font-sans);
       color: var(--color-text);
-      background: var(--color-surface);
+      background: transparent;
     }
     .toolbar {
       display: flex; align-items: center; gap: 8px;
@@ -174,7 +174,6 @@ export class DiagnosticsView extends LitElement {
   render() {
     if (this._disabled) {
       return html`
-        <div class="toolbar"><span class="title">Diagnostics</span></div>
         <div class="banner">
           Dev probes aren't mounted on this server. Restart with <code>FOYER_DEV=1 just run</code>
           to enable <code>/dev/run-tests</code>.
@@ -186,7 +185,6 @@ export class DiagnosticsView extends LitElement {
     const failed = this._results.length - passed;
     return html`
       <div class="toolbar">
-        <span class="title">Diagnostics</span>
         <span class="count">${this._probes.length} probes</span>
         <span class="spacer"></span>
         <button @click=${this._runSelected} ?disabled=${this._running}>
