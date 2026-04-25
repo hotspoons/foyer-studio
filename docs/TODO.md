@@ -37,7 +37,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 - [ ] Quantization grid on UI (hideable) based on BPMs. Ability to drag waveforms and sequences to snap to it with a modifer
 - [ ] Tunnel clients don't hear audio until they open the mixer once, we need audio always on for them and not reliant on a UI tweak
 - [ ] Chat notifications don't show on docked FAB, only floating FAB for chat. Need this to show on the FAB and we need a toast or what ever they are called if chats come in and the chat UI isn't open
-- [ ] Restore old slide-out panel behavior for docked FABs, it was a much nicer design
+- [ ] Restore old slide-out panel behavior for docked FABs, it was a much nicer design 
 - [ ] Clicking "Unsaved" should launch a confirmation dialog "Would you like to save"? Save/Cancel. Maybe replace with a disk icon, no text
 - [ ] The widget prompting to save the layout is way too big, maybe just make this an icon with a grid or something that lights up yellow when the layout is unsaved, don't inject the whole name in it
 - [ ] Solo states don't seem to be well synced on the front end. When I load a project that had a soloed channel, it doesn't reflect on the UI and I have solo and unsolo everything to get the channels in a good state. We need to take a good look at this

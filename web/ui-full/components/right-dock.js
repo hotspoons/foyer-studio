@@ -462,11 +462,6 @@ export class RightDock extends LitElement {
             @click=${() => layout.tileAllWidgets()}
           >${icon("squares-2x2", 14)}</button>
           <button
-            title="Minimize all widgets"
-            ?disabled=${widgets.length === 0}
-            @click=${() => layout.minimizeAllWidgets()}
-          >${icon("minus-circle", 14)}</button>
-          <button
             title="Restore all widgets"
             ?disabled=${widgets.length === 0}
             @click=${() => layout.restoreAllWidgets()}

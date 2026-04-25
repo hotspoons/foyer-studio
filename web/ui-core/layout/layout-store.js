@@ -374,26 +374,6 @@ export class LayoutStore extends EventTarget {
     this._emit();
   }
 
-  minimizeAllWidgets() {
-    let touched = false;
-    for (const f of this._floating) {
-      if (f.kind !== "widget") continue;
-      if (!f.minimized) { f.minimized = true; touched = true; }
-    }
-    for (const [, w] of this._externalWidgets) {
-      if (!w.minimized) {
-        w.minimized = true;
-        try { w.setMinimized(true); } catch {}
-        touched = true;
-      }
-    }
-    // Plugin floats don't have a minimize state; the layer-wide
-    // visibility flag is their analogue. Hiding the layer entirely
-    // rather than per-plugin keeps the existing pluginFloats invariant
-    // (open-set persistence) intact.
-    if (touched) this._emit();
-  }
-
   restoreAllWidgets() {
     let touched = false;
     for (const f of this._floating) {

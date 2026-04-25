@@ -469,7 +469,69 @@ customElements.define("foyer-window", FoyerWindow);
  * change state. (Track editor, MIDI editor, beat sequencer all share
  * this codepath.)
  */
-export function openWindow({ title, icon, storageKey, content, width, height, backdrop = false, onReuse }) {
+// ── persistence: remember which kinds of windows were open across reloads ──
+//
+// `_floating` (in layout-store) used to persist Console + Diagnostics
+// because they were tile-class floats. After moving them to the
+// foyer-window chrome (2026-04-25), nothing remembered open windows on
+// reload. We bring back the same UX with a tiny registry: each spawn
+// site registers a kind + factory once, openWindow records the kind in
+// localStorage on creation and removes it on close, and `rehydrateWindows`
+// replays the list at boot. Track Editor / MIDI Editor / Beat Sequencer
+// participate too; they need the live session to resolve track / region
+// IDs, so the caller is expected to invoke `rehydrateWindows()` AFTER
+// the first session snapshot has landed.
+const PERSIST_KEY = "foyer.windows.open.v1";
+const FACTORIES = new Map();
+
+function _loadPersisted() {
+  try { return JSON.parse(localStorage.getItem(PERSIST_KEY) || "[]") || []; }
+  catch { return []; }
+}
+function _savePersisted(arr) {
+  try { localStorage.setItem(PERSIST_KEY, JSON.stringify(arr)); } catch {}
+}
+function _persistKey(entry) {
+  return `${entry.kind}::${entry.id ?? ""}`;
+}
+
+/** Add (or update) an entry in the persisted open-list. Idempotent on `(kind, id)`. */
+function _recordOpen(persist) {
+  const list = _loadPersisted();
+  const key = _persistKey(persist);
+  const idx = list.findIndex((e) => _persistKey(e) === key);
+  if (idx >= 0) list[idx] = persist;
+  else list.push(persist);
+  _savePersisted(list);
+}
+function _recordClose(persist) {
+  const key = _persistKey(persist);
+  _savePersisted(_loadPersisted().filter((e) => _persistKey(e) !== key));
+}
+
+/**
+ * Register a factory for a window kind. Called once at module load by
+ * each spawn site (`right-dock.js` for console + diagnostics,
+ * `track-editor-modal.js` for track editor, etc.). The factory
+ * receives the `props` saved alongside the entry and is expected to
+ * call `openWindow` itself (which idempotently dedupes by storageKey).
+ */
+export function registerWindowKind(kind, factory) {
+  if (typeof factory === "function") FACTORIES.set(kind, factory);
+}
+
+/** Replay every persisted open window. Safe to call multiple times. */
+export function rehydrateWindows() {
+  const list = _loadPersisted();
+  for (const entry of list) {
+    const fn = FACTORIES.get(entry.kind);
+    if (!fn) continue;
+    try { fn(entry.props || {}); }
+    catch (e) { console.warn("rehydrate failed for", entry.kind, e); }
+  }
+}
+
+export function openWindow({ title, icon, storageKey, content, width, height, backdrop = false, onReuse, persist }) {
   if (storageKey) {
     const existing = document.querySelector(
       `foyer-window[storage-key="${CSS.escape(storageKey)}"]`,
