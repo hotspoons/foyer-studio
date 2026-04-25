@@ -169,6 +169,13 @@ jobs:
         run: ./scripts/dev/tw.sh build
 
       - name: Build foyer (release)
+        env:
+          # Force `audiopus_sys` to statically link libopus from source
+          # so the released binary doesn't depend on a system
+          # `libopus.so.0` at runtime (end users shouldn't have to
+          # apt-get / brew-install opus to run install.sh's output).
+          # See ci.yml's matching note.
+          OPUS_NO_PKG_CONFIG: "1"
         run: cargo build --release --bin foyer
 
       - name: Build shim

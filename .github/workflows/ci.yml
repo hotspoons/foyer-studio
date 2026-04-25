@@ -80,7 +80,12 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
+          # autoconf/automake/libtool: `audiopus_sys` uses them to
+          # build libopus from source (we force OPUS_NO_PKG_CONFIG=1
+          # at build time for a self-contained binary). They're
+          # usually preinstalled on ubuntu-24.04; explicit for safety.
           sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
             libsoup-3.0-dev \
@@ -117,6 +122,18 @@ jobs:
       # at workflow level. `dist/foyer` is a stable staging path so the
       # downstream ui-smoke job doesn't need to know which profile ran.
       - name: Build foyer
+        env:
+          # Force `audiopus_sys` to static-link libopus from source.
+          # Without this, audiopus_sys's build script picks up a system
+          # libopus via pkg-config when one happens to be on the
+          # builder (transitive apt dep on Linux, brew dep on macOS),
+          # and the resulting binary needs `libopus.so.0` at runtime
+          # — which the ui-smoke job's runner doesn't have, and end
+          # users who run install.sh shouldn't need to apt-get either.
+          # autoconf/automake/libtool must be present so the source
+          # build's `autoreconf` succeeds; macOS install step has them,
+          # Linux runners ship them by default.
+          OPUS_NO_PKG_CONFIG: "1"
         run: |
           mkdir -p dist
           if [ "$RELEASE_BUILD" = "true" ]; then
