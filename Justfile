@@ -73,6 +73,15 @@ clippy:
 fmt-check:
     cargo fmt --all -- --check
 
+# Apply every autofixer that resolves a `just verify` failure
+# (formatting, lint auto-fixes, etc.). Run this before pushing —
+# `just verify` is the read-only gate (mirrors GitHub Actions); this
+# recipe is the writeable companion. Add new fixers here as the
+# project picks them up.
+ci:
+    cargo fmt --all
+    @echo "✅ ci: applied"
+
 test:
     cargo test --workspace --all-targets
 
@@ -113,9 +122,11 @@ test-ui-ci:
 
 # Full gate — mirrors what CI runs on a PR. Any failure = not ready
 # to merge. Runs fmt + clippy + cargo test + UI smoke back-to-back so
-# a single `just ci` locally matches a green check on the PR.
-ci: fmt-check clippy test test-ui-ci
-    @echo "✅ ci: clean"
+# a single `just verify` locally matches a green check on the PR.
+# The companion `just ci` recipe applies autofixers (fmt, etc.) for
+# anything in here that has a writeable counterpart.
+verify: fmt-check clippy test test-ui-ci
+    @echo "✅ verify: clean"
 
 # Drive the live UI from the CLI — screenshot, click, eval JS, probe
 # store state. Useful for scripting reproducers and remote-control

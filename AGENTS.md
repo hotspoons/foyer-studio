@@ -115,7 +115,8 @@ NOT edit `index.html` or `boot.js`.
 just run                      # stub or Ardour backend, serves web/
 just run --backend stub       # fast dev loop, no shim/JACK needed
 just test-ui-ci               # Playwright smoke with auto-spawned stub
-just ci                       # fmt + clippy + cargo test + UI smoke
+just verify                   # fmt-check + clippy + test + UI smoke (read-only PR gate)
+just ci                       # autofixers (cargo fmt, …) — run before `just verify`
 just ui-probe dump            # JSON snapshot of store/rbac/peers
 just ui-probe screenshot /tmp/f.png
 just ui-probe eval 'window.__foyer.store.state.status'

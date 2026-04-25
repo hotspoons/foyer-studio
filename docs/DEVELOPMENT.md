@@ -161,16 +161,18 @@ stale.
 Tests are `just` recipes so they double as CI steps:
 
 ```bash
-just fmt-check       # cargo fmt --all -- --check
+just fmt-check       # cargo fmt --all -- --check (read-only)
 just clippy          # cargo clippy --workspace --all-targets -- -D warnings
 just test            # cargo test --workspace --all-targets
 just test-ui         # Playwright smoke against a running server
 just test-ui-ci      # Playwright smoke with an auto-spawned stub server
-just ci              # fmt-check + clippy + test + test-ui-ci (full gate)
+just verify          # fmt-check + clippy + test + test-ui-ci (full read-only gate)
+just ci              # autofixers (cargo fmt, …) — run before `just verify`
+                     # if `verify` flagged something a formatter can fix
 ```
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the
-same recipes via `setup-just` + `setup-bun`, so a green `just ci`
+same recipes via `setup-just` + `setup-bun`, so a green `just verify`
 locally maps to a green PR check.
 
 The UI harness lives in [../tests-ui/](../tests-ui) (outside `web/`

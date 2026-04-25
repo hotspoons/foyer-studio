@@ -80,7 +80,10 @@ jobs:
             libboost-dev libxt-dev libtool autotools-dev autoconf automake \
             libasound2-dev libpulse-dev libjack-jackd2-dev \
             libvamp-hostsdk3v5 vamp-plugin-sdk libvamp-sdk2v5 \
-            libaubio-dev libcppunit-dev
+            libaubio-dev libcppunit-dev \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev
 
       - name: Install macOS build deps
         if: matrix.os_label == 'macos'

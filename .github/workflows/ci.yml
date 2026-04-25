@@ -12,11 +12,25 @@ env:
 jobs:
   # Rust gates — fmt + clippy + test, all driven by the same `just`
   # recipes devs run locally. Keeping the steps identical on both
-  # sides means a green `just ci` == a green CI check.
+  # sides means a green `just verify` == a green CI check.
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # foyer-desktop pulls in tao+wry which link GTK3 + WebKit2GTK
+      # on Linux. The runner image doesn't ship those — clippy/test
+      # both fail at the glib-sys build script without them.
+      - name: Install GTK/WebKit deps for foyer-desktop
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -34,6 +48,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install GTK/WebKit deps for foyer-desktop
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v2

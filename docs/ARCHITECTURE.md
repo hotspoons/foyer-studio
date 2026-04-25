@@ -187,8 +187,9 @@ Each of these is enforced in review and logged in
 - **DAW-agnostic schema.** `foyer-schema` types describe domain
   entities (Session, Track, Parameter) — never Ardour specifics.
 - **`just` over ad-hoc scripts.** Every recurring workflow lives
-  in the [Justfile](../Justfile). A green `just ci` maps directly
-  to a green PR check.
+  in the [Justfile](../Justfile). A green `just verify` maps directly
+  to a green PR check; `just ci` is its writeable companion (cargo fmt
+  and other autofixers).
 - **Decisions get written down.** Architectural tradeoffs append
   to [DECISIONS.md](DECISIONS.md) as a numbered ADR.
 
