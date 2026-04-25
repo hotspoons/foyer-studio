@@ -1,9 +1,14 @@
 name: ci
 
 on:
+  # Run on every branch push so feature-branch CI gives fast feedback,
+  # AND on PRs targeting main, AND on direct push to main (merge).
+  # The build profile differs by event — see RELEASE_BUILD below.
+  # `'**'` matches branches only, not tags (release.yml owns tags).
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,6 +18,11 @@ env:
   # deprecated" warning we kept seeing on every run. Drop this once
   # all our actions ship a v* release that runs Node 24 by default.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Profile gate. Release build is slow (LTO + codegen-units=1) — only
+  # pay when the artifact actually matters: PRs targeting main and the
+  # main branch itself. Feature-branch pushes get a debug build for a
+  # tighter dev-iteration loop.
+  RELEASE_BUILD: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 jobs:
   # Rust gates — fmt + clippy + test + a debug `foyer` binary that the
@@ -45,23 +55,33 @@ jobs:
       - run: just fmt-check
       - run: just clippy
       - run: just test
-      # Tailwind CSS goes into the bundled web tree, so it has to exist
-      # before the release link picks up include_dir!. Cheap step that
-      # would fail loud (~30 s) rather than ship a release with a stale
-      # / empty tw.build.css.
+      # Tailwind CSS goes into the bundled web tree (include_dir! bakes
+      # web/styles/tw.build.css into the binary), so always populate it
+      # before the link step regardless of profile.
       - run: ./scripts/dev/tw.sh build
-      # Build the release binary CI publishes as an artifact and the
-      # downstream ui-smoke job consumes. Release profile has
-      # lto=thin + codegen-units=1, so this isn't a free ride after
-      # `just test` — count on a few extra minutes the first time the
-      # cache is cold. Local dev keeps using debug builds via
-      # `cargo build` / `just run`.
-      - run: cargo build --release --bin foyer
-      - name: Upload foyer release binary
+      # Pick the build profile based on what RELEASE_BUILD evaluated to
+      # at workflow level. `dist/foyer` is a stable staging path so the
+      # downstream ui-smoke job doesn't need to know which profile ran.
+      - name: Build foyer
+        run: |
+          mkdir -p dist
+          if [ "$RELEASE_BUILD" = "true" ]; then
+            echo "::notice::Building foyer in RELEASE profile (slow on cache miss)"
+            cargo build --release --bin foyer
+            cp target/release/foyer dist/foyer
+          else
+            echo "::notice::Building foyer in DEBUG profile (feature-branch fast path)"
+            cargo build --bin foyer
+            cp target/debug/foyer dist/foyer
+          fi
+      - name: Upload foyer binary
         uses: actions/upload-artifact@v4
         with:
+          # Same name regardless of profile so downloads don't have to
+          # branch. Profile is recorded in the workflow run summary's
+          # ::notice:: line above.
           name: foyer-linux-x86_64
-          path: target/release/foyer
+          path: dist/foyer
           retention-days: 7
           if-no-files-found: error
 
@@ -79,13 +99,13 @@ jobs:
       # below and runs against the system's existing libc + libssl.
       - uses: extractions/setup-just@v2
       - uses: oven-sh/setup-bun@v2
-      - name: Download foyer release binary
+      - name: Download foyer binary
         uses: actions/download-artifact@v4
         with:
           name: foyer-linux-x86_64
-          path: target/release
+          path: dist
       - name: Mark foyer executable
-        run: chmod +x target/release/foyer
+        run: chmod +x dist/foyer
       - name: Install Chromium deps
         run: |
           cd tests-ui
@@ -93,11 +113,11 @@ jobs:
           bunx playwright install --with-deps chromium
       - name: Build tailwind assets
         run: ./scripts/dev/tw.sh build
-      - name: just test-ui-ci (using prebuilt release binary)
+      - name: just test-ui-ci (using prebuilt binary)
         env:
-          # Tells `just test-ui-ci` to skip `cargo build` and use the
-          # release binary the rust job uploaded for us.
-          FOYER_BIN: ${{ github.workspace }}/target/release/foyer
+          # Skip `cargo build` and use the binary from the rust job —
+          # whichever profile that job picked.
+          FOYER_BIN: ${{ github.workspace }}/dist/foyer
         run: just test-ui-ci
       - name: Upload Playwright artifacts
         if: failure()
