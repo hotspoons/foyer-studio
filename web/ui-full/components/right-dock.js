@@ -178,6 +178,9 @@ export class RightDock extends LitElement {
     _widgets:   { state: true, type: Array },
     _spawnOpen: { state: true, type: Boolean },
     _dropHighlight: { state: true, type: Boolean },
+    _slideOpen: { state: true, type: Boolean },
+    _slideWidth: { state: true, type: Number },
+    _slideFabId: { state: true, type: String },
   };
 
   static styles = css`
@@ -241,6 +244,21 @@ export class RightDock extends LitElement {
       font-size: 9px;
       font-weight: 700;
       letter-spacing: 0.08em;
+      position: relative;
+    }
+    .rail button.dock-icon .fab-badge {
+      position: absolute;
+      top: -3px; right: -3px;
+      min-width: 14px;
+      height: 14px;
+      padding: 0 3px;
+      border-radius: 999px;
+      background: var(--color-error, #ef4444);
+      color: #fff;
+      font: 9px/14px var(--font-sans);
+      font-weight: 700;
+      text-align: center;
+      pointer-events: none;
     }
 
     /* Widgets dock — open-window list + group controls + sticky
@@ -296,11 +314,18 @@ export class RightDock extends LitElement {
     }
     .spawn-anchor { position: relative; }
 
-    /* Slide-out panel sandwiched between the workspace and the rail.
-     * Width is set inline by render() so the resize handle drag can
-     * mutate it directly. The dock's flex layout puts the panel to
-     * the left of the rail, making the visible width come from the
-     * panel itself. */
+    /* Slide-out container that hosts a slotted FAB. The FAB is moved
+     * here from document.body via DOM reparenting so its own shadow-
+     * root styles still apply when it renders content via slot. */
+    .slide-out {
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--color-border);
+      background: var(--color-surface);
+      min-width: 200px;
+      overflow: hidden;
+    }
+    .slide-out ::slotted(*) { flex: 1; min-height: 0; }
     :host([collapsed]) { border-left: 0; }
     .panel {
       display: flex;
@@ -350,6 +375,15 @@ export class RightDock extends LitElement {
     this._widgets = [];
     this._spawnOpen = false;
     this._dropHighlight = false;
+    // Slide-out state. `_slideOpen` is the visibility flag, `_slideFabId`
+    // is which docked FAB is currently slotted in. Width persists in
+    // localStorage like the rest of the dock.
+    this._slideOpen = false;
+    this._slideFabId = "";
+    try {
+      this._slideWidth = parseInt(localStorage.getItem("foyer.rightdock.slide.w") || "320", 10);
+    } catch { this._slideWidth = 320; }
+    if (!Number.isFinite(this._slideWidth) || this._slideWidth < 200) this._slideWidth = 320;
     this._storeHandler = () => this.requestUpdate();
     this._layoutHandler = () => this._refreshMinimized();
     this._docPointerDown = (ev) => this._maybeCloseSpawnMenu(ev);
@@ -360,6 +394,10 @@ export class RightDock extends LitElement {
     super.connectedCallback();
     window.__foyer?.store?.addEventListener("change", this._storeHandler);
     window.__foyer?.layout?.addEventListener("change", this._layoutHandler);
+    // Re-render rail icons whenever a new chat message arrives so the
+    // unread badge on a docked chat FAB updates without waiting for an
+    // unrelated store tick.
+    window.__foyer?.chat?.addEventListener?.("change", this._storeHandler);
     document.addEventListener("pointerdown", this._docPointerDown, true);
     // Expose self on the global so shadow-DOM-hidden siblings (FABs,
     // tile-leaf tear-outs) can call methods on us without trying to
@@ -370,6 +408,7 @@ export class RightDock extends LitElement {
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("change", this._storeHandler);
     window.__foyer?.layout?.removeEventListener("change", this._layoutHandler);
+    window.__foyer?.chat?.removeEventListener?.("change", this._storeHandler);
     document.removeEventListener("pointerdown", this._docPointerDown, true);
     if (window.__foyer?.rightDock === this) window.__foyer.rightDock = null;
     super.disconnectedCallback();
@@ -435,14 +474,21 @@ export class RightDock extends LitElement {
   }
 
   render() {
-    // Rail-only layout. Each docked FAB owns its own popout (rendered
-    // inside the FAB's shadow root via `toggleFromDock` — see the
-    // pointer handler below) so its scoped styles apply. The earlier
-    // shared slide-out lost class-based CSS when re-templating into
-    // this dock's shadow root and Rich called it ugly on 2026-04-25;
-    // we kept the structure (rail + widgets dock) and dropped the
-    // panel surface.
+    // Slide-out + rail layout. The slide-out is a width-resizable
+    // container hosting whatever docked FAB the user has activated;
+    // the FAB physically reparents into a `<slot name="slide-out">`
+    // inside this dock's host so the FAB's own shadow-root styles
+    // still apply (no template-into-foreign-shadow-root mistake).
+    // Rail itself stays at the right edge with the FAB icons +
+    // widgets dock.
+    const slidePx = this._slideOpen ? `width:${this._slideWidth}px` : "width:0";
     return html`
+      ${this._slideOpen ? html`
+        <div class="resize" @pointerdown=${(ev) => this._startResize(ev)}></div>
+        <div class="slide-out" style=${slidePx}>
+          <slot name="slide-out"></slot>
+        </div>
+      ` : null}
       <div class="rail">
         ${this._renderDockedFabs({ leadingSep: false })}
         <div class="rail-spacer"></div>
@@ -477,18 +523,52 @@ export class RightDock extends LitElement {
     this._announceDockChanged();
   }
 
+  _toggleSlideForFab(id) {
+    const layout = window.__foyer?.layout;
+    if (!layout) return;
+    const fab = layout.fabInstance?.(id);
+    if (!fab) return;
+    if (this._slideOpen && this._slideFabId === id) {
+      // Same FAB tapped twice — close.
+      try { fab.exitSlideMode?.(); } catch {}
+      this._slideOpen = false;
+      this._slideFabId = "";
+      this._announceDockChanged();
+      return;
+    }
+    // Switch — exit any prior fab's slide mode, then enter the new one.
+    if (this._slideFabId && this._slideFabId !== id) {
+      const prev = layout.fabInstance?.(this._slideFabId);
+      try { prev?.exitSlideMode?.(); } catch {}
+    }
+    this._slideOpen = true;
+    this._slideFabId = id;
+    // Defer reparent until after our next render so the slot exists.
+    this.requestUpdate();
+    queueMicrotask(() => {
+      try { fab.enterSlideMode?.(this); } catch (e) { console.warn("slide-mode enter failed", e); }
+      try { fab.onDockPanelOpen?.(); } catch {}
+      this._announceDockChanged();
+    });
+  }
+
   _startResize(ev) {
     ev.preventDefault();
     const startX = ev.clientX;
-    const startW = this._width;
+    const startW = this._slideOpen ? this._slideWidth : this._width;
     const move = (e) => {
       const dx = startX - e.clientX;
-      this._width = Math.max(200, Math.min(600, startW + dx));
+      const next = Math.max(200, Math.min(640, startW + dx));
+      if (this._slideOpen) this._slideWidth = next;
+      else this._width = next;
       this._announceDockChanged();
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      try {
+        if (this._slideOpen) localStorage.setItem("foyer.rightdock.slide.w", String(this._slideWidth));
+      } catch {}
       this._persistPanel();
       this._announceDockChanged();
     };
@@ -696,8 +776,10 @@ export class RightDock extends LitElement {
     const sorted = [...fabs].sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
     return html`
       ${leadingSep ? html`<div class="rail-sep"></div>` : null}
-      ${sorted.map(
-        ({ id, meta }) => html`
+      ${sorted.map(({ id, meta }) => {
+        const fab = window.__foyer?.layout?.fabInstance?.(id);
+        const badge = (typeof fab?.dockBadge === "function") ? fab.dockBadge() : 0;
+        return html`
           <button
             class="dock-icon fab-dock"
             title="${meta.label || id} — click to open · drag off rail to undock · right-click menu"
@@ -705,9 +787,10 @@ export class RightDock extends LitElement {
             @contextmenu=${(ev) => this._onFabIconContext(ev, id)}
           >
             ${icon(meta.icon || "squares-2x2", 16)}
+            ${badge > 0 ? html`<span class="fab-badge">${badge > 99 ? "99+" : badge}</span>` : null}
           </button>
-        `
-      )}
+        `;
+      })}
     `;
   }
 
@@ -738,23 +821,14 @@ export class RightDock extends LitElement {
     };
     const up = () => {
       if (!tore) {
-        // Tap: route to the FAB's OWN docked panel (rendered inside
-        // its shadow root, so its scoped styles apply). The earlier
-        // slide-out approach hosted FAB content as a Lit template
-        // inside <foyer-right-dock>'s shadow root, which dropped the
-        // FAB's class-based CSS — Rich saw an unstyled blob on
-        // 2026-04-25. Routing through `toggleFromDock` gives each FAB
-        // exclusive ownership of its visual chrome.
-        const fab = window.__foyer?.layout?.fabInstance?.(id);
-        // Close any other open FAB so only one popout shows at a time.
-        const fabs = window.__foyer?.layout?.dockedFabs?.() || [];
-        for (const f of fabs) {
-          if (f.id === id) continue;
-          const other = window.__foyer?.layout?.fabInstance?.(f.id);
-          if (other?._open) other.closeFromDock?.();
-        }
-        fab?.toggleFromDock?.(iconTop);
-        if (fab?._open) fab?.onDockPanelOpen?.();
+        // Tap: open the FAB inside the slide-out slot. Reparents the
+        // FAB into our host so its scoped shadow-root styles still
+        // cascade — the prior slide-out templated content into our
+        // shadow root and dropped CSS, which Rich called ugly. Now
+        // we use slot projection: the FAB lives in our LIGHT DOM as
+        // <slot name="slide-out"> child, but its own shadow root
+        // owns the styling. (Rich, TODO #41.)
+        this._toggleSlideForFab(id);
       }
       cleanup();
     };
@@ -779,6 +853,13 @@ export class RightDock extends LitElement {
     const layout = window.__foyer?.layout;
     if (!layout) return;
     const fab = layout.fabInstance?.(id);
+    // Exit slide-out before undocking so the FAB is back on body before
+    // the floating-FAB drag handler takes over.
+    if (this._slideFabId === id) {
+      try { fab?.exitSlideMode?.(); } catch {}
+      this._slideOpen = false;
+      this._slideFabId = "";
+    }
     layout.undockFab(id);
     // If our slide-out panel is currently showing this FAB, close it
     // — the FAB is leaving the rail and there's nothing to render.

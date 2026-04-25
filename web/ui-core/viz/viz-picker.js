@@ -198,6 +198,42 @@ export class VizPicker extends LitElement {
               <span class="num">${(this._prefs.midiVelocityShading ?? 0.6).toFixed(2)}</span>
             </div>
           </div>
+
+          <div class="row" style="border-top:1px solid var(--color-border);padding-top:10px;margin-top:4px">
+            <div class="label">Timeline grid colors</div>
+            <div class="slider-row" title="Color of the seconds-tick gridlines on the timeline">
+              <span style="flex:1">Time grid</span>
+              <input type="color"
+                     .value=${this._prefs.timeGridColor || "#3a3a44"}
+                     @input=${(e) => this._set("timeGridColor", e.currentTarget.value)}>
+              <button class="seg" style="flex:0;padding:2px 6px"
+                      title="Reset to default"
+                      @click=${() => { this._set("timeGridColor", "#3a3a44"); this._set("timeGridAlpha", 1.0); }}>↺</button>
+            </div>
+            <div class="slider-row" title="Time-grid opacity">
+              <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Opacity</span>
+              <input type="range" min="0" max="1" step="0.05" style="flex:1"
+                     .value=${String(this._prefs.timeGridAlpha ?? 1)}
+                     @input=${(e) => this._set("timeGridAlpha", Number(e.currentTarget.value))}>
+              <span class="num">${(this._prefs.timeGridAlpha ?? 1).toFixed(2)}</span>
+            </div>
+            <div class="slider-row" title="Color of the BPM-quantized grid overlay" style="margin-top:6px">
+              <span style="flex:1">Quant grid</span>
+              <input type="color"
+                     .value=${this._prefs.quantGridColor || "#7c5cff"}
+                     @input=${(e) => this._set("quantGridColor", e.currentTarget.value)}>
+              <button class="seg" style="flex:0;padding:2px 6px"
+                      title="Reset to default"
+                      @click=${() => { this._set("quantGridColor", "#7c5cff"); this._set("quantGridAlpha", 0.5); }}>↺</button>
+            </div>
+            <div class="slider-row" title="Quant-grid opacity">
+              <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Opacity</span>
+              <input type="range" min="0" max="1" step="0.05" style="flex:1"
+                     .value=${String(this._prefs.quantGridAlpha ?? 0.5)}
+                     @input=${(e) => this._set("quantGridAlpha", Number(e.currentTarget.value))}>
+              <span class="num">${(this._prefs.quantGridAlpha ?? 0.5).toFixed(2)}</span>
+            </div>
+          </div>
         </div>
       ` : null}
     `;

@@ -110,6 +110,9 @@ export class TileLeaf extends LitElement {
     }
 
     .menu {
+      /* Inline left/top are set by _openMenu from the trigger
+       * button's bounding rect so the menu drops below whichever
+       * button opened it. Defaults below as a safety net. */
       position: absolute;
       top: 28px;
       left: 6px;
@@ -267,6 +270,22 @@ export class TileLeaf extends LitElement {
   _openMenu(mode, ev) {
     ev.stopPropagation();
     this.store?.focus(this.leaf.id);
+    // Anchor the menu to the button the user actually clicked.
+    // Previously the menu CSS pinned `left: 6px; top: 28px` so a
+    // mixer / timeline tile's view-picker always popped in the
+    // upper-left of the tile regardless of where the trigger button
+    // sat. Capture the button's offset within the host so the menu
+    // hangs immediately below it (Rich, TODO #54).
+    const btn = ev.currentTarget;
+    const host = this.getBoundingClientRect();
+    const r = btn?.getBoundingClientRect?.();
+    if (r && host) {
+      this._menuLeft = Math.max(2, Math.round(r.left - host.left));
+      this._menuTop  = Math.max(2, Math.round(r.bottom - host.top + 2));
+    } else {
+      this._menuLeft = 6;
+      this._menuTop  = 28;
+    }
     this._menuMode = this._menuMode === mode ? "" : mode;
   }
 
@@ -456,24 +475,13 @@ export class TileLeaf extends LitElement {
           ${icon(meta.icon, 12)}
           <span class="label">${meta.label}</span>
         </button>
-        <button @click=${(e) => this._openMenu("split-row", e)}
-                title="Split right — pick a view for the new pane">
-          ${icon("split-right", 12)}
-        </button>
-        <button @click=${(e) => this._openMenu("split-column", e)}
-                title="Split below — pick a view for the new pane">
-          ${icon("split-below", 12)}
-        </button>
-        <button @click=${(e) => { e.stopPropagation(); this._float(); }}
-                title="Detach to floating window">
-          ${icon("arrow-top-right-on-square", 12)}
-        </button>
-        <button @click=${(e) => { e.stopPropagation(); this._dockTarget(); }}
-                title="Dock to a slot — click then pick a slot">
-          ${icon("squares-2x2", 12)}
-        </button>
         <span class="spacer"></span>
         <button @click=${this._close} title="Close tile">${icon("close", 12)}</button>
+        <!-- Split / Float / Dock-to-slot buttons removed 2026-04-25.
+             Identical actions are reachable from the right-click
+             context menu and the top "+ New" menu, so the chrome was
+             pure visual noise on every tile. (Rich, TODO #50.) -->
+
       </header>
       <div class="body"
            @pointerdown=${() => this._focus()}
@@ -492,8 +500,9 @@ export class TileLeaf extends LitElement {
     const hint = this._menuMode === "swap"
       ? "Click to swap · drag out to float"
       : "Click to split · drag out to float";
+    const style = `left:${this._menuLeft ?? 6}px;top:${this._menuTop ?? 28}px`;
     return html`
-      <div class="menu" @click=${(e) => e.stopPropagation()}>
+      <div class="menu" style=${style} @click=${(e) => e.stopPropagation()}>
         <div class="menu-heading">${heading}</div>
         <div class="menu-hint">${hint}</div>
         ${items.map(v => html`

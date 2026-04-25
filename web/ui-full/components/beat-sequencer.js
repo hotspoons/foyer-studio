@@ -32,6 +32,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { playPreviewNote, resumePreviewCtx } from "foyer-core/audio/midi-preview.js";
+import { chordIntervals, SCALES, PITCH_CLASS_LABELS } from "foyer-core/music-theory.js";
 // Side-strip embedded body — see `_toggleStrip` + render().
 import "./midi-manager.js";
 
@@ -711,6 +712,58 @@ export class BeatSequencer extends LitElement {
     super.connectedCallback();
     window.__foyer?.store?.addEventListener("control", this._onStoreControl);
     window.__foyer?.store?.addEventListener("change", this._onStoreControl);
+    // Latch number keys 3..9 while held — pitched-mode cell clicks
+    // use them as a chord modifier (matches the piano-roll behavior).
+    // Resolved against the user's stored scale prefs from the
+    // piano-roll toolbar so the editors stay consistent.
+    this._heldChordDigit = null;
+    this._onChordKeyDown = (e) => {
+      // Only latch when the pointer is hovering this editor so a
+      // background sequencer doesn't steal the digit from the focused
+      // editor. CSS `:hover` propagates from hovered descendants up
+      // to the host, so this matches whenever the cursor is anywhere
+      // inside the editor.
+      if (!this.matches?.(":hover")) return;
+      // Don't latch while typing in a text field (number inputs in
+      // the toolbar) — let the field receive the key.
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const k = e.key;
+      if (/^[3456789]$/.test(k)) this._heldChordDigit = parseInt(k, 10);
+    };
+    this._onChordKeyUp = (e) => {
+      const k = e.key;
+      if (/^[3456789]$/.test(k) && this._heldChordDigit === parseInt(k, 10)) {
+        this._heldChordDigit = null;
+      }
+    };
+    window.addEventListener("keydown", this._onChordKeyDown);
+    window.addEventListener("keyup",   this._onChordKeyUp);
+    window.addEventListener("blur",    this._onChordKeyUp);
+    // Client-side undo/redo. Bound on `this` so the listener is
+    // unique per instance — a beat sequencer in a foyer-window
+    // gets its own ring keyed on its element identity.
+    this._onKeyForUndo = (ev) => {
+      // Only react when the user is actually focused inside this
+      // editor (or a child) — avoids hijacking Ctrl+Z in the timeline
+      // / mixer / piano roll. Walk the composed path looking for
+      // ourselves.
+      const path = ev.composedPath ? ev.composedPath() : [];
+      if (!path.includes(this)) return;
+      // Don't grab when typing in an input — let the field's native
+      // undo work.
+      const t = ev.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const meta = ev.ctrlKey || ev.metaKey;
+      if (!meta) return;
+      const k = (ev.key || "").toLowerCase();
+      if (k === "z" && !ev.shiftKey) {
+        if (this.undo()) { ev.preventDefault(); ev.stopPropagation(); }
+      } else if ((k === "z" && ev.shiftKey) || k === "y") {
+        if (this.redo()) { ev.preventDefault(); ev.stopPropagation(); }
+      }
+    };
+    document.addEventListener("keydown", this._onKeyForUndo, true);
   }
   firstUpdated() {
     // Lit binds @wheel= as a passive listener in some browsers,
@@ -745,6 +798,12 @@ export class BeatSequencer extends LitElement {
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("control", this._onStoreControl);
     window.__foyer?.store?.removeEventListener("change", this._onStoreControl);
+    if (this._onKeyForUndo) document.removeEventListener("keydown", this._onKeyForUndo, true);
+    if (this._onChordKeyDown) {
+      window.removeEventListener("keydown", this._onChordKeyDown);
+      window.removeEventListener("keyup",   this._onChordKeyUp);
+      window.removeEventListener("blur",    this._onChordKeyUp);
+    }
     super.disconnectedCallback();
   }
 
@@ -796,9 +855,59 @@ export class BeatSequencer extends LitElement {
     const L = this._currentLayout();
     const next = JSON.parse(JSON.stringify(L));
     mutator(next);
+    // Push the BEFORE snapshot onto the per-instance undo ring; any
+    // fresh edit invalidates the redo stack. Bounded so a busy user
+    // can't balloon memory on a long session. (Rich, TODO #45 —
+    // intentionally client-side: the backend already has its own
+    // Ardour-side undo; this ring is just for "I tweaked the
+    // sequencer pattern, gimme back the previous arrangement.")
+    this._pushUndoSnapshot(L);
+    this._redoStack = [];
     this.layout = next;
     this._persistLayout();
     this._tick++;
+  }
+
+  _pushUndoSnapshot(layout) {
+    if (!this._undoStack) this._undoStack = [];
+    if (!this._redoStack) this._redoStack = [];
+    // Cheap structural-equality skip so a no-op edit doesn't pollute
+    // the ring (e.g. a click that toggled a cell on then immediately
+    // off in the same gesture).
+    const top = this._undoStack[this._undoStack.length - 1];
+    const snap = JSON.stringify(layout);
+    if (top === snap) return;
+    this._undoStack.push(snap);
+    if (this._undoStack.length > 64) this._undoStack.shift();
+  }
+
+  undo() {
+    if (!this._undoStack?.length) return false;
+    const cur = this._currentLayout();
+    const prev = this._undoStack.pop();
+    if (!this._redoStack) this._redoStack = [];
+    this._redoStack.push(JSON.stringify(cur));
+    if (this._redoStack.length > 64) this._redoStack.shift();
+    try {
+      this.layout = JSON.parse(prev);
+      this._persistLayout();
+      this._tick++;
+    } catch {}
+    return true;
+  }
+
+  redo() {
+    if (!this._redoStack?.length) return false;
+    const cur = this._currentLayout();
+    const nxt = this._redoStack.pop();
+    if (!this._undoStack) this._undoStack = [];
+    this._undoStack.push(JSON.stringify(cur));
+    try {
+      this.layout = JSON.parse(nxt);
+      this._persistLayout();
+      this._tick++;
+    } catch {}
+    return true;
   }
 
   // ── pattern grid ops ─────────────────────────────────────────────
@@ -816,6 +925,50 @@ export class BeatSequencer extends LitElement {
     let max = 0;
     for (const c of pattern?.cells || []) if (c.step === step && c.velocity > max) max = c.velocity;
     return max;
+  }
+
+  // ── shared scale prefs (mirror the piano roll's localStorage keys
+  //    so a single Scale picker drives both editors). ─────────────
+  _readScaleRoot() {
+    try {
+      const v = parseInt(localStorage.getItem("foyer.midi.scale.root") ?? "0", 10);
+      return Number.isFinite(v) ? v : 0;
+    } catch { return 0; }
+  }
+  _readScaleMode() {
+    try {
+      return localStorage.getItem("foyer.midi.scale.mode") || "chromatic";
+    } catch { return "chromatic"; }
+  }
+
+  /** Chord-resize drag: pulling right grows every chord cell's
+   *  `length_steps` together. Called only from the chord branch in
+   *  `_onCellDown` after the chord cells have been toggled on. */
+  _beginChordResize(ev, rows, step) {
+    const startX = ev.clientX;
+    const cellW = this._cellW || 24;
+    const L = this._currentLayout();
+    const maxLen = Math.max(1, L.pattern_steps - step);
+    const onMove = (e) => {
+      const dx = e.clientX - startX;
+      const delta = Math.round(dx / cellW);
+      if (delta < 0) return;
+      const next = Math.max(1, Math.min(maxLen, 1 + delta));
+      this._commit((Lnext) => {
+        const p = Lnext.patterns.find((pp) => pp.id === this._selectedPatternId);
+        if (!p) return;
+        for (const r of rows) {
+          const idx = p.cells.findIndex((c) => c.row === r && c.step === step);
+          if (idx >= 0) p.cells[idx] = { ...p.cells[idx], length_steps: next };
+        }
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   }
 
   _setCell(row, step, on, velocity, lengthSteps) {
@@ -1209,6 +1362,44 @@ export class BeatSequencer extends LitElement {
     const rowDef = L.rows[row];
     const wasOn = this._isOnInPattern(pat, row, step);
 
+    // Chord-on-click in pitched mode. Held digit + Shift/Ctrl resolves
+    // the chord shape; we map each chord pitch to a row index (skipping
+    // pitches that aren't in the visible row set) and toggle ON each
+    // cell at `step`. Drag-to-resize after click extends every chord
+    // cell's `length_steps` together. (Rich, 2026-04-26.)
+    if (L.mode === "pitched" && this._heldChordDigit && rowDef?.pitch != null) {
+      const intervals = chordIntervals(
+        this._heldChordDigit,
+        ev.shiftKey,
+        ev.ctrlKey || ev.metaKey,
+        this._readScaleRoot(),
+        this._readScaleMode(),
+        rowDef.pitch,
+      );
+      const targets = [];
+      for (const iv of intervals) {
+        const pit = rowDef.pitch + iv;
+        const r = L.rows.findIndex((rr) => rr.pitch === pit);
+        if (r >= 0) targets.push(r);
+      }
+      if (targets.length === 0) return;
+      // Single _commit so undo treats the whole chord as one step.
+      this._commit((Lnext) => {
+        const p = Lnext.patterns.find((pp) => pp.id === this._selectedPatternId);
+        if (!p) return;
+        for (const r of targets) {
+          const idx = p.cells.findIndex((c) => c.row === r && c.step === step);
+          const cell = { row: r, step, velocity: this._defaultVelocity, length_steps: 1 };
+          if (idx >= 0) p.cells[idx] = { ...p.cells[idx], ...cell };
+          else p.cells.push(cell);
+        }
+      });
+      // Drag-to-resize for the WHOLE chord. Extend each chord cell's
+      // length together as the user drags right.
+      this._beginChordResize(ev, targets, step);
+      return;
+    }
+
     // If clicking on an existing ON cell: enter velocity-drag mode.
     // Vertical drag adjusts velocity (up = louder); pure click with
     // no movement toggles the cell off. Moving out of the cell while
@@ -1498,8 +1689,43 @@ export class BeatSequencer extends LitElement {
                  @change=${() => this._togglePreview()}>
           Preview
         </label>
+        ${L.mode === "pitched" ? html`
+          <label title="Scale used by chord-on-click (hold 3..9 + click)">
+            Scale
+            <select @change=${(e) => {
+                      try { localStorage.setItem("foyer.midi.scale.root", e.currentTarget.value); } catch {}
+                      this.requestUpdate();
+                    }}>
+              ${PITCH_CLASS_LABELS.map((lbl, i) => html`
+                <option value=${i} ?selected=${i === this._readScaleRoot()}>${lbl}</option>
+              `)}
+            </select>
+            <select @change=${(e) => {
+                      try { localStorage.setItem("foyer.midi.scale.mode", e.currentTarget.value); } catch {}
+                      this.requestUpdate();
+                    }}>
+              ${Object.entries(SCALES).map(([id, s]) => html`
+                <option value=${id} ?selected=${id === this._readScaleMode()}>${s.label}</option>
+              `)}
+            </select>
+          </label>
+        ` : null}
         <button title="Beat loop presets" @click=${() => { this._presetsOpen = true; }}>Presets…</button>
         <button title="Clear selected pattern" @click=${() => this._clearSelectedPattern()}>Clear</button>
+        <button title="Undo (Ctrl+Z) — client-side only"
+                ?disabled=${!(this._undoStack?.length)}
+                @click=${() => this.undo()}>
+          ${icon("arrow-uturn-left", 12)}
+        </button>
+        <button title="Redo (Ctrl+Shift+Z / Ctrl+Y) — client-side only"
+                ?disabled=${!(this._redoStack?.length)}
+                @click=${() => this.redo()}>
+          ${icon("arrow-uturn-right", 12)}
+        </button>
+        <button title=${this._stripOpen ? "Hide instruments + patches" : "Show instruments + patches for this track"}
+                @click=${() => this._toggleStrip()}>
+          ${icon(this._stripOpen ? "chevron-right" : "musical-note", 12)}
+        </button>
       </div>
     `;
   }

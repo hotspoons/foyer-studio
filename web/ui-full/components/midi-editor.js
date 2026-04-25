@@ -27,6 +27,7 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
+import { SCALES, PITCH_CLASS_LABELS, inScale, chordIntervals } from "foyer-core/music-theory.js";
 // Side-strip body — see `_toggleStrip` + render().
 import "./midi-manager.js";
 
@@ -102,6 +103,12 @@ export class MidiEditor extends LitElement {
      *  so the side-strip's <foyer-midi-manager> can show the right
      *  track's instruments + patches. PLAN 154. */
     trackId:     { type: String, attribute: "track-id" },
+    /** Scale highlighting on the keyboard rail. `_scaleRoot` is a
+     *  pitch class 0..11 (C..B); `_scaleMode` is a key in SCALES.
+     *  Persisted per-browser so a user's preferred reference scale
+     *  follows them across sessions. (Rich, TODO #36.) */
+    _scaleRoot:  { state: true, type: Number },
+    _scaleMode:  { state: true, type: String },
   };
 
   static styles = css`
@@ -177,6 +184,17 @@ export class MidiEditor extends LitElement {
       border-bottom-color: rgba(255, 255, 255, 0.05);
     }
     .key.c-row { font-weight: 700; }
+    /* Scale highlights: in-scale = subtle accent tint on top of base
+     * key color; root note = stronger accent. Out-of-scale stays
+     * default. Layered as a box-shadow so the existing key colors are
+     * preserved underneath. */
+    .key.in-scale {
+      box-shadow: inset 0 0 0 9999px color-mix(in oklab, var(--color-accent-2) 10%, transparent);
+    }
+    .key.scale-root {
+      box-shadow: inset 0 0 0 9999px color-mix(in oklab, var(--color-accent) 22%, transparent);
+      border-bottom-color: color-mix(in oklab, var(--color-accent) 60%, var(--color-border));
+    }
     .notes-scroll {
       flex: 1; min-width: 0;
       overflow: auto;
@@ -329,6 +347,21 @@ export class MidiEditor extends LitElement {
     this._pitchHi = 108;
     this._selection = new Set();
     this._snapIdx = 2;                  // 1/16 default
+    // Held-digit tracker for chord-on-click. While the user holds 3,
+    // 7, 9 (etc.) the next click adds a chord rooted at the clicked
+    // pitch with intervals resolved by `chordIntervals()`.
+    this._heldChordDigit = null;
+    // Scale-highlight prefs persist per-browser. Default: chromatic
+    // (effectively off) so a user who hasn't engaged it sees the
+    // unmodified piano roll.
+    try {
+      this._scaleRoot = parseInt(localStorage.getItem("foyer.midi.scale.root") ?? "0", 10);
+      const m = localStorage.getItem("foyer.midi.scale.mode") || "chromatic";
+      this._scaleMode = SCALES[m] ? m : "chromatic";
+    } catch {
+      this._scaleRoot = 0;
+      this._scaleMode = "chromatic";
+    }
     this._localNotes = [];
     this._drag = null;                  // { kind, noteIds, origX, origY, origNotes }
     this._lastStatus = "";              // current cursor-at-grid readout
@@ -343,6 +376,22 @@ export class MidiEditor extends LitElement {
       if (kbd) kbd.style.transform = `translateY(${-ev.currentTarget.scrollTop}px)`;
     };
     this._onKeyDown = (e) => this._handleKeydown(e);
+    // Latch number keys 3..9 while held so a follow-up click on the
+    // canvas can resolve a chord-on-click. Lifted on keyup or when
+    // the editor blurs to avoid sticky state.
+    this._onChordKeyDown = (e) => {
+      if (!this._mouseOver) return;
+      const k = e.key;
+      if (/^[3456789]$/.test(k)) {
+        this._heldChordDigit = parseInt(k, 10);
+      }
+    };
+    this._onChordKeyUp = (e) => {
+      const k = e.key;
+      if (/^[3456789]$/.test(k) && this._heldChordDigit === parseInt(k, 10)) {
+        this._heldChordDigit = null;
+      }
+    };
     // Track cursor position on the canvas so paste/duplicate can land
     // at the pointer even though the keyboard event carries no mouse
     // coordinates.
@@ -364,6 +413,9 @@ export class MidiEditor extends LitElement {
     super.connectedCallback();
     this.tabIndex = 0;       // allow focus → keydown handler
     window.addEventListener("keydown", this._onKeyDown);
+    window.addEventListener("keydown", this._onChordKeyDown);
+    window.addEventListener("keyup",   this._onChordKeyUp);
+    window.addEventListener("blur",    this._onChordKeyUp);
     window.addEventListener("pointermove", this._onPointerMove);
     this.addEventListener("pointerenter", () => { this._mouseOver = true; });
     this.addEventListener("pointerleave", () => { this._mouseOver = false; });
@@ -418,6 +470,9 @@ export class MidiEditor extends LitElement {
   }
   disconnectedCallback() {
     window.removeEventListener("keydown", this._onKeyDown);
+    window.removeEventListener("keydown", this._onChordKeyDown);
+    window.removeEventListener("keyup",   this._onChordKeyUp);
+    window.removeEventListener("blur",    this._onChordKeyUp);
     window.removeEventListener("pointermove", this._onPointerMove);
     super.disconnectedCallback();
   }
@@ -612,6 +667,48 @@ export class MidiEditor extends LitElement {
     // When Alt is held, use 1 tick as the minimum length floor so
     // very-short notes are placeable. Otherwise anchor to the snap.
     const length = ev.altKey ? Math.max(1, this._snapTicks()) : this._snapTicks();
+
+    // Chord-on-click: a digit (3..9) held during the click stacks
+    // a chord rooted at the clicked pitch instead of placing a single
+    // note. Modifiers select the variant: Shift=major, Ctrl/Cmd=minor,
+    // both=dominant/third-option. With no modifier the chord follows
+    // the active scale's stack-of-thirds. (Rich, TODO #35.)
+    if (this._heldChordDigit) {
+      const intervals = chordIntervals(
+        this._heldChordDigit,
+        ev.shiftKey,
+        ev.ctrlKey || ev.metaKey,
+        this._scaleRoot ?? 0,
+        this._scaleMode || "chromatic",
+        pitch,
+      );
+      const ids = [];
+      for (const iv of intervals) {
+        const p = pitch + iv;
+        if (p < 0 || p > 127) continue;
+        const n = this._addNoteLocal({
+          pitch: p,
+          velocity: 100,
+          start_ticks: ticks,
+          length_ticks: length,
+          channel: 0,
+        });
+        if (n) ids.push(n.id);
+      }
+      if (ids.length === 0) return;
+      // Select the whole chord and start a "created+resize-r" drag.
+      // Two reasons: (1) `_onDragUp` with `d.created` sends `add_note`
+      // for every id in the selection so the chord actually persists
+      // server-side — without this the local-only notes vanished as
+      // soon as the next non-chord echo overwrote `_localNotes`. (2)
+      // The drag lets the user pull out a longer length for the whole
+      // chord in one gesture, matching single-note placement.
+      // (Rich, 2026-04-26.)
+      this._selection = new Set(ids);
+      this._beginDrag(ev, { kind: "resize-r", created: true });
+      return;
+    }
+
     const note = this._addNoteLocal({
       pitch,
       velocity: 100,
@@ -969,6 +1066,26 @@ export class MidiEditor extends LitElement {
           </select>
         </div>
 
+        <div class="group" title="Highlight in-scale notes on the keyboard rail">
+          <span>Scale</span>
+          <select @change=${(e) => {
+                    this._scaleRoot = Number(e.currentTarget.value);
+                    try { localStorage.setItem("foyer.midi.scale.root", String(this._scaleRoot)); } catch {}
+                  }}>
+            ${PITCH_CLASS_LABELS.map((lbl, i) => html`
+              <option value=${i} ?selected=${i === (this._scaleRoot ?? 0)}>${lbl}</option>
+            `)}
+          </select>
+          <select @change=${(e) => {
+                    this._scaleMode = e.currentTarget.value;
+                    try { localStorage.setItem("foyer.midi.scale.mode", this._scaleMode); } catch {}
+                  }}>
+            ${Object.entries(SCALES).map(([id, s]) => html`
+              <option value=${id} ?selected=${id === (this._scaleMode || "chromatic")}>${s.label}</option>
+            `)}
+          </select>
+        </div>
+
         <div class="group" title="Horizontal zoom (Ctrl-scroll)">
           <span>H</span>
           <input type="range" min="0" max="${H_ZOOM_LEVELS.length - 1}" step="1"
@@ -991,8 +1108,12 @@ export class MidiEditor extends LitElement {
         <button title="Reset to full piano" @click=${() => this._resetPitch()}>
           A0–C8
         </button>
-        <button title="Undo (Ctrl+Z)" @click=${() => this._send({ type: "undo" })}>↶</button>
-        <button title="Redo (Ctrl+Shift+Z / Ctrl+Y)" @click=${() => this._send({ type: "redo" })}>↷</button>
+        <button title="Undo (Ctrl+Z)" @click=${() => this._send({ type: "undo" })}>
+          ${icon("arrow-uturn-left", 12)}
+        </button>
+        <button title="Redo (Ctrl+Shift+Z / Ctrl+Y)" @click=${() => this._send({ type: "redo" })}>
+          ${icon("arrow-uturn-right", 12)}
+        </button>
         <button title=${this._stripOpen ? "Hide instruments + patches" : "Show instruments + patches for this track"}
                 @click=${() => this._toggleStrip()}
                 style="margin-left:auto">
@@ -1003,13 +1124,19 @@ export class MidiEditor extends LitElement {
       <div class="body" style="--row-h:${rowH}px">
         <div class="keyboard">
           <div class="keys" style="height:${canvasH}px">
-            ${visiblePitches.map((p) => html`
-              <div class="key ${isBlackKey(p) ? "black" : ""} ${p % 12 === 0 ? "c-row" : ""}"
-                   style="height:${rowH}px"
-                   title=${keyLabel(p)}>
-                ${p % 12 === 0 ? keyLabel(p) : ""}
-              </div>
-            `)}
+            ${visiblePitches.map((p) => {
+              const cls = ((p - (this._scaleRoot ?? 0)) % 12 + 12) % 12;
+              const root = cls === 0;
+              const inS = inScale(p, this._scaleRoot ?? 0, this._scaleMode || "chromatic");
+              const scaleClass = root ? "scale-root" : (inS ? "in-scale" : "");
+              return html`
+                <div class="key ${isBlackKey(p) ? "black" : ""} ${p % 12 === 0 ? "c-row" : ""} ${scaleClass}"
+                     style="height:${rowH}px"
+                     title=${keyLabel(p)}>
+                  ${p % 12 === 0 ? keyLabel(p) : ""}
+                </div>
+              `;
+            })}
           </div>
         </div>
         <div class="notes-scroll" @scroll=${this._onKeyboardSync}>

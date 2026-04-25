@@ -17,6 +17,7 @@ import "foyer-ui-core/viz/waveform-gl.js";
 import "./midi-strip.js";
 import "./automation-lane.js";
 import "foyer-ui-core/viz/viz-picker.js";
+import { getVizPrefs } from "foyer-ui-core/viz/viz-settings.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 
@@ -47,6 +48,14 @@ export class TimelineView extends LitElement {
     _zoom: { state: true, type: Number },
     _playheadSamples: { state: true, type: Number },
     _selection: { state: true, type: Object },
+    // Pointer-tracked sample position for the hover cursor line — null
+    // when the mouse leaves the grid. Distinct from the playhead so
+    // the user can sight a future seek or region edge.
+    _hoverSamples: { state: true, type: Number },
+    // BPM-aware quantization grid. Off by default; on, draws beat
+    // subdivisions over the timeline at 1/<denominator> of a beat.
+    _quantOn: { state: true, type: Boolean },
+    _quantDiv: { state: true, type: Number },
   };
 
   static styles = css`
@@ -107,10 +116,13 @@ export class TimelineView extends LitElement {
     }
     .lane-gridlines .gl {
       position: absolute; top: 0; bottom: 0;
-      border-left: 1px solid color-mix(in oklab, var(--color-border) 30%, transparent);
+      /* --foyer-time-grid is set on the host from viz prefs (Viz
+       * menu → Timeline grid colors). Falls back to the prior
+       * border-mix if unset. */
+      border-left: 1px solid var(--foyer-time-grid, color-mix(in oklab, var(--color-border) 30%, transparent));
     }
     .lane-gridlines .gl.major {
-      border-left-color: color-mix(in oklab, var(--color-border) 60%, transparent);
+      border-left-color: var(--foyer-time-grid-major, color-mix(in oklab, var(--color-border) 60%, transparent));
     }
     .lane {
       position: relative;
@@ -341,6 +353,60 @@ export class TimelineView extends LitElement {
       pointer-events: none;
       z-index: 4;
     }
+    /* Resize handles for the time-range selection. Visible only on
+     * hover (the band itself stays visually quiet at rest); pointer-
+     * events auto so the cursor flips to ew-resize. Drag mutates
+     * selection.{start,end}Samples and fires a fresh
+     * timeline-selection event on release. (Rich, TODO #51.) */
+    .selection-handle {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 8px;
+      cursor: ew-resize;
+      pointer-events: auto;
+      z-index: 5;
+      background: transparent;
+    }
+    .selection-handle:hover,
+    .selection-handle.dragging {
+      background: color-mix(in oklab, var(--color-accent) 65%, transparent);
+    }
+    .selection-handle.left  { transform: translateX(-4px); }
+    .selection-handle.right { transform: translateX(-4px); }
+    /* Vertical line that follows the mouse pointer across the
+     * timeline, distinct from the playhead so the user can sight a
+     * future seek / region edge without committing. */
+    .cursor-line {
+      position: absolute;
+      top: ${RULER_HEIGHT}px;
+      bottom: 0;
+      width: 1px;
+      background: color-mix(in oklab, var(--color-text-muted) 60%, transparent);
+      pointer-events: none;
+      z-index: 2;
+    }
+    /* BPM-quantized grid lines, drawn over the time-based gridlines.
+     * Beat boundaries are stronger; in-beat subdivisions are lighter. */
+    .quant-line {
+      position: absolute;
+      top: ${RULER_HEIGHT}px;
+      bottom: 0;
+      width: 1px;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .quant-line.beat {
+      /* --foyer-quant-grid is set from viz prefs as a full rgba() so
+       * the user's chosen alpha is already baked in. Beat lines use
+       * the value as-is; in-beat subdivisions (.sub) drop to 50% of
+       * the user's alpha for a visible hierarchy. */
+      background: var(--foyer-quant-grid, var(--color-accent-2));
+    }
+    .quant-line.sub {
+      background: var(--foyer-quant-grid, var(--color-accent-2));
+      opacity: 0.5;
+    }
   `;
 
   constructor() {
@@ -375,6 +441,16 @@ export class TimelineView extends LitElement {
     this._lastSeekAtMs = 0;
     this._recordingAnchorSamples = null;
     this._transportDropStats = { stale_seq: 0, backward_jump: 0 };
+    // Quantization grid prefs persist per-browser. Default off so a
+    // first-time user doesn't see extra lines they didn't ask for.
+    try {
+      this._quantOn = localStorage.getItem("foyer.timeline.quant.on") === "1";
+      const d = parseInt(localStorage.getItem("foyer.timeline.quant.div") || "16", 10);
+      this._quantDiv = [4, 8, 16, 32, 6, 12].includes(d) ? d : 16;
+    } catch {
+      this._quantOn = false;
+      this._quantDiv = 16;
+    }
   }
 
   _loadLaneHeights() {
@@ -413,8 +489,44 @@ export class TimelineView extends LitElement {
     this._onStoreSelection = () => this.requestUpdate();
     window.__foyer?.store?.addEventListener("control", this._onStoreControl);
     window.__foyer?.store?.addEventListener("selection", this._onStoreSelection);
+    // Apply user-configured grid colors (Viz menu → Timeline grid
+    // colors). Pushed onto the host as CSS custom properties; the
+    // existing rules on `.lane-gridlines .gl` and `.quant-line` read
+    // them via `var(--foyer-time-grid)` / `var(--foyer-quant-grid)`.
+    this._applyGridColors();
+    this._onVizPrefsChanged = () => this._applyGridColors();
+    window.addEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
+  }
+
+  _applyGridColors() {
+    const p = getVizPrefs();
+    const time = p.timeGridColor || "#3a3a44";
+    const quant = p.quantGridColor || "#7c5cff";
+    const clamp01 = (n) => Math.max(0, Math.min(1, Number(n) || 0));
+    const timeA = clamp01(p.timeGridAlpha ?? 1);
+    const quantA = clamp01(p.quantGridAlpha ?? 0.5);
+    // Compose hex+alpha into rgba() so the existing CSS rules
+    // (`var(--foyer-time-grid)`) get a single color value with the
+    // user's alpha baked in. This keeps the rules simple while
+    // letting users dim the grid without losing the hue.
+    const rgba = (hex, a) => {
+      const h = hex.replace(/^#/, "");
+      const r = parseInt(h.slice(0, 2), 16) || 0;
+      const g = parseInt(h.slice(2, 4), 16) || 0;
+      const b = parseInt(h.slice(4, 6), 16) || 0;
+      return `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`;
+    };
+    this.style.setProperty("--foyer-time-grid", rgba(time, timeA));
+    // Major time-tick stays the same hue but at a higher alpha so
+    // 1s/5s ticks remain legible even when the user dims the body.
+    this.style.setProperty(
+      "--foyer-time-grid-major",
+      rgba(time, Math.min(1, timeA + 0.4)),
+    );
+    this.style.setProperty("--foyer-quant-grid", rgba(quant, quantA));
   }
   disconnectedCallback() {
+    if (this._onVizPrefsChanged) window.removeEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     window.__foyer?.ws?.removeEventListener("transport_seek_request", this._seekHandler);
     this._wfCache?.removeEventListener("update", this._onWfUpdate);
@@ -1071,6 +1183,21 @@ export class TimelineView extends LitElement {
           >Loop selection</button>
         ` : null}
         <span style="flex:1"></span>
+        <label title="BPM-quantized grid overlay (uses transport.tempo)">
+          <input type="checkbox" .checked=${!!this._quantOn} @change=${() => this._toggleQuantOn()}>
+          Grid
+        </label>
+        ${this._quantOn ? html`
+          <select title="Grid subdivision per quarter note"
+                  @change=${(e) => this._setQuantDiv(Number(e.currentTarget.value))}>
+            <option value="4"  ?selected=${this._quantDiv === 4}>1/4</option>
+            <option value="8"  ?selected=${this._quantDiv === 8}>1/8</option>
+            <option value="16" ?selected=${this._quantDiv === 16}>1/16</option>
+            <option value="32" ?selected=${this._quantDiv === 32}>1/32</option>
+            <option value="6"  ?selected=${this._quantDiv === 6}>1/8T</option>
+            <option value="12" ?selected=${this._quantDiv === 12}>1/16T</option>
+          </select>
+        ` : null}
         <foyer-viz-picker></foyer-viz-picker>
         <button @click=${this._clearCache} title="Drop all cached peak files">Clear peak cache</button>
         <span>${totalSec.toFixed(1)}s · ${sr} Hz · wheel to zoom · Alt-wheel for lane height</span>
@@ -1082,7 +1209,9 @@ export class TimelineView extends LitElement {
         ` : null}
       </div>
       <div class="scroll" @wheel=${(e) => this._onWheel(e)}>
-        <div class="grid" style="width:${gridWidth}px">
+        <div class="grid" style="width:${gridWidth}px"
+             @pointermove=${(e) => this._onGridHoverMove(e)}
+             @pointerleave=${() => { this._hoverSamples = null; }}>
           <div class="ruler"
                @wheel=${(e) => this._onRulerWheel(e)}
                @pointerdown=${(e) => this._onRulerPointerDown(e)}
@@ -1099,8 +1228,10 @@ export class TimelineView extends LitElement {
               <span class="gl ${major ? 'major' : ''}" style="left:${t * this._zoom}px"></span>
             `)}
           </div>
+          ${this._renderQuantGrid()}
           ${tracks.map(t => this._renderLane(t))}
           ${this._renderSelection()}
+          ${this._renderHoverCursor()}
           ${this._renderPlayhead()}
           ${this._renderRecordingPlaceholder()}
         </div>
@@ -1114,11 +1245,119 @@ export class TimelineView extends LitElement {
     const a = Math.min(this._selection.startSamples, this._selection.endSamples);
     const b = Math.max(this._selection.startSamples, this._selection.endSamples);
     const leftPx = HEAD_WIDTH + (a / sr) * this._zoom;
+    const rightPx = HEAD_WIDTH + (b / sr) * this._zoom;
     const widthPx = Math.max(1, ((b - a) / sr) * this._zoom);
     return html`
       <div class="selection-body" style="left:${leftPx}px;width:${widthPx}px"></div>
       <div class="selection-ruler" style="left:${leftPx}px;width:${widthPx}px"></div>
+      <div class="selection-handle left"
+           title="Drag to resize the start of the selection"
+           style="left:${leftPx}px"
+           @pointerdown=${(e) => this._startSelectionResize(e, "left")}></div>
+      <div class="selection-handle right"
+           title="Drag to resize the end of the selection"
+           style="left:${rightPx}px"
+           @pointerdown=${(e) => this._startSelectionResize(e, "right")}></div>
     `;
+  }
+
+  _onGridHoverMove(ev) {
+    // Throttle via rAF — pointermove fires at hardware rate and we
+    // only need one update per paint frame.
+    if (this._hoverRaf) return;
+    this._hoverRaf = requestAnimationFrame(() => {
+      this._hoverRaf = 0;
+      const ruler = this.renderRoot.querySelector(".ruler");
+      if (!ruler) return;
+      const samples = this._samplesAtX(ev.clientX, ruler);
+      if (Number.isFinite(samples)) this._hoverSamples = samples;
+    });
+  }
+
+  _renderQuantGrid() {
+    if (!this._quantOn) return null;
+    const sr = this._timeline?.sample_rate || 48_000;
+    const len = this._timeline?.length_samples || 0;
+    const totalSec = len / sr;
+    const tempo = Number(window.__foyer?.store?.state?.controls?.get?.("transport.tempo")) || 120;
+    if (!Number.isFinite(tempo) || tempo <= 0) return null;
+    const beatSec = 60 / tempo;
+    const div = Math.max(1, this._quantDiv | 0);
+    const stepSec = beatSec / (div / 4); // div=4 → quarter notes; div=16 → 16ths
+    const lines = [];
+    let i = 0;
+    for (let t = 0; t <= totalSec + 1e-6; t += stepSec, i++) {
+      const onBeat = i % (div / 4) === 0;
+      lines.push({ t, beat: onBeat });
+      // Cap to keep the DOM sane on long sessions at high subdivisions.
+      if (lines.length > 4000) break;
+    }
+    return html`${lines.map((l) => html`
+      <span class="quant-line ${l.beat ? "beat" : "sub"}"
+            style="left:${HEAD_WIDTH + l.t * this._zoom}px"></span>
+    `)}`;
+  }
+
+  _toggleQuantOn() {
+    this._quantOn = !this._quantOn;
+    try { localStorage.setItem("foyer.timeline.quant.on", this._quantOn ? "1" : "0"); } catch {}
+  }
+  _setQuantDiv(d) {
+    this._quantDiv = d;
+    try { localStorage.setItem("foyer.timeline.quant.div", String(d)); } catch {}
+  }
+
+  _renderHoverCursor() {
+    if (this._hoverSamples == null) return null;
+    const sr = this._timeline?.sample_rate || 48_000;
+    const x = HEAD_WIDTH + (this._hoverSamples / sr) * this._zoom;
+    return html`<div class="cursor-line" style="left:${x}px"></div>`;
+  }
+
+  _startSelectionResize(ev, edge) {
+    if (ev.button !== 0) return;
+    if (!this._selection) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const handle = ev.currentTarget;
+    handle.classList.add("dragging");
+    // Resolve which edge of the *visible* range we're on (start <= end
+    // not guaranteed in raw _selection); find the ruler element to
+    // compute samples-at-X.
+    const ruler = this.renderRoot.querySelector(".ruler");
+    const a = this._selection.startSamples;
+    const b = this._selection.endSamples;
+    const startEdge = edge === "left" ? Math.min(a, b) : Math.max(a, b);
+    const fixedEdge = edge === "left" ? Math.max(a, b) : Math.min(a, b);
+    void startEdge;
+    const move = (e) => {
+      if (!ruler) return;
+      const samples = this._samplesAtX(e.clientX, ruler);
+      this._selection = edge === "left"
+        ? { startSamples: samples, endSamples: fixedEdge }
+        : { startSamples: fixedEdge, endSamples: samples };
+    };
+    const up = () => {
+      handle.classList.remove("dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (this._selection) {
+        const lo = Math.min(this._selection.startSamples, this._selection.endSamples);
+        const hi = Math.max(this._selection.startSamples, this._selection.endSamples);
+        if (Math.abs(lo - hi) < 1) {
+          this._selection = null;
+        } else {
+          this.dispatchEvent(new CustomEvent("timeline-selection", {
+            detail: { startSamples: lo, endSamples: hi },
+            bubbles: true, composed: true,
+          }));
+        }
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   }
 
   _renderPlayhead() {
@@ -1181,7 +1420,11 @@ export class TimelineView extends LitElement {
           <div class="lane-kind">
             ${track.kind}${this._isSequencerTrack(track.id) ? html`<span class="seq-chip" title="Active beat-sequencer region">SEQ</span>` : null}
           </div>
-          <div class="lane-controls">
+          <div class="lane-controls"
+               @dblclick=${(e) => e.stopPropagation()}>
+            <!-- @dblclick stop on the wrapper so a fast double-tap on
+                 any M/S/R/A button doesn't bubble to lane-head and
+                 spawn the track editor (Rich, TODO #52). -->
             <div class="lane-ctl-btn mute ${muted ? "on" : ""}"
                  title="Mute (${muted ? "on" : "off"})"
                  @click=${(e) => { e.stopPropagation(); this._toggleTrackBool(track.mute?.id); }}>M</div>

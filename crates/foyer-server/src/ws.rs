@@ -1456,15 +1456,27 @@ async fn dispatch_command(
                     return Ok(());
                 }
                 Err(e) => {
-                    tracing::warn!("open_egress failed ({e}); falling back to sidecar test tone");
-                    // 1-hour cap is a liveness guard, not a UX
-                    // timer — the tone exits immediately when the
-                    // subscriber drops (stream close), so in
-                    // practice it plays as long as Rich is
-                    // listening.
-                    state
-                        .audio_hub
-                        .spawn_test_tone_source(format, std::time::Duration::from_secs(3600))
+                    // Any other backend error — treat the same as
+                    // `AudioEgressUnavailable`: surface a clean error
+                    // and stay silent. Falling back to the sidecar
+                    // test tone (the prior behavior) was obnoxious
+                    // when Ardour briefly errored on session swap or
+                    // when the shim's writer queue closed during a
+                    // reconnect: every "Listen" click landed on a
+                    // 440 Hz sine instead of just being quiet.
+                    // (Rich, 2026-04-26.)
+                    tracing::warn!(
+                        "open_egress stream_id={stream_id} failed ({e}); staying silent"
+                    );
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "audio_egress_unavailable".into(),
+                            message: format!("audio source unavailable: {e}"),
+                        },
+                    )
+                    .await;
+                    return Ok(());
                 }
             };
             match state

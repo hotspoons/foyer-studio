@@ -36,7 +36,9 @@ export class PluginPanel extends LitElement {
       height: 100%;
       color: var(--color-text);
       font-family: var(--font-sans);
-      background: var(--color-surface);
+      /* Transparent so the frosted foyer-window shell shows through.
+       * Inner blocks (header, .row, .footer) keep their own backgrounds. */
+      background: transparent;
       overflow: hidden;
     }
 

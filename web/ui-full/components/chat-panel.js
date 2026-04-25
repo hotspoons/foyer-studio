@@ -62,7 +62,31 @@ export class FoyerChatPanel extends LitElement {
     _tick: { state: true, type: Number },
     _snapshotPrompt: { state: true, type: Boolean },
     _snapshotName: { state: true, type: String },
+    _slideMode: { state: true, type: Boolean },
   };
+
+  /** Slide-out hooks (mirror QuadrantFab's). Right-dock calls these
+   *  to move chat in/out of the dock's slide-out slot.
+   *  (Rich, TODO #41.) */
+  enterSlideMode(dockHost) {
+    if (!dockHost) return;
+    this._slideMode = true;
+    this._open = true;
+    this.setAttribute("slot", "slide-out");
+    if (this.parentElement !== dockHost) dockHost.appendChild(this);
+    this._onOpen();
+    this.requestUpdate();
+  }
+  exitSlideMode() {
+    if (!this._slideMode) return;
+    this._slideMode = false;
+    this._open = false;
+    this.removeAttribute("slot");
+    if (this.parentElement && this.parentElement !== document.body) {
+      document.body.appendChild(this);
+    }
+    this.requestUpdate();
+  }
 
   static styles = css`
     ${scrollbarStyles}
@@ -354,16 +378,41 @@ export class FoyerChatPanel extends LitElement {
     this._onPointerUp = this._onPointerUp.bind(this);
     this._onWinResize = this._onWinResize.bind(this);
     this._onChatChange = () => {
-      // Track unread when panel is closed.
-      if (!this._open && !this._isDocked()) {
-        const msgs = this._chat()?.messages ?? [];
+      // Track unread anytime the chat UI isn't currently visible —
+      // covers BOTH floating-FAB-closed and docked-rail-closed states.
+      // Pre-fix the docked path skipped this branch and the rail icon
+      // never showed a badge (Rich, TODO #40).
+      const msgs = this._chat()?.messages ?? [];
+      if (!this._open) {
         const added = Math.max(0, msgs.length - this._lastSeenCount);
-        if (added > 0) this._unreadCount += added;
+        if (added > 0) {
+          this._unreadCount += added;
+          // Surface a non-blocking toast for the newest arrival so a
+          // user with the chat closed at least notices someone said
+          // something. Skip self-messages (we don't toast our own
+          // outgoing). Lazy-import toast so the path is free for users
+          // who never spawn the chat.
+          const last = msgs[msgs.length - 1];
+          const selfId = window.__foyer?.store?.state?.selfPeerId;
+          if (last && last.from_peer_id !== selfId) {
+            import("foyer-ui-core/widgets/toast.js").then(({ toast }) => {
+              const who = last.from_label || last.from_peer_id || "peer";
+              const body = String(last.body || "").replace(/\s+/g, " ").trim();
+              toast(`${who}: ${body.slice(0, 80)}${body.length > 80 ? "…" : ""}`);
+            }).catch(() => {});
+          }
+        }
       }
       this._tick++;
-      this._lastSeenCount = this._chat()?.messages?.length ?? 0;
+      this._lastSeenCount = msgs.length;
       this.requestUpdate();
     };
+  }
+
+  /** Number to overlay on the rail icon when docked. Right-dock reads
+   *  this each render via `fab.dockBadge?.()`. */
+  dockBadge() {
+    return this._unreadCount;
   }
 
   connectedCallback() {
@@ -645,14 +694,19 @@ export class FoyerChatPanel extends LitElement {
   // ── render ─────────────────────────────────────────────────────
 
   render() {
+    // Slide-out mode: render fills the right-dock slot. Reparented
+    // by `enterSlideMode(dockHost)`; styles still come from this
+    // shadow root.
+    if (this._slideMode) {
+      return html`
+        <div class="panel" style="position:relative;width:100%;height:100%;border-radius:0;box-shadow:none;border:0"
+             role="dialog" aria-label="Foyer chat">
+          ${this._renderPanelBody({ compact: true })}
+        </div>
+      `;
+    }
     if (this._isDocked()) {
-      // Docked: rail icon in <foyer-right-dock>; rail click flips
-      // `_open` via `toggleFromDock()` and we render our docked
-      // panel here, inside chat-panel's shadow root, so all the
-      // .transcript / .composer / .msg styles apply. Going through
-      // the right-dock's slide-out (an earlier approach) put the
-      // template in a different shadow root and dropped scoped CSS,
-      // which Rich flagged as broken on 2026-04-25.
+      // Docked pop-out: panel anchored to the rail by `_dockStyle()`.
       if (this._open) {
         return html`
           <div class="panel" style=${this._dockStyle()} role="dialog" aria-label="Foyer chat">

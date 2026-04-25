@@ -92,6 +92,20 @@ export const DEFAULT_VIZ_PREFS = Object.freeze({
   /** Velocity shading on MIDI note bars (0..1 alpha multiplier on the
    *  velocity-driven component). 0 = flat color, 1 = full dynamic range. */
   midiVelocityShading: 0.6,
+
+  /** Color of the timeline's seconds-tick gridlines (`.lane-gridlines .gl`).
+   *  Distinct from the BPM-quantized grid below so the user can tell them
+   *  apart at a glance. (Rich, 2026-04-26.) */
+  timeGridColor:    "#3a3a44",
+  /** Alpha (0..1) applied to `timeGridColor`. Lets users dim the grid
+   *  without losing the hue choice. */
+  timeGridAlpha:    1.0,
+  /** Color of the BPM-quantized grid overlay (`.quant-line`). Defaults to
+   *  a saturated accent so it reads as a different layer from the seconds
+   *  grid. */
+  quantGridColor:   "#7c5cff",
+  /** Alpha (0..1) applied to `quantGridColor`. */
+  quantGridAlpha:   0.5,
 });
 
 /** Resolve the current MIDI note color, falling through to `trackColor`

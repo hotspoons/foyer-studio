@@ -83,6 +83,21 @@ document.addEventListener("contextmenu", (ev) => {
 // Boot-time: install whatever automation script the user has saved.
 bootAutomation();
 
+// Globally blur any `<select>` once it commits a change, so a stale
+// focus on a combo box (plugin enum param, drum-kit picker, future
+// scale-root chooser) doesn't swallow the next Space press into
+// reopening the dropdown instead of toggling transport. Individual
+// callers used to remember `ev.target.blur()` per onchange handler;
+// every new combo box was a fresh chance to forget it. Capture-phase
+// listener so we beat any handler that re-focuses the element on
+// change. (Rich, TODO #53.)
+document.addEventListener("change", (ev) => {
+  const t = ev.target;
+  if (t && t.tagName === "SELECT") {
+    queueMicrotask(() => { try { t.blur(); } catch {} });
+  }
+}, true);
+
 export class FoyerApp extends LitElement {
   static properties = {
     _status:  { state: true },

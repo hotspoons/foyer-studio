@@ -92,10 +92,29 @@ export class QuadrantFab extends LitElement {
     _panelWidth: { state: true, type: Number },
     _panelHeight: { state: true, type: Number },
     _open: { state: true, type: Boolean },
+    /** Slide-out mode: the FAB has been moved into the right-dock's
+     *  slot and renders body content with relative positioning that
+     *  fills the slide-out container. Distinct from the "docked +
+     *  pop-out" mode (`_open` only) where the panel is anchored to
+     *  the rail via `_dockStyle()`. (Rich, TODO #41.) */
+    _slideMode: { state: true, type: Boolean },
   };
 
   static styles = css`
     :host { display: contents; }
+    :host([slide-mode]) {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    :host([slide-mode]) .panel.slide {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      border-radius: 0;
+      box-shadow: none;
+      border: 0;
+    }
 
     .fab {
       position: fixed;
@@ -269,6 +288,7 @@ export class QuadrantFab extends LitElement {
     // experiment where the right-dock rendered the FAB's content via a
     // template lost the scoped styles and looked unstyled — see
     // DECISION 42.)
+    if (this._slideMode) return this._renderSlidePanel();
     if (this._isDocked()) {
       if (this._open) return this._renderDockedPanel();
       return html``;
@@ -338,6 +358,54 @@ export class QuadrantFab extends LitElement {
         <div class="body">${this._renderPanelContent()}</div>
       </div>
     `;
+  }
+
+  /** Render the FAB's body inside the right-dock's slide-out slot.
+   *  Same content as `_renderDockedPanel` (panel chrome + body) but
+   *  with relative positioning that fills the slot's box. The host
+   *  is reparented into the right-dock as a slotted child; styles
+   *  still cascade from this shadow root. */
+  _renderSlidePanel() {
+    return html`
+      <div class="panel slide" @click=${(e) => e.stopPropagation()}>
+        <header class="grip" style="cursor:default;display:flex;align-items:center;gap:8px">
+          <span style="flex:1">${this._fabTitle}</span>
+          <button title="Undock — return to floating FAB"
+                  @click=${() => this._undock()}
+                  style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:10px;padding:2px 8px;cursor:pointer;font-family:var(--font-sans);letter-spacing:0.06em;text-transform:uppercase">Undock</button>
+          <button title="Close"
+                  @click=${() => this.closeFromDock()}
+                  style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--color-text-muted);padding:2px 6px;cursor:pointer;font-size:14px;line-height:1">×</button>
+        </header>
+        <div class="body">${this._renderPanelContent()}</div>
+      </div>
+    `;
+  }
+
+  /** Public hooks the right-dock calls to move us into / out of its
+   *  slide-out slot. The fab physically reparents under the dock host
+   *  and sets `slot="slide-out"`; styles still cascade from this
+   *  component's own shadow root, so subclasses' `.row` / `.tabs` /
+   *  etc. render correctly without duplication. */
+  enterSlideMode(dockHost) {
+    if (!dockHost) return;
+    this._slideMode = true;
+    this._open = true;
+    this.setAttribute("slide-mode", "");
+    this.setAttribute("slot", "slide-out");
+    if (this.parentElement !== dockHost) dockHost.appendChild(this);
+    this.requestUpdate();
+  }
+  exitSlideMode() {
+    if (!this._slideMode) return;
+    this._slideMode = false;
+    this._open = false;
+    this.removeAttribute("slide-mode");
+    this.removeAttribute("slot");
+    if (this.parentElement && this.parentElement !== document.body) {
+      document.body.appendChild(this);
+    }
+    this.requestUpdate();
   }
 
   /** Pop this FAB out of the rail and restore it to its last floating
