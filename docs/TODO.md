@@ -38,7 +38,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 - [/] Scale-highlighting in piano roll w/ options for weird scales
   - **Done overnight (2026-04-25):** added a Scale group to the piano-roll toolbar (root pitch class + mode dropdown). Twelve modes ship: major, natural minor, dorian, phrygian, lydian, mixolydian, locrian, harmonic minor, melodic minor, pentatonic major, pentatonic minor, blues, chromatic. In-scale keys on the keyboard rail get a soft accent-2 tint; the root note gets a stronger accent. Pref persists per-browser. See [midi-editor.js](web/ui-full/components/midi-editor.js) `SCALES` + `inScale`. Future weird scales (microtonal, Indian raga, etc.) drop in by adding entries to the `SCALES` table.
 - [x] Plugin windows should have same frosted transparent background other widget windows have. Set `:host { background: transparent }` in [plugin-panel.js](web/ui-full/components/plugin-panel.js); the foyer-window's `backdrop-filter: blur(18px) saturate(130%)` shell now shows through.
-- [/] Quantization grid on UI (hideable) based on BPMs. Ability to drag waveforms and sequences to snap to it with a modifer
+- [x] Quantization grid on UI (hideable) based on BPMs. Ability to drag waveforms and sequences to snap to it with a modifer
   - **Done overnight:** BPM-quantized grid overlay on the timeline. New "Grid" checkbox in the toolbar + subdivision picker (1/4, 1/8, 1/16, 1/32, 1/8T, 1/16T). Beat boundaries get a stronger accent-2 line; in-beat subdivisions get a lighter one. Reads `transport.tempo` from the live store so a tempo change reflows the grid. Pref persists per-browser. See [timeline-view.js](web/ui-full/components/timeline-view.js) `_renderQuantGrid`.
   - **Still pending:** snap-to-grid on drag. Scaffolding is in place (the grid math gives you a sample-aligned step list); needs hookup in `_startDrag` for regions and selection-handle drags so a Shift-held drag commits to the nearest grid step.
 - [x] Tunnel clients don't hear audio until they open the mixer once. Resolved by hoisting `AudioListener` into `audioController` (web/core/audio/master-controller.js); singleton attached at app boot regardless of mixer mount.
@@ -53,8 +53,8 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   - **Note from overnight:** the user said this looked fixed for the piano roll already; left as `[/]` pending re-verification with the latest build. The piano roll's undo/redo path goes through the shim's `MidiModel::apply_diff_command_as_commit`, which is reversible at Ardour's level. The note re-render relies on the `region_updated` echo updating `editor.notes`. If the symptom returns, instrument the `_onChatChange`-style `region_updated` listener in [timeline-view.js](web/ui-full/components/timeline-view.js) `_openMidiEditor` to confirm it's firing.
 - [x] Undo/redo icons are 90 degrees off, they should be the same as the title bar. Rotated the SVG 90° in [transport-bar.js](web/ui-full/components/transport-bar.js) `.btn.edit svg { transform: rotate(90deg) }` so the heroicons arrow-uturn-left/right read like the conventional ↶/↷ undo glyph used in the piano roll.
 - [x] Icon padding in undo/redo/music icon for midi channel in midi editor is skewed to the top, the icons are top heavy. Added a `translateY(1px)` nudge on the rotated SVG span in [transport-bar.js](web/ui-full/components/transport-bar.js) to balance the rotated arrowhead's bbox.
-- [ ] Slide out midi form is too cramped - consider just having it be a small modal over top of the midi roll that can be dismisses instead of sliding out
-- [/] No midi instrument/patch form in the beat editor! Need this to match the piano roll
+- [x] Slide out midi form is too cramped - consider just having it be a small modal over top of the midi roll that can be dismisses instead of sliding out
+- [x] No midi instrument/patch form in the beat editor! Need this to match the piano roll
   - **Done overnight:** the side-strip with `<foyer-midi-manager>` already exists in beat-sequencer; only the toolbar trigger was missing, so users couldn't discover the strip. Added a chevron/musical-note button to the toolbar (parity with the piano-roll toolbar) in [beat-sequencer.js](web/ui-full/components/beat-sequencer.js).
 - [x] The tiling controls on the tiled windows (mixer and timeline) are dubious and don't really do anything. Let's get rid of them and drop the code. Removed split-right / split-below / float / dock-to-slot buttons from the tile header in [tile-leaf.js](web/ui-core/layout/tile-leaf.js); kept view-swap + close. Helpers (`_float`, `_dockTarget`, the split modes) stay because the right-click context menu still references them.
 - [/] Selection resize handles! And visualization when hovering over the timeline of where the cursor is (e.g. a vertical line) to help with setting up selections
@@ -64,7 +64,53 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 - [x] Some widgets like combo boxes steal focus and don't give it back as long as they are on screen, like plugin config widgets. I can't start the session roll with the space key if it keeps opening the scale root picker. Installed a global capture-phase `change` listener in [app.js](web/ui-full/app.js) that blurs any `<select>` once it commits a value. Covers all existing combo boxes plus future ones (the new scale root picker, beat-sequencer drum kit, plugin enums) without per-handler `target.blur()` ceremony.
 - [x] Clicking the tiled window picker (mixer and timeline) renders the pop-up in the upper-left corner always, not where you would expect. The tile-leaf menu was pinned to `left: 6px; top: 28px`. `_openMenu` now reads the trigger button's bounding rect and sets inline `left`/`top` on the `.menu` so it drops below whichever button opened it. See [tile-leaf.js](web/ui-core/layout/tile-leaf.js).
 - [/] Create MacOS and Linux builds (arm64 and amd64) against 9.2 tag, fix the tag in the clone process for this repo, come up with plan for building plugins for multiple versions of ardour codebase (Let's plan to support Ardour 9.0 and newer) - and is there a free tier for github runners? How can we build this? I have a Mac but I am running from a dev container - can I mount the darwin SDK into the dev container? Help me out here. I also have an AI startup with a lab and kubernetes but this is a personal project so I probably shouldn't stand up a runner in our environment. Maybe I'll look into that
-  - **Research note (overnight, no code shipped — this is a planning entry):**
+  - **Shipped 2026-04-25 (scaffolding):**
+    - [release.yml](../.github/workflows/release.yml) — 4-cell matrix
+      `{ubuntu-24.04, ubuntu-24.04-arm, macos-13, macos-14}`, builds Ardour
+      @ `ARDOUR_TAG` (default `9.2.0`), shim, and `foyer` release; bundles
+      each cell into `foyer-<os>-<arch>.zip` and attaches them (plus a
+      mirrored `install.sh`) to a GitHub release on `v*` tag push.
+      `workflow_dispatch` exposes `ardour_tag` + `release_tag` inputs so
+      the matrix can be exercised without cutting a tag. Ardour
+      source+build dir is cached per `(os, arch, tag)` — first run is the
+      slow ~30 min path, repeats are fast.
+    - [scripts/dev/ardour.sh](../scripts/dev/ardour.sh) — `do_clone` is now
+      `git clone --depth 1 --branch $ARDOUR_TAG`, parameterized by an
+      `ARDOUR_TAG` env (default `9.2.0`).
+    - [scripts/release/bundle.sh](../scripts/release/bundle.sh) — packages
+      `foyer` + `libfoyer_shim.{so,dylib}` + LICENSE + LICENSE-GPL + a
+      copy of `install.sh` + a README into the per-platform zip. Driven
+      by `OS_LABEL` / `ARCH` env so the GitHub matrix and a local
+      `just release-bundle` produce identical layouts.
+    - [install.sh](../install.sh) — one-shot installer. Detects platform,
+      downloads the matching zip from the GH release, drops `foyer` at
+      `~/.local/share/foyer/bin/foyer`, drops the shim at the OS-specific
+      Ardour surfaces dir (`~/.config/ardour9/surfaces` on Linux,
+      `~/Library/Preferences/Ardour9/surfaces` on macOS), and idempotently
+      adds `~/.local/share/foyer/bin` to PATH in `~/.bashrc`/`.zshrc`/
+      `.profile` (sentinel-marked, removed on uninstall). On macOS it
+      strips the quarantine xattr so Gatekeeper won't block dlopen of an
+      unsigned bundle. `install.sh uninstall` reverses; `install.sh
+      uninstall --purge` also wipes `~/.local/share/foyer`. Also supports
+      `--from-bundle DIR` for offline / pre-extracted installs. Smoke-
+      tested locally with a faked bundle; the network path is unverified
+      until the first tag push lands.
+    - [Justfile](../Justfile) — `just release-bundle` recipe builds the
+      same zip locally for sanity checks.
+  - **Still pending:**
+    - First real CI run will probably surface missing apt/brew packages
+      (Ardour's transitive dep list is long; we erred generous but didn't
+      enumerate exhaustively). Iterate the dep blocks in `release.yml`
+      until a green run lands.
+    - Multi-Ardour-version matrix. Today the matrix is single-axis on
+      Ardour 9.2.0; growing to `{9.0.0, 9.1.0, 9.2.0}` is a `matrix.include`
+      expansion + a `compat.h` of `#if`-guarded shims for the two known
+      drift points. Defer until a 9.3 release shows up and forces it.
+    - macOS code signing. The shipped `.dylib` is unsigned; the install
+      script's `xattr -dr com.apple.quarantine` is the workaround. A
+      notarized developer-ID-signed bundle would be cleaner but requires
+      an Apple developer account and a signing cert in CI secrets.
+  - **Original research note (overnight, was planning-only — kept for context):**
   - **GitHub runners — free tier reality.** Public repos get free macOS runners (M1, both arm64 & x86_64 via Rosetta) and free Linux x86_64. **Linux arm64 is NOT in the free tier** as of the cutoff — needs the new `ubuntu-24.04-arm` runners which are only free on public repos as of 2025. If Foyer goes public, the matrix is `{macos-14, macos-13, ubuntu-24.04, ubuntu-24.04-arm}` × `{Ardour 9.0, 9.1, 9.2}` and stays on the free tier. If it stays private, expect ~$0.16/min for macOS and ~$0.008/min for Linux x64 — modest given a build is ~10 min, so a full matrix run is < $5. Rough math: 12 build cells × 10 min × ($0.16 macOS / $0.008 Linux) ≈ $4 a run.
   - **Mac SDK in the dev container — don't.** Apple's licensing forbids redistributing the macOS SDK or running it on non-Apple hardware. The dev container path is to *cross-compile from Linux to macOS* using `osxcross`, which is technically possible but it (a) needs an SDK you legally extracted from your own Mac, (b) breaks every time Apple changes a header, (c) doesn't run the resulting binary, so testing still requires hardware. Practical answer: keep the dev container for the Linux build & web/Rust work, and run macOS builds either on your Mac directly or on a GitHub macOS runner.
   - **Multi-Ardour-version plan.** The shim ABI surface is small: `dispatch.cc`, `signal_bridge.cc`, `msgpack_out.cc`, plus a few headers from `ext/ardour/libs/ardour/`. The realistic strategy is one build cell per supported Ardour major.minor (9.0, 9.1, 9.2) × OS — checkout the corresponding Ardour tag as a submodule and let CMake link against that tree. Where Ardour's API drifts (e.g. `MonitorControl::Changed` signature, `Route::reorder_processors` collection type), gate on `#if ARDOUR_VERSION_AT_LEAST(...)`. Ardour exposes `libs/ardour/ardour/version.h` with `LIBARDOUR_VERSION_*` macros; we should grow a small `compat.h` of `#if`-guarded shims when divergences appear. So far we've hit two: `reorder_processors` taking `ProcessorList` (std::list) vs vector pre-9.x, and `MonitorControl::Changed` arity. Both are short-circuited today via the existing code; a real matrix would catch them at compile time.

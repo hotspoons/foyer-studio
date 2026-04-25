@@ -363,10 +363,19 @@ export class FoyerWindow extends LitElement {
       maximized: this.maximized,
     });
   }
+  
 
   _toggleMax() {
     this.maximized = !this.maximized;
     this._persist();
+    // Notify slotted children so they can adapt their layout to the
+    // new size (e.g. beat-sequencer surfaces a play/tempo strip when
+    // the window has full-screen real estate). Fires on both
+    // maximize and restore.
+    this.dispatchEvent(new CustomEvent("foyer-window-maximize-changed", {
+      bubbles: true, composed: true,
+      detail: { maximized: this.maximized },
+    }));
   }
 
   _startDrag(ev) {
@@ -526,18 +535,68 @@ export function registerWindowKind(kind, factory) {
   if (typeof factory === "function") FACTORIES.set(kind, factory);
 }
 
+// Re-entry guard. Some factories are async (dynamic-import the heavy
+// editor modules), and they trigger envelope traffic on mount. The
+// store rebroadcasts that as a "change" event, which our app shell
+// uses to re-fire rehydrate. Without this latch we can stack dozens of
+// concurrent factory calls before the first one's `openWindow` writes
+// the storage-key — every resolve replaces the editor's content,
+// remounts it, and feeds the loop. A simple flag breaks the cycle:
+// only one rehydrate pass at a time. Anything that arrives mid-pass is
+// covered by the next legitimate trigger. (Rich, 2026-04-26.)
+let _rehydrating = false;
+
+/** True while a rehydrate pass is in flight (including async factories
+ *  whose dynamic imports haven't resolved yet). `openWindow` checks
+ *  this to skip user-action-only side effects (z-order bump, widgets
+ *  layer reveal) — we don't want page reload to shuffle z-order or
+ *  un-hide a layer the user explicitly hid. */
+let _rehydratingDeep = 0;
+
+export function isRehydrating() {
+  return _rehydratingDeep > 0;
+}
+
 /** Replay every persisted open window. Safe to call multiple times. */
 export function rehydrateWindows() {
-  const list = _loadPersisted();
-  for (const entry of list) {
-    const fn = FACTORIES.get(entry.kind);
-    if (!fn) continue;
-    try { fn(entry.props || {}); }
-    catch (e) { console.warn("rehydrate failed for", entry.kind, e); }
+  if (_rehydrating) return;
+  _rehydrating = true;
+  _rehydratingDeep += 1;
+  try {
+    const list = _loadPersisted();
+    for (const entry of list) {
+      const fn = FACTORIES.get(entry.kind);
+      if (!fn) continue;
+      try { fn(entry.props || {}); }
+      catch (e) { console.warn("rehydrate failed for", entry.kind, e); }
+    }
+  } finally {
+    // Release the synchronous re-entry latch on the next microtask so
+    // any sync factory calls within this pass can't re-enter. The
+    // "deep" flag stays high through any async factory resolution
+    // window (dynamic imports + region-cache lookups), then drops
+    // after a short grace period so subsequent user actions get the
+    // normal z-order bump + layer reveal behavior.
+    queueMicrotask(() => { _rehydrating = false; });
+    setTimeout(() => { _rehydratingDeep = Math.max(0, _rehydratingDeep - 1); }, 1500);
   }
 }
 
 export function openWindow({ title, icon, storageKey, content, width, height, backdrop = false, onReuse, persist }) {
+  const fromRehydrate = isRehydrating();
+  // Reveal the widgets layer for any user-initiated open. Rehydrate
+  // intentionally skips this so a reload doesn't override the user's
+  // hide-widgets choice. The ambient `registerExternalWidget` register
+  // path also no longer auto-shows — the reveal lives here, in the
+  // user-action surface, so every spawn point (plugin floats, MIDI /
+  // beat editor, track editor, console, diagnostics) gets it without
+  // each having to opt in. (Rich, 2026-04-26.)
+  if (!fromRehydrate) {
+    try {
+      const layout = window.__foyer?.layout;
+      if (layout && !layout.widgetsVisible?.()) layout.setWidgetsVisible?.(true);
+    } catch {}
+  }
   if (storageKey) {
     const existing = document.querySelector(
       `foyer-window[storage-key="${CSS.escape(storageKey)}"]`,
@@ -561,16 +620,24 @@ export function openWindow({ title, icon, storageKey, content, width, height, ba
         } catch {}
       }
       if (title) existing.title = title;
-      try {
-        document.body.appendChild(existing); // bump above siblings
-      } catch {}
+      // Bump above siblings only on user-initiated opens. Rehydrate
+      // calls would otherwise reorder the z-stack of restored windows
+      // every time a region cache update fires — windows shuffle
+      // visibly on reload (Rich, 2026-04-26).
+      if (!fromRehydrate) {
+        try { document.body.appendChild(existing); } catch {}
+      }
       try {
         const layoutId = existing._layoutId;
         if (layoutId) {
           window.__foyer?.layout?.setExternalMinimized?.(layoutId, false);
         }
       } catch {}
-      if (persist?.kind) _recordOpen(persist);
+      // Skip the persist record on rehydrate — the entry is already in
+      // localStorage by definition (that's why rehydrate is firing).
+      // Re-recording every time burns localStorage writes for nothing
+      // and triggers downstream change events.
+      if (persist?.kind && !fromRehydrate) _recordOpen(persist);
       return () => existing.remove();
     }
   }

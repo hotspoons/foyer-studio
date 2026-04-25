@@ -817,5 +817,15 @@ export function openTrackEditor(trackId, options = {}) {
     },
     width: 720,
     height: 640,
+    // Retarget the existing element instead of swapping it. Without
+    // this every rehydrate pass would disconnect+reconnect the modal,
+    // re-firing its connectedCallback's `list_ports` request — and
+    // when the shim is dead, every rehydrate produced a new
+    // `list_ports_failed` toast on the user. (Rich, 2026-04-26.)
+    onReuse: (existing) => {
+      if (!existing) return;
+      if (trackId) existing.trackId = trackId;
+      if (options.tab) existing.initialTab = options.tab;
+    },
   }));
 }

@@ -33,6 +33,10 @@ import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { playPreviewNote, resumePreviewCtx } from "foyer-core/audio/midi-preview.js";
 import { chordIntervals, SCALES, PITCH_CLASS_LABELS } from "foyer-core/music-theory.js";
+// Reuse the transport bar's drag-to-scrub tempo control rather than a
+// plain `<input type="number">` — fine/coarse step + drag handling
+// already match the rest of the app's "tempo" affordance.
+import "foyer-ui-core/widgets/number-scrub.js";
 // Side-strip embedded body — see `_toggleStrip` + render().
 import "./midi-manager.js";
 
@@ -287,6 +291,7 @@ export class BeatSequencer extends LitElement {
     }
     .tb {
       display: flex; align-items: center; gap: 10px;
+      flex-wrap: wrap; row-gap: 6px;
       padding: 6px 12px;
       background: var(--color-surface-elevated);
       border-bottom: 1px solid var(--color-border);
@@ -294,6 +299,9 @@ export class BeatSequencer extends LitElement {
       flex: 0 0 auto;
     }
     .tb .title { color: var(--color-text); font-weight: 600; }
+    .tb label {
+      display: inline-flex; align-items: center; gap: 6px;
+    }
     .tb select, .tb button, .tb input[type="number"] {
       background: var(--color-surface);
       border: 1px solid var(--color-border);
@@ -302,10 +310,51 @@ export class BeatSequencer extends LitElement {
       border-radius: var(--radius-sm, 4px);
       cursor: pointer;
       font: inherit; font-size: 11px;
+      /* Center any iconographic content (icon spans, unicode glyphs)
+       * in the button's box. Without this the SVG span sits at the
+       * baseline and looks top-heavy next to the textual buttons. */
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 22px;
+      line-height: 1;
+    }
+    .tb button > span,
+    .tb button > svg {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     .tb button:hover, .tb select:hover { background: var(--color-surface-muted); }
-    .tb input[type="range"] { flex: 0 0 90px; }
+    .tb input[type="range"] { flex: 0 0 90px; vertical-align: middle; }
     .tb input[type="number"] { width: 58px; font-variant-numeric: tabular-nums; }
+    /* Pull the spacer out of the line-flow when the bar wraps; without
+     * flex 1 0 100 percent the spacer would still try to push later
+     * items to the second row, leaving big gaps. With wrap+full-width
+     * the second row starts cleanly with the buttons that come after. */
+    .tb .tb-spacer { flex: 1 1 auto; min-width: 0; }
+    /* Transport strip — only rendered when the host foyer-window is
+     * maximized. Holds the tempo widget + play/stop. Sits between
+     * the main toolbar and the seek bar. */
+    .transport-strip {
+      display: flex; align-items: center; gap: 12px;
+      padding: 6px 12px;
+      background: var(--color-surface);
+      border-bottom: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+      font: inherit; font-size: 11px;
+    }
+    .transport-strip foyer-number { flex: 0 0 auto; }
+    .transport-strip button {
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      padding: 4px 10px;
+      border-radius: var(--radius-sm, 4px);
+      cursor: pointer;
+      font: inherit; font-size: 13px;
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 36px; min-height: 28px;
+    }
+    .transport-strip button:hover { background: var(--color-surface-muted); }
 
     .seek {
       position: relative; height: 18px;
@@ -712,6 +761,18 @@ export class BeatSequencer extends LitElement {
     super.connectedCallback();
     window.__foyer?.store?.addEventListener("control", this._onStoreControl);
     window.__foyer?.store?.addEventListener("change", this._onStoreControl);
+    // Listen for convert/restore broadcasts from the piano roll so
+    // we update our archived state without waiting for a region_updated
+    // echo (the shim doesn't broadcast for metadata-only writes).
+    this._onSequencerLayoutChanged = (ev) => {
+      const d = ev?.detail || {};
+      if (!d.regionId || d.regionId !== this.regionId) return;
+      if (!d.layout) return;
+      this.layout = d.layout;
+      this._tick++;
+      this.requestUpdate();
+    };
+    window.addEventListener("foyer:sequencer-layout-changed", this._onSequencerLayoutChanged);
     // Latch number keys 3..9 while held — pitched-mode cell clicks
     // use them as a chord modifier (matches the piano-roll behavior).
     // Resolved against the user's stored scale prefs from the
@@ -740,6 +801,10 @@ export class BeatSequencer extends LitElement {
     window.addEventListener("keydown", this._onChordKeyDown);
     window.addEventListener("keyup",   this._onChordKeyUp);
     window.addEventListener("blur",    this._onChordKeyUp);
+    // Re-render when the host foyer-window flips maximized so the
+    // transport strip appears/disappears reactively.
+    this._onMaximizeChanged = () => { this._tick++; this.requestUpdate(); };
+    document.addEventListener("foyer-window-maximize-changed", this._onMaximizeChanged);
     // Client-side undo/redo. Bound on `this` so the listener is
     // unique per instance — a beat sequencer in a foyer-window
     // gets its own ring keyed on its element identity.
@@ -798,11 +863,17 @@ export class BeatSequencer extends LitElement {
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("control", this._onStoreControl);
     window.__foyer?.store?.removeEventListener("change", this._onStoreControl);
+    if (this._onSequencerLayoutChanged) {
+      window.removeEventListener("foyer:sequencer-layout-changed", this._onSequencerLayoutChanged);
+    }
     if (this._onKeyForUndo) document.removeEventListener("keydown", this._onKeyForUndo, true);
     if (this._onChordKeyDown) {
       window.removeEventListener("keydown", this._onChordKeyDown);
       window.removeEventListener("keyup",   this._onChordKeyUp);
       window.removeEventListener("blur",    this._onChordKeyUp);
+    }
+    if (this._onMaximizeChanged) {
+      document.removeEventListener("foyer-window-maximize-changed", this._onMaximizeChanged);
     }
     super.disconnectedCallback();
   }
@@ -1320,6 +1391,14 @@ export class BeatSequencer extends LitElement {
         this.layout = next;
         this._persistLayout();
         this._tick++;
+        // Restore regenerates notes server-side, so the regular
+        // region_updated echo will reach the piano roll. We still
+        // broadcast the layout flip immediately so the piano roll
+        // doesn't render-flicker between "convert" optimistic state
+        // and the echo arriving.
+        window.dispatchEvent(new CustomEvent("foyer:sequencer-layout-changed", {
+          detail: { regionId: this.regionId, layout: next },
+        }));
       });
     });
   }
@@ -1533,6 +1612,7 @@ export class BeatSequencer extends LitElement {
       <div class="root">
         <div class="main">
           ${this._renderToolbar(L)}
+          ${this._renderTransportStrip()}
           ${L.active === false ? this._renderArchivedBanner() : null}
           ${this._renderSeekBar()}
           ${this._renderArrangement(L)}
@@ -1643,13 +1723,48 @@ export class BeatSequencer extends LitElement {
     `;
   }
 
-  _renderToolbar(L) {
+  _isMaximized() {
+    const win = this.closest?.("foyer-window");
+    return !!(win && win.hasAttribute("maximized"));
+  }
+
+  _renderTransportStrip() {
+    if (!this._isMaximized()) return null;
     const tempo = this._currentTempo();
+    const playing = !!window.__foyer?.store?.state?.controls?.get?.("transport.playing");
+    return html`
+      <div class="transport-strip">
+        <foyer-number
+          label="Tempo"
+          unit="BPM"
+          .value=${tempo}
+          .min=${20}
+          .max=${300}
+          .step=${1}
+          .fineStep=${0.1}
+          .coarseStep=${10}
+          .precision=${1}
+          .pxPerStep=${3}
+          @input=${(e) => this._setTempo(e.detail?.value ?? e.target.value)}
+          @change=${(e) => this._setTempo(e.detail?.value ?? e.target.value)}
+        ></foyer-number>
+        <button title=${playing ? "Pause" : "Play"}
+                @click=${() => window.__foyer?.ws?.controlSet?.("transport.playing", playing ? 0 : 1)}>
+          ${playing ? "❚❚" : "▶"}
+        </button>
+        <button title="Stop"
+                @click=${() => window.__foyer?.ws?.controlSet?.("transport.playing", 0)}>
+          ■
+        </button>
+      </div>
+    `;
+  }
+
+  _renderToolbar(L) {
     return html`
       <div class="tb">
         <span class="title">Beat</span>
         <span>${this.regionName || "—"}</span>
-        <span style="flex:1"></span>
         <label>Mode
           <select @change=${(e) => this._setMode(e.currentTarget.value)}>
             <option value="drum" ?selected=${L.mode === "drum"}>Drum</option>
@@ -1676,14 +1791,12 @@ export class BeatSequencer extends LitElement {
                  @input=${(e) => { this._defaultVelocity = Number(e.currentTarget.value); this._tick++; }}>
           <span style="min-width:22px;text-align:right;color:var(--color-accent,#7c5cff);font-variant-numeric:tabular-nums">${this._defaultVelocity}</span>
         </label>
-        <label>Tempo
-          <input type="number" min="20" max="300" step="0.1"
-                 .value=${tempo.toFixed(1)}
-                 @change=${(e) => this._setTempo(e.currentTarget.value)}>
-          <span style="color:var(--color-text-muted);font-size:10px">BPM</span>
-        </label>
-        <button title="Play" @click=${() => window.__foyer?.ws?.controlSet?.("transport.playing", 1)}>▶</button>
-        <button title="Stop" @click=${() => window.__foyer?.ws?.controlSet?.("transport.playing", 0)}>■</button>
+        <!-- Tempo + Play/Stop moved to the maximized-only transport
+             strip below. Editing live mostly happens at normal window
+             size, where transport is reachable from the main app's
+             transport bar; surfacing them in-editor only when the
+             user has full-screen real estate keeps the toolbar tight.
+             (Rich, 2026-04-26.) -->
         <label class="chk" title="Play a short sound in the browser when you click a cell (browser-only; does not route through the DAW yet)">
           <input type="checkbox" .checked=${this._preview}
                  @change=${() => this._togglePreview()}>

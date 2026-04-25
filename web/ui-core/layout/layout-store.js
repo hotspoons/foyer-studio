@@ -284,7 +284,14 @@ export class LayoutStore extends EventTarget {
       tileTo: typeof meta?.tileTo === "function" ? meta.tileTo : () => {},
       minimized: false,
     });
-    if (!this._widgetsVisible) this._widgetsVisible = true;
+    // Used to force-show the widgets layer on every register. That
+    // turned the layer's "hidden" preference into a one-shot setting:
+    // any foyer-window mount (rehydrate at boot, opening a plugin
+    // panel, opening a track editor) wrote `widgetsVisible: true`
+    // back to localStorage, so the user's hide-widgets choice never
+    // survived a reload (Rich, 2026-04-26). Spawn paths that DO want
+    // to surface the new window on click should call
+    // `setWidgetsVisible(true)` themselves.
     this._emit();
   }
   unregisterExternalWidget(id) {

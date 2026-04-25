@@ -231,6 +231,7 @@ export class WaveformGl extends LitElement {
 
     const palette = resolvePalette();
     const clipTh = this._prefs.clipThreshold || 0.99;
+    const style = this._prefs.waveformStyle || "detailed";
 
     const buckets = this.peaks.bucket_count;
     const src = this.peaks.peaks;
@@ -273,6 +274,23 @@ export class WaveformGl extends LitElement {
         if (hi >= clipTh) clipMax[x] = 1;
         if (-lo >= clipTh) clipMin[x] = 1;
       }
+    } else if (style === "detailed") {
+      // Fewer source buckets than pixels → STEP-FUNCTION upsample.
+      // Each pixel takes its bucket's raw min/max (no interpolation),
+      // so bucket boundaries stay sharp at high zoom. Matches the
+      // Ardour Editor's look when you zoom past the peak file's
+      // native resolution: bucket-aligned vertical slabs instead of
+      // a smooth blob that hides the underlying resolution.
+      for (let x = 0; x < n; x++) {
+        const t = (x / Math.max(1, n)) * bCount;
+        const i = Math.min(bCount - 1, Math.floor(t));
+        const mn = src[(bStart + i) * 2] || 0;
+        const mx = src[(bStart + i) * 2 + 1] || 0;
+        tops[x] = mid - mx * (ySpan * 0.5);
+        bots[x] = mid - mn * (ySpan * 0.5);
+        if (mx >= clipTh) clipMax[x] = 1;
+        if (-mn >= clipTh) clipMin[x] = 1;
+      }
     } else {
       // Fewer source buckets than pixels → UPSAMPLE with linear
       // interpolation between (min, max) of adjacent buckets. Each
@@ -297,40 +315,67 @@ export class WaveformGl extends LitElement {
       }
     }
 
+    const glow = Math.max(0, Math.min(1, this._prefs.glow ?? 0));
+
     ctx.lineWidth = Math.max(1, dpr * 0.75);
     ctx.lineCap = "butt";
     ctx.lineJoin = "miter";
     ctx.imageSmoothingEnabled = false;
     ctx.translate(0.5, 0.5);
-    ctx.strokeStyle = palette.fill;
-    ctx.beginPath();
 
-    // ─── Ardour's connected-segment draw loop ───────────────────
-    // Port of libs/waveview/wave_view.cc :: WaveView::draw_image
-    // lines 684-702 (Ardour 9.2). Reference paper:
-    // https://lac.linuxaudio.org/2013/papers/36.pdf Fig 3.
-    for (let i = 0; i < n; i++) {
-      const t = tops[i];
-      const b = bots[i];
-      if (i + 1 >= n) {
-        // Last column: just the vertical.
-        ctx.moveTo(i, t);
-        ctx.lineTo(i, b);
-      } else if (t >= bots[i + 1]) {
-        // Falling signal — my top is below next bot in pixel Y.
-        ctx.moveTo(i - 0.5, b);
-        ctx.lineTo(i + 0.5, bots[i + 1]);
-      } else if (b <= tops[i + 1]) {
-        // Rising signal — my bot is above next top in pixel Y.
-        ctx.moveTo(i - 0.5, t);
-        ctx.lineTo(i + 0.5, tops[i + 1]);
+    // Optional glow — uses canvas2D shadow as a cheap bloom. Pass 1
+    // strokes with shadow; pass 2 strokes the crisp line on top.
+    // Skipped when glow=0 to keep the fast path identical to before.
+    const drawShape = (color) => {
+      ctx.strokeStyle = color;
+      ctx.beginPath();
+      if (style === "bar") {
+        // Independent vertical bar per column — no connection between
+        // columns. Reads as a denser / more "DAW-y" waveform.
+        for (let i = 0; i < n; i++) {
+          ctx.moveTo(i, tops[i]);
+          ctx.lineTo(i, bots[i]);
+        }
       } else {
-        // Ranges overlap (loud): full vertical span.
-        ctx.moveTo(i, t);
-        ctx.lineTo(i, b);
+        // Mirrored (default) + Ghost share the connected-segment loop.
+        // Ghost just strokes at lower alpha (handled by `color` arg).
+        // Port of libs/waveview/wave_view.cc :: WaveView::draw_image
+        // lines 684-702 (Ardour 9.2).
+        for (let i = 0; i < n; i++) {
+          const t = tops[i];
+          const b = bots[i];
+          if (i + 1 >= n) {
+            ctx.moveTo(i, t);
+            ctx.lineTo(i, b);
+          } else if (t >= bots[i + 1]) {
+            ctx.moveTo(i - 0.5, b);
+            ctx.lineTo(i + 0.5, bots[i + 1]);
+          } else if (b <= tops[i + 1]) {
+            ctx.moveTo(i - 0.5, t);
+            ctx.lineTo(i + 0.5, tops[i + 1]);
+          } else {
+            ctx.moveTo(i, t);
+            ctx.lineTo(i, b);
+          }
+        }
       }
+      ctx.stroke();
+    };
+
+    if (glow > 0) {
+      // Pass 1: blurred edge in palette.edge.
+      ctx.save();
+      ctx.shadowColor = palette.edge;
+      ctx.shadowBlur = 4 + glow * 16;
+      ctx.lineWidth = Math.max(1, dpr * 1.25);
+      drawShape(palette.edge);
+      ctx.restore();
     }
-    ctx.stroke();
+    // Pass 2: crisp body in palette.fill (or palette.edge tinted for ghost).
+    const bodyColor = style === "ghost"
+      ? `color-mix(in oklab, ${palette.fill} 45%, transparent)`
+      : palette.fill;
+    drawShape(bodyColor);
 
     // Clip markers: small vertical stubs at the top/bottom of clipped columns.
     if (clipMax.some((v) => v) || clipMin.some((v) => v)) {

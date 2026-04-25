@@ -10,16 +10,28 @@
 
 const KEY = "foyer.viz.prefs.v1";
 
-export const WAVEFORM_STYLE_IDS = ["mirrored", "bar", "ghost"];
+export const WAVEFORM_STYLE_IDS = ["detailed", "mirrored", "bar", "ghost"];
 export const WAVEFORM_STYLES = {
+  // Detailed = the Ardour-faithful look. Step-function upsample so
+  // bucket boundaries stay sharp at extreme zoom (each peak bucket
+  // reads as a discrete vertical strip), connected segments between
+  // adjacent peaks. Closest to what libs/waveview/wave_view.cc paints
+  // in the Editor canvas.
+  detailed: { label: "Detailed" },
+  // Mirrored = same connected-segment loop as Detailed, but linearly
+  // interpolates peak min/max values across pixels when zoomed past
+  // the peak file's native resolution. Reads softer / smoother and
+  // doesn't betray the bucket grid; some people prefer this look on
+  // sparsely-peaked aux/bus tracks.
   mirrored: { label: "Mirrored" },
   bar:      { label: "Bar" },
   ghost:    { label: "Ghost" },
 };
-export const WAVEFORM_PALETTES_ORDER = ["aurora", "cyan", "magma", "sunset", "chlorophyll", "graphite"];
+export const WAVEFORM_PALETTES_ORDER = ["aurora", "cyan", "magma", "sunset", "chlorophyll", "graphite", "custom"];
 const PALETTE_LABELS = {
   aurora: "Aurora", cyan: "Cyan", magma: "Magma",
   sunset: "Sunset", chlorophyll: "Chlorophyll", graphite: "Graphite",
+  custom: "Custom",
 };
 export const WAVEFORM_PALETTES_RAW = {
   aurora:   { fill: "#a78bfa", edge: "#c4b5fd", clip: "#ef4444", underrun: "#f59e0b" },
@@ -28,6 +40,10 @@ export const WAVEFORM_PALETTES_RAW = {
   sunset:   { fill: "#f472b6", edge: "#fbcfe8", clip: "#ef4444", underrun: "#f59e0b" },
   chlorophyll: { fill: "#34d399", edge: "#6ee7b7", clip: "#ef4444", underrun: "#f59e0b" },
   graphite: { fill: "#e5e7eb", edge: "#ffffff", clip: "#ef4444", underrun: "#f59e0b" },
+  // Custom palette — the user-configurable slot. Defaults match
+  // Aurora until the user picks; the picker below sets `customFill`
+  // and `customEdge` prefs which `resolvePalette` substitutes in.
+  custom:   { fill: "#a78bfa", edge: "#c4b5fd", clip: "#ef4444", underrun: "#f59e0b" },
 };
 // Labeled map consumed by UI (settings modal, viz picker). Keeps the
 // colours and labels aligned — one source of truth.
@@ -72,7 +88,7 @@ export const MIDI_PALETTES = Object.fromEntries(
 
 export const DEFAULT_VIZ_PREFS = Object.freeze({
   /** Visual style for waveforms — matches the shader's u_style enum. */
-  waveformStyle: "mirrored",
+  waveformStyle: "detailed",
   /** Named palette from WAVEFORM_PALETTES. */
   palette: "aurora",
   /** 0..1 glow multiplier; 0 disables the "energy bloom" effect. */
@@ -106,6 +122,10 @@ export const DEFAULT_VIZ_PREFS = Object.freeze({
   quantGridColor:   "#7c5cff",
   /** Alpha (0..1) applied to `quantGridColor`. */
   quantGridAlpha:   0.5,
+
+  /** User-defined palette colors. Active when `palette === "custom"`. */
+  customFill:       "#a78bfa",
+  customEdge:       "#c4b5fd",
 });
 
 /** Resolve the current MIDI note color, falling through to `trackColor`
@@ -147,7 +167,15 @@ export function setVizPref(key, value) {
 }
 
 export function resolvePalette() {
-  const name = getVizPref("palette");
+  const prefs = read();
+  const name = prefs.palette;
+  if (name === "custom") {
+    return {
+      ...WAVEFORM_PALETTES.aurora,
+      fill: prefs.customFill || "#a78bfa",
+      edge: prefs.customEdge || "#c4b5fd",
+    };
+  }
   return WAVEFORM_PALETTES[name] || WAVEFORM_PALETTES.aurora;
 }
 

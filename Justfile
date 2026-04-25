@@ -138,6 +138,19 @@ config-reset:
 tw-build:
     ./scripts/dev/tw.sh build
 
+# Build a release zip for the host platform. Mirrors what the
+# `release.yml` matrix does on each runner — useful for sanity-checking
+# the bundle layout, or for cutting an unsigned local build to hand to
+# someone on the same OS/arch.
+#
+# Requires: a built Ardour (just ardour ensure) and a built shim.
+# Override the Ardour tag with: ARDOUR_TAG=9.1.0 just release-bundle
+release-bundle:
+    ./scripts/dev/tw.sh build
+    cargo build --release --bin foyer
+    ./scripts/dev/shim.sh build
+    ./scripts/release/bundle.sh
+
 ardour cmd='help' *args='':
     ./scripts/dev/ardour.sh {{cmd}} {{args}}
 

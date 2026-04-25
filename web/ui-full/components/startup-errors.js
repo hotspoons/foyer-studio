@@ -173,8 +173,22 @@ export class StartupErrors extends LitElement {
     } else if (this._dismissed && Date.now() > this._captureUntil) {
       return;
     }
-    // Keep a bounded ring so a spammy backend doesn't OOM the modal.
-    const next = this._errors.concat([{ code: body.code || "error", message: body.message || "" }]);
+    // Coalesce duplicates: a dead shim emits the same `list_ports_failed`
+    // / `set_track_input_failed` / etc. across every retry, and three
+    // rehydrate passes per editor was producing rows like
+    //   list_ports_failed   writer queue closed   (×7)
+    // in the banner. Group by (code, message) and surface a single
+    // row with a count instead.
+    const code    = body.code || "error";
+    const message = body.message || "";
+    const idx = this._errors.findIndex((e) => e.code === code && e.message === message);
+    let next;
+    if (idx >= 0) {
+      next = this._errors.slice();
+      next[idx] = { ...next[idx], count: (next[idx].count || 1) + 1 };
+    } else {
+      next = this._errors.concat([{ code, message, count: 1 }]);
+    }
     this._errors = next.slice(-MAX_ERRORS);
   }
 
@@ -197,7 +211,7 @@ export class StartupErrors extends LitElement {
           ${this._errors.map((e) => html`
             <div class="row">
               <span class="code">${e.code}</span>
-              <span class="msg">${e.message}</span>
+              <span class="msg">${e.message}${e.count > 1 ? ` (×${e.count})` : ""}</span>
             </div>
           `)}
         </div>

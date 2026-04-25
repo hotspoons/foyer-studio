@@ -23,6 +23,7 @@ import { icon } from "foyer-ui-core/icons.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import "foyer-ui-core/widgets/window-list.js";
 import { openWindow, registerWindowKind } from "foyer-ui-core/widgets/window.js";
+import { findRegion as _findRegionInCache } from "foyer-core/region-cache.js";
 
 // Persistence factories: replayed on reload by `rehydrateWindows()` so
 // Console + Diagnostics come back exactly the way `_floating` used to
@@ -58,14 +59,13 @@ registerWindowKind("track-editor", (props) => {
 });
 
 function _findRegion(regionId) {
-  const session = window.__foyer?.store?.state?.session;
-  if (!session) return null;
-  for (const t of session.tracks || []) {
-    for (const r of t.regions || []) {
-      if (r.id === regionId) return { region: r, trackId: t.id };
-    }
-  }
-  return null;
+  // Regions don't live on the session snapshot — they're only in the
+  // global region cache (populated by the WS envelope stream). The
+  // earlier `session.tracks[].regions[]` lookup always returned null,
+  // so MIDI editor / beat sequencer rehydration silently no-op'd.
+  // (Rich, 2026-04-26.)
+  const hit = _findRegionInCache(regionId);
+  return hit ? { region: hit.region, trackId: hit.track_id } : null;
 }
 
 function _findPlugin(pluginId) {
@@ -85,6 +85,16 @@ registerWindowKind("plugin", (props) => {
   import("foyer-ui-core/layout/plugin-layer.js").then((m) => m.openPluginFloat(p));
 });
 
+function _retargetMidiEditor(editor, found) {
+  if (!editor) return;
+  editor.notes = Array.isArray(found.region.notes) ? found.region.notes : [];
+  editor.regionId = found.region.id;
+  editor.regionName = found.region.name || "";
+  editor.sequencerLayout = found.region.foyer_sequencer || null;
+  editor.readOnly = !!(found.region.foyer_sequencer && found.region.foyer_sequencer.active !== false);
+  editor.trackId = found.trackId || "";
+}
+
 registerWindowKind("midi-editor", (props) => {
   const found = props?.regionId ? _findRegion(props.regionId) : null;
   if (!found) return;
@@ -93,12 +103,7 @@ registerWindowKind("midi-editor", (props) => {
     import("foyer-ui-core/widgets/window.js"),
   ]).then(([, winMod]) => {
     const editor = document.createElement("foyer-midi-editor");
-    editor.notes = Array.isArray(found.region.notes) ? found.region.notes : [];
-    editor.regionId = found.region.id;
-    editor.regionName = found.region.name || "";
-    editor.sequencerLayout = found.region.foyer_sequencer || null;
-    editor.readOnly = !!(found.region.foyer_sequencer && found.region.foyer_sequencer.active !== false);
-    editor.trackId = found.trackId || "";
+    _retargetMidiEditor(editor, found);
     winMod.openWindow({
       title: `MIDI — ${found.region.name || found.region.id}`,
       icon: "sparkles",
@@ -106,9 +111,19 @@ registerWindowKind("midi-editor", (props) => {
       content: editor,
       width: 1040, height: 680,
       persist: { kind: "midi-editor", id: "midi-editor", props: { regionId: found.region.id } },
+      onReuse: (existing) => _retargetMidiEditor(existing, found),
     });
   });
 });
+
+function _retargetBeatSequencer(seq, found) {
+  if (!seq) return;
+  seq.regionId = found.region.id;
+  seq.regionName = found.region.name || "";
+  seq.notes = Array.isArray(found.region.notes) ? found.region.notes : [];
+  seq.layout = found.region.foyer_sequencer || null;
+  seq.trackId = found.trackId || "";
+}
 
 registerWindowKind("beat-sequencer", (props) => {
   const found = props?.regionId ? _findRegion(props.regionId) : null;
@@ -118,11 +133,7 @@ registerWindowKind("beat-sequencer", (props) => {
     import("foyer-ui-core/widgets/window.js"),
   ]).then(([, winMod]) => {
     const seq = document.createElement("foyer-beat-sequencer");
-    seq.regionId = found.region.id;
-    seq.regionName = found.region.name || "";
-    seq.notes = Array.isArray(found.region.notes) ? found.region.notes : [];
-    seq.layout = found.region.foyer_sequencer || null;
-    seq.trackId = found.trackId || "";
+    _retargetBeatSequencer(seq, found);
     winMod.openWindow({
       title: `Beat — ${found.region.name || found.region.id}`,
       icon: "queue-list",
@@ -130,6 +141,7 @@ registerWindowKind("beat-sequencer", (props) => {
       content: seq,
       width: 1100, height: 560,
       persist: { kind: "beat-sequencer", id: "beat-sequencer", props: { regionId: found.region.id } },
+      onReuse: (existing) => _retargetBeatSequencer(existing, found),
     });
   });
 });
@@ -731,7 +743,6 @@ export class RightDock extends LitElement {
     if (!layout) return;
     if (typeof layout.openWidget === "function") layout.openWidget(view);
     else {
-      if (!layout.widgetsVisible?.()) layout.setWidgetsVisible?.(true);
       layout.openFloat?.(view);
     }
   }

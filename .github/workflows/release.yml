@@ -1,0 +1,197 @@
+name: release
+
+# Builds release zips for {Linux, macOS} × {x86_64, arm64} on tag push,
+# attaches them to a GitHub release, and publishes the install.sh
+# alongside so a user can do:
+#
+#   curl -fsSL https://github.com/<owner>/<repo>/releases/latest/download/install.sh | bash
+#
+# Each zip contains the Rust `foyer` binary and the per-platform shim
+# (`libfoyer_shim.so` on Linux, `libfoyer_shim.dylib` on macOS) plus
+# README/LICENSE. The shim is ABI-locked to the Ardour minor version
+# named by `ardour_tag`; for now we ship a single pin (9.2.0) and grow
+# the matrix when API drift forces it. See docs/TODO.md "Multi-Ardour
+# version plan" for the long-term shape.
+#
+# Triggered by:
+#   * pushing a `v*` tag (publishes a real release)
+#   * manual workflow_dispatch with optional inputs (handy for
+#     dry-running the matrix without cutting a tag).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ardour_tag:
+        description: "Ardour git tag to build the shim against"
+        required: false
+        default: "9.2.0"
+      release_tag:
+        description: "Release tag name (e.g. v0.1.0). Empty = artifact-only run"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.os_label }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os_label: linux
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            os_label: linux
+            arch: arm64
+          - runner: macos-13
+            os_label: macos
+            arch: x86_64
+          - runner: macos-14
+            os_label: macos
+            arch: arm64
+    env:
+      ARDOUR_TAG: ${{ github.event.inputs.ardour_tag || '9.2.0' }}
+      ASSET_NAME: foyer-${{ matrix.os_label }}-${{ matrix.arch }}.zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build deps
+        if: matrix.os_label == 'linux'
+        run: |
+          sudo apt-get update
+          # Ardour's waf configure pulls in a long list. The set below
+          # mirrors what the Ardour wiki recommends for a "headless"
+          # build; we leave out gtk3-only optional bits.
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config python3 python3-pip git curl unzip zip \
+            libgtkmm-2.4-dev libglibmm-2.4-dev libsigc++-2.0-dev libxml2-dev \
+            libsndfile1-dev libsamplerate0-dev libfftw3-dev liblo-dev libtag1-dev \
+            libreadline-dev liblrdf0-dev liblilv-dev libserd-dev libsord-dev \
+            libsratom-dev libcurl4-gnutls-dev libwebsockets-dev libpangomm-1.4-dev \
+            libsuil-dev liblv2-dev rubberband-cli libxext-dev \
+            libcairomm-1.0-dev libusb-1.0-0-dev libudev-dev \
+            libboost-dev libxt-dev libtool autotools-dev autoconf automake \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            libvamp-hostsdk3v5 vamp-plugin-sdk libvamp-sdk2v5 \
+            libaubio-dev libcppunit-dev
+
+      - name: Install macOS build deps
+        if: matrix.os_label == 'macos'
+        run: |
+          # Homebrew already on the runner; updating is slow and not
+          # strictly needed.
+          brew install cmake pkg-config glibmm@2.66 libsigc++@2 libxml2 \
+            libsndfile libsamplerate fftw liblo taglib readline lrdf lilv \
+            serd sord sratom suil lv2 rubberband cairomm@1.14 \
+            gtkmm pangomm@2.46 boost aubio cppunit vamp-plugin-sdk
+          # Some keg-only formulas need their pkg-config dirs surfaced.
+          {
+            echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix readline)/lib/pkgconfig:$(brew --prefix glibmm@2.66)/lib/pkgconfig:$(brew --prefix libsigc++@2)/lib/pkgconfig:$(brew --prefix cairomm@1.14)/lib/pkgconfig:$(brew --prefix pangomm@2.46)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          } >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # `target/` cache, separate per matrix cell.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os_label }}-${{ matrix.arch }}
+
+      # Ardour clone + build dir cache. Key includes the tag so a tag
+      # bump invalidates cleanly. Restoring this is the difference
+      # between a 30 s build and a 30 min build.
+      - name: Cache Ardour source + build
+        id: cache-ardour
+        uses: actions/cache@v4
+        with:
+          path: ext/ardour
+          key: ardour-${{ matrix.os_label }}-${{ matrix.arch }}-${{ env.ARDOUR_TAG }}-v1
+
+      - name: Clone Ardour @ ${{ env.ARDOUR_TAG }}
+        if: steps.cache-ardour.outputs.cache-hit != 'true'
+        run: ./scripts/dev/ardour.sh clone
+
+      - name: Configure + build Ardour (slow — ~15-30 min, cached)
+        if: steps.cache-ardour.outputs.cache-hit != 'true'
+        run: |
+          ./scripts/dev/ardour.sh configure
+          ./scripts/dev/ardour.sh build
+
+      - name: Build Tailwind CSS
+        run: ./scripts/dev/tw.sh build
+
+      - name: Build foyer (release)
+        run: cargo build --release --bin foyer
+
+      - name: Build shim
+        run: |
+          cmake -S shims/ardour -B shims/ardour/cmake-build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DFOYER_ARDOUR_SOURCE="$PWD/ext/ardour"
+          cmake --build shims/ardour/cmake-build -j
+
+      - name: Bundle release zip
+        env:
+          OS_LABEL: ${{ matrix.os_label }}
+          ARCH: ${{ matrix.arch }}
+        run: ./scripts/release/bundle.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET_NAME }}
+          path: dist/${{ env.ASSET_NAME }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: publish release
+    needs: build
+    # Only publish a real release when triggered by a tag push, OR when
+    # workflow_dispatch was given a non-empty release_tag input.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release-assets
+          # Each artifact upload was a directory named foyer-*.zip
+          # containing the actual zip; merge-multiple flattens but the
+          # zip files land at dist/foyer-*.zip.
+          cp dist/foyer-*.zip release-assets/
+          cp install.sh release-assets/install.sh
+          ls -la release-assets/
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          files: release-assets/*
+          fail_on_unmatched_files: true

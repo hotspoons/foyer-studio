@@ -146,13 +146,41 @@ export class VizPicker extends LitElement {
           <div class="row">
             <div class="label">Palette</div>
             <div class="swatches">
-              ${Object.entries(WAVEFORM_PALETTES).map(([name, p]) => html`
-                <div class="swatch ${this._prefs.palette === name ? "active" : ""}"
-                     title=${name}
-                     style="background:linear-gradient(135deg, ${p.fill}, ${p.edge})"
-                     @click=${() => this._set("palette", name)}></div>
-              `)}
+              ${Object.entries(WAVEFORM_PALETTES).map(([name, p]) => {
+                if (name === "custom") {
+                  // Custom palette: the swatch shows the user's chosen
+                  // fill/edge so they see what's saved at a glance.
+                  // Clicking activates; clicking the active swatch
+                  // exposes inline color pickers below for fill/edge.
+                  const fill = this._prefs.customFill || p.fill;
+                  const edge = this._prefs.customEdge || p.edge;
+                  return html`
+                    <div class="swatch ${this._prefs.palette === "custom" ? "active" : ""}"
+                         title="Custom palette"
+                         style="background:linear-gradient(135deg, ${fill}, ${edge})"
+                         @click=${() => this._set("palette", "custom")}></div>
+                  `;
+                }
+                return html`
+                  <div class="swatch ${this._prefs.palette === name ? "active" : ""}"
+                       title=${name}
+                       style="background:linear-gradient(135deg, ${p.fill}, ${p.edge})"
+                       @click=${() => this._set("palette", name)}></div>
+                `;
+              })}
             </div>
+            ${this._prefs.palette === "custom" ? html`
+              <div class="slider-row" style="margin-top:6px">
+                <span style="flex:0;width:50px;color:var(--color-text-muted);font-size:10px">Fill</span>
+                <input type="color"
+                       .value=${this._prefs.customFill || "#a78bfa"}
+                       @input=${(e) => this._set("customFill", e.currentTarget.value)}>
+                <span style="flex:0;width:50px;color:var(--color-text-muted);font-size:10px;margin-left:10px">Edge</span>
+                <input type="color"
+                       .value=${this._prefs.customEdge || "#c4b5fd"}
+                       @input=${(e) => this._set("customEdge", e.currentTarget.value)}>
+              </div>
+            ` : null}
           </div>
           <div class="row">
             <div class="label">Glow</div>

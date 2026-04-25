@@ -14,6 +14,7 @@ import { applyTheme } from "foyer-ui-core/theme.js";
 import { installTransportReturn } from "foyer-core/transport-return.js";
 import { audioController } from "foyer-core/audio/master-controller.js";
 import { rehydrateWindows } from "foyer-ui-core/widgets/window.js";
+import { bootRegionCache } from "foyer-core/region-cache.js";
 
 import { LayoutStore } from "foyer-ui-core/layout/layout-store.js";
 import { Keybinds } from "foyer-ui-core/layout/keybinds.js";
@@ -306,25 +307,41 @@ export class FoyerApp extends LitElement {
     // observer of this controller's state.
     audioController.attach(this.ws, this.store);
 
-    // Replay foyer-window open-set after the first real session
-    // arrives — track-editor / midi-editor / beat-sequencer factories
-    // resolve their IDs against `state.session`, so calling rehydrate
-    // before the snapshot lands would no-op. Console + Diagnostics
-    // don't need session data and would replay fine sooner, but
-    // gating on session keeps the boot path simple. One-shot.
-    let _rehydrated = false;
-    const tryRehydrate = () => {
-      if (_rehydrated) return;
-      const s = this.store.state.session;
-      if (!s) return;
-      _rehydrated = true;
+    // Boot the global region cache so MIDI-editor / beat-sequencer
+    // rehydrate factories can resolve `regionId → region` without
+    // having to wait for the timeline to mount. The cache subscribes
+    // to envelope traffic + fires `list_regions` for every track in
+    // the session snapshot. (Rich, 2026-04-26.)
+    bootRegionCache();
+
+    // Replay foyer-window open-set across boot. Trigger sources, in
+    // the order they typically fire:
+    //   1. Immediate — console / diagnostics / plugin factories whose
+    //      props don't depend on session data spawn right away.
+    //   2. `sessions` event — track-editor factories key off live
+    //      tracks; they need the session snapshot.
+    //   3. `foyer:region-cache-updated` event — MIDI / Beat factories
+    //      need the region cache populated. Region cache emits this
+    //      whenever a `regions_list` reply lands. Closes the 1-2
+    //      second gap where windows used to pop in on a fallback
+    //      timer.
+    // The 800ms / 2500ms backstops stay in place as belt-and-braces
+    // for rare cases where we miss the cache update event (e.g. boot
+    // ordering races). Rehydrate is idempotent so extra calls are
+    // cheap.
+    //
+    // Subscribing to the firehose `change` event (we tried that
+    // briefly) creates a rehydrate→editor-mount→list_regions→change→
+    // rehydrate loop that flashes editor windows in and out of
+    // existence — keep it off the change firehose. (Rich, 2026-04-26.)
+    const fire = () => {
       try { rehydrateWindows(); } catch (e) { console.warn("rehydrate failed", e); }
     };
-    this.store.addEventListener("change", tryRehydrate);
-    // First-open path with a stub backend may have an empty session
-    // forever; replay Console + Diagnostics anyway after a short delay
-    // so the user's chrome comes back even on a fresh stub launcher.
-    setTimeout(() => { if (!_rehydrated) { _rehydrated = true; try { rehydrateWindows(); } catch {} } }, 800);
+    fire();
+    this.store.addEventListener("sessions", fire);
+    window.addEventListener("foyer:region-cache-updated", fire);
+    setTimeout(fire, 800);
+    setTimeout(fire, 2500);
   }
 
   /**

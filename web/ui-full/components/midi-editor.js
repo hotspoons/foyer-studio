@@ -146,6 +146,18 @@ export class MidiEditor extends LitElement {
       border-radius: var(--radius-sm, 4px);
       cursor: pointer;
       font: inherit; font-size: 11px;
+      /* Center icon-only button content vertically — without this the
+       * SVG span sits at the baseline and the buttons read top-heavy
+       * next to text-only buttons in the same row. (Rich, 2026-04-26.) */
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 22px;
+      line-height: 1;
+    }
+    .toolbar button > span,
+    .toolbar button > svg {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     .toolbar button:hover, .toolbar select:hover {
       background: var(--color-surface-muted);
@@ -420,6 +432,19 @@ export class MidiEditor extends LitElement {
     this.addEventListener("pointerenter", () => { this._mouseOver = true; });
     this.addEventListener("pointerleave", () => { this._mouseOver = false; });
     this._reflectReadOnlyAttr();
+    // Pick up convert/restore broadcasts from the beat sequencer so
+    // our readOnly state flips immediately even when the shim doesn't
+    // echo a region_updated for the metadata-only write.
+    this._onSequencerLayoutChanged = (ev) => {
+      const d = ev?.detail || {};
+      if (!d.regionId || d.regionId !== this.regionId) return;
+      if (!d.layout) return;
+      this.sequencerLayout = d.layout;
+      this.readOnly = !!(d.layout && d.layout.active !== false);
+      this._reflectReadOnlyAttr();
+      this.requestUpdate();
+    };
+    window.addEventListener("foyer:sequencer-layout-changed", this._onSequencerLayoutChanged);
   }
   _reflectReadOnlyAttr() {
     if (this.readOnly) this.setAttribute("readonly", "");
@@ -452,6 +477,23 @@ export class MidiEditor extends LitElement {
           region_id: this.regionId,
           layout: next,
         });
+        // Optimistic UI update. The shim doesn't broadcast a
+        // `region_updated` event for metadata-only writes (no notes
+        // changed → no PropertyChange), so without this the editor
+        // would stay locked in read-only mode until the user reloads
+        // or re-opens the region. Flip our local state immediately;
+        // the next genuine region_updated (e.g. user starts editing
+        // the now-MIDI region) will reconcile against the same value.
+        this.sequencerLayout = next;
+        this.readOnly = false;
+        this._reflectReadOnlyAttr();
+        this.requestUpdate();
+        // Broadcast so the beat-sequencer (if it's also open on this
+        // region) flips to its archived banner without waiting for
+        // an echo that never arrives.
+        window.dispatchEvent(new CustomEvent("foyer:sequencer-layout-changed", {
+          detail: { regionId: this.regionId, layout: next },
+        }));
       });
     });
   }
@@ -474,6 +516,9 @@ export class MidiEditor extends LitElement {
     window.removeEventListener("keyup",   this._onChordKeyUp);
     window.removeEventListener("blur",    this._onChordKeyUp);
     window.removeEventListener("pointermove", this._onPointerMove);
+    if (this._onSequencerLayoutChanged) {
+      window.removeEventListener("foyer:sequencer-layout-changed", this._onSequencerLayoutChanged);
+    }
     super.disconnectedCallback();
   }
 

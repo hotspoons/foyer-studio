@@ -72,7 +72,8 @@ export class TimelineView extends LitElement {
       min-width: 0;
     }
     .toolbar input[type=range] { width: 200px; }
-    .toolbar button {
+    .toolbar button,
+    .toolbar select {
       font: inherit; font-size: 10px;
       color: var(--color-text-muted);
       background: transparent;
@@ -80,8 +81,16 @@ export class TimelineView extends LitElement {
       border-radius: var(--radius-sm);
       padding: 2px 8px;
       cursor: pointer;
+      display: inline-flex; align-items: center;
+      min-height: 22px;
     }
-    .toolbar button:hover { color: var(--color-text); border-color: var(--color-accent); }
+    .toolbar button:hover,
+    .toolbar select:hover { color: var(--color-text); border-color: var(--color-accent); }
+    .toolbar select { padding-right: 4px; }
+    .toolbar label {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 10px; color: var(--color-text-muted);
+    }
     /* Force border-box throughout this component. Tailwind sets it
        globally on the document, but Lit shadow DOM doesn't inherit
        that — so width:140px + padding + border was producing a
@@ -1957,7 +1966,6 @@ export class TimelineView extends LitElement {
     const sr = this._timeline?.sample_rate || 48_000;
     const startX = ev.clientX;
     const pxPerSec = this._zoom;
-    let lastSent = 0;
 
     const origs = new Map();
     for (const id of movingIds) {
@@ -1965,42 +1973,50 @@ export class TimelineView extends LitElement {
       if (r) origs.set(id, { start: r.start_samples, len: r.length_samples });
     }
 
+    // During the drag we only update the local preview — no
+    // `update_region` commands are sent until pointer-up. Why: each
+    // server-side `update_region` opens a reversible-command commit
+    // (`begin_reversible_command` + `StatefulDiffCommand` +
+    // `commit_reversible_command`), and the previous 80 ms throttle
+    // produced 60+ undo entries during a typical multi-second drag.
+    // On a heavily-loaded shim that pile-up timed out and crashed
+    // Ardour. One undo entry per drag is also what every native DAW
+    // does. (Rich, 2026-04-26.)
     const move = (e) => {
       const dxPx = e.clientX - startX;
       const dxSamples = Math.round((dxPx / pxPerSec) * sr);
-      const now = performance.now();
       for (const id of movingIds) {
         const o = origs.get(id);
         if (!o) continue;
         const r = this._regionForId(id);
         if (!r) continue;
-        let patch = null;
         const preview = { ...r };
         if (mode === "move") {
           preview.start_samples = Math.max(0, o.start + dxSamples);
-          patch = { start_samples: preview.start_samples };
         } else if (mode === "resize-right") {
           preview.length_samples = Math.max(4800, o.len + dxSamples);
-          patch = { length_samples: preview.length_samples };
         } else if (mode === "resize-left") {
           const newStart = Math.max(0, o.start + dxSamples);
           const newLen = Math.max(4800, o.len - (newStart - o.start));
           preview.start_samples = newStart;
           preview.length_samples = newLen;
-          patch = { start_samples: newStart, length_samples: newLen };
         }
         this._patchRegionLocally(preview);
-        if (now - lastSent > 80) {
-          window.__foyer?.ws?.send({ type: "update_region", id, patch });
-        }
       }
-      if (now - lastSent > 80) lastSent = now;
     };
     const up = () => {
       for (const el of els) el.classList.remove("dragging");
+      // Single committed update per region, with the final position +
+      // length. The shim wraps each in a reversible command, so the
+      // user gets one undo entry per drag.
       for (const id of movingIds) {
         const r = this._regionForId(id);
         if (!r) continue;
+        const o = origs.get(id);
+        if (!o) continue;
+        // Skip the round-trip if nothing actually moved (e.g. the
+        // user click-dragged but landed back at the start).
+        if (r.start_samples === o.start && r.length_samples === o.len) continue;
         window.__foyer?.ws?.send({
           type: "update_region",
           id: r.id,
