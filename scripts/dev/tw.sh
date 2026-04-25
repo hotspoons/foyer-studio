@@ -30,8 +30,12 @@ install_tw() {
         aarch64|arm64) arch="arm64" ;;
         *) echo "tw: unsupported architecture: $arch"; exit 1 ;;
     esac
+    # Tailwind v4 renamed the macOS asset from `darwin` to `macos`.
+    # Normalise here so the URL still resolves on both v3 and v4 (v3
+    # also publishes a `macos-*` symlink as of recent releases).
     case "$os" in
-        linux|darwin) ;;
+        linux) ;;
+        darwin) os="macos" ;;
         *) echo "tw: unsupported OS: $os"; exit 1 ;;
     esac
     url="$DOWNLOAD_BASE/tailwindcss-$os-$arch"

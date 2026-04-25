@@ -234,7 +234,7 @@ jobs:
             libreadline-dev liblrdf0-dev liblilv-dev libserd-dev libsord-dev \
             libsratom-dev libcurl4-gnutls-dev libwebsockets-dev libpangomm-1.4-dev \
             libsuil-dev lv2-dev librubberband-dev libxext-dev \
-            libcairomm-1.0-dev libusb-1.0-0-dev libudev-dev \
+            libcairomm-1.0-dev libusb-1.0-0-dev libudev-dev libarchive-dev \
             libboost-dev libxt-dev \
             libasound2-dev libpulse-dev libjack-jackd2-dev \
             vamp-plugin-sdk libaubio-dev libcppunit-dev
