@@ -159,7 +159,11 @@ export class WindowList extends LitElement {
     if (!layout) return html`<div class="empty">No layout available.</div>`;
 
     const floats = layout.floating() || [];
-    const pluginFloats = layout.pluginFloats?.() || [];
+    // External widgets cover the entire foyer-window family — plugin
+    // configs, track editors, MIDI editors, beat sequencers, console,
+    // diagnostics. Pulled from `allWidgets()` and filtered to the
+    // external kind.
+    const externals = (layout.allWidgets?.() || []).filter((w) => w.kind === "external");
     const tree = layout.tree;
     const tiles = this._collectTiles(tree);
     const dockedFabs = layout.dockedFabs?.() || [];
@@ -167,7 +171,7 @@ export class WindowList extends LitElement {
     const allEmpty =
       tiles.length === 0 &&
       floats.length === 0 &&
-      pluginFloats.length === 0 &&
+      externals.length === 0 &&
       dockedFabs.length === 0;
 
     return html`
@@ -177,9 +181,40 @@ export class WindowList extends LitElement {
           : html`
               ${this._renderTiles(tiles)}
               ${this._renderFloats(floats)}
-              ${this._renderPluginFloats(pluginFloats)}
+              ${this._renderExternals(externals)}
               ${this._renderDockedFabs(dockedFabs)}
             `}
+      </div>
+    `;
+  }
+
+  _renderExternals(items) {
+    if (items.length === 0) return null;
+    return html`
+      <div class="group">
+        <div class="group-title">
+          <span>Widgets</span>
+          <span class="count">${items.length}</span>
+        </div>
+        ${items.map((w) => html`
+          <div class="row"
+               @click=${() => {
+                 const ew = window.__foyer?.layout?.externalWidget?.(w.id);
+                 if (w.minimized) window.__foyer.layout.setExternalMinimized(w.id, false);
+                 try { ew?.focus?.(); } catch {}
+               }}>
+            <span class="icon-chip">${icon(w.icon || "document", 12)}</span>
+            <span class="label">${w.title || w.view}</span>
+            <button
+              title="Close"
+              @click=${(ev) => {
+                ev.stopPropagation();
+                const ew = window.__foyer?.layout?.externalWidget?.(w.id);
+                try { ew?.close?.(); } catch {}
+              }}
+            >${icon("x-mark", 10)}</button>
+          </div>
+        `)}
       </div>
     `;
   }

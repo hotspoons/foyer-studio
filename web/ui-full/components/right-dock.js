@@ -22,6 +22,117 @@ import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import "foyer-ui-core/widgets/window-list.js";
+import { openWindow, registerWindowKind } from "foyer-ui-core/widgets/window.js";
+
+// Persistence factories: replayed on reload by `rehydrateWindows()` so
+// Console + Diagnostics come back exactly the way `_floating` used to
+// remember them before they moved to the foyer-window chrome.
+const _spawnConsole = () => {
+  const el = document.createElement("foyer-console-view");
+  openWindow({
+    title: "Console", icon: "command-line", storageKey: "console-widget",
+    content: el, width: 720, height: 480,
+    persist: { kind: "console", id: "console", props: {} },
+  });
+};
+const _spawnDiagnostics = () => {
+  const el = document.createElement("foyer-diagnostics");
+  openWindow({
+    title: "Diagnostics", icon: "check-circle", storageKey: "diagnostics-widget",
+    content: el, width: 720, height: 520,
+    persist: { kind: "diagnostics", id: "diagnostics", props: {} },
+  });
+};
+registerWindowKind("console", _spawnConsole);
+registerWindowKind("diagnostics", _spawnDiagnostics);
+
+// Track Editor / MIDI Editor / Beat Sequencer factories. The heavy
+// editor modules are lazy-imported at rehydrate time so we don't drag
+// them into the boot path, but they register here so the kind is known
+// before the session has even loaded.
+registerWindowKind("track-editor", (props) => {
+  if (!props?.trackId) return;
+  import("./track-editor-modal.js").then((m) => {
+    m.openTrackEditor(props.trackId, { tab: props.tab || "" });
+  });
+});
+
+function _findRegion(regionId) {
+  const session = window.__foyer?.store?.state?.session;
+  if (!session) return null;
+  for (const t of session.tracks || []) {
+    for (const r of t.regions || []) {
+      if (r.id === regionId) return { region: r, trackId: t.id };
+    }
+  }
+  return null;
+}
+
+function _findPlugin(pluginId) {
+  const session = window.__foyer?.store?.state?.session;
+  if (!session) return null;
+  for (const t of session.tracks || []) {
+    for (const p of t.plugins || []) {
+      if (p.id === pluginId) return p;
+    }
+  }
+  return null;
+}
+
+registerWindowKind("plugin", (props) => {
+  const p = props?.pluginId ? _findPlugin(props.pluginId) : null;
+  if (!p) return;
+  import("foyer-ui-core/layout/plugin-layer.js").then((m) => m.openPluginFloat(p));
+});
+
+registerWindowKind("midi-editor", (props) => {
+  const found = props?.regionId ? _findRegion(props.regionId) : null;
+  if (!found) return;
+  Promise.all([
+    import("./midi-editor.js"),
+    import("foyer-ui-core/widgets/window.js"),
+  ]).then(([, winMod]) => {
+    const editor = document.createElement("foyer-midi-editor");
+    editor.notes = Array.isArray(found.region.notes) ? found.region.notes : [];
+    editor.regionId = found.region.id;
+    editor.regionName = found.region.name || "";
+    editor.sequencerLayout = found.region.foyer_sequencer || null;
+    editor.readOnly = !!(found.region.foyer_sequencer && found.region.foyer_sequencer.active !== false);
+    editor.trackId = found.trackId || "";
+    winMod.openWindow({
+      title: `MIDI — ${found.region.name || found.region.id}`,
+      icon: "sparkles",
+      storageKey: "midi-editor",
+      content: editor,
+      width: 1040, height: 680,
+      persist: { kind: "midi-editor", id: "midi-editor", props: { regionId: found.region.id } },
+    });
+  });
+});
+
+registerWindowKind("beat-sequencer", (props) => {
+  const found = props?.regionId ? _findRegion(props.regionId) : null;
+  if (!found) return;
+  Promise.all([
+    import("./beat-sequencer.js"),
+    import("foyer-ui-core/widgets/window.js"),
+  ]).then(([, winMod]) => {
+    const seq = document.createElement("foyer-beat-sequencer");
+    seq.regionId = found.region.id;
+    seq.regionName = found.region.name || "";
+    seq.notes = Array.isArray(found.region.notes) ? found.region.notes : [];
+    seq.layout = found.region.foyer_sequencer || null;
+    seq.trackId = found.trackId || "";
+    winMod.openWindow({
+      title: `Beat — ${found.region.name || found.region.id}`,
+      icon: "queue-list",
+      storageKey: "beat-sequencer",
+      content: seq,
+      width: 1100, height: 560,
+      persist: { kind: "beat-sequencer", id: "beat-sequencer", props: { regionId: found.region.id } },
+    });
+  });
+});
 
 const PANEL_KEY = "foyer.rightdock.v1";
 
@@ -441,6 +552,11 @@ export class RightDock extends LitElement {
           title=${sticky ? "Sticky on — clicking a tile won't hide widgets" : "Sticky off — click a tile to hide widgets"}
           @click=${() => layout.toggleWidgetsSticky()}
         >${icon(sticky ? "lock-closed" : "lock-open", 16)}</button>
+        <button
+          title="Tile all widgets"
+          ?disabled=${widgets.length === 0}
+          @click=${() => layout.tileAllWidgets()}
+        >${icon("squares-2x2", 16)}</button>
         <div class="spawn-anchor">
           <button
             title="Spawn a widget"
@@ -456,11 +572,6 @@ export class RightDock extends LitElement {
 
         ${widgets.length > 0 ? html`<div class="rail-sep"></div>` : null}
         <div class="group-controls">
-          <button
-            title="Tile all widgets"
-            ?disabled=${widgets.length === 0}
-            @click=${() => layout.tileAllWidgets()}
-          >${icon("squares-2x2", 14)}</button>
           <button
             title="Restore all widgets"
             ?disabled=${widgets.length === 0}
@@ -485,39 +596,17 @@ export class RightDock extends LitElement {
         >${icon(ic, 16)}</button>
       `;
     }
-    if (w.kind === "external") {
-      return html`
-        <button
-          class=${cls}
-          title=${`${w.title || w.view} · click to ${w.minimized ? "restore" : "focus"} · right-click to close`}
-          @click=${() => this._focusExternalWidget(w)}
-          @contextmenu=${(ev) => this._onExternalWidgetContext(ev, w)}
-        >${icon(ic, 16)}</button>
-      `;
-    }
-    // plugin — resolve a real name via the live session so the
-    // tooltip is useful (every plugin shares the puzzle-piece icon).
-    const pluginName = this._pluginName(w.id);
+    // External widget (foyer-window). Plugins, track editor, MIDI
+    // editor, beat sequencer, console, diagnostics all flow through
+    // here on the same code path.
     return html`
       <button
-        class="dock-icon"
-        title=${`${pluginName} · click to focus · right-click to close`}
-        @click=${() => window.__foyer?.layout?.raisePluginFloat?.(w.id)}
-        @contextmenu=${(ev) => this._onPluginWidgetContext(ev, w)}
+        class=${cls}
+        title=${`${w.title || w.view} · click to ${w.minimized ? "restore" : "focus"} · right-click to close`}
+        @click=${() => this._focusExternalWidget(w)}
+        @contextmenu=${(ev) => this._onExternalWidgetContext(ev, w)}
       >${icon(ic, 16)}</button>
     `;
-  }
-
-  _pluginName(pluginId) {
-    if (!pluginId) return "Plugin";
-    const session = window.__foyer?.store?.state?.session;
-    if (!session) return "Plugin";
-    for (const t of session.tracks || []) {
-      for (const p of t.plugins || []) {
-        if (p.id === pluginId) return `${t.name} · ${p.name}`;
-      }
-    }
-    return "Plugin";
   }
 
   _focusExternalWidget(w) {
@@ -555,25 +644,8 @@ export class RightDock extends LitElement {
     // storageKey keeps the open-set idempotent — clicking "+ Console"
     // twice focuses the existing window instead of stacking
     // duplicates. (Rich, 2026-04-25.)
-    const SPEC = {
-      console:     { title: "Console",     icon: "command-line",  tag: "foyer-console-view", w: 720, h: 480, key: "console-widget" },
-      diagnostics: { title: "Diagnostics", icon: "check-circle",  tag: "foyer-diagnostics",  w: 720, h: 520, key: "diagnostics-widget" },
-    };
-    const spec = SPEC[view];
-    if (spec) {
-      import("foyer-ui-core/widgets/window.js").then(({ openWindow }) => {
-        const el = document.createElement(spec.tag);
-        openWindow({
-          title: spec.title,
-          icon: spec.icon,
-          storageKey: spec.key,
-          content: el,
-          width: spec.w,
-          height: spec.h,
-        });
-      });
-      return;
-    }
+    if (view === "console")     { _spawnConsole();     return; }
+    if (view === "diagnostics") { _spawnDiagnostics(); return; }
     // Fallback for any other future widget views — legacy openWidget.
     const layout = window.__foyer?.layout;
     if (!layout) return;
@@ -599,11 +671,6 @@ export class RightDock extends LitElement {
   _onTileWidgetContext(ev, w) {
     ev.preventDefault();
     window.__foyer?.layout?.removeFloat?.(w.id);
-  }
-
-  _onPluginWidgetContext(ev, w) {
-    ev.preventDefault();
-    window.__foyer?.layout?.closePluginFloat?.(w.id);
   }
 
   _renderDockedFabs({ leadingSep = true } = {}) {

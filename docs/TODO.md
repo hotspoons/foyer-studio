@@ -28,7 +28,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 ## Next issues
 - [x] Let's have the access token in the link be a base64-encoded SHA of the username/password combo, not just the username/password combo
-- [ ] Disable space global binding if the role can't mess with the transport (e.g. read only, performer) - causing issues in remote sessions
+- [x] Disable space global binding if the role can't mess with the transport (e.g. read only, performer) - causing issues in remote sessions
 
 
 ## Features/updates
@@ -47,8 +47,9 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 - [ ] Slide out midi form is too cramped - consider just having it be a small modal over top of the midi roll that can be dismisses instead of sliding out
 - [ ] No midi instrument/patch form in the beat editor! Need this to match the piano roll
 - [ ] The tiling controls on the tiled windows (mixer and timeline) are dubious and don't really do anything. Let's get rid of them and drop the code
+- [ ] Selection resize handles! And visualization when hovering over the timeline of where the cursor is (e.g. a vertical line) to help with setting up selections
 - [ ] Clicking the tiled window picker (mixer and timeline) renders the pop-up in the upper-left corner always, not where you would expect
-- [ ] Create MacOS and Linux builds (arm64 and amd64) against 9.2 tag, fix the tag in the clone process for this repo, come up with plan for building plugins for multiple versions of ardour codebase (Let's plan to support Ardour 9.0 and newer) - and is there a free tier for github runners? How can we build this? I have a Mac but I am running from a dev container - can I mount the darwin SDK into the dev container? Help me out
+- [ ] Create MacOS and Linux builds (arm64 and amd64) against 9.2 tag, fix the tag in the clone process for this repo, come up with plan for building plugins for multiple versions of ardour codebase (Let's plan to support Ardour 9.0 and newer) - and is there a free tier for github runners? How can we build this? I have a Mac but I am running from a dev container - can I mount the darwin SDK into the dev container? Help me out here. I also have an AI startup with a lab and kubernetes but this is a personal project so I probably shouldn't stand up a runner in our environment. Maybe I'll look into that
 
 
 ## Bugs

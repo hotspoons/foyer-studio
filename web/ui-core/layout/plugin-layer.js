@@ -213,14 +213,10 @@ export class PluginLayer extends LitElement {
   }
 
   render() {
-    if (!this._visible) {
-      this.setAttribute("hidden", "");
-      return html``;
-    }
-    this.removeAttribute("hidden");
-    return html`
-      ${this._placed.map((p) => this._renderWindow(p))}
-    `;
+    // Plugin floats moved to <foyer-window> on 2026-04-25, so this
+    // renderer is intentionally empty. The element stays mounted so
+    // any in-flight imports / refs don't break, but it never paints.
+    return html``;
   }
 
   _renderWindow(p) {
@@ -378,14 +374,44 @@ export class PluginLayer extends LitElement {
 customElements.define("foyer-plugin-layer", PluginLayer);
 
 /**
- * Helper used by outside code (plugin-strip, command palette) to open a
- * plugin float using the layer's auto-sizing heuristic. Handles the
- * "already open — just raise / do nothing" case.
+ * Open a plugin parameter window. As of 2026-04-25 this routes through
+ * the shared `<foyer-window>` chrome (frosted shell, dock-list, persist
+ * across reload) instead of the legacy `_pluginFloats` + `<foyer-plugin
+ * -layer>` renderer. Plugin windows now look identical to track editor /
+ * MIDI editor / beat sequencer / console / diagnostics, and the widgets
+ * dock manages them through the same external-widget API (DECISION 42).
+ *
+ * Idempotent on plugin-id: a second call for the same plugin focuses the
+ * existing window. Caller passes the live plugin snapshot — we read its
+ * `name` for the title and its layout heuristic for the initial size.
  */
 export function openPluginFloat(pluginInstance) {
-  const layout = window.__foyer?.layout;
-  if (!layout || !pluginInstance?.id) return;
-  if (!layout.pluginFloatsVisible()) layout.setPluginFloatsVisible(true);
+  if (!pluginInstance?.id) return;
   const size = heuristicSize(pluginInstance);
-  layout.openPluginFloat(pluginInstance.id, size);
+  Promise.all([
+    import("foyer-ui-core/widgets/window.js"),
+  ]).then(([{ openWindow }]) => {
+    const panel = document.createElement("foyer-plugin-panel");
+    panel.plugin = pluginInstance;
+    // trackName resolves via the live session inside the panel itself
+    // when needed (mixer breadcrumb); the foyer-window header shows the
+    // plugin name.
+    openWindow({
+      title: pluginInstance.name || "Plugin",
+      icon: "puzzle-piece",
+      storageKey: `plugin.${pluginInstance.id}`,
+      content: panel,
+      width: size.w,
+      height: size.h,
+      persist: {
+        kind: "plugin",
+        id: pluginInstance.id,
+        props: { pluginId: pluginInstance.id },
+      },
+      onReuse: (existingPanel) => {
+        if (!existingPanel) return;
+        existingPanel.plugin = pluginInstance;
+      },
+    });
+  });
 }

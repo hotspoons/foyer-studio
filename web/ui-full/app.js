@@ -13,6 +13,7 @@ import { Store } from "foyer-core/store.js";
 import { applyTheme } from "foyer-ui-core/theme.js";
 import { installTransportReturn } from "foyer-core/transport-return.js";
 import { audioController } from "foyer-core/audio/master-controller.js";
+import { rehydrateWindows } from "foyer-ui-core/widgets/window.js";
 
 import { LayoutStore } from "foyer-ui-core/layout/layout-store.js";
 import { Keybinds } from "foyer-ui-core/layout/keybinds.js";
@@ -289,6 +290,26 @@ export class FoyerApp extends LitElement {
     // mount/unmount cycles. The mixer's toggle becomes a thin
     // observer of this controller's state.
     audioController.attach(this.ws, this.store);
+
+    // Replay foyer-window open-set after the first real session
+    // arrives — track-editor / midi-editor / beat-sequencer factories
+    // resolve their IDs against `state.session`, so calling rehydrate
+    // before the snapshot lands would no-op. Console + Diagnostics
+    // don't need session data and would replay fine sooner, but
+    // gating on session keeps the boot path simple. One-shot.
+    let _rehydrated = false;
+    const tryRehydrate = () => {
+      if (_rehydrated) return;
+      const s = this.store.state.session;
+      if (!s) return;
+      _rehydrated = true;
+      try { rehydrateWindows(); } catch (e) { console.warn("rehydrate failed", e); }
+    };
+    this.store.addEventListener("change", tryRehydrate);
+    // First-open path with a stub backend may have an empty session
+    // forever; replay Console + Diagnostics anyway after a short delay
+    // so the user's chrome comes back even on a fresh stub launcher.
+    setTimeout(() => { if (!_rehydrated) { _rehydrated = true; try { rehydrateWindows(); } catch {} } }, 800);
   }
 
   /**

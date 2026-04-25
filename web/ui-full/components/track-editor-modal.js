@@ -810,6 +810,11 @@ export function openTrackEditor(trackId, options = {}) {
     icon: "adjustments-horizontal",
     storageKey: `track-editor.${trackId}`,
     content: el,
+    persist: {
+      kind: "track-editor",
+      id: trackId,
+      props: { trackId, tab: options.tab || "" },
+    },
     width: 720,
     height: 640,
   }));

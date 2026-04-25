@@ -852,6 +852,7 @@ export class TimelineView extends LitElement {
         content: seq,
         width: 1100,
         height: 560,
+        persist: { kind: "beat-sequencer", id: "beat-sequencer", props: { regionId: region?.id } },
         // Same reasoning as the MIDI editor — retarget the live
         // sequencer to the new region rather than spawning a dup.
         onReuse: (existingSeq) => {
@@ -1463,6 +1464,7 @@ export class TimelineView extends LitElement {
         content: editor,
         width: 1040,
         height: 680,
+        persist: { kind: "midi-editor", id: "midi-editor", props: { regionId: region?.id } },
         // Reusing an already-open MIDI editor: retarget the live
         // editor element to the newly-clicked region instead of
         // letting openWindow swap nodes (which would orphan the

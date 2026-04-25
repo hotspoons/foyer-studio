@@ -93,6 +93,11 @@ export class LayoutStore extends EventTarget {
     // re-opens.
     const STALE_VIEWS = new Set(["console", "diagnostics"]);
     this._floating = this._floating.filter((f) => !STALE_VIEWS.has(f.view));
+    // Plugin floats also migrated to <foyer-window> (frosted shell,
+    // shared dock-list, persistence via `foyer.windows.open.v1`). The
+    // legacy `_pluginFloats` array is now unused — prune it on hydrate
+    // so old entries don't render through the now-empty plugin-layer.
+    this._pluginFloats = [];
     this._dockedFabs = (() => {
       try { return JSON.parse(localStorage.getItem(FAB_DOCK_KEY) || "{}") || {}; }
       catch { return {}; }
@@ -246,15 +251,10 @@ export class LayoutStore extends EventTarget {
         z: f.z | 0,
       });
     }
-    for (const p of this._pluginFloats) {
-      out.push({
-        kind: "plugin",
-        id: p.plugin_id,
-        view: "plugin_panel",
-        minimized: false, // plugin layer doesn't have a minimize concept
-        z: p.z | 0,
-      });
-    }
+    // Plugin floats moved to <foyer-window> chrome on 2026-04-25 —
+    // they now flow through `_externalWidgets` like every other
+    // dialog-class widget. The legacy `_pluginFloats` array is no
+    // longer rendered (DECISION 42).
     for (const [id, meta] of this._externalWidgets) {
       out.push({
         kind: "external",

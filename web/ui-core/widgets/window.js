@@ -76,7 +76,13 @@ export class FoyerWindow extends LitElement {
   static properties = {
     title:       { type: String },
     icon:        { type: String },
-    storageKey:  { type: String, attribute: "storage-key" },
+    // `reflect: true` makes the property write back to the
+    // `storage-key` attribute so `document.querySelector(
+    //   'foyer-window[storage-key="…"]')` finds an existing window
+    // and the idempotent reuse path in `openWindow` actually fires.
+    // Without reflection the attribute stayed empty and every double-
+    // click stacked another track editor (Rich, 2026-04-25).
+    storageKey:  { type: String, attribute: "storage-key", reflect: true },
     backdrop:    { type: Boolean, reflect: true },
     maximized:   { type: Boolean, reflect: true },
     minimized:   { type: Boolean, reflect: true },
@@ -564,6 +570,7 @@ export function openWindow({ title, icon, storageKey, content, width, height, ba
           window.__foyer?.layout?.setExternalMinimized?.(layoutId, false);
         }
       } catch {}
+      if (persist?.kind) _recordOpen(persist);
       return () => existing.remove();
     }
   }
@@ -575,7 +582,11 @@ export function openWindow({ title, icon, storageKey, content, width, height, ba
   if (height) w.initHeight = height;
   if (backdrop) w.backdrop = true;
   if (content) w.appendChild(content);
-  const close = () => { w.remove(); };
+  if (persist?.kind) _recordOpen(persist);
+  const close = () => {
+    if (persist?.kind) _recordClose(persist);
+    w.remove();
+  };
   w.addEventListener("close", close);
   document.body.appendChild(w);
   return close;

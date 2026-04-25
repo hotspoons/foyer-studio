@@ -21,5 +21,19 @@ fn main() {
     };
     println!("cargo:rustc-env=FOYER_BUNDLED_WEB={resolved}");
     println!("cargo:rerun-if-env-changed=FOYER_BUNDLED_WEB");
-    println!("cargo:rerun-if-changed={resolved}");
+    // Watching the entire web/ tree forces a relink on every JS edit.
+    // That matters for `cargo build --release` (the bundle has to be
+    // accurate to ship), but for dev runs we serve `--web-root web`
+    // straight off disk and the bundled copy is never read. Skip the
+    // watcher in debug to keep `just run` cheap. Set
+    // FOYER_BUNDLE_WATCH_DEBUG=1 to opt back in if you're testing the
+    // bundle path locally.
+    let profile = std::env::var("PROFILE").unwrap_or_default();
+    let force_watch = std::env::var("FOYER_BUNDLE_WATCH_DEBUG")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    if profile != "debug" || force_watch {
+        println!("cargo:rerun-if-changed={resolved}");
+    }
+    println!("cargo:rerun-if-env-changed=FOYER_BUNDLE_WATCH_DEBUG");
 }
