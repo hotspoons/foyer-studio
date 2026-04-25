@@ -1337,7 +1337,6 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (ctrl);
 				std::shared_ptr<ARDOUR::AutomationList> alist = ac ? ac->alist () : nullptr;
 				XMLNode* before = alist ? &alist->get_state () : nullptr;
-				const auto depth_before = session.undo_redo ().undo_depth ();
 				session.begin_reversible_command ("Foyer control change");
 				ctrl->set_value (snap.value, Controllable::UseGroup);
 				if (alist && before) {
@@ -1345,10 +1344,6 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					    *alist, before, &alist->get_state ()));
 				}
 				session.commit_reversible_command ();
-				PBD::warning << "foyer_shim: [undo] control_set id=" << snap.id
-				             << " has_alist=" << (alist ? 1 : 0)
-				             << " undo_depth " << depth_before << " -> "
-				             << session.undo_redo ().undo_depth () << endmsg;
 				// No manual echo — the Controllable::Changed signal will
 				// fire and our SignalBridge will emit the corresponding
 				// `control.update`.
@@ -1390,7 +1385,6 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// editor_ops.cc nudge_regions for the same idiom.
 				auto& session = shim->session ();
 				const bool own_txn = (self->_undo_group_depth == 0);
-				const auto depth_before = session.undo_redo ().undo_depth ();
 				if (own_txn) session.begin_reversible_command ("Foyer update region");
 				hit.region->clear_changes ();
 				if (snap.has_patch_start) {
@@ -1407,10 +1401,6 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				session.add_command (new PBD::StatefulDiffCommand (hit.region));
 				if (own_txn) session.commit_reversible_command ();
-				PBD::warning << "foyer_shim: [undo] update_region id=" << snap.id
-				             << " own_txn=" << own_txn
-				             << " undo_depth " << depth_before << " -> "
-				             << session.undo_redo ().undo_depth () << endmsg;
 				auto bytes = msgpack_out::encode_region_updated (session, snap.id);
 				if (!bytes.empty ()) {
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
@@ -2593,12 +2583,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				else if (id == "edit.undo") {
 					const auto before = session.undo_redo ().undo_depth ();
 					session.undo (1);
-					const auto after = session.undo_redo ().undo_depth ();
-					PBD::warning << "foyer_shim: [undo] edit.undo undo_depth "
-					             << before << " -> " << after
-					             << " redo_depth=" << session.undo_redo ().redo_depth ()
-					             << endmsg;
-					if (after < before) {
+					if (session.undo_redo ().undo_depth () < before) {
 						auto bytes = msgpack_out::encode_patch_reload ();
 						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 					}
@@ -2606,12 +2591,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				else if (id == "edit.redo") {
 					const auto before = session.undo_redo ().redo_depth ();
 					session.redo (1);
-					const auto after = session.undo_redo ().redo_depth ();
-					PBD::warning << "foyer_shim: [undo] edit.redo redo_depth "
-					             << before << " -> " << after
-					             << " undo_depth=" << session.undo_redo ().undo_depth ()
-					             << endmsg;
-					if (after < before) {
+					if (session.undo_redo ().redo_depth () < before) {
 						auto bytes = msgpack_out::encode_patch_reload ();
 						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 					}
