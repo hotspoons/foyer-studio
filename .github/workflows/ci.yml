@@ -25,18 +25,41 @@ env:
   RELEASE_BUILD: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 jobs:
-  # Rust gates — fmt + clippy + test + a debug `foyer` binary that the
+  # Rust gates — fmt + clippy + test + a `foyer` binary that the
   # downstream ui-smoke job consumes via artifact (so we don't pay for
-  # a second build on a second runner). All driven by the same `just`
-  # recipes devs run locally — a green `just verify` == a green CI check.
+  # a second build on a second runner). Matrix mirrors release.yml's
+  # so every PR validates all four shipping platforms; on cache hit
+  # the non-Linux cells stay cheap.
+  #
+  # All driven by the same `just` recipes devs run locally — a green
+  # `just verify` == a green CI check on the Linux x86_64 cell.
   rust:
-    runs-on: ubuntu-latest
+    name: rust (${{ matrix.os }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+          - runner: macos-13
+            os: macos
+            arch: x86_64
+          - runner: macos-14
+            os: macos
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
       # foyer-desktop pulls in tao+wry which link GTK3 + WebKit2GTK
       # on Linux. The runner image doesn't ship those — clippy/test
-      # both fail at the glib-sys build script without them.
+      # both fail at the glib-sys build script without them. macOS
+      # uses native frameworks (Cocoa/WebKit) and needs no extra deps.
       - name: Install GTK/WebKit deps for foyer-desktop
+        if: matrix.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -51,6 +74,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Per-cell cache so cross-platform builds don't trample.
+          key: ci-${{ matrix.os }}-${{ matrix.arch }}
       - uses: extractions/setup-just@v2
       - run: just fmt-check
       - run: just clippy
@@ -77,10 +103,9 @@ jobs:
       - name: Upload foyer binary
         uses: actions/upload-artifact@v4
         with:
-          # Same name regardless of profile so downloads don't have to
-          # branch. Profile is recorded in the workflow run summary's
-          # ::notice:: line above.
-          name: foyer-linux-x86_64
+          # Same name shape as release.yml so the install.sh URL doesn't
+          # change between CI artifacts and tagged releases.
+          name: foyer-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/foyer
           retention-days: 7
           if-no-files-found: error
@@ -89,6 +114,11 @@ jobs:
   # it headless with Playwright. No JACK / Ardour / shim needed; this
   # exercises the three-tier web split (core / ui-core / ui-*) and
   # the Rust server's HTTP + WS surface.
+  #
+  # Single-platform (linux x86_64) intentionally — Playwright tests
+  # the BROWSER (Chromium), not the host OS. The foyer server is just
+  # a subprocess; running smoke 4× across the matrix would burn
+  # minutes for no extra coverage.
   ui-smoke:
     needs: rust
     runs-on: ubuntu-latest
@@ -129,20 +159,46 @@ jobs:
             tests-ui/test-results
           retention-days: 14
 
-  # Build the C++ Ardour shim and publish `libfoyer_shim.so` as an
-  # artifact so reviewers can grab it from the Actions tab without a
-  # full release. Runs in parallel with rust+ui-smoke (independent —
-  # nothing here links Rust). The first run on a fresh cache pays the
-  # ~30 min Ardour build; the cache key includes ARDOUR_TAG so a tag
-  # bump invalidates cleanly. After warmup the slow path skips and the
-  # job is mostly the cmake-build step (~1 min).
+  # Build the C++ Ardour shim per platform and publish each library as
+  # an artifact so reviewers can grab them from the Actions tab without
+  # cutting a release. Mirrors release.yml's matrix shape so a green
+  # ci.yml run gives high confidence the release.yml run for the same
+  # commit will also be green.
+  #
+  # First run on a fresh cache pays the ~30 min Ardour build per cell;
+  # cache keys include ARDOUR_TAG so a tag bump invalidates cleanly.
+  # After warmup the slow path skips and each cell is mostly the
+  # cmake-build step (~1 min).
   shim:
-    runs-on: ubuntu-latest
+    name: shim (${{ matrix.os }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+            shim_ext: so
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            shim_ext: so
+          - runner: macos-13
+            os: macos
+            arch: x86_64
+            shim_ext: dylib
+          - runner: macos-14
+            os: macos
+            arch: arm64
+            shim_ext: dylib
     env:
       ARDOUR_TAG: 9.2.0
     steps:
       - uses: actions/checkout@v4
-      - name: Install shim + Ardour build deps
+
+      - name: Install shim + Ardour build deps (Linux)
+        if: matrix.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -157,30 +213,46 @@ jobs:
             libasound2-dev libpulse-dev libjack-jackd2-dev \
             libvamp-hostsdk3v5 vamp-plugin-sdk libvamp-sdk2v5 \
             libaubio-dev libcppunit-dev
+
+      - name: Install shim + Ardour build deps (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          brew install cmake pkg-config glibmm@2.66 libsigc++@2 libxml2 \
+            libsndfile libsamplerate fftw liblo taglib readline lrdf lilv \
+            serd sord sratom suil lv2 rubberband cairomm@1.14 \
+            gtkmm pangomm@2.46 boost aubio cppunit vamp-plugin-sdk
+          {
+            echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix readline)/lib/pkgconfig:$(brew --prefix glibmm@2.66)/lib/pkgconfig:$(brew --prefix libsigc++@2)/lib/pkgconfig:$(brew --prefix cairomm@1.14)/lib/pkgconfig:$(brew --prefix pangomm@2.46)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          } >> "$GITHUB_ENV"
+
       - name: Cache Ardour source + build
         id: cache-ardour
         uses: actions/cache@v4
         with:
           path: ext/ardour
-          key: ardour-linux-x86_64-${{ env.ARDOUR_TAG }}-v1
+          key: ardour-${{ matrix.os }}-${{ matrix.arch }}-${{ env.ARDOUR_TAG }}-v1
+
       - name: Clone Ardour @ ${{ env.ARDOUR_TAG }}
         if: steps.cache-ardour.outputs.cache-hit != 'true'
         run: ./scripts/dev/ardour.sh clone
+
       - name: Build Ardour (slow on cache miss, ~30 min)
         if: steps.cache-ardour.outputs.cache-hit != 'true'
         run: |
           ./scripts/dev/ardour.sh configure
           ./scripts/dev/ardour.sh build
+
       - name: Build shim
         run: |
           cmake -S shims/ardour -B shims/ardour/cmake-build \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DFOYER_ARDOUR_SOURCE="$PWD/ext/ardour"
           cmake --build shims/ardour/cmake-build -j
+
       - name: Upload shim
         uses: actions/upload-artifact@v4
         with:
-          name: foyer-shim-linux-x86_64
-          path: shims/ardour/cmake-build/libfoyer_shim.so
+          name: foyer-shim-${{ matrix.os }}-${{ matrix.arch }}
+          path: shims/ardour/cmake-build/libfoyer_shim.${{ matrix.shim_ext }}
           retention-days: 7
           if-no-files-found: error
