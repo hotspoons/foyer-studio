@@ -48,6 +48,12 @@ export class TrackStrip extends LitElement {
     _renaming: { state: true, type: Boolean },
     _panOpen: { state: true, type: Boolean },
     _panMode: { state: true, type: String },
+    // Optimistic monitor-mode override. Set when the user clicks
+    // a mon-btn; cleared once the backend echoes the same value back.
+    // Without this the parent's next render replaces our local
+    // optimistic copy with the stale store value and the button
+    // appears to ignore the first click (Rich, 2026-04-25).
+    _monitoringPending: { state: true, type: String },
   };
 
   static styles = css`
@@ -262,6 +268,10 @@ export class TrackStrip extends LitElement {
       if (this.track.peak_meter) {
         this._meterCtl = new ControlController(this, store, this.track.peak_meter);
       }
+      // Echo settled — drop the pending override.
+      if (this._monitoringPending && this.track.monitoring === this._monitoringPending) {
+        this._monitoringPending = null;
+      }
     }
     // Apply width via inline styles so the mixer's layout mode can drive us.
     if (changed.has("density") || changed.has("widthMode") || changed.has("overrideWidth")) {
@@ -350,7 +360,8 @@ export class TrackStrip extends LitElement {
             <div class="mon-row" title="Monitoring: auto, input (live), disk (playback) — Ardour MonitorChoice">
               ${["auto", "in", "disk"].map((mode) => {
                 const full = mode === "in" ? "input" : mode;
-                const active = (t.monitoring || "auto") === full;
+                const effective = this._monitoringPending || t.monitoring || "auto";
+                const active = effective === full;
                 return html`
                   <button class="mon-btn ${active ? "on" : ""}"
                           title=${
@@ -609,11 +620,18 @@ export class TrackStrip extends LitElement {
   }
 
   _setMonitoring(mode) {
-    // Optimistic local update so the pressed state flips immediately
-    // — the shim echoes a track_updated event with the committed
-    // value shortly after. "auto" | "input" | "disk" | "cue".
+    // Optimistic local override so the pressed state flips
+    // immediately. Lives in `_monitoringPending` (a state property,
+    // not on `this.track`) because the parent re-renders by pushing a
+    // fresh `.track` and would otherwise overwrite a mutation here.
+    // Cleared in `willUpdate` once the shim echoes a `track_updated`
+    // carrying the new value. (Pre-fix the user had to click twice
+    // because Ardour's MonitorControl::set_value queues to the audio
+    // thread and the inline echo from dispatch.cc returned the OLD
+    // value; the SignalBridge wiring fixes the echo, this hardens
+    // the click-feel until the echo lands.)
     if (!this.track) return;
-    this.track = { ...this.track, monitoring: mode };
+    this._monitoringPending = mode;
     this._updatePatch({ monitoring: mode });
   }
 

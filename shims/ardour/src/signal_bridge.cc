@@ -18,6 +18,7 @@ static constexpr bool LOG_TRANSPORT_TICK = false;
 #include <cstdlib>
 #include <iostream>
 
+#include "ardour/monitor_control.h"
 #include "ardour/playlist.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
@@ -338,6 +339,25 @@ SignalBridge::subscribe_controls_on_route (Route& r)
 	wire (r.mute_control ());
 	wire (r.solo_control ());
 	if (auto rec = r.rec_enable_control ()) wire (rec);
+
+	// Monitoring choice. Ardour's MonitorControl::set_value queues the
+	// change to the audio thread, so the inline `encode_track_updated`
+	// emit at the end of dispatch.cc::UpdateTrack reads the OLD enum
+	// value and broadcasts a stale state. Without a settled-state
+	// rebroadcast the client overwrites its optimistic update with the
+	// stale echo and the user has to click twice. Wire the Changed
+	// signal to re-emit a track_updated AFTER the engine actually
+	// settles (Rich, 2026-04-25).
+	if (auto mon = r.monitoring_control ()) {
+		std::ostringstream ridss;
+		ridss << r.id ();
+		const std::string track_id = "track." + ridss.str ();
+		mon->Changed.connect (
+		    _connections, MISSING_INVALIDATOR,
+		    std::bind<void> (&SignalBridge::on_route_presentation_changed,
+		                     this, track_id),
+		    _shim.event_loop ());
+	}
 
 	// Plugin-param live updates. Without these subscriptions the web
 	// UI only sees the values it SET itself — Ardour's native GUI

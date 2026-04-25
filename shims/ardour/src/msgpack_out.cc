@@ -676,10 +676,29 @@ encode_session_snapshot (Session& session,
 			o.str ("name"); o.str (s.name);
 			o.str ("kind"); o.str (s.kind);
 			if (!s.color.empty ()) { o.str ("color"); o.str (s.color); } else { o.str ("color"); o.nil (); }
-			o.str ("gain"); emit_param_num  ((s.self_id + ".gain").c_str (), "Gain", "continuous", 0.0);
-			o.str ("pan");  emit_param_num  ((s.self_id + ".pan").c_str (),  "Pan",  "continuous", 0.0);
-			o.str ("mute"); emit_param_bool ((s.self_id + ".mute").c_str (), "Mute", false);
-			o.str ("solo"); emit_param_bool ((s.self_id + ".solo").c_str (), "Solo", false);
+			// Initial-state values come from the live route controls.
+			// Hardcoding them to 0/false (the prior code) meant the
+			// snapshot always claimed every track was at unity gain,
+			// centered, unmuted, and unsoloed — which masked the user's
+			// stored solo state on session load until they toggled
+			// every channel off+on. Read get_value() instead so the
+			// snapshot reflects actual session state. (Rich,
+			// 2026-04-25.)
+			double gain_v = 0.0;
+			double pan_v  = 0.0;
+			bool   mute_v = false;
+			bool   solo_v = false;
+			if (it != route_by_id.end ()) {
+				auto const& r = it->second;
+				if (auto gc = r->gain_control ())          gain_v = gc->get_value ();
+				if (auto pc = r->pan_azimuth_control ())   pan_v  = pc->get_value ();
+				if (auto mc = r->mute_control ())          mute_v = mc->get_value () >= 0.5;
+				if (auto sc = r->solo_control ())          solo_v = sc->get_value () >= 0.5;
+			}
+			o.str ("gain"); emit_param_num  ((s.self_id + ".gain").c_str (), "Gain", "continuous", gain_v);
+			o.str ("pan");  emit_param_num  ((s.self_id + ".pan").c_str (),  "Pan",  "continuous", pan_v);
+			o.str ("mute"); emit_param_bool ((s.self_id + ".mute").c_str (), "Mute", mute_v);
+			o.str ("solo"); emit_param_bool ((s.self_id + ".solo").c_str (), "Solo", solo_v);
 			// `peak_meter` is an EntityId string — the client
 			// subscribes to it via ControlController in track-strip.js
 			// and renders the value that arrives in meter_batch events.
