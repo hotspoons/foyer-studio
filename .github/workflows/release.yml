@@ -46,6 +46,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # GitHub retired the Intel `macos-13` runner. macOS is arm64
+        # only here — Intel Macs need to build from source until/if we
+        # produce a universal2 lipo'd binary. Linux covers both archs.
         include:
           - runner: ubuntu-24.04
             os_label: linux
@@ -53,9 +56,6 @@ jobs:
           - runner: ubuntu-24.04-arm
             os_label: linux
             arch: arm64
-          - runner: macos-13
-            os_label: macos
-            arch: x86_64
           - runner: macos-14
             os_label: macos
             arch: arm64

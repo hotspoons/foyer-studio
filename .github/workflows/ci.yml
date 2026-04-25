@@ -10,6 +10,17 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel in-flight runs for the same ref when a new push lands.
+# Saves the matrix from chewing through obsolete commits while you're
+# iterating on a branch. `main` is excluded from cancellation —
+# every commit on main should produce a complete CI record.
+#
+# Group key includes the workflow name so other workflows (release.yml
+# etc.) don't end up in the same cancellation pool.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
@@ -39,6 +50,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # GitHub retired the Intel `macos-13` runner. macOS is arm64
+        # only here — Intel Macs need to build from source until/if we
+        # produce a universal2 lipo'd binary. Linux still covers both
+        # archs natively.
         include:
           - runner: ubuntu-24.04
             os: linux
@@ -46,9 +61,6 @@ jobs:
           - runner: ubuntu-24.04-arm
             os: linux
             arch: arm64
-          - runner: macos-13
-            os: macos
-            arch: x86_64
           - runner: macos-14
             os: macos
             arch: arm64
@@ -185,6 +197,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # See note on the rust job: macOS is arm64 only.
         include:
           - runner: ubuntu-24.04
             os: linux
@@ -194,10 +207,6 @@ jobs:
             os: linux
             arch: arm64
             shim_ext: so
-          - runner: macos-13
-            os: macos
-            arch: x86_64
-            shim_ext: dylib
           - runner: macos-14
             os: macos
             arch: arm64

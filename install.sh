@@ -75,6 +75,11 @@ detect_target() {
         aarch64|arm64)  ARCH=arm64 ;;
         *) die "unsupported architecture: $uname_m" ;;
     esac
+    # GitHub retired the Intel macOS runners, so we don't ship a
+    # macOS x86_64 binary. Intel Macs need to build from source.
+    if [ "$OS" = "macos" ] && [ "$ARCH" = "x86_64" ]; then
+        die "Intel Macs aren't supported by the prebuilt release. Build from source: https://github.com/$REPO"
+    fi
 }
 
 require_cmd() {
