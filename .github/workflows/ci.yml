@@ -211,7 +211,11 @@ jobs:
             arch: arm64
             shim_ext: dylib
     env:
-      ARDOUR_TAG: "9.2"
+      # Pin to a specific master SHA — the shim source uses APIs
+      # added after tag 9.2 (`PBD::RWLock`, 2-arg `IO::connect`).
+      # Bump when the shim grows compat shims and we can target
+      # tagged Ardour again.
+      ARDOUR_TAG: "a1d709fd14"
     steps:
       - uses: actions/checkout@v4
 
@@ -265,7 +269,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ext/ardour
-          key: ardour-${{ matrix.os }}-${{ matrix.arch }}-${{ env.ARDOUR_TAG }}-v1
+          key: ardour-${{ matrix.os }}-${{ matrix.arch }}-${{ env.ARDOUR_TAG }}-v2
 
       - name: Clone Ardour @ ${{ env.ARDOUR_TAG }}
         if: steps.cache-ardour.outputs.cache-hit != 'true'

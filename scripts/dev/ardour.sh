@@ -15,11 +15,14 @@ else
 fi
 
 ARDOUR_UPSTREAM="${FOYER_ARDOUR_UPSTREAM:-https://github.com/Ardour/ardour.git}"
-# Pin the Ardour version we build against. Ardour tags releases as
-# `<major>.<minor>` (no patch — e.g. `9.2`, not `9.2.0`). Override
-# with `ARDOUR_TAG=9.1` in the environment for matrix builds across
-# versions.
-ARDOUR_TAG="${ARDOUR_TAG:-9.2}"
+# Pin the Ardour ref the shim is built against. Accepts a tag
+# (`9.2`), branch name (`master`), or commit SHA. Default is a
+# specific master commit because the shim source uses APIs added
+# after tag 9.2 — `PBD::RWLock` and the 2-arg `IO::connect`. Until
+# the shim grows `#if ARDOUR_VERSION_AT_LEAST(...)` compat shims,
+# we have to track post-9.2 master to compile cleanly. Bump this
+# to whatever SHA you've been hacking against locally.
+ARDOUR_TAG="${ARDOUR_TAG:-a1d709fd14}"
 
 usage() {
     cat <<EOF
@@ -51,10 +54,24 @@ do_clone() {
         exit 1
     fi
     echo "ardour: cloning $ARDOUR_UPSTREAM @ $ARDOUR_TAG → $target (~250 MB shallow)"
-    git -c advice.detachedHead=false clone \
-        --depth 1 \
-        --branch "$ARDOUR_TAG" \
-        "$ARDOUR_UPSTREAM" "$target"
+    # `git clone --branch` doesn't accept commit SHAs. Try the fast
+    # branch/tag path first; on failure fall back to init + fetch +
+    # checkout, which works for any ref the server accepts (GitHub
+    # has supported uploadpack.allowReachableSHA1InWant since 2020).
+    if git -c advice.detachedHead=false clone \
+            --depth 1 \
+            --branch "$ARDOUR_TAG" \
+            "$ARDOUR_UPSTREAM" "$target" 2>/dev/null; then
+        :
+    else
+        echo "ardour: '$ARDOUR_TAG' isn't a tag/branch — fetching as commit SHA"
+        rm -rf "$target"
+        mkdir -p "$target"
+        git -C "$target" init -q
+        git -C "$target" remote add origin "$ARDOUR_UPSTREAM"
+        git -C "$target" fetch --depth 1 origin "$ARDOUR_TAG"
+        git -C "$target" -c advice.detachedHead=false checkout FETCH_HEAD
+    fi
     echo "ardour: done. Next: \`just ardour configure && just ardour build\`"
     ARDOUR_DIR="$target"
 }

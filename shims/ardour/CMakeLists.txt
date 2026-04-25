@@ -133,6 +133,26 @@ pkg_check_modules(GLIBMM  REQUIRED IMPORTED_TARGET glibmm-2.4)
 pkg_check_modules(SIGCPP  REQUIRED IMPORTED_TARGET sigc++-2.0)
 pkg_check_modules(LIBXML2 REQUIRED IMPORTED_TARGET libxml-2.0)
 
+# ── Homebrew prefix on macOS ───────────────────────────────────
+#
+# Ardour's headers `#include <boost/...>` and other system libs that
+# Apple's clang doesn't auto-add to the include path (unlike Linux,
+# where apt's `libboost-dev` writes headers under /usr/include/).
+# Surface Homebrew's prefix explicitly so headers like
+# `boost/bind/protect.hpp` resolve against `/opt/homebrew/include/`
+# (Apple Silicon) or `/usr/local/include/` (Intel).
+if(APPLE)
+  execute_process(
+    COMMAND brew --prefix
+    OUTPUT_VARIABLE FOYER_BREW_PREFIX
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE FOYER_BREW_RESULT)
+  if(FOYER_BREW_RESULT EQUAL 0 AND IS_DIRECTORY "${FOYER_BREW_PREFIX}/include")
+    message(STATUS "Foyer shim: Homebrew include dir → ${FOYER_BREW_PREFIX}/include")
+    set(FOYER_BREW_INCLUDE "${FOYER_BREW_PREFIX}/include")
+  endif()
+endif()
+
 # ── Ardour library search ──────────────────────────────────────
 #
 # Find each shared library the shim links against. The locations come
@@ -196,6 +216,14 @@ target_include_directories(foyer_shim PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${ARDOUR_INCLUDES}
 )
+
+# macOS only: surface the Homebrew include dir so boost (and any
+# other brew-installed system headers Ardour pulls in transitively)
+# resolves. No-op on Linux where /usr/include is on the default
+# system path.
+if(FOYER_BREW_INCLUDE)
+  target_include_directories(foyer_shim PRIVATE "${FOYER_BREW_INCLUDE}")
+endif()
 
 # Ardour's build-tree configurator writes generated headers (e.g.
 # ardour/debug.h macro expansions) into the build dir. Pick those up
