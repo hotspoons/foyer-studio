@@ -201,18 +201,24 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
+          # Package-name notes for Ubuntu 24.04 (noble):
+          #   * `liblv2-dev` was renamed to `lv2-dev` between 22.04 and 24.04.
+          #   * The versioned `libvamp-hostsdk3v5` / `libvamp-sdk2v5` aren't
+          #     in noble; `vamp-plugin-sdk` covers Ardour's build needs.
+          #   * `rubberband-cli` is the runtime tool — Ardour links the
+          #     library, so we want `librubberband-dev` instead.
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config python3 git curl unzip zip \
+            gettext intltool autoconf automake autotools-dev libtool \
             libgtkmm-2.4-dev libglibmm-2.4-dev libsigc++-2.0-dev libxml2-dev \
             libsndfile1-dev libsamplerate0-dev libfftw3-dev liblo-dev libtag1-dev \
             libreadline-dev liblrdf0-dev liblilv-dev libserd-dev libsord-dev \
             libsratom-dev libcurl4-gnutls-dev libwebsockets-dev libpangomm-1.4-dev \
-            libsuil-dev liblv2-dev rubberband-cli libxext-dev \
+            libsuil-dev lv2-dev librubberband-dev libxext-dev \
             libcairomm-1.0-dev libusb-1.0-0-dev libudev-dev \
-            libboost-dev libxt-dev libtool autotools-dev autoconf automake \
+            libboost-dev libxt-dev \
             libasound2-dev libpulse-dev libjack-jackd2-dev \
-            libvamp-hostsdk3v5 vamp-plugin-sdk libvamp-sdk2v5 \
-            libaubio-dev libcppunit-dev
+            vamp-plugin-sdk libaubio-dev libcppunit-dev
 
       - name: Install shim + Ardour build deps (macOS)
         if: matrix.os == 'macos'
