@@ -77,6 +77,59 @@ require_repo() {
     fi
 }
 
+patch_for_darwin() {
+    # Ardour's vendored ydk/ytk (forks of GTK+'s gdk/gtk) use
+    # `__attribute((alias("IA__foo")))` symbol aliases for ELF symbol
+    # visibility games. Mach-O on darwin doesn't support the `alias`
+    # attribute → clang errors with "aliases are not supported on
+    # darwin" against `gdkaliasdef.c` and `gtkaliasdef.c`. Both files
+    # are wrapped in `#ifndef DISABLE_VISIBILITY`, so defining that
+    # macro short-circuits them entirely.
+    #
+    # Upstream Ardour builds on macOS use their bundled GTK stack
+    # (which side-steps these files); compiling the in-tree ydk/ytk on
+    # darwin requires this patch. Sentinel-marked grep makes it
+    # idempotent so a cached `ext/ardour` only patches once.
+    local sentinel="# foyer-studio: DISABLE_VISIBILITY on darwin"
+    for f in "$ARDOUR_DIR/libs/tk/ydk/wscript" "$ARDOUR_DIR/libs/tk/ytk/wscript"; do
+        [ -f "$f" ] || continue
+        if grep -qF "$sentinel" "$f"; then
+            continue
+        fi
+        # Inject `DISABLE_VISIBILITY` into the darwin defines list. The
+        # darwin block in both wscripts is "if sys.platform == 'darwin':"
+        # followed by `obj.source = ... + ..._quartz_sources`. Add a
+        # `obj.defines += ['DISABLE_VISIBILITY']` line right after the
+        # source assignment.
+        python3 - "$f" "$sentinel" <<'PY'
+import re, sys
+path, sentinel = sys.argv[1], sys.argv[2]
+src = open(path).read()
+# Capture the indent of the `obj.source` line in group 2 so we know
+# how much leading whitespace to use for the inserted lines (the
+# wscripts use 8-space indent for these blocks).
+pattern = re.compile(
+    r"(if sys\.platform == 'darwin':\s*\n([ \t]+)obj\.source\s*=\s*[^\n]*_quartz_sources\b[^\n]*)\n",
+    re.MULTILINE,
+)
+m = pattern.search(src)
+if not m:
+    sys.stderr.write(f"ardour: failed to locate darwin source line in {path}\n")
+    sys.exit(1)
+indent = m.group(2)
+patched = (
+    src[:m.end(1)]
+    + "\n"
+    + indent + sentinel + "\n"
+    + indent + "obj.defines += ['DISABLE_VISIBILITY']\n"
+    + src[m.end(1):]
+)
+open(path, "w").write(patched)
+print(f"ardour: patched DISABLE_VISIBILITY into {path}")
+PY
+    done
+}
+
 do_configure() {
     local extra_args=()
     local cppflags="${CPPFLAGS:-}"
@@ -104,6 +157,7 @@ do_configure() {
         if brew --prefix boost >/dev/null 2>&1; then
             extra_args+=("--boost-include=$(brew --prefix boost)/include")
         fi
+        patch_for_darwin
     fi
 
     (
