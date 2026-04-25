@@ -149,10 +149,18 @@ do_configure() {
         brew_prefix="$(brew --prefix)"
         cppflags="-I$brew_prefix/include ${cppflags}"
         ldflags="-L$brew_prefix/lib ${ldflags}"
-        # `libarchive` is keg-only on macOS so its .pc lives under the
-        # formula's own prefix, not the global lib/pkgconfig.
+        # Keg-only formulas don't symlink into the global prefix, so
+        # they need their per-formula include + lib dirs surfaced
+        # explicitly. `libarchive` is required: its header is included
+        # by `libs/pbd/pbd/file_archive.h`, which gets dragged into
+        # libardour compilation units that don't have libpbd's
+        # per-cell `ARCHIVE` uselib in scope.
         if brew --prefix libarchive >/dev/null 2>&1; then
-            pkg_path="$(brew --prefix libarchive)/lib/pkgconfig:$pkg_path"
+            local libarchive_prefix
+            libarchive_prefix="$(brew --prefix libarchive)"
+            cppflags="-I$libarchive_prefix/include ${cppflags}"
+            ldflags="-L$libarchive_prefix/lib ${ldflags}"
+            pkg_path="$libarchive_prefix/lib/pkgconfig:$pkg_path"
         fi
         if brew --prefix boost >/dev/null 2>&1; then
             extra_args+=("--boost-include=$(brew --prefix boost)/include")
