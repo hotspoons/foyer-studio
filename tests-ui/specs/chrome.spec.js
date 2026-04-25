@@ -43,9 +43,12 @@ test.describe("shipping UI chrome", () => {
       const { listViews } = await import("/core/registry/views.js");
       return listViews().map((v) => v.id);
     });
-    expect(viewIds).toEqual(
-      expect.arrayContaining(["mixer", "timeline", "plugins", "session", "console"]),
-    );
+    // The view registry holds tile-mountable surfaces. The user-facing
+    // ones today are mixer + timeline (registered by ui-full's nav-bar).
+    // `plugins`, `session`, and `console` migrated to the widget/window
+    // system (see right-dock.js CATEGORIES) so they're no longer in
+    // listViews(). `preview` is a fallback registered by tile-leaf.
+    expect(viewIds).toEqual(expect.arrayContaining(["mixer", "timeline"]));
   });
 
   test("tile-leaf body survives store churn (no element re-mount)", async ({ page }) => {

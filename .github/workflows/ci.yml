@@ -8,11 +8,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  # Opt every JS-based action into Node.js 24 ahead of GitHub's
+  # forced-flip on 2026-06-02. Silences the "Node.js 20 actions are
+  # deprecated" warning we kept seeing on every run. Drop this once
+  # all our actions ship a v* release that runs Node 24 by default.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # Rust gates — fmt + clippy + test, all driven by the same `just`
-  # recipes devs run locally. Keeping the steps identical on both
-  # sides means a green `just verify` == a green CI check.
+  # Rust gates — fmt + clippy + test + a debug `foyer` binary that the
+  # downstream ui-smoke job consumes via artifact (so we don't pay for
+  # a second build on a second runner). All driven by the same `just`
+  # recipes devs run locally — a green `just verify` == a green CI check.
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -39,30 +45,47 @@ jobs:
       - run: just fmt-check
       - run: just clippy
       - run: just test
+      # Tailwind CSS goes into the bundled web tree, so it has to exist
+      # before the release link picks up include_dir!. Cheap step that
+      # would fail loud (~30 s) rather than ship a release with a stale
+      # / empty tw.build.css.
+      - run: ./scripts/dev/tw.sh build
+      # Build the release binary CI publishes as an artifact and the
+      # downstream ui-smoke job consumes. Release profile has
+      # lto=thin + codegen-units=1, so this isn't a free ride after
+      # `just test` — count on a few extra minutes the first time the
+      # cache is cold. Local dev keeps using debug builds via
+      # `cargo build` / `just run`.
+      - run: cargo build --release --bin foyer
+      - name: Upload foyer release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: foyer-linux-x86_64
+          path: target/release/foyer
+          retention-days: 7
+          if-no-files-found: error
 
   # Browser-level smoke — boots a stub-backend Foyer server and drives
   # it headless with Playwright. No JACK / Ardour / shim needed; this
   # exercises the three-tier web split (core / ui-core / ui-*) and
   # the Rust server's HTTP + WS surface.
   ui-smoke:
+    needs: rust
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install GTK/WebKit deps for foyer-desktop
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # No GTK install + no rust toolchain + no rust-cache here on
+      # purpose — we don't compile anything, the binary is downloaded
+      # below and runs against the system's existing libc + libssl.
       - uses: extractions/setup-just@v2
       - uses: oven-sh/setup-bun@v2
+      - name: Download foyer release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: foyer-linux-x86_64
+          path: target/release
+      - name: Mark foyer executable
+        run: chmod +x target/release/foyer
       - name: Install Chromium deps
         run: |
           cd tests-ui
@@ -70,7 +93,11 @@ jobs:
           bunx playwright install --with-deps chromium
       - name: Build tailwind assets
         run: ./scripts/dev/tw.sh build
-      - name: just test-ui-ci
+      - name: just test-ui-ci (using prebuilt release binary)
+        env:
+          # Tells `just test-ui-ci` to skip `cargo build` and use the
+          # release binary the rust job uploaded for us.
+          FOYER_BIN: ${{ github.workspace }}/target/release/foyer
         run: just test-ui-ci
       - name: Upload Playwright artifacts
         if: failure()
@@ -81,3 +108,59 @@ jobs:
             tests-ui/report
             tests-ui/test-results
           retention-days: 14
+
+  # Build the C++ Ardour shim and publish `libfoyer_shim.so` as an
+  # artifact so reviewers can grab it from the Actions tab without a
+  # full release. Runs in parallel with rust+ui-smoke (independent —
+  # nothing here links Rust). The first run on a fresh cache pays the
+  # ~30 min Ardour build; the cache key includes ARDOUR_TAG so a tag
+  # bump invalidates cleanly. After warmup the slow path skips and the
+  # job is mostly the cmake-build step (~1 min).
+  shim:
+    runs-on: ubuntu-latest
+    env:
+      ARDOUR_TAG: 9.2.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shim + Ardour build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config python3 git curl unzip zip \
+            libgtkmm-2.4-dev libglibmm-2.4-dev libsigc++-2.0-dev libxml2-dev \
+            libsndfile1-dev libsamplerate0-dev libfftw3-dev liblo-dev libtag1-dev \
+            libreadline-dev liblrdf0-dev liblilv-dev libserd-dev libsord-dev \
+            libsratom-dev libcurl4-gnutls-dev libwebsockets-dev libpangomm-1.4-dev \
+            libsuil-dev liblv2-dev rubberband-cli libxext-dev \
+            libcairomm-1.0-dev libusb-1.0-0-dev libudev-dev \
+            libboost-dev libxt-dev libtool autotools-dev autoconf automake \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            libvamp-hostsdk3v5 vamp-plugin-sdk libvamp-sdk2v5 \
+            libaubio-dev libcppunit-dev
+      - name: Cache Ardour source + build
+        id: cache-ardour
+        uses: actions/cache@v4
+        with:
+          path: ext/ardour
+          key: ardour-linux-x86_64-${{ env.ARDOUR_TAG }}-v1
+      - name: Clone Ardour @ ${{ env.ARDOUR_TAG }}
+        if: steps.cache-ardour.outputs.cache-hit != 'true'
+        run: ./scripts/dev/ardour.sh clone
+      - name: Build Ardour (slow on cache miss, ~30 min)
+        if: steps.cache-ardour.outputs.cache-hit != 'true'
+        run: |
+          ./scripts/dev/ardour.sh configure
+          ./scripts/dev/ardour.sh build
+      - name: Build shim
+        run: |
+          cmake -S shims/ardour -B shims/ardour/cmake-build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DFOYER_ARDOUR_SOURCE="$PWD/ext/ardour"
+          cmake --build shims/ardour/cmake-build -j
+      - name: Upload shim
+        uses: actions/upload-artifact@v4
+        with:
+          name: foyer-shim-linux-x86_64
+          path: shims/ardour/cmake-build/libfoyer_shim.so
+          retention-days: 7
+          if-no-files-found: error

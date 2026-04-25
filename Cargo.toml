@@ -15,7 +15,14 @@ members = [
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
-license = "GPL-2.0-or-later"
+# All Rust crates in this workspace are Apache-2.0. The repo's GPL
+# zone is confined to `shims/ardour/` (which links libardour and is
+# NOT in this workspace). See top-level LICENSE for the split, and
+# DECISIONS.md entry 15 for the rationale. Earlier this was set to
+# `GPL-2.0-or-later` and propagated to every crate via
+# `license.workspace = true` — wrong: published crate metadata would
+# claim copyleft on code that's actually permissive.
+license = "Apache-2.0"
 rust-version = "1.75"
 authors = ["Foyer Studio Contributors"]
 repository = "https://github.com/foyer-studio/foyer-studio"

@@ -100,15 +100,26 @@ test-ui *args='':
 # This is the form CI uses — no shim, no Ardour, no JACK needed, just
 # exercises the browser + Rust server boundary. Exits with the
 # Playwright exit code.
+#
+# Set FOYER_BIN=/path/to/foyer to skip the cargo build and use a
+# prebuilt binary instead — the GitHub Actions ui-smoke job uses this
+# to consume the binary the rust job already built.
 test-ui-ci:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --bin foyer
+    bin="${FOYER_BIN:-./target/debug/foyer}"
+    if [ ! -x "$bin" ]; then
+        if [ -n "${FOYER_BIN:-}" ]; then
+            echo "FOYER_BIN=$FOYER_BIN is not executable — refusing to fall back to a build" >&2
+            exit 1
+        fi
+        cargo build --bin foyer
+    fi
     # Use the repo's working web/ so CI validates the tree that just
     # got committed — NOT whatever happens to be extracted in the
     # runner's $XDG_DATA_HOME. Without this flag the CLI serves the
     # install dir (the canonical hackability target for users).
-    ./target/debug/foyer serve \
+    "$bin" serve \
         --backend stub --listen 127.0.0.1:3838 --web-root web \
         > /tmp/foyer-ci.log 2>&1 &
     server_pid=$!
