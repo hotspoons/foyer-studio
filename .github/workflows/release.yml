@@ -174,8 +174,11 @@ jobs:
           # so the released binary doesn't depend on a system
           # `libopus.so.0` at runtime (end users shouldn't have to
           # apt-get / brew-install opus to run install.sh's output).
-          # See ci.yml's matching note.
-          OPUS_NO_PKG_CONFIG: "1"
+          # OPUS_STATIC flips the static/dynamic decision, OPUS_NO_PKG
+          # bypasses pkg-config so a system libopus on the builder
+          # doesn't sneak back in. See ci.yml's matching note.
+          OPUS_STATIC: "1"
+          OPUS_NO_PKG: "1"
         run: cargo build --release --bin foyer
 
       - name: Build shim

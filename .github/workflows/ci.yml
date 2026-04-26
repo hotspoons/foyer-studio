@@ -109,9 +109,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # Per-cell cache so cross-platform builds don't trample.
-          # Bumped to invalidate stale builds that were missing the
-          # `OPUS_NO_PKG_CONFIG=1` static-link of libopus.
-          key: ci-${{ matrix.os }}-${{ matrix.arch }}-opus-static
+          # Bumped again — the previous `-opus-static` key cached
+          # binaries built with the wrong env var name
+          # (OPUS_NO_PKG_CONFIG instead of OPUS_STATIC + OPUS_NO_PKG),
+          # so they still dynamic-linked libopus. New key forces a
+          # cold build with the correct env vars.
+          key: ci-${{ matrix.os }}-${{ matrix.arch }}-opus-static-v2
       - uses: extractions/setup-just@v2
       - run: just fmt-check
       - run: just clippy
@@ -126,16 +129,24 @@ jobs:
       - name: Build foyer
         env:
           # Force `audiopus_sys` to static-link libopus from source.
-          # Without this, audiopus_sys's build script picks up a system
-          # libopus via pkg-config when one happens to be on the
-          # builder (transitive apt dep on Linux, brew dep on macOS),
-          # and the resulting binary needs `libopus.so.0` at runtime
-          # — which the ui-smoke job's runner doesn't have, and end
-          # users who run install.sh shouldn't need to apt-get either.
-          # autoconf/automake/libtool must be present so the source
-          # build's `autoreconf` succeeds; macOS install step has them,
-          # Linux runners ship them by default.
-          OPUS_NO_PKG_CONFIG: "1"
+          # Two env vars, both required:
+          #   * OPUS_STATIC=1 — flips audiopus_sys's `is_static_build`
+          #     to true (default on Linux-glibc is dynamic).
+          #   * OPUS_NO_PKG=1 — bypasses pkg-config so we don't pick up
+          #     a dynamic system libopus when one happens to be on the
+          #     builder (transitive apt dep on Linux, brew dep on
+          #     macOS).
+          # Without both, the resulting binary needs `libopus.so.0` at
+          # runtime — which the ui-smoke job's runner doesn't have, and
+          # end users running install.sh shouldn't need to apt-get
+          # either. autoconf/automake/libtool must be present so the
+          # source build's `autoreconf` succeeds; both Linux and macOS
+          # install steps have them.
+          # NB: `OPUS_NO_PKG_CONFIG` (with `_CONFIG`) is a different
+          # variable that pkg-config-rs reads — has no effect on
+          # audiopus_sys's static/dynamic decision. Don't use it.
+          OPUS_STATIC: "1"
+          OPUS_NO_PKG: "1"
         run: |
           mkdir -p dist
           if [ "$RELEASE_BUILD" = "true" ]; then

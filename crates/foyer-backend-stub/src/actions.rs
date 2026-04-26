@@ -121,6 +121,13 @@ pub(crate) fn catalog() -> Vec<Action> {
             None,
         ),
         mk(
+            "track.add_midi",
+            "Add MIDI Track",
+            ActionCategory::Track,
+            Some("plus"),
+            None,
+        ),
+        mk(
             "track.add_bus",
             "Add Bus",
             ActionCategory::Track,

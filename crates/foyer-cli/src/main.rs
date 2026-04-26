@@ -689,21 +689,27 @@ SESSION_DIR="$DIR"
 SESSION_FILE="$SESSION_DIR/$NAME.ardour"
 
 if [ ! -f "$SESSION_FILE" ]; then
-    mkdir -p "$SESSION_DIR"
+    # `ardour9-new_empty_session <leaf-dir> <name>` CREATES <leaf-dir>
+    # and writes <leaf-dir>/<name>.ardour inside. It refuses to run
+    # when <leaf-dir> already exists ("Session folder already exists",
+    # then throws SessionException). Earlier versions of this script
+    # `mkdir -p`'d the dir first and then wondered why the helper
+    # always failed — kicking $DIR/$NAME directly without
+    # pre-creating it is the working pattern.
+    LEAF_DIR="$DIR/$NAME"
+    # If a previous failed run left an empty $LEAF_DIR, clean it up
+    # so the helper can mkdir it itself. A non-empty dir we leave
+    # alone — caller can rm -rf manually once they're sure.
+    if [ -d "$LEAF_DIR" ] && [ -z "$(ls -A "$LEAF_DIR" 2>/dev/null)" ]; then
+        rmdir "$LEAF_DIR" 2>/dev/null || true
+    fi
     for HELPER in "$TOP"/build/session_utils/ardour*-new_empty_session; do
         if [ -x "$HELPER" ]; then
-            echo "foyer: bootstrapping new session $SESSION_DIR/$NAME via $HELPER" >&2
-            # Preferred form for older helper builds.
-            "$HELPER" "$SESSION_DIR" "$NAME" || true
-            if [ ! -f "$SESSION_FILE" ]; then
-                # Some helper builds expect a per-session directory.
-                ALT_DIR="$DIR/$NAME"
-                mkdir -p "$ALT_DIR"
-                "$HELPER" "$ALT_DIR" "$NAME" || true
-                if [ -f "$ALT_DIR/$NAME.ardour" ]; then
-                    SESSION_DIR="$ALT_DIR"
-                    SESSION_FILE="$SESSION_DIR/$NAME.ardour"
-                fi
+            echo "foyer: bootstrapping new session $LEAF_DIR via $HELPER" >&2
+            "$HELPER" "$LEAF_DIR" "$NAME" || true
+            if [ -f "$LEAF_DIR/$NAME.ardour" ]; then
+                SESSION_DIR="$LEAF_DIR"
+                SESSION_FILE="$SESSION_DIR/$NAME.ardour"
             fi
             break
         fi
@@ -712,7 +718,8 @@ fi
 
 if [ ! -f "$SESSION_FILE" ]; then
     echo "foyer: ERROR failed to create session file $SESSION_FILE" >&2
-    echo "foyer: hint: run '$TOP/build/session_utils/ardour9-new_empty_session \"$SESSION_DIR\" \"$NAME\"' manually" >&2
+    echo "foyer: hint: run '$TOP/build/session_utils/ardour9-new_empty_session \"$DIR/$NAME\" \"$NAME\"' manually" >&2
+    echo "foyer: hint: also remove any leftover dir: rm -rf \"$DIR/$NAME\"" >&2
     exit 1
 fi
 
