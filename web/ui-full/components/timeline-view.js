@@ -1660,10 +1660,26 @@ export class TimelineView extends LitElement {
     if (ev.shiftKey || ev.ctrlKey || ev.metaKey) {
       if (this._selectedRegionIds.has(region.id)) this._selectedRegionIds.delete(region.id);
       else this._selectedRegionIds.add(region.id);
-    } else {
-      this._selectedRegionIds.clear();
-      this._selectedRegionIds.add(region.id);
+      this._pendingDemoteRegionId = null;
+      this.requestUpdate();
+      return;
     }
+    // Unmodified click on a region that's ALREADY in the multi-selection:
+    // keep the selection so the drag handler in `_startDrag` can move
+    // the whole group. We arm a "demote" flag — if the user releases
+    // without dragging, the click resolves to "select just this one"
+    // (standard finder / DAW behavior). The flag is cleared inside
+    // `_startDrag`'s pointermove once a real drag begins, and consumed
+    // in pointerup if it was never cleared.
+    if (this._selectedRegionIds.has(region.id) && this._selectedRegionIds.size > 1) {
+      this._pendingDemoteRegionId = region.id;
+      return;
+    }
+    // Otherwise (single-select replace, or click on an unselected region):
+    // collapse to just this region.
+    this._selectedRegionIds.clear();
+    this._selectedRegionIds.add(region.id);
+    this._pendingDemoteRegionId = null;
     this.requestUpdate();
   }
 
@@ -1982,9 +1998,21 @@ export class TimelineView extends LitElement {
     // On a heavily-loaded shim that pile-up timed out and crashed
     // Ardour. One undo entry per drag is also what every native DAW
     // does. (Rich, 2026-04-26.)
+    // Track whether the pointer actually moved enough to count as a
+    // drag. `_onRegionPointerDown` armed `_pendingDemoteRegionId` if
+    // the user clicked on an already-multi-selected region; if no
+    // real drag happens we treat the click as "demote to single".
+    // 3 px threshold matches typical OS drag-start hysteresis.
+    let didDrag = false;
+    const DRAG_PX_THRESHOLD = 3;
     const move = (e) => {
       const dxPx = e.clientX - startX;
       const dxSamples = Math.round((dxPx / pxPerSec) * sr);
+      if (!didDrag && Math.abs(dxPx) >= DRAG_PX_THRESHOLD) {
+        didDrag = true;
+        // Real drag started — keep the multi-selection; demote is off.
+        this._pendingDemoteRegionId = null;
+      }
       for (const id of movingIds) {
         const o = origs.get(id);
         if (!o) continue;
@@ -1992,11 +2020,17 @@ export class TimelineView extends LitElement {
         if (!r) continue;
         const preview = { ...r };
         if (mode === "move") {
-          preview.start_samples = Math.max(0, o.start + dxSamples);
+          // Allow regions to move before the timeline's zero mark.
+          // Schema's `start_samples` is signed (i64) — Ardour displays
+          // the lozenge with its left edge in the pre-roll area, and
+          // playback starts the source `-start_samples` in.
+          preview.start_samples = o.start + dxSamples;
         } else if (mode === "resize-right") {
           preview.length_samples = Math.max(4800, o.len + dxSamples);
         } else if (mode === "resize-left") {
-          const newStart = Math.max(0, o.start + dxSamples);
+          // Left-resize can drag the start before zero; keep at least
+          // one render-stable length (4800 samples ≈ 0.1 s at 48 kHz).
+          const newStart = o.start + dxSamples;
           const newLen = Math.max(4800, o.len - (newStart - o.start));
           preview.start_samples = newStart;
           preview.length_samples = newLen;
@@ -2006,6 +2040,16 @@ export class TimelineView extends LitElement {
     };
     const up = () => {
       for (const el of els) el.classList.remove("dragging");
+      // Click without drag on a member of a multi-selection collapses
+      // the selection to just that member — standard "click is a
+      // single-select; drag preserves multi" behavior.
+      if (!didDrag && this._pendingDemoteRegionId) {
+        const demoteId = this._pendingDemoteRegionId;
+        this._pendingDemoteRegionId = null;
+        this._selectedRegionIds.clear();
+        this._selectedRegionIds.add(demoteId);
+        this.requestUpdate();
+      }
       // Single committed update per region, with the final position +
       // length. The shim wraps each in a reversible command, so the
       // user gets one undo entry per drag.

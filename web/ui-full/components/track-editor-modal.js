@@ -493,7 +493,7 @@ export class TrackEditorModal extends LitElement {
             <foyer-track-strip
               .track=${t}
               .density=${DENSITIES.normal}
-              .widthMode=${"absolute"}
+              .widthMode=${"fixed"}
             ></foyer-track-strip>
           </div>
         </div>`}

@@ -17,7 +17,7 @@
 // The `rectById` provider is injected so we don't hard-couple to the DOM.
 
 import { DIR } from "./tile-tree.js";
-import { isTypingTarget } from "../typing-guard.js";
+import { isTypingTarget, hasActiveTextSelection } from "../typing-guard.js";
 import { isActionAllowed } from "foyer-core/rbac.js";
 
 const STORAGE_MOD = "foyer.keymap.mod";
@@ -199,6 +199,19 @@ export class Keybinds {
       else if (key === "x" && !e.shiftKey) action = "edit.cut";
       else if (key === "c" && !e.shiftKey) action = "edit.copy";
       else if (key === "v" && !e.shiftKey) action = "edit.paste";
+      // If the user has highlighted plain text (e.g. credentials in
+      // the Remote Access form, a path in the project picker, a log
+      // line in the console panel), Cmd+C / Cmd+X mean "copy that
+      // text" — `isTypingTarget` doesn't catch this because the
+      // selection is on a read-only span, not an editable input.
+      // Bail so the browser's native clipboard runs instead of our
+      // DAW edit.copy / edit.cut action. (Paste is unaffected — it
+      // only matters in editable surfaces, which `isTypingTarget`
+      // already covers.)
+      if ((action === "edit.copy" || action === "edit.cut")
+          && hasActiveTextSelection()) {
+        return;
+      }
       if (action && ws) {
         e.preventDefault();
         ws.send({ type: "invoke_action", id: action });

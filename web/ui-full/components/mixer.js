@@ -1,7 +1,7 @@
 // Mixer surface. Wraps a row of track strips with a density toolbar that
 // lets the user flip between Wide / Normal / Compact / Narrow presets and
-// choose whether strip widths scale with the container (Relative) or lock
-// to a fixed pixel width (Absolute) that horizontally scrolls.
+// choose whether strip widths scale with the container (Fill) or lock
+// to a fixed pixel width (Fixed) that horizontally scrolls.
 //
 // Settings persist via mixer-density.js.
 
@@ -262,10 +262,12 @@ export class Mixer extends LitElement {
         </div>
         <span style="margin-left:10px">Width</span>
         <div class="group">
-          <button class=${this._widthMode === "relative" ? "active" : ""}
-                  @click=${() => this._setMode("relative")}>Relative</button>
-          <button class=${this._widthMode === "absolute" ? "active" : ""}
-                  @click=${() => this._setMode("absolute")}>Absolute</button>
+          <button class=${this._widthMode === "fill" ? "active" : ""}
+                  @click=${() => this._setMode("fill")}
+                  title="Strips flex to fill the container">Fill</button>
+          <button class=${this._widthMode === "fixed" ? "active" : ""}
+                  @click=${() => this._setMode("fixed")}
+                  title="Strips stay at the density's pixel width; mixer scrolls horizontally if needed">Fixed</button>
         </div>
         <span style="flex:1"></span>
         ${Object.keys(this._widthOverrides).length

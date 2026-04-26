@@ -18,7 +18,13 @@ pub struct Region {
     pub track_id: EntityId,
     pub name: String,
     /// Start position in audio samples at the session's sample rate.
-    pub start_samples: u64,
+    /// Signed because regions can be dragged before the timeline's
+    /// zero mark — Ardour and other DAWs display the lozenge
+    /// extending into pre-roll, with playback effectively starting
+    /// `-start_samples` into the source on transport-roll. Sign
+    /// matters for the shim's set_position write and for client
+    /// rendering (left-edge can be left of x=0).
+    pub start_samples: i64,
     pub length_samples: u64,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub color: Option<String>,
@@ -108,7 +114,7 @@ pub struct WaveformRequest {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RegionPatch {
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub start_samples: Option<u64>,
+    pub start_samples: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub length_samples: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]

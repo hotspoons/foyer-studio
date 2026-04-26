@@ -9,6 +9,23 @@ on:
     branches: ['**']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      ardour_tag:
+        description: "Ardour ref to build the shim against. Empty = use the value in .env."
+        required: false
+        default: ""
+
+# Cancel in-flight runs for the same ref when a new push lands.
+# Saves the matrix from chewing through obsolete commits while you're
+# iterating on a branch. `main` is excluded from cancellation —
+# every commit on main should produce a complete CI record.
+#
+# Group key includes the workflow name so other workflows (release.yml
+# etc.) don't end up in the same cancellation pool.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,21 +42,59 @@ env:
   RELEASE_BUILD: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 jobs:
-  # Rust gates — fmt + clippy + test + a debug `foyer` binary that the
+  # Rust gates — fmt + clippy + test + a `foyer` binary that the
   # downstream ui-smoke job consumes via artifact (so we don't pay for
-  # a second build on a second runner). All driven by the same `just`
-  # recipes devs run locally — a green `just verify` == a green CI check.
+  # a second build on a second runner). Matrix mirrors release.yml's
+  # so every PR validates all four shipping platforms; on cache hit
+  # the non-Linux cells stay cheap.
+  #
+  # All driven by the same `just` recipes devs run locally — a green
+  # `just verify` == a green CI check on the Linux x86_64 cell.
   rust:
-    runs-on: ubuntu-latest
+    name: rust (${{ matrix.os }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # GitHub retired the Intel `macos-13` runner. macOS is arm64
+        # only here — Intel Macs need to build from source until/if we
+        # produce a universal2 lipo'd binary. Linux still covers both
+        # archs natively, BUT we build them against musl
+        # (`*-unknown-linux-musl`) so the shipped binary is fully
+        # statically linked: no libc, libgcc_s, libm, libopus, or any
+        # other .so dep at runtime. install.sh's output works on a
+        # bare Linux distro with just a kernel.
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            target: aarch64-unknown-linux-musl
+          - runner: macos-14
+            os: macos
+            arch: arm64
+            # macOS uses Mach-O; binaries always link libSystem.dylib
+            # which every Mac ships. No musl story; we only need
+            # libopus static-linked (handled via OPUS_STATIC env).
+            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-      # foyer-desktop pulls in tao+wry which link GTK3 + WebKit2GTK
-      # on Linux. The runner image doesn't ship those — clippy/test
-      # both fail at the glib-sys build script without them.
-      - name: Install GTK/WebKit deps for foyer-desktop
+      # foyer-desktop (cargo test --workspace touches it) pulls in
+      # tao+wry which link GTK3 + WebKit2GTK on Linux. The runner
+      # image doesn't ship those — clippy/test both fail at the
+      # glib-sys build script without them. autoconf/automake/
+      # libtool + musl-tools: audiopus_sys's source build of libopus
+      # uses autoreconf and links via musl-gcc.
+      - name: Install Linux build deps
+        if: matrix.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool \
+            musl-tools \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
             libsoup-3.0-dev \
@@ -47,10 +102,20 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev
+      # macOS: autoconf/automake/libtool for audiopus_sys's libopus
+      # source build (needed even though we don't musl on macOS).
+      - name: Install autotools for audiopus_sys (macOS)
+        if: matrix.os == 'macos'
+        run: brew install autoconf automake libtool
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Per-cell cache; suffix changes when the build target does
+          # so musl artifacts don't collide with leftover glibc ones.
+          key: ci-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.target }}
       - uses: extractions/setup-just@v2
       - run: just fmt-check
       - run: just clippy
@@ -60,27 +125,65 @@ jobs:
       # before the link step regardless of profile.
       - run: ./scripts/dev/tw.sh build
       # Pick the build profile based on what RELEASE_BUILD evaluated to
-      # at workflow level. `dist/foyer` is a stable staging path so the
-      # downstream ui-smoke job doesn't need to know which profile ran.
+      # at workflow level, and target musl on Linux for fully-static
+      # binaries (zero .so deps at runtime — no libopus, libc, libgcc).
+      # `dist/foyer` is a stable staging path so the downstream
+      # ui-smoke job doesn't need to know which target/profile ran.
       - name: Build foyer
+        env:
+          # Force `audiopus_sys` to static-link libopus from source.
+          # Two env vars, both required:
+          #   * OPUS_STATIC=1 — flips audiopus_sys's `is_static_build`
+          #     to true (default on Linux-glibc is dynamic).
+          #   * OPUS_NO_PKG=1 — bypasses pkg-config so we don't pick up
+          #     a dynamic system libopus when one happens to be on the
+          #     builder.
+          # On Linux/musl with `+crt-static` even libc/libgcc/libm
+          # disappear from the binary's dyn-link list; on macOS only
+          # libopus is the concern (libSystem.dylib is on every Mac).
+          OPUS_STATIC: "1"
+          OPUS_NO_PKG: "1"
+          # CC: tell audiopus_sys's libopus ./configure (autotools,
+          # reads bare CC env) to use musl-gcc on Linux musl targets.
+          # Without this, the default `cc` picks up glibc's
+          # fortified-source headers (`__memcpy_chk` etc.) which
+          # then can't link against musl's libc → "undefined
+          # reference" errors at the final link step. macOS keeps
+          # the default `cc` (xcrun-resolved clang).
+          # cc-rs (used by other build scripts) reads CC_<TARGET>
+          # before the bare CC, so the per-target keys are
+          # belt-and-braces.
+          CC: ${{ contains(matrix.target, 'linux-musl') && 'musl-gcc' || 'cc' }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          # crt-static makes Linux musl bake the C runtime into the
+          # binary. No-op on Apple targets (Mach-O always links
+          # libSystem dynamically and that's by design).
+          RUSTFLAGS: "-C target-feature=+crt-static -Dwarnings"
         run: |
           mkdir -p dist
           if [ "$RELEASE_BUILD" = "true" ]; then
-            echo "::notice::Building foyer in RELEASE profile (slow on cache miss)"
-            cargo build --release --bin foyer
-            cp target/release/foyer dist/foyer
+            echo "::notice::Building foyer in RELEASE profile for ${{ matrix.target }} (slow on cache miss)"
+            cargo build --release --target "${{ matrix.target }}" --bin foyer
+            cp "target/${{ matrix.target }}/release/foyer" dist/foyer
           else
-            echo "::notice::Building foyer in DEBUG profile (feature-branch fast path)"
-            cargo build --bin foyer
-            cp target/debug/foyer dist/foyer
+            echo "::notice::Building foyer in DEBUG profile for ${{ matrix.target }} (feature-branch fast path)"
+            cargo build --target "${{ matrix.target }}" --bin foyer
+            cp "target/${{ matrix.target }}/debug/foyer" dist/foyer
+          fi
+          echo "==> binary linkage:"
+          file dist/foyer
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            ldd dist/foyer 2>&1 || echo "(static — no dynamic deps)"
+          else
+            otool -L dist/foyer 2>&1 || true
           fi
       - name: Upload foyer binary
         uses: actions/upload-artifact@v4
         with:
-          # Same name regardless of profile so downloads don't have to
-          # branch. Profile is recorded in the workflow run summary's
-          # ::notice:: line above.
-          name: foyer-linux-x86_64
+          # Same name shape as release.yml so the install.sh URL doesn't
+          # change between CI artifacts and tagged releases.
+          name: foyer-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/foyer
           retention-days: 7
           if-no-files-found: error
@@ -89,6 +192,11 @@ jobs:
   # it headless with Playwright. No JACK / Ardour / shim needed; this
   # exercises the three-tier web split (core / ui-core / ui-*) and
   # the Rust server's HTTP + WS surface.
+  #
+  # Single-platform (linux x86_64) intentionally — Playwright tests
+  # the BROWSER (Chromium), not the host OS. The foyer server is just
+  # a subprocess; running smoke 4× across the matrix would burn
+  # minutes for no extra coverage.
   ui-smoke:
     needs: rust
     runs-on: ubuntu-latest
@@ -97,6 +205,10 @@ jobs:
       # No GTK install + no rust toolchain + no rust-cache here on
       # purpose — we don't compile anything, the binary is downloaded
       # below and runs against the system's existing libc + libssl.
+      # The Linux foyer binary is built against musl with +crt-static,
+      # so it's fully self-contained — no apt installs needed for it
+      # to launch. (Playwright still apt-installs Chromium deps below,
+      # which is unrelated.)
       - uses: extractions/setup-just@v2
       - uses: oven-sh/setup-bun@v2
       - name: Download foyer binary
@@ -128,59 +240,137 @@ jobs:
             tests-ui/report
             tests-ui/test-results
           retention-days: 14
+      - name: Upload foyer server log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: foyer-ci-log
+          path: /tmp/foyer-ci.log
+          if-no-files-found: ignore
+          retention-days: 14
 
-  # Build the C++ Ardour shim and publish `libfoyer_shim.so` as an
-  # artifact so reviewers can grab it from the Actions tab without a
-  # full release. Runs in parallel with rust+ui-smoke (independent —
-  # nothing here links Rust). The first run on a fresh cache pays the
-  # ~30 min Ardour build; the cache key includes ARDOUR_TAG so a tag
-  # bump invalidates cleanly. After warmup the slow path skips and the
-  # job is mostly the cmake-build step (~1 min).
+  # Build the C++ Ardour shim per platform and publish each library as
+  # an artifact so reviewers can grab them from the Actions tab without
+  # cutting a release. Mirrors release.yml's matrix shape so a green
+  # ci.yml run gives high confidence the release.yml run for the same
+  # commit will also be green.
+  #
+  # First run on a fresh cache pays the ~30 min Ardour build per cell;
+  # cache keys include ARDOUR_TAG so a tag bump invalidates cleanly.
+  # After warmup the slow path skips and each cell is mostly the
+  # cmake-build step (~1 min).
   shim:
-    runs-on: ubuntu-latest
-    env:
-      ARDOUR_TAG: 9.2.0
+    name: shim (${{ matrix.os }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+            shim_ext: so
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            shim_ext: so
+          - runner: macos-14
+            os: macos
+            arch: arm64
+            shim_ext: dylib
     steps:
       - uses: actions/checkout@v4
-      - name: Install shim + Ardour build deps
+
+      # Resolve ARDOUR_TAG: workflow_dispatch input wins, otherwise
+      # read from `.env` (the project default, committed to the repo).
+      # Setting it here writes to $GITHUB_ENV so subsequent steps —
+      # including the cache key, which is evaluated per-step — see it.
+      - name: Resolve ARDOUR_TAG
+        run: |
+          if [ -n "${{ github.event.inputs.ardour_tag }}" ]; then
+            echo "ARDOUR_TAG=${{ github.event.inputs.ardour_tag }}" >> "$GITHUB_ENV"
+            echo "::notice::ARDOUR_TAG=${{ github.event.inputs.ardour_tag }} (workflow_dispatch override)"
+          elif [ -f .env ]; then
+            grep -E '^ARDOUR_TAG=' .env >> "$GITHUB_ENV"
+            echo "::notice::ARDOUR_TAG sourced from .env"
+          else
+            echo "::error::No ARDOUR_TAG set and no .env file present"
+            exit 1
+          fi
+
+      - name: Install shim + Ardour build deps (Linux)
+        if: matrix.os == 'linux'
         run: |
           sudo apt-get update
+          # Package-name notes for Ubuntu 24.04 (noble):
+          #   * `liblv2-dev` was renamed to `lv2-dev` between 22.04 and 24.04.
+          #   * The versioned `libvamp-hostsdk3v5` / `libvamp-sdk2v5` aren't
+          #     in noble; `vamp-plugin-sdk` covers Ardour's build needs.
+          #   * `rubberband-cli` is the runtime tool — Ardour links the
+          #     library, so we want `librubberband-dev` instead.
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config python3 git curl unzip zip \
+            gettext intltool autoconf automake autotools-dev libtool \
             libgtkmm-2.4-dev libglibmm-2.4-dev libsigc++-2.0-dev libxml2-dev \
             libsndfile1-dev libsamplerate0-dev libfftw3-dev liblo-dev libtag1-dev \
             libreadline-dev liblrdf0-dev liblilv-dev libserd-dev libsord-dev \
             libsratom-dev libcurl4-gnutls-dev libwebsockets-dev libpangomm-1.4-dev \
-            libsuil-dev liblv2-dev rubberband-cli libxext-dev \
-            libcairomm-1.0-dev libusb-1.0-0-dev libudev-dev \
-            libboost-dev libxt-dev libtool autotools-dev autoconf automake \
+            libsuil-dev lv2-dev librubberband-dev libxext-dev \
+            libcairomm-1.0-dev libusb-1.0-0-dev libudev-dev libarchive-dev \
+            libboost-dev libxt-dev \
             libasound2-dev libpulse-dev libjack-jackd2-dev \
-            libvamp-hostsdk3v5 vamp-plugin-sdk libvamp-sdk2v5 \
-            libaubio-dev libcppunit-dev
+            vamp-plugin-sdk libaubio-dev libcppunit-dev
+
+      - name: Install shim + Ardour build deps (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          # autoconf/automake/libtool: needed by Ardour's waf build chain.
+          # libarchive/libogg/flac: required by Ardour wscript pkg-config
+          # checks (libarchive is keg-only on macOS — pkg-config path
+          # surfaced below).
+          brew install cmake pkg-config autoconf automake libtool \
+            glibmm@2.66 libsigc++@2 libxml2 libarchive libogg flac \
+            libsndfile libsamplerate fftw liblo taglib readline lrdf lilv \
+            serd sord sratom suil lv2 rubberband cairomm@1.14 \
+            gtkmm pangomm@2.46 boost aubio cppunit vamp-plugin-sdk
+          # Surface keg-only formulas to pkg-config. Without libarchive
+          # here, Ardour configure fails on the `libarchive >= 3.0.0`
+          # check.
+          {
+            echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix readline)/lib/pkgconfig:$(brew --prefix glibmm@2.66)/lib/pkgconfig:$(brew --prefix libsigc++@2)/lib/pkgconfig:$(brew --prefix cairomm@1.14)/lib/pkgconfig:$(brew --prefix pangomm@2.46)/lib/pkgconfig:$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          } >> "$GITHUB_ENV"
+          {
+            echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix readline)/lib/pkgconfig:$(brew --prefix glibmm@2.66)/lib/pkgconfig:$(brew --prefix libsigc++@2)/lib/pkgconfig:$(brew --prefix cairomm@1.14)/lib/pkgconfig:$(brew --prefix pangomm@2.46)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          } >> "$GITHUB_ENV"
+
       - name: Cache Ardour source + build
         id: cache-ardour
         uses: actions/cache@v4
         with:
           path: ext/ardour
-          key: ardour-linux-x86_64-${{ env.ARDOUR_TAG }}-v1
+          key: ardour-${{ matrix.os }}-${{ matrix.arch }}-${{ env.ARDOUR_TAG }}-v2
+
       - name: Clone Ardour @ ${{ env.ARDOUR_TAG }}
         if: steps.cache-ardour.outputs.cache-hit != 'true'
         run: ./scripts/dev/ardour.sh clone
+
       - name: Build Ardour (slow on cache miss, ~30 min)
         if: steps.cache-ardour.outputs.cache-hit != 'true'
         run: |
           ./scripts/dev/ardour.sh configure
           ./scripts/dev/ardour.sh build
+
       - name: Build shim
         run: |
           cmake -S shims/ardour -B shims/ardour/cmake-build \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DFOYER_ARDOUR_SOURCE="$PWD/ext/ardour"
           cmake --build shims/ardour/cmake-build -j
+
       - name: Upload shim
         uses: actions/upload-artifact@v4
         with:
-          name: foyer-shim-linux-x86_64
-          path: shims/ardour/cmake-build/libfoyer_shim.so
+          name: foyer-shim-${{ matrix.os }}-${{ matrix.arch }}
+          path: shims/ardour/cmake-build/libfoyer_shim.${{ matrix.shim_ext }}
           retention-days: 7
           if-no-files-found: error

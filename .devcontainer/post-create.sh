@@ -12,19 +12,39 @@ git config --global --add safe.directory /workspaces/ardour
 #######################
 # Ardour source tree
 #######################
+# Default Ardour ref for shim ABI compatibility — same default as
+# scripts/dev/ardour.sh and the CI workflows. To track a different
+# version, set ARDOUR_TAG in your environment (e.g. .bashrc) and rerun
+# `just ardour ensure`.
+ARDOUR_TAG="${ARDOUR_TAG:-9.2}"
 ARDOUR_REPO_EXT="/workspaces/foyer-studio/ext/ardour"
 ARDOUR_LEGACY_SIBLING="/workspaces/ardour"
+
+ardour_ref_check() {
+    local dir="$1"
+    local current
+    current="$(git -C "$dir" describe --tags --always 2>/dev/null || echo unknown)"
+    if [ "$current" = "$ARDOUR_TAG" ]; then
+        echo "✅ ardour detected at $dir (on $ARDOUR_TAG)"
+    else
+        echo "⚠️  ardour detected at $dir but on '$current' (target: $ARDOUR_TAG)"
+        echo "   Switch with:  ARDOUR_TAG=$ARDOUR_TAG just ardour ensure"
+        echo "   Or pick a different ref:  ARDOUR_TAG=<tag|branch|sha> just ardour ensure"
+    fi
+}
+
 if [ -d "$ARDOUR_REPO_EXT/.git" ]; then
-    echo "✅ ardour detected at $ARDOUR_REPO_EXT (in-repo ext/)"
+    ardour_ref_check "$ARDOUR_REPO_EXT"
 elif [ -d "$ARDOUR_LEGACY_SIBLING/.git" ]; then
-    echo "✅ ardour detected at $ARDOUR_LEGACY_SIBLING (legacy sibling layout)"
+    ardour_ref_check "$ARDOUR_LEGACY_SIBLING"
     echo "   (to migrate: mv $ARDOUR_LEGACY_SIBLING $ARDOUR_REPO_EXT — optional)"
 else
     echo "⚠️  ardour source not found — shim builds will fail until you run:"
     echo ""
-    echo "     just ardour clone"
-    echo "     just ardour build    # slow, one-time"
+    echo "     just ardour clone     # fetches Ardour @ $ARDOUR_TAG"
+    echo "     just ardour build     # slow, one-time"
     echo ""
+    echo "Override the ref:  ARDOUR_TAG=<tag|branch|sha> just ardour clone"
     echo "Continuing — stub-backend development (just run) works without ardour."
 fi
 

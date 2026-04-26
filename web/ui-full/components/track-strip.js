@@ -192,7 +192,7 @@ export class TrackStrip extends LitElement {
     super();
     this.track = null;
     this.density = null;
-    this.widthMode = "relative";
+    this.widthMode = "fill";
     this.overrideWidth = null;
     this._gainCtl = null;
     this._muteCtl = null;
@@ -289,7 +289,7 @@ export class TrackStrip extends LitElement {
       this.style.minWidth = `${this.overrideWidth}px`;
       return;
     }
-    if (this.widthMode === "absolute") {
+    if (this.widthMode === "fixed") {
       this.style.flex = "0 0 auto";
       this.style.width = `${d.trackWidth}px`;
       this.style.minWidth = `${d.trackWidth}px`;

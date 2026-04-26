@@ -86,7 +86,7 @@ fn synthesize_for(track_id: &EntityId) -> Vec<Region> {
             id: EntityId::new(format!("region.{slug}.{i}")),
             track_id: track_id.clone(),
             name: format!("{slug} {}", i + 1),
-            start_samples: start,
+            start_samples: start as i64,
             length_samples: dur,
             color: None,
             muted: false,

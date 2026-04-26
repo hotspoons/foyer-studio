@@ -557,7 +557,11 @@ describe_region (const Region& r, const std::string& track_id)
 	d.id              = "region." + region_pbd_id_string (r);
 	d.track_id        = track_id;
 	d.name            = r.name ();
-	d.start_samples   = static_cast<std::uint64_t> (std::max<samplepos_t> (r.position_sample (), 0));
+	// Signed: Ardour's `position_sample()` can return a negative
+	// value when the region has been dragged before the timeline's
+	// zero mark (a standard pre-roll workflow). Emit verbatim so
+	// the wire format preserves the sign.
+	d.start_samples   = static_cast<std::int64_t> (r.position_sample ());
 	d.length_samples  = static_cast<std::uint64_t> (std::max<samplecnt_t> (r.length_samples (), 0));
 	d.muted           = r.muted ();
 	d.color           = ""; // PresentationInfo color would go here — deferred.

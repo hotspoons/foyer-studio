@@ -5,9 +5,11 @@
 //      reopen via `launch_project`.
 //   2. Browse projects… — opens the project picker modal for ad-hoc
 //      project discovery under the sidecar's jail.
-//   3. New session… — not yet wired (lacks a "create-blank-project"
-//      command); renders as disabled with a tooltip explaining. Slot is
-//      in place so that landing patch is a one-file edit.
+//   3. New session… — opens the project picker in "new" mode (same
+//      flow as File → New Session in the main menu); the picker
+//      routes the chosen path through `launch_project`, and the
+//      foyer-cli launcher bootstraps the on-disk .ardour file via
+//      `ardour9-new_empty_session` before exec'ing hardour.
 //
 // Also renders any orphans from `store.state.orphans` as a banner at
 // the top — the user can reattach (stub for now), reopen (same as
@@ -338,12 +340,15 @@ export class WelcomeScreen extends LitElement {
   }
 
   _newSession() {
-    // Create-new-project has no backend command yet. The "new MIDI
-    // track" track.add_midi action ships an empty session via the
-    // stub-backend path, but creating a fresh on-disk .ardour file
-    // needs a Session::new() call in the shim that we haven't wired.
-    // For now show a tooltip via the [disabled] attribute; the CTA
-    // slot stays so the landing patch is a one-file change.
+    // Same picker the main menu uses for File → New Session; the
+    // "new" mode reuses the project-picker UI but routes a chosen
+    // path through `launch_project` with the bootstrap-empty-session
+    // path in foyer-cli's launcher. Lazy-import so the picker bundle
+    // isn't on the welcome-screen first-paint critical path.
+    import("./project-picker-modal.js").then((m) => {
+      if (typeof m.showProjectPicker === "function") m.showProjectPicker("new");
+      else window.dispatchEvent(new CustomEvent("foyer:open-project-picker", { detail: { mode: "new" } }));
+    });
   }
 
   _reattachGroup(group) {
@@ -518,7 +523,7 @@ export class WelcomeScreen extends LitElement {
               <div class="desc">Navigate the sidecar's project directory to find an Ardour session.</div>
             </div>
           </button>
-          <button class="cta" disabled title="Coming soon — needs a Session::new() command in the shim.">
+          <button class="cta" @click=${() => this._newSession()}>
             <span class="icon">${icon("plus-circle", 18)}</span>
             <div>
               <div class="title">New session…</div>
