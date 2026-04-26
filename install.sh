@@ -10,6 +10,10 @@ set -euo pipefail
 # successful main-branch CI artifacts via nightly.link, no GitHub auth):
 #   curl -fsSL https://raw.githubusercontent.com/hotspoons/foyer-studio/main/install.sh | bash -s -- --latest-ci
 #
+# Usage (latest CI build, no release needed — grabs the most recent
+# successful main-branch CI artifacts via nightly.link, no GitHub auth):
+#   curl -fsSL https://raw.githubusercontent.com/foyer-studio/foyer-studio/main/install.sh | bash -s -- --latest-ci
+#
 # Usage (explicit):
 #   ./install.sh install                       # latest release
 #   ./install.sh install --version v0.1.0
