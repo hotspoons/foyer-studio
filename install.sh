@@ -4,11 +4,11 @@ set -euo pipefail
 # Foyer Studio one-shot installer.
 #
 # Usage (network install):
-#   curl -fsSL https://github.com/foyer-studio/foyer-studio/releases/latest/download/install.sh | bash
+#   curl -fsSL https://github.com/hotspoons/foyer-studio/releases/latest/download/install.sh | bash
 #
 # Usage (latest CI build, no release needed — grabs the most recent
 # successful main-branch CI artifacts via nightly.link, no GitHub auth):
-#   curl -fsSL https://raw.githubusercontent.com/foyer-studio/foyer-studio/main/install.sh | bash -s -- --latest-ci
+#   curl -fsSL https://raw.githubusercontent.com/hotspoons/foyer-studio/main/install.sh | bash -s -- --latest-ci
 #
 # Usage (explicit):
 #   ./install.sh install                       # latest release
@@ -19,7 +19,7 @@ set -euo pipefail
 #   ./install.sh uninstall --purge             # also wipe ~/.local/share/foyer/
 #
 # Env overrides:
-#   FOYER_RELEASE_REPO  owner/repo to fetch from (default: foyer-studio/foyer-studio)
+#   FOYER_RELEASE_REPO  owner/repo to fetch from (default: hotspoons/foyer-studio)
 #   FOYER_PREFIX        install root (default: $XDG_DATA_HOME/foyer or ~/.local/share/foyer)
 #   FOYER_CI_BRANCH     branch to pull --latest-ci artifacts from (default: main)
 #   FOYER_NO_PATH_EDIT  set to 1 to skip touching shell rc files
@@ -36,7 +36,7 @@ set -euo pipefail
 #   4. Adds $FOYER_PREFIX/bin to PATH in ~/.bashrc / ~/.zshrc / ~/.profile
 #      (idempotent — sentinel-marked, removed on uninstall).
 
-REPO="${FOYER_RELEASE_REPO:-foyer-studio/foyer-studio}"
+REPO="${FOYER_RELEASE_REPO:-hotspoons/foyer-studio}"
 PREFIX="${FOYER_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/foyer}"
 BIN_DIR="$PREFIX/bin"
 PATH_SENTINEL="# foyer-studio installer (managed)"
@@ -48,7 +48,9 @@ SHIM_EXT=""
 SURFACES_DIR=""
 
 die() { echo "install.sh: $*" >&2; exit 1; }
-note() { echo "==> $*"; }
+# Stderr so callers using $(download_and_extract_ci ...) don't capture
+# progress chatter into the returned bundle path.
+note() { echo "==> $*" >&2; }
 
 usage() {
     cat <<EOF
