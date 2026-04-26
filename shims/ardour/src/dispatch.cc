@@ -284,7 +284,7 @@ struct DecodedCmd
 
 	// RegionPatch fields — only read for UpdateRegion. All optional.
 	bool          has_patch_start   = false;
-	std::uint64_t patch_start       = 0;
+	std::int64_t  patch_start       = 0;
 	bool          has_patch_length  = false;
 	std::uint64_t patch_length      = 0;
 	bool          has_patch_name    = false;
@@ -787,7 +787,9 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 		std::string pk;
 		if (!in.read_str (pk)) return false;
 		if (pk == "start_samples") {
-			if (!in.read_u64 (out.patch_start)) return false;
+			// Signed wire format — region positions can be negative
+			// when the user has dragged the lozenge before zero.
+			if (!read_i64 (in, out.patch_start)) return false;
 			out.has_patch_start = true;
 		} else if (pk == "length_samples") {
 			if (!in.read_u64 (out.patch_length)) return false;
@@ -1348,7 +1350,14 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				std::shared_ptr<ARDOUR::AutomationList> alist = ac ? ac->alist () : nullptr;
 				XMLNode* before = alist ? &alist->get_state () : nullptr;
 				session.begin_reversible_command ("Foyer control change");
-				ctrl->set_value (snap.value, Controllable::UseGroup);
+				// Wire pan format is [-1, 1]; Ardour's
+				// pan_azimuth_control wants [0, 1]. Convert
+				// before set_value (no-op for non-pan ids).
+				double write_value = snap.value;
+				if (schema_map::is_pan_id (snap.id)) {
+					write_value = schema_map::pan_wire_to_ardour (write_value);
+				}
+				ctrl->set_value (write_value, Controllable::UseGroup);
 				if (alist && before) {
 					session.add_command (new MementoCommand<ARDOUR::AutomationList> (
 					    *alist, before, &alist->get_state ()));

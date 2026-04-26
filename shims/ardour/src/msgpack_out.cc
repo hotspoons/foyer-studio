@@ -308,6 +308,11 @@ encode_control_update (Session& session, const Controllable& c)
 	std::string id = schema_map::id_for_controllable (session, c);
 	if (id.empty ()) return {};
 	double val = c.get_value ();
+	// Ardour's pan_azimuth_control is [0, 1]; the wire / UI use
+	// [-1, 1]. See schema_map::pan_ardour_to_wire.
+	if (schema_map::is_pan_id (id)) {
+		val = schema_map::pan_ardour_to_wire (val);
+	}
 
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
@@ -702,7 +707,8 @@ encode_session_snapshot (Session& session,
 			if (it != route_by_id.end ()) {
 				auto const& r = it->second;
 				if (auto gc = r->gain_control ())          gain_v = gc->get_value ();
-				if (auto pc = r->pan_azimuth_control ())   pan_v  = pc->get_value ();
+				if (auto pc = r->pan_azimuth_control ())
+					pan_v = schema_map::pan_ardour_to_wire (pc->get_value ());
 				if (auto mc = r->mute_control ())          mute_v = mc->get_value () >= 0.5;
 				if (auto sc = r->solo_control ())          solo_v = sc->get_value () >= 0.5;
 			}
@@ -1018,7 +1024,7 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	o.str ("id");             o.str (r.id);
 	o.str ("track_id");       o.str (r.track_id);
 	o.str ("name");           o.str (r.name);
-	o.str ("start_samples");  o.u (r.start_samples);
+	o.str ("start_samples");  o.i (r.start_samples);
 	o.str ("length_samples"); o.u (r.length_samples);
 	if (emit_color)       { o.str ("color"); o.str (r.color); }
 	o.str ("muted"); o.b (r.muted);
@@ -1408,7 +1414,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 		// Values echo the snapshot shape; the client overwrites them from
 		// ControlUpdate events, so exact numerical accuracy isn't required.
 		o.str ("gain"); emit_named_param (o, matched.self_id + ".gain", "Gain", "continuous", false, route->gain_control () ? route->gain_control ()->get_value () : 0.0, false);
-		o.str ("pan");  emit_named_param (o, matched.self_id + ".pan",  "Pan",  "continuous", false, route->pan_azimuth_control () ? route->pan_azimuth_control ()->get_value () : 0.0, false);
+		o.str ("pan");  emit_named_param (o, matched.self_id + ".pan",  "Pan",  "continuous", false, route->pan_azimuth_control () ? schema_map::pan_ardour_to_wire (route->pan_azimuth_control ()->get_value ()) : 0.0, false);
 		o.str ("mute"); emit_named_param (o, matched.self_id + ".mute", "Mute", "trigger", true, 0.0, route->mute_control () && route->mute_control ()->get_value () >= 0.5);
 		o.str ("solo"); emit_named_param (o, matched.self_id + ".solo", "Solo", "trigger", true, 0.0, route->solo_control () && route->solo_control ()->get_value () >= 0.5);
 		// Must match the snapshot's peak_meter id so the client's

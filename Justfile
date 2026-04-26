@@ -46,6 +46,31 @@ run *args='': prep
         "${overlay_args[@]}" \
         {{args}}
 
+# Run the binary the way an end user does: without `--web-root`, so
+# foyer extracts its bundled web/ to `$XDG_DATA_HOME/foyer/web/` on
+# first boot and serves from there. `prep` already nukes any existing
+# extract via `scripts/dev/nuke-web-install.sh`, so each `just
+# run-static` cycle re-bakes the bundle and re-extracts cleanly —
+# ideal for testing JS changes through the actual ship-path
+# (include_dir! → extract → serve) before cutting a static binary.
+#
+# Why this exists separate from `just run`: `just run` deliberately
+# bypasses extract via `--web-root web` so dev iteration is
+# immediate. `just run-static` exercises the path real users hit
+# (and where stale extracts have bitten before — the bundled tree
+# is hackable per web/HACKING.md and edits survive restarts, which
+# is great for users but means a freshly-rebuilt binary doesn't
+# automatically refresh someone else's hacked copy).
+#
+# `FOYER_BUNDLE_WATCH_DEBUG=1`: debug builds normally use an empty
+# stub tree for `include_dir!` so JS edits don't trigger a 20 s
+# rebuild every iteration (see build.rs). This recipe opts back in
+# so the bundled tree is actually populated. First build after
+# enabling is slower; subsequent builds are incremental.
+run-static *args='': prep
+    FOYER_BUNDLE_WATCH_DEBUG=1 cargo build --bin foyer
+    ./target/debug/foyer serve --listen 0.0.0.0:3838 {{args}}
+
 run-tls *args='': prep
     #!/usr/bin/env bash
     tls_dir="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/tls"

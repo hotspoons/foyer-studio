@@ -260,7 +260,7 @@ struct RegionDesc {
 	std::string   id;                     ///< "region.<region-pbd-id>"
 	std::string   track_id;               ///< "track.<stripable-id>"
 	std::string   name;
-	std::uint64_t start_samples   = 0;    ///< position on the timeline
+	std::int64_t  start_samples   = 0;    ///< position on the timeline (signed; can be negative when the region is dragged before zero)
 	std::uint64_t length_samples  = 0;
 	std::string   color;                  ///< "#rrggbb" or ""
 	bool          muted           = false;
@@ -317,6 +317,22 @@ std::shared_ptr<PBD::Controllable> resolve_automation_control (ARDOUR::Session&,
 /// Recover the track id (`track.<pbd>`) from a control id. Used to
 /// re-emit `track_updated` after automation edits.
 std::string track_id_for_control (ARDOUR::Session&, const std::string& control_id);
+
+/// Pan range conversion. Ardour's `pan_azimuth_control` uses
+/// [0.0, 1.0] (0 = full left, 0.5 = center, 1 = full right) but
+/// foyer's wire format and UI sliders use [-1.0, 1.0] (-1 = full
+/// left, 0 = center, 1 = full right). Apply these helpers at every
+/// shim emit/write site so the wire format is consistent.
+inline double pan_ardour_to_wire (double v) { return v * 2.0 - 1.0; }
+inline double pan_wire_to_ardour (double v) { return (v + 1.0) * 0.5; }
+
+/// Whether a control id refers to a track pan control. Pan ids
+/// match `track.<pbd-id>.pan` and need the [-1, 1] ↔ [0, 1]
+/// conversion; nothing else does.
+inline bool is_pan_id (const std::string& id) {
+    return id.size () >= 4
+        && id.compare (id.size () - 4, 4, ".pan") == 0;
+}
 
 } // namespace ArdourSurface::schema_map
 

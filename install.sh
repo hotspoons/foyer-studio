@@ -6,9 +6,14 @@ set -euo pipefail
 # Usage (network install):
 #   curl -fsSL https://github.com/foyer-studio/foyer-studio/releases/latest/download/install.sh | bash
 #
+# Usage (latest CI build, no release needed — grabs the most recent
+# successful main-branch CI artifacts via nightly.link, no GitHub auth):
+#   curl -fsSL https://raw.githubusercontent.com/foyer-studio/foyer-studio/main/install.sh | bash -s -- --latest-ci
+#
 # Usage (explicit):
 #   ./install.sh install                       # latest release
 #   ./install.sh install --version v0.1.0
+#   ./install.sh install --latest-ci           # latest passing CI build
 #   ./install.sh install --from-bundle ./dir   # use an extracted zip
 #   ./install.sh uninstall                     # remove binary + shim
 #   ./install.sh uninstall --purge             # also wipe ~/.local/share/foyer/
@@ -16,6 +21,7 @@ set -euo pipefail
 # Env overrides:
 #   FOYER_RELEASE_REPO  owner/repo to fetch from (default: foyer-studio/foyer-studio)
 #   FOYER_PREFIX        install root (default: $XDG_DATA_HOME/foyer or ~/.local/share/foyer)
+#   FOYER_CI_BRANCH     branch to pull --latest-ci artifacts from (default: main)
 #   FOYER_NO_PATH_EDIT  set to 1 to skip touching shell rc files
 #
 # What it does:
@@ -34,6 +40,7 @@ REPO="${FOYER_RELEASE_REPO:-foyer-studio/foyer-studio}"
 PREFIX="${FOYER_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/foyer}"
 BIN_DIR="$PREFIX/bin"
 PATH_SENTINEL="# foyer-studio installer (managed)"
+CI_BRANCH="${FOYER_CI_BRANCH:-main}"
 
 OS=""
 ARCH=""
@@ -48,8 +55,11 @@ usage() {
 foyer installer
 
 Commands:
-  install [--version vX.Y.Z] [--from-bundle DIR]
+  install [--version vX.Y.Z] [--latest-ci] [--from-bundle DIR]
                                   Fetch + install foyer + shim.
+                                  --latest-ci pulls the most recent passing
+                                  CI build from nightly.link instead of a
+                                  tagged release (no GitHub auth needed).
   uninstall [--purge]             Remove foyer + shim. --purge wipes
                                   $PREFIX entirely.
   help                            Show this help.
@@ -57,6 +67,7 @@ Commands:
 Env:
   FOYER_RELEASE_REPO  owner/repo (default: $REPO)
   FOYER_PREFIX        install root (default: $PREFIX)
+  FOYER_CI_BRANCH     branch for --latest-ci (default: $CI_BRANCH)
   FOYER_NO_PATH_EDIT  set 1 to skip shell rc edits
 EOF
 }
@@ -113,6 +124,44 @@ download_and_extract() {
     extracted="$(find "$workdir" -mindepth 1 -maxdepth 1 -type d -name "foyer-*" | head -n1)"
     [ -n "$extracted" ] || die "extracted bundle directory not found"
     echo "$extracted"
+}
+
+# Pull the foyer binary + shim from the most recent successful ci.yml run on
+# $CI_BRANCH via nightly.link, which proxies GitHub Actions artifacts behind
+# auth-free URLs. The two CI artifacts are uploaded as separate files (not a
+# combined bundle like the release), so we download both and lay them out to
+# match the release-bundle shape that install_files expects.
+download_and_extract_ci() {
+    local workdir="$1"
+    require_cmd curl
+    require_cmd unzip
+
+    local base="https://nightly.link/$REPO/workflows/ci/$CI_BRANCH"
+    local bin_url="$base/foyer-$OS-$ARCH.zip"
+    local shim_url="$base/foyer-shim-$OS-$ARCH.zip"
+    local bin_zip="$workdir/foyer-bin.zip"
+    local shim_zip="$workdir/foyer-shim.zip"
+    local bundle="$workdir/foyer-$OS-$ARCH"
+    mkdir -p "$bundle"
+
+    note "fetching $bin_url"
+    if ! curl -fL --retry 3 -o "$bin_zip" "$bin_url"; then
+        die "download failed (URL: $bin_url) — no successful run on '$CI_BRANCH'?"
+    fi
+    note "fetching $shim_url"
+    if ! curl -fL --retry 3 -o "$shim_zip" "$shim_url"; then
+        die "download failed (URL: $shim_url) — no successful run on '$CI_BRANCH'?"
+    fi
+
+    # Each CI artifact zip wraps a single file at the root.
+    ( cd "$bundle" && unzip -qo "$bin_zip" && unzip -qo "$shim_zip" )
+    [ -f "$bundle/foyer" ] \
+        || die "CI bundle missing foyer binary (from $bin_url)"
+    [ -f "$bundle/libfoyer_shim.$SHIM_EXT" ] \
+        || die "CI bundle missing shim (from $shim_url)"
+    # GitHub Actions artifact uploads strip the executable bit.
+    chmod +x "$bundle/foyer"
+    echo "$bundle"
 }
 
 install_files() {
@@ -198,26 +247,42 @@ remove_from_path() {
 do_install() {
     local version="latest"
     local from_bundle=""
+    local latest_ci=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --version)    version="$2"; shift 2 ;;
             --version=*)  version="${1#*=}"; shift ;;
             --from-bundle) from_bundle="$2"; shift 2 ;;
             --from-bundle=*) from_bundle="${1#*=}"; shift ;;
+            --latest-ci)  latest_ci=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) die "unknown install argument: $1" ;;
         esac
     done
 
+    if [ "$latest_ci" = 1 ] && [ -n "$from_bundle" ]; then
+        die "--latest-ci and --from-bundle are mutually exclusive"
+    fi
+    if [ "$latest_ci" = 1 ] && [ "$version" != "latest" ]; then
+        die "--latest-ci and --version are mutually exclusive"
+    fi
+
     detect_target
     note "target: $OS/$ARCH"
     note "prefix: $PREFIX"
     note "ardour surfaces: $SURFACES_DIR"
+    [ "$latest_ci" = 1 ] && note "source: latest passing CI on $CI_BRANCH (via nightly.link)"
 
     local workdir source_dir cleanup_workdir=0
     if [ -n "$from_bundle" ]; then
         [ -d "$from_bundle" ] || die "--from-bundle path not a directory: $from_bundle"
         source_dir="$from_bundle"
+    elif [ "$latest_ci" = 1 ]; then
+        workdir="$(mktemp -d)"
+        cleanup_workdir=1
+        # shellcheck disable=SC2064
+        trap "rm -rf '$workdir'" EXIT
+        source_dir="$(download_and_extract_ci "$workdir")"
     else
         workdir="$(mktemp -d)"
         cleanup_workdir=1
@@ -288,8 +353,16 @@ do_uninstall() {
 }
 
 main() {
-    local cmd="${1:-install}"
-    [ $# -gt 0 ] && shift || true
+    # Accept either an explicit subcommand or a bare flag (in which case
+    # we default to `install` so `bash -s -- --latest-ci` works straight
+    # out of a curl pipe).
+    local cmd="install"
+    if [ $# -gt 0 ]; then
+        case "$1" in
+            install|uninstall|help|-h|--help)
+                cmd="$1"; shift ;;
+        esac
+    fi
     case "$cmd" in
         install)        do_install "$@" ;;
         uninstall)      do_uninstall "$@" ;;

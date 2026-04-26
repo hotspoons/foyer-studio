@@ -35,8 +35,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sudo \
       vim \
       less \
-      # bun's installer unpacks a zip into BUN_INSTALL
+      # bun's installer unpacks a zip into BUN_INSTALL.
+      # `zip` is needed by `just release-bundle` to package the
+      # platform-specific foyer-<os>-<arch>.zip artifacts.
       unzip \
+      zip \
+      # musl-tools provides musl-gcc — used by `just release-bundle`
+      # to produce fully-static Linux binaries (matching what CI
+      # ships).
+      musl-tools \
       python3 \
       python3-pip \
       libssl-dev \

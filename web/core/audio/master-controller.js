@@ -75,8 +75,19 @@ class AudioController extends EventTarget {
   /// Decide based on tunnel status + saved preference whether to
   /// start the listener now. `isLocal` may be null when called
   /// before the greeting; we then bail unless a saved pref exists.
+  ///
+  /// Deferral: we DON'T call start() directly. Chrome's autoplay
+  /// policy refuses to actually un-suspend an AudioContext created
+  /// outside a user-gesture call stack (page load doesn't count),
+  /// and even though the rest of the listener pipeline can spin up
+  /// against a suspended context, you get the console warning and
+  /// the UI shows "playing" while no audio comes out — confusing.
+  /// Instead, install a one-shot gesture hook; the very first click
+  /// or keypress on the page triggers the real `start()`, where the
+  /// AudioContext is born inside the gesture stack and never has to
+  /// be un-suspended. No-op if no auto-on pref applies.
   _applyPref(isLocal) {
-    if (this._on || this._starting) return;
+    if (this._on || this._starting || this._gestureHandler) return;
     const rbac = this._store?.state?.rbac;
     const isTunnel = !!rbac?.isTunnel;
     let wantOn;
@@ -90,7 +101,27 @@ class AudioController extends EventTarget {
       else if (isLocal === null) return;
       else wantOn = !isLocal;
     }
-    if (wantOn) this.start({ silent: true }).catch(() => {});
+    if (wantOn) this._scheduleAutoStart();
+  }
+
+  /// Wait for the next user gesture, then call start({ silent: true }).
+  /// Idempotent; only one set of listeners is registered at a time.
+  _scheduleAutoStart() {
+    if (this._gestureHandler) return;
+    const onGesture = () => {
+      window.removeEventListener("pointerdown", onGesture, true);
+      window.removeEventListener("keydown", onGesture, true);
+      this._gestureHandler = null;
+      // Don't re-schedule if start() throws — the user can still
+      // toggle Listen on manually and that's a fresh gesture.
+      this.start({ silent: true }).catch(() => {});
+    };
+    this._gestureHandler = onGesture;
+    // Capture phase + window so we run before any in-app handler can
+    // stopPropagation away. `pointerdown` covers mouse + touch +
+    // pen; `keydown` covers keyboard-only navigation.
+    window.addEventListener("pointerdown", onGesture, true);
+    window.addEventListener("keydown", onGesture, true);
   }
 
   isOn() { return this._on; }
@@ -137,14 +168,72 @@ class AudioController extends EventTarget {
     this._emitChange();
   }
 
+  /// Listen button click handler. This is the ONE blessed user-gesture
+  /// entry point for the audio pipeline — every code path through here
+  /// runs inside the click's synchronous call stack until the first
+  /// `await`, which is exactly the window the browser's autoplay policy
+  /// gives us to prime an AudioContext.
+  ///
+  /// Behavior matrix:
+  ///   * `_on=false`              → start fresh (gesture credit available)
+  ///   * `_on=true`, ctx running  → stop (true toggle off)
+  ///   * `_on=true`, ctx suspended → try resume in this gesture stack;
+  ///                                 if still suspended, do a clean
+  ///                                 stop + start. Recovery path for
+  ///                                 the "auto-start fired before any
+  ///                                 gesture and got blocked" case.
+  ///   * `_on=true`, ctx missing   → state is desynced; restart.
   async toggle() {
-    if (this._on) return this.stop();
+    // Whatever this click is, the user is now manually steering the
+    // audio. Drop any pending deferred-start gesture handler so we
+    // don't double-fire later on some unrelated click.
+    this._clearGestureHandler();
+
+    if (!this._on) {
+      return this.start();
+    }
+
+    const ctx = this._listener?.ctx;
+    const state = ctx?.state ?? "(no ctx)";
+    if (state === "running") {
+      return this.stop();
+    }
+    console.info(`[audio-controller] Listen click: _on=true but ctx state=${state} — attempting recovery`);
+    if (ctx && state === "suspended") {
+      // ctx.resume() inside this click stack should succeed — Chrome
+      // grants gesture credit for click events. If it really refuses
+      // (extension interference, bizarre browser state), fall through
+      // to the full restart below.
+      try {
+        await ctx.resume();
+      } catch (e) {
+        console.warn("[audio-controller] resume during toggle failed:", e);
+      }
+      if (this._listener?.ctx?.state === "running") {
+        this._emitChange();
+        return;
+      }
+    }
+    // Stale state — tear down and start fresh inside this gesture.
+    await this.stop({ silent: true });
     return this.start();
+  }
+
+  _clearGestureHandler() {
+    if (!this._gestureHandler) return;
+    window.removeEventListener("pointerdown", this._gestureHandler, true);
+    window.removeEventListener("keydown", this._gestureHandler, true);
+    this._gestureHandler = null;
   }
 
   _teardown() {
     try { this._listener?.stop(); } catch {}
     this._listener = null;
+    if (this._gestureHandler) {
+      window.removeEventListener("pointerdown", this._gestureHandler, true);
+      window.removeEventListener("keydown", this._gestureHandler, true);
+      this._gestureHandler = null;
+    }
   }
 
   _emitChange() {

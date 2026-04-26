@@ -2,10 +2,14 @@
 // that the mixer + track-strip components read; pure data, no DOM.
 //
 // Width-lock mode:
-//   "relative": strips flex to fill the mixer's container (width scales)
-//   "absolute": every strip is exactly `trackWidth` px; mixer horizontally
+//   "fill": strips flex to fill the mixer's container (width scales as
+//   the window / sidebar resizes).
+//   "fixed": every strip is exactly `trackWidth` px; mixer horizontally
 //   scrolls if it overflows. Matches the "hold widths through resize"
 //   workflow pro mixers want on bigger consoles.
+//
+// Old persisted values: "relative" / "absolute" are migrated to
+// "fill" / "fixed" on load. See `loadMixerSettings` below.
 
 export const DENSITIES = {
   wide: {
@@ -61,15 +65,30 @@ const KEY = "foyer.mixer.v1";
 
 export const DEFAULT_SETTINGS = Object.freeze({
   density: "normal",
-  widthMode: "relative", // "relative" | "absolute"
-  /** per-track-id absolute width override (only honored when widthMode=absolute). */
+  // Default to "fixed": every strip is exactly its density's
+  // trackWidth, mixer horizontally scrolls if it overflows. Matches
+  // the workflow pro mixers want — strips stay stable across resize
+  // instead of squishing as the window or sidebar changes width.
+  // Switch to "fill" for fill-the-container behavior.
+  widthMode: "fixed", // "fill" | "fixed"
+  /** per-track-id pixel width override (only honored when widthMode=fixed). */
   widthOverrides: {},
 });
+
+/// Map legacy widthMode values to the current names. Anyone with a
+/// saved `relative` / `absolute` setting from before the rename gets
+/// silently upgraded next load — no flash of the wrong layout.
+function migrateWidthMode(s) {
+  if (s?.widthMode === "relative") s.widthMode = "fill";
+  else if (s?.widthMode === "absolute") s.widthMode = "fixed";
+  return s;
+}
 
 export function loadMixerSettings() {
   try {
     const raw = localStorage.getItem(KEY);
-    return { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
+    const merged = { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
+    return migrateWidthMode(merged);
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
