@@ -146,6 +146,7 @@ install_files() {
             xattr -dr com.apple.quarantine "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT" 2>/dev/null || true
         fi
     fi
+
 }
 
 # Idempotently append a PATH export to whichever shell rc files exist.

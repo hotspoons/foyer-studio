@@ -49,19 +49,26 @@ jobs:
         # GitHub retired the Intel `macos-13` runner. macOS is arm64
         # only here — Intel Macs need to build from source until/if we
         # produce a universal2 lipo'd binary. Linux covers both archs.
+        # `target`: build target for the foyer Rust binary. Linux
+        # ships musl/+crt-static (fully self-contained, no .so deps);
+        # macOS uses the standard Apple target (links libSystem like
+        # every Mac binary, libopus is static-linked via OPUS_STATIC).
         include:
           - runner: ubuntu-24.04
             os_label: linux
             arch: x86_64
             with_shim: true
+            target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             os_label: linux
             arch: arm64
             with_shim: true
+            target: aarch64-unknown-linux-musl
           - runner: macos-14
             os_label: macos
             arch: arm64
             with_shim: true
+            target: aarch64-apple-darwin
     env:
       ASSET_NAME: foyer-${{ matrix.os_label }}-${{ matrix.arch }}.zip
     steps:
@@ -100,6 +107,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config python3 python3-pip git curl unzip zip \
             gettext intltool autoconf automake autotools-dev libtool \
+            musl-tools \
             libgtkmm-2.4-dev libglibmm-2.4-dev libsigc++-2.0-dev libxml2-dev \
             libsndfile1-dev libsamplerate0-dev libfftw3-dev liblo-dev libtag1-dev \
             libreadline-dev liblrdf0-dev liblilv-dev libserd-dev libsord-dev \
@@ -136,11 +144,14 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      # `target/` cache, separate per matrix cell.
+      # `target/` cache, separate per matrix cell + target so musl
+      # artifacts don't collide with leftover glibc ones.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.os_label }}-${{ matrix.arch }}
+          key: release-${{ matrix.os_label }}-${{ matrix.arch }}-${{ matrix.target }}
 
       # Ardour clone + build dir cache. Key includes the tag so a tag
       # bump invalidates cleanly. Restoring this is the difference
@@ -170,16 +181,31 @@ jobs:
 
       - name: Build foyer (release)
         env:
-          # Force `audiopus_sys` to statically link libopus from source
-          # so the released binary doesn't depend on a system
-          # `libopus.so.0` at runtime (end users shouldn't have to
-          # apt-get / brew-install opus to run install.sh's output).
-          # OPUS_STATIC flips the static/dynamic decision, OPUS_NO_PKG
-          # bypasses pkg-config so a system libopus on the builder
-          # doesn't sneak back in. See ci.yml's matching note.
+          # Static-link libopus from source via audiopus_sys (see
+          # ci.yml's matching note for why both vars are required).
           OPUS_STATIC: "1"
           OPUS_NO_PKG: "1"
-        run: cargo build --release --bin foyer
+          # CC: audiopus_sys's libopus ./configure (autotools) reads
+          # the bare CC env. Use musl-gcc on Linux musl targets so
+          # the libopus .o files don't reference glibc-only
+          # fortified-source symbols like `__memcpy_chk`. macOS
+          # keeps the default `cc` (xcrun-resolved clang).
+          CC: ${{ contains(matrix.target, 'linux-musl') && 'musl-gcc' || 'cc' }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          # crt-static bakes the musl C runtime into the Linux binary.
+          # No-op on Apple targets (Mach-O always links libSystem
+          # dynamically and that's by design).
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: |
+          cargo build --release --target "${{ matrix.target }}" --bin foyer
+          echo "==> binary linkage:"
+          file "target/${{ matrix.target }}/release/foyer"
+          if [ "${{ matrix.os_label }}" = "linux" ]; then
+            ldd "target/${{ matrix.target }}/release/foyer" 2>&1 || echo "(static — no dynamic deps)"
+          else
+            otool -L "target/${{ matrix.target }}/release/foyer" 2>&1 || true
+          fi
 
       - name: Build shim
         if: matrix.with_shim
@@ -193,6 +219,10 @@ jobs:
         env:
           OS_LABEL: ${{ matrix.os_label }}
           ARCH: ${{ matrix.arch }}
+          # Tells bundle.sh where to find the binary for this target;
+          # it lives under target/<triple>/release/, not target/release/
+          # because we build with `cargo build --target ...`.
+          FOYER_BIN: ${{ github.workspace }}/target/${{ matrix.target }}/release/foyer
           # Tells bundle.sh to ship a foyer-only zip when there's no
           # shim for this platform yet.
           FOYER_SKIP_SHIM: ${{ matrix.with_shim && '0' || '1' }}

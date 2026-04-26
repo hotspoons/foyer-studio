@@ -262,8 +262,9 @@ export class ChatStore extends EventTarget {
     const view = new DataView(buf);
     view.setUint8(0, PTT_MAGIC);
     view.setUint8(1, PTT_VERSION);
-    const dst = new Float32Array(buf, PTT_HEADER_LEN_IN);
-    dst.set(samples);
+    new Uint8Array(buf, PTT_HEADER_LEN_IN).set(
+      new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength),
+    );
     this.ws?.sendBinary?.(buf);
   }
 
