@@ -109,7 +109,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # Per-cell cache so cross-platform builds don't trample.
-          key: ci-${{ matrix.os }}-${{ matrix.arch }}
+          # Bumped to invalidate stale builds that were missing the
+          # `OPUS_NO_PKG_CONFIG=1` static-link of libopus.
+          key: ci-${{ matrix.os }}-${{ matrix.arch }}-opus-static
       - uses: extractions/setup-just@v2
       - run: just fmt-check
       - run: just clippy

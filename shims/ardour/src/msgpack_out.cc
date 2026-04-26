@@ -54,6 +54,17 @@
 
 #include "schema_map.h"
 
+// Apple's MacTypes.h (pulled in transitively via CoreFoundation by
+// Ardour's macOS-flavored ydk/quartz headers) does:
+//   #define nil nullptr
+// Our `Out` struct exposes `nil()` as a MessagePack-spec method name,
+// so the macro substitutes it into `nullptr()` and the entire class
+// fails to parse. Wipe the macro for this TU now that all the Apple
+// headers have been pulled in. No-op on Linux.
+#ifdef __APPLE__
+#  undef nil
+#endif
+
 using namespace ARDOUR;
 using namespace PBD;
 
