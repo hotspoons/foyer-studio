@@ -12,6 +12,28 @@ import { load as loadRecents, forget as forgetRecent, touch as touchRecent, clea
 import { launchProjectGuarded } from "../session-launch.js";
 import { isAllowed, isActionAllowed } from "foyer-core/rbac.js";
 
+// Walk shadow roots to find a custom element. The timeline lives ≥2
+// shadow roots deep (foyer-app → tile-container → tile-leaf →
+// foyer-timeline-view), and `document.querySelector` doesn't pierce
+// shadow boundaries — so client-side menu actions like Cut/Copy/Paste
+// silently no-op'd before this helper. Mirrors `queryDeep` in
+// ui-core/layout/keybinds.js so menu and keybind paths share the same
+// resolution logic.
+function findTimeline() {
+  const walk = (root) => {
+    const found = root.querySelector("foyer-timeline-view");
+    if (found) return found;
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) {
+        const nested = walk(el.shadowRoot);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  };
+  return walk(document);
+}
+
 // Category → menu label + order. Categories not listed are skipped.
 const MENU_ORDER = [
   { cat: "session",   label: "Session"   },
@@ -264,21 +286,36 @@ export class MainMenu extends LitElement {
     // Client-only view actions — the zoom stack + time-range selection
     // live in the browser, so we handle these without a round trip.
     if (a.id === "view.zoom_selection") {
-      document.querySelector("foyer-timeline-view")?.zoomToSelection?.();
+      findTimeline()?.zoomToSelection?.();
       return;
     }
     if (a.id === "view.zoom_previous") {
-      document.querySelector("foyer-timeline-view")?.zoomPrevious?.();
+      findTimeline()?.zoomPrevious?.();
       return;
     }
     // Client-orchestrated edit ops: walk the selection and fan out the
-    // right per-region commands.
+    // right per-region commands. cut/copy/paste are pure client-side
+    // (the shim's edit.cut/copy/paste handlers are unreachable from
+    // headless hardour, dispatch.cc:2761-2762), so we intercept here
+    // rather than firing `invoke_action` to a no-op backend.
+    if (a.id === "edit.cut") {
+      findTimeline()?.cutRegionSelection?.();
+      return;
+    }
+    if (a.id === "edit.copy") {
+      findTimeline()?.copyRegionSelection?.();
+      return;
+    }
+    if (a.id === "edit.paste") {
+      findTimeline()?.pasteRegions?.({ at: "mouse" });
+      return;
+    }
     if (a.id === "edit.delete_selection") {
-      document.querySelector("foyer-timeline-view")?.deleteSelection?.();
+      findTimeline()?.deleteSelection?.();
       return;
     }
     if (a.id === "edit.mute_selection") {
-      document.querySelector("foyer-timeline-view")?.muteSelection?.();
+      findTimeline()?.muteSelection?.();
       return;
     }
     // Preferences is a client-side settings modal — no round trip.

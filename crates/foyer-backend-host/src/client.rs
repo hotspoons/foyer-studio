@@ -401,6 +401,22 @@ impl HostClient {
         .await
     }
 
+    pub async fn duplicate_region_range(
+        &self,
+        source_region_id: EntityId,
+        source_offset_samples: u64,
+        length_samples: u64,
+        at_samples: u64,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::DuplicateRegionRange {
+            source_region_id,
+            source_offset_samples,
+            length_samples,
+            at_samples,
+        })
+        .await
+    }
+
     pub async fn create_region(
         &self,
         track_id: EntityId,

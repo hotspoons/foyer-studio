@@ -633,6 +633,7 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::DeleteRegion { .. } => "delete_region",
         Command::CreateRegion { .. } => "create_region",
         Command::DuplicateRegion { .. } => "duplicate_region",
+        Command::DuplicateRegionRange { .. } => "duplicate_region_range",
         Command::ListWaveform { .. } => "list_waveform",
         Command::ClearWaveformCache { .. } => "clear_waveform_cache",
         Command::ListBackends => "list_backends",
@@ -1660,6 +1661,33 @@ async fn dispatch_command(
                     state,
                     Event::Error {
                         code: "duplicate_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::DuplicateRegionRange {
+            source_region_id,
+            source_offset_samples,
+            length_samples,
+            at_samples,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .duplicate_region_range(
+                    source_region_id,
+                    source_offset_samples,
+                    length_samples,
+                    at_samples,
+                )
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "duplicate_region_range_failed".into(),
                         message: e.to_string(),
                     },
                 )

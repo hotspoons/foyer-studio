@@ -231,6 +231,24 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn duplicate_region_range(
+        &self,
+        source_region_id: EntityId,
+        source_offset_samples: u64,
+        length_samples: u64,
+        at_samples: u64,
+    ) -> Result<(), BackendError> {
+        self.client
+            .duplicate_region_range(
+                source_region_id,
+                source_offset_samples,
+                length_samples,
+                at_samples,
+            )
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn create_region(
         &self,
         track_id: EntityId,

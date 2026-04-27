@@ -14,41 +14,14 @@
 //      composed selectors.
 
 import { test, expect } from "@playwright/test";
-
-const DEEP_FIND = `
-  function deepFind(tag) {
-    const stack = [document.querySelector("foyer-app").shadowRoot];
-    while (stack.length) {
-      const r = stack.pop();
-      const hit = r.querySelector(tag);
-      if (hit) return hit;
-      for (const el of r.querySelectorAll("*")) if (el.shadowRoot) stack.push(el.shadowRoot);
-    }
-    return null;
-  }
-`;
+import { DEEP_FIND, bootTimeline } from "./_boot.js";
 
 async function bootAndMountTimeline(page) {
-  page.setDefaultTimeout(20_000);
-  await page.goto("/");
-  await page.waitForFunction(() => window.__foyer?.store?.state?.status === "open");
-  await page.waitForFunction(
-    () => typeof window.__foyer?.layout?.setTree === "function",
-  );
+  await bootTimeline(page);
   await page.waitForFunction(
     () => (window.__foyer?.store?.state?.session?.tracks?.length ?? 0) >= 3,
+    { timeout: 20_000 },
   );
-  await page.evaluate(() => {
-    window.__foyer.layout.setTree({
-      kind: "leaf", id: "test_t", view: "timeline", props: {},
-    });
-  });
-  // Lit re-renders are batched; give the tile-leaf time to swap in
-  // foyer-timeline-view and complete its firstUpdated.
-  await page.waitForFunction(`(() => {
-    ${DEEP_FIND}
-    return !!deepFind("foyer-timeline-view");
-  })()`);
 }
 
 async function runResize(page, { trackId, dy, shift = false }) {

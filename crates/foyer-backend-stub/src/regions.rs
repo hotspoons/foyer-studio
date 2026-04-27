@@ -61,6 +61,37 @@ impl RegionStore {
         }
         None
     }
+
+    /// Find a region by id in any track. Returns `(track_id, region_clone)`.
+    pub fn find(&self, id: &EntityId) -> Option<(EntityId, Region)> {
+        for (track_key, list) in self.by_track.iter() {
+            if let Some(r) = list.iter().find(|r| r.id == *id) {
+                return Some((EntityId::new(track_key.clone()), r.clone()));
+            }
+        }
+        None
+    }
+
+    /// Append `region` to the track-local list, in start-time order.
+    /// `region.track_id` and `region.id` must already be set by the caller.
+    pub fn insert(&mut self, region: Region) {
+        let key = region.track_id.as_str().to_string();
+        let list = self.by_track.entry(key).or_default();
+        // Keep regions in start-time order so the timeline-side picker
+        // (rs[0] = first region) is deterministic.
+        let pos = list
+            .iter()
+            .position(|r| r.start_samples > region.start_samples)
+            .unwrap_or(list.len());
+        list.insert(pos, region);
+    }
+}
+
+/// Generate a fresh region id distinct from any in the store. Format
+/// matches the synthesized ones (`region.<n>`) so the timeline-side
+/// region renderer doesn't have to special-case duplicates.
+pub(crate) fn fresh_region_id(seed: u64) -> EntityId {
+    EntityId::new(format!("region.dup.{seed}"))
 }
 
 fn synthesize_for(track_id: &EntityId) -> Vec<Region> {

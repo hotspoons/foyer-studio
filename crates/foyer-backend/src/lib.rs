@@ -294,6 +294,24 @@ pub trait Backend: Send + Sync + 'static {
         Err(BackendError::Other("duplicate_region not supported".into()))
     }
 
+    /// Duplicate a SLICE of an existing region (the contiguous range
+    /// `[source_offset_samples, source_offset_samples + length_samples)`
+    /// inside the source's content) onto the same track at
+    /// `at_samples`. Used by the timeline's range-aware cut/copy/paste
+    /// when the user has both a region selection and a time-range
+    /// selection.
+    async fn duplicate_region_range(
+        &self,
+        _source_region_id: EntityId,
+        _source_offset_samples: u64,
+        _length_samples: u64,
+        _at_samples: u64,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other(
+            "duplicate_region_range not supported".into(),
+        ))
+    }
+
     /// Create a brand-new empty region on the given track.
     /// Fire-and-forget: the host echoes a `RegionsList` once the
     /// playlist has committed.

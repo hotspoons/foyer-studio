@@ -5,36 +5,10 @@
 // the resulting region count + state reflects the op.
 
 import { test, expect } from "@playwright/test";
-
-const DEEP_FIND = `
-  function deepFind(tag) {
-    const stack = [document.querySelector("foyer-app").shadowRoot];
-    while (stack.length) {
-      const r = stack.pop();
-      const hit = r.querySelector(tag);
-      if (hit) return hit;
-      for (const el of r.querySelectorAll("*")) if (el.shadowRoot) stack.push(el.shadowRoot);
-    }
-    return null;
-  }
-`;
+import { DEEP_FIND, bootTimeline as baseBootTimeline } from "./_boot.js";
 
 async function bootTimeline(page) {
-  page.setDefaultTimeout(20_000);
-  await page.goto("/");
-  await page.waitForFunction(() => window.__foyer?.store?.state?.status === "open");
-  await page.waitForFunction(
-    () => typeof window.__foyer?.layout?.setTree === "function",
-  );
-  await page.evaluate(() => {
-    window.__foyer.layout.setTree({
-      kind: "leaf", id: "test_t", view: "timeline", props: {},
-    });
-  });
-  await page.waitForFunction(`(() => {
-    ${DEEP_FIND}
-    return !!deepFind("foyer-timeline-view");
-  })()`);
+  await baseBootTimeline(page);
   // Stub seeds regions lazily on the first list_regions call, which the
   // timeline issues only after it mounts. Wait until at least one track
   // has regions in its local cache.

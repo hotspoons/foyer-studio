@@ -764,6 +764,27 @@ pub enum Command {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         length_samples: Option<u64>,
     },
+    /// Clone a SLICE of `source_region_id` — the contiguous range
+    /// `[source_offset_samples, source_offset_samples + length_samples)`
+    /// inside the source's content — into a new region on the same
+    /// track, starting at `at_samples`. Used for the "select a time
+    /// range, cut/copy from regions" DAW workflow where each captured
+    /// region contributes only the bits that overlap the selection.
+    /// MIDI notes inside the slice are carried; notes outside are
+    /// dropped. Emits a `RegionsList` echo for the track on success.
+    DuplicateRegionRange {
+        source_region_id: EntityId,
+        /// Offset INTO the source region (not into the source media).
+        /// `0` means "start at the source's left edge" — same as
+        /// `DuplicateRegion`. Bounded to the source's length on the
+        /// backend; values past the end produce a zero-length region.
+        source_offset_samples: u64,
+        /// Length of the slice. Clamped to the source's remaining
+        /// length from `source_offset_samples`. Must be > 0.
+        length_samples: u64,
+        /// Destination position on the timeline in samples.
+        at_samples: u64,
+    },
     /// Ask for decimated peaks for `region_id` at the given resolution. The
     /// sidecar rounds the request to the nearest cached tier.
     ListWaveform {

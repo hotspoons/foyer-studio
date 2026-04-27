@@ -257,6 +257,22 @@ export class TimelineView extends LitElement {
         0 1px 3px rgba(0, 0, 0, 0.35);
       filter: brightness(1.08);
     }
+    /* Cut-pending slice overlay: a translucent scrim positioned over
+     * the slice the user has queued for delete-on-paste. For whole-
+     * region cuts the overlay spans 0..100% and looks like the legacy
+     * dim. For time-range slice cuts the overlay covers ONLY the
+     * carved-out portion so the user can see exactly what's leaving
+     * vs. what's staying behind. The dashed border is on the overlay
+     * (not the region) so the lozenge boundary still reads cleanly. */
+    .region .cut-slice-overlay {
+      position: absolute;
+      top: 0; bottom: 0;
+      pointer-events: none;
+      background: rgba(0, 0, 0, 0.55);
+      border: 1px dashed rgba(255, 255, 255, 0.5);
+      box-sizing: border-box;
+      z-index: 2;
+    }
     .region .name {
       position: absolute;
       top: 2px; left: 6px; right: 6px;
@@ -454,12 +470,27 @@ export class TimelineView extends LitElement {
     this._selectedRegionIds = new Set();
     // Per-tab region clipboard for cut/copy/paste. `null` when empty.
     // Shape: { mode: "copy"|"cut", anchor_samples, items: [{ region_id,
-    // track_id, offset_samples, length_samples }] }. We snapshot region
-    // IDs (not their bodies) — the duplicate command on the server
-    // fans out a fresh region from the live source. That means a cut
-    // can't be undone by clearing the clipboard; the originals persist
-    // until paste actually fires the delete. Matches Reaper's flow.
+    // track_id, offset_samples, length_samples, slice_start, slice_len }] }.
+    // For whole-region copies, slice_start=0 and slice_len=length_samples;
+    // for time-range slice ops slice_{start,len} carve out the active
+    // sub-range and the wire command sends DuplicateRegionRange with
+    // those offsets. We snapshot region IDs (not their bodies) — the
+    // duplicate command on the server fans out a fresh region from the
+    // live source. That means a cut can't be undone by clearing the
+    // clipboard; the originals persist until paste actually fires the
+    // delete. Matches Reaper's flow.
     this._regionClipboard = null;
+    // Region IDs currently dimmed on the timeline because they're
+    // queued for delete-on-paste. Stored as a Set for O(1) class-
+    // decision lookup during render; reconciled to the click-selection
+    // by `_reconcileCutPending()` whenever selection mutates AND
+    // defensively at the top of render() to catch indirect mutations.
+    // Last pointer X over the timeline grid in CSS px (relative to the
+    // grid's bounding rect, includes the head-column offset). Used by
+    // the default paste keybind to anchor at the mouse cursor instead
+    // of the playhead. `null` when the pointer is outside the grid;
+    // paste falls back to the playhead in that case.
+    this._lastMouseGridX = null;
     // Last seq that updated transport.position; guards against stale
     // out-of-order position packets causing visible playhead jump-back.
     this._lastTransportSeq = 0;
@@ -1161,6 +1192,17 @@ export class TimelineView extends LitElement {
       return 0;
     }
     const tracks = this.session?.tracks || [];
+    // If the user has BOTH a region click-selection AND an active time
+    // range, slice the regions to that range (each region contributes
+    // only the bits that overlap the range). Otherwise capture the
+    // whole region. The slice-start/len are stored in clipboard items
+    // so paste can pick the right wire command.
+    const tr = this._selection
+      ? {
+          start: Math.min(this._selection.startSamples, this._selection.endSamples),
+          end: Math.max(this._selection.startSamples, this._selection.endSamples),
+        }
+      : null;
     const items = [];
     let anchor = Number.POSITIVE_INFINITY;
     for (const id of ids) {
@@ -1173,28 +1215,66 @@ export class TimelineView extends LitElement {
       if (!region) continue;
       const start = Number(region.start_samples || 0);
       const len = Number(region.length_samples || 0);
-      anchor = Math.min(anchor, start);
+      const end = start + len;
+      let sliceStart = 0;
+      let sliceLen = len;
+      let timelineAnchor = start;
+      if (tr) {
+        // Intersect [start, end] with [tr.start, tr.end].
+        const overlapStart = Math.max(start, tr.start);
+        const overlapEnd = Math.min(end, tr.end);
+        if (overlapEnd <= overlapStart) continue; // no overlap; skip
+        sliceStart = overlapStart - start; // offset INTO the source region
+        sliceLen = overlapEnd - overlapStart;
+        timelineAnchor = overlapStart;     // for paste-position offsets
+      }
+      anchor = Math.min(anchor, timelineAnchor);
       items.push({
         region_id: region.id,
         track_id: track.id,
-        start_samples: start,
-        length_samples: len,
+        start_samples: timelineAnchor, // for offset bookkeeping below
+        length_samples: sliceLen,
+        slice_start: sliceStart,
+        slice_len: sliceLen,
+        full_length: len,
+        region_start_samples: start, // timeline pos of the source region
       });
     }
     if (!items.length) {
       if (!silent) toast("Nothing selected — click a region first", { tone: "warn", ttl: 2400 });
       return 0;
     }
-    // Re-key offsets from the earliest region in the set so paste
-    // re-anchors to the playhead while keeping internal spacing.
+    // Re-key offsets from the earliest item so paste re-anchors to
+    // the cursor while keeping internal spacing between captured items.
     for (const it of items) it.offset_samples = it.start_samples - anchor;
-    this._regionClipboard = { mode, anchor_samples: anchor, items };
+    const sliced = !!tr;
+    this._regionClipboard = { mode, anchor_samples: anchor, items, sliced };
+    // Visual marker for cut-pending regions. Replaces any prior cut
+    // pending state — a fresh cut/copy supersedes the previous one.
+    // Stored as Map(region_id -> {sliceStart, sliceLen, fullLength}) so
+    // the renderer can dim only the slice (not the whole region) when
+    // a time-range cut is queued. For whole-region cuts the slice
+    // covers [0, fullLength] and the dim spans the entire lozenge as
+    // before.
+    if (mode === "cut") {
+      this._cutPending = new Map(
+        items.map((it) => [it.region_id, {
+          sliceStart: it.slice_start,
+          sliceLen: it.slice_len,
+          fullLength: it.full_length,
+        }]),
+      );
+    } else {
+      this._cutPending = new Map();
+    }
+    this.requestUpdate();
     if (!silent) {
       const noun = items.length === 1 ? "region" : "regions";
+      const sliceNote = sliced ? " (range slice)" : "";
       toast(
         mode === "cut"
-          ? `Cut ${items.length} ${noun} — paste to commit`
-          : `Copied ${items.length} ${noun}`,
+          ? `Cut ${items.length} ${noun}${sliceNote} — paste to commit`
+          : `Copied ${items.length} ${noun}${sliceNote}`,
         { tone: "info", ttl: 2400 },
       );
     }
@@ -1209,40 +1289,111 @@ export class TimelineView extends LitElement {
   }
 
   /**
-   * Paste the clipboard at the current playhead. For cut-mode, the
-   * originals are deleted after the duplicates land. Returns the number
-   * of regions written.
+   * Paste the clipboard. The anchor sample defaults to the mouse's
+   * current grid position so a Ctrl+V drops near the cursor — Reaper's
+   * default. Pass `{ at: "playhead" }` (or `{ at: <samples> }`) for
+   * other anchors (Ctrl+Shift+V is wired to playhead in keybinds.js).
+   *
+   * For sliced clipboards (region selection AND time range at capture
+   * time), each item is sent as `duplicate_region_range` so the shim
+   * can carve only the captured slice out of the source. Whole-region
+   * captures fall back to plain `duplicate_region`.
+   *
+   * For cut-mode, the originals are deleted after the duplicates land.
+   * Returns the number of regions written.
    */
-  pasteRegionsAtPlayhead() {
+  pasteRegions({ at = "mouse" } = {}) {
     const clip = this._regionClipboard;
     if (!clip || !clip.items.length) {
       toast("Clipboard is empty — copy a region first", { tone: "warn", ttl: 2400 });
       return 0;
     }
     const ws = window.__foyer?.ws;
-    const cursor = Number(
-      window.__foyer?.store?.state?.controls?.get("transport.position") || 0,
-    );
+    let anchorSamples;
+    if (typeof at === "number") {
+      anchorSamples = at;
+    } else if (at === "playhead") {
+      anchorSamples = Number(
+        window.__foyer?.store?.state?.controls?.get("transport.position") || 0,
+      );
+    } else {
+      // Default: mouse. Falls back to playhead if the pointer is off
+      // the grid (e.g. user invoked the keybind with cursor over a FAB).
+      const fromMouse = this._mouseAnchorSamples();
+      anchorSamples = fromMouse != null
+        ? fromMouse
+        : Number(window.__foyer?.store?.state?.controls?.get("transport.position") || 0);
+    }
     const cut = clip.mode === "cut";
     const groupLabel = cut
       ? `Foyer paste ${clip.items.length} regions (cut)`
       : `Foyer paste ${clip.items.length} regions`;
     ws?.send({ type: "undo_group_begin", name: groupLabel });
     for (const it of clip.items) {
-      ws?.send({
-        type: "duplicate_region",
-        source_region_id: it.region_id,
-        at_samples: cursor + it.offset_samples,
-        length_samples: it.length_samples,
-      });
+      const at_samples = anchorSamples + it.offset_samples;
+      if (clip.sliced) {
+        ws?.send({
+          type: "duplicate_region_range",
+          source_region_id: it.region_id,
+          source_offset_samples: it.slice_start,
+          length_samples: it.slice_len,
+          at_samples,
+        });
+      } else {
+        ws?.send({
+          type: "duplicate_region",
+          source_region_id: it.region_id,
+          at_samples,
+          length_samples: it.length_samples,
+        });
+      }
     }
     if (cut) {
+      // Split-around-slice for sliced cuts: the source region becomes
+      // two pieces (the part BEFORE the slice + the part AFTER) so the
+      // user gets a gap where the slice used to be — Reaper's standard
+      // "cut a chunk out" behavior. Whole-region cuts collapse to the
+      // simple delete path.
+      //
+      // Order matters: create the "after" clone FIRST so the source
+      // region's full content is still available when the shim
+      // dereferences `source_region_id`. Trimming/deleting the source
+      // happens last.
       for (const it of clip.items) {
-        ws?.send({ type: "delete_region", id: it.region_id });
+        const isSliced = clip.sliced
+          && !(it.slice_start === 0 && it.slice_len >= it.full_length);
+        if (!isSliced) {
+          ws?.send({ type: "delete_region", id: it.region_id });
+          continue;
+        }
+        const beforeLen = it.slice_start;
+        const afterOffset = it.slice_start + it.slice_len;
+        const afterLen = it.full_length - afterOffset;
+        if (afterLen > 0) {
+          ws?.send({
+            type: "duplicate_region_range",
+            source_region_id: it.region_id,
+            source_offset_samples: afterOffset,
+            length_samples: afterLen,
+            at_samples: it.region_start_samples + afterOffset,
+          });
+        }
+        if (beforeLen > 0) {
+          ws?.send({
+            type: "update_region",
+            id: it.region_id,
+            patch: { length_samples: beforeLen },
+          });
+        } else {
+          // No "before" piece; the after-clone replaces the source.
+          ws?.send({ type: "delete_region", id: it.region_id });
+        }
       }
       // After a cut/paste, the clipboard slot is consumed so a second
       // paste doesn't re-delete already-gone originals. Clear it.
       this._regionClipboard = null;
+      this._cutPending = new Map();
+      this.requestUpdate();
     }
     ws?.send({ type: "undo_group_end" });
     const noun = clip.items.length === 1 ? "region" : "regions";
@@ -1252,6 +1403,26 @@ export class TimelineView extends LitElement {
       { tone: "info", ttl: 2400 },
     );
     return clip.items.length;
+  }
+
+  /** Back-compat shim — old callers (specs, agents) used the old name. */
+  pasteRegionsAtPlayhead() {
+    return this.pasteRegions({ at: "playhead" });
+  }
+
+  /**
+   * Translate the last-known mouse position over the timeline grid
+   * into a sample offset. Returns `null` when the cursor is outside
+   * the content area or before the head column. Mirrors the inverse
+   * of the leftPx math in `_renderLane` / region rects.
+   */
+  _mouseAnchorSamples() {
+    if (this._lastMouseGridX == null) return null;
+    const sr = this._timeline?.sample_rate || 48_000;
+    const x = this._lastMouseGridX - HEAD_WIDTH;
+    if (x < 0) return null;
+    const samples = (x / this._zoom) * sr;
+    return Math.max(0, Math.round(samples));
   }
 
   /**
@@ -1359,6 +1530,10 @@ export class TimelineView extends LitElement {
   }
 
   render() {
+    // Defensive cut-pending reconcile: catches selection changes
+    // routed through any of the half-dozen `_selectedRegionIds.clear()`
+    // sites in this file without having to instrument each one.
+    this._reconcileCutPending();
     const tracks = this.session?.tracks ?? [];
     const sr = this._timeline?.sample_rate || 48_000;
     // Base content length: session length (or 30s min). Extended on the
@@ -1427,7 +1602,7 @@ export class TimelineView extends LitElement {
       <div class="scroll" @wheel=${(e) => this._onWheel(e)}>
         <div class="grid" style="width:${gridWidth}px"
              @pointermove=${(e) => this._onGridHoverMove(e)}
-             @pointerleave=${() => { this._hoverSamples = null; }}>
+             @pointerleave=${() => { this._hoverSamples = null; this._lastMouseGridX = null; }}>
           <div class="ruler"
                @wheel=${(e) => this._onRulerWheel(e)}
                @pointerdown=${(e) => this._onRulerPointerDown(e)}
@@ -1478,6 +1653,17 @@ export class TimelineView extends LitElement {
   }
 
   _onGridHoverMove(ev) {
+    // Stash the grid-local pointer X for the mouse-anchored paste
+    // keybind. Captured eagerly (no rAF gate) so a paste fired right
+    // after a mouse move uses the latest position; cheap, just two
+    // assignments + a rect lookup. Stored as the offset from the grid
+    // element's left edge — `_mouseAnchorSamples()` subtracts the
+    // head column to get the content-area position.
+    const grid = this.renderRoot.querySelector(".grid");
+    if (grid) {
+      const r = grid.getBoundingClientRect();
+      this._lastMouseGridX = ev.clientX - r.left;
+    }
     // Throttle via rAF — pointermove fires at hardware rate and we
     // only need one update per paint frame.
     if (this._hoverRaf) return;
@@ -1706,6 +1892,25 @@ export class TimelineView extends LitElement {
           // foyer-backend-host/src/lib.rs:244), which is a visual lie.
           const isMidi = track.kind === "midi";
           const regionSelected = this._selectedRegionIds.has(r.id);
+          const cutInfo = this._cutPending?.get(r.id);
+          // For sliced cuts, dim only the slice (overlay div positioned
+          // relative to the region). For whole-region cuts (slice covers
+          // the whole region) the overlay matches the region's full
+          // width, so we keep the same code path either way and skip
+          // the legacy `cut-pending` class on the outer div — the
+          // overlay handles the dim.
+          const regionLen = Math.max(1, Number(r.length_samples) || 1);
+          let cutOverlay = null;
+          if (cutInfo) {
+            const sliceStart = Math.max(0, Math.min(cutInfo.sliceStart, regionLen));
+            const sliceEnd = Math.max(sliceStart, Math.min(sliceStart + cutInfo.sliceLen, regionLen));
+            const leftPct = (sliceStart / regionLen) * 100;
+            const rightPct = ((regionLen - sliceEnd) / regionLen) * 100;
+            cutOverlay = html`
+              <div class="cut-slice-overlay"
+                   style="left:${leftPct}%;right:${rightPct}%"></div>
+            `;
+          }
           return html`
             <div class="region ${regionSelected ? "selected" : ""}" data-id=${r.id}
                  tabindex="0"
@@ -1716,6 +1921,7 @@ export class TimelineView extends LitElement {
               ${isMidi
                 ? html`<foyer-midi-strip class="viz" .notes=${r.notes || []} .color=${track.color || ""}></foyer-midi-strip>`
                 : html`<foyer-waveform-gl class="viz" data-id=${r.id}></foyer-waveform-gl>`}
+              ${cutOverlay}
               <div class="name">${r.name}</div>
               <div class="edge left"  @pointerdown=${(e) => this._startDrag(e, r, "resize-left")}></div>
               <div class="edge right" @pointerdown=${(e) => this._startDrag(e, r, "resize-right")}></div>
@@ -1904,11 +2110,32 @@ export class TimelineView extends LitElement {
       action: () => { ensureSelection(); this.copyRegionSelection(); },
     });
     items.push({
-      label: "Paste at playhead",
+      label: "Paste at cursor",
       icon: "clipboard",
       shortcut: `${meta}+V`,
       disabled: !this.hasClipboard(),
-      action: () => this.pasteRegionsAtPlayhead(),
+      action: (ev) => {
+        // The context-click already supplied a clientX/Y on the grid;
+        // use it as the paste anchor instead of the last hovered grid
+        // X (which is stale once the menu opens and intercepts pointer
+        // events). Falls back to mouse-anchor → playhead chain.
+        const clientX = ev?.clientX;
+        if (Number.isFinite(clientX)) {
+          const grid = this.renderRoot.querySelector(".grid");
+          if (grid) {
+            const r = grid.getBoundingClientRect();
+            this._lastMouseGridX = clientX - r.left;
+          }
+        }
+        this.pasteRegions({ at: "mouse" });
+      },
+    });
+    items.push({
+      label: "Paste at playhead",
+      icon: "clipboard",
+      shortcut: `${meta}+Shift+V`,
+      disabled: !this.hasClipboard(),
+      action: () => this.pasteRegions({ at: "playhead" }),
     });
     items.push({
       label: "Duplicate",
@@ -1938,6 +2165,7 @@ export class TimelineView extends LitElement {
       if (this._selectedRegionIds.has(region.id)) this._selectedRegionIds.delete(region.id);
       else this._selectedRegionIds.add(region.id);
       this._pendingDemoteRegionId = null;
+      this._reconcileCutPending();
       this.requestUpdate();
       return;
     }
@@ -1957,7 +2185,37 @@ export class TimelineView extends LitElement {
     this._selectedRegionIds.clear();
     this._selectedRegionIds.add(region.id);
     this._pendingDemoteRegionId = null;
+    this._reconcileCutPending();
     this.requestUpdate();
+  }
+
+  /**
+   * Drop cut-pending state for any region that's no longer part of
+   * the click-selection. If that empties the cut-pending set, also
+   * abandon the clipboard — the user's "next" cut transaction starts
+   * fresh, and a stale cut clipboard would otherwise delete random
+   * regions on a later paste.
+   */
+  _reconcileCutPending() {
+    if (!this._cutPending) {
+      this._cutPending = new Map();
+      return;
+    }
+    if (this._cutPending.size === 0) return;
+    let changed = false;
+    for (const id of [...this._cutPending.keys()]) {
+      if (!this._selectedRegionIds.has(id)) {
+        this._cutPending.delete(id);
+        changed = true;
+      }
+    }
+    if (changed && this._cutPending.size === 0
+        && this._regionClipboard?.mode === "cut") {
+      // The user navigated away from every cut-pending region; treat
+      // that as cancelling the cut. Without this, the next paste would
+      // try to delete regions the user no longer cares about.
+      this._regionClipboard = null;
+    }
   }
 
   _isMidiRegion(region) {
@@ -2338,6 +2596,7 @@ export class TimelineView extends LitElement {
         this._pendingDemoteRegionId = null;
         this._selectedRegionIds.clear();
         this._selectedRegionIds.add(demoteId);
+        this._reconcileCutPending();
         this.requestUpdate();
       }
       // Single committed update per region, with the final position +

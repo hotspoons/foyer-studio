@@ -53,6 +53,9 @@ pub struct StubBackend {
     jail: Option<Arc<Jail>>,
     regions: Arc<Mutex<regions::RegionStore>>,
     waveforms: Arc<Mutex<waveform::WaveformCache>>,
+    /// Monotonic seed for `regions::fresh_region_id` — bumped on every
+    /// duplicate so concurrent paste batches don't collide.
+    dup_seed: std::sync::atomic::AtomicU64,
     /// Handle to the meter-tick task — aborted on drop so repeated
     /// backend-swaps don't leak a tick task per swap.
     meter_handle: Option<tokio::task::JoinHandle<()>>,
@@ -84,6 +87,7 @@ impl StubBackend {
             jail: None,
             regions: Arc::new(Mutex::new(regions::RegionStore::new())),
             waveforms: Arc::new(Mutex::new(waveform::WaveformCache::new())),
+            dup_seed: std::sync::atomic::AtomicU64::new(1),
             meter_handle: None,
             test_tone: false,
         };
@@ -107,9 +111,15 @@ impl StubBackend {
             jail: None,
             regions: Arc::new(Mutex::new(regions::RegionStore::new())),
             waveforms: Arc::new(Mutex::new(waveform::WaveformCache::new())),
+            dup_seed: std::sync::atomic::AtomicU64::new(1),
             meter_handle: None,
             test_tone: false,
         }
+    }
+
+    fn next_dup_seed(&self) -> u64 {
+        self.dup_seed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Enable the 440 Hz reference test tone on egress streams.
@@ -344,6 +354,97 @@ impl Backend for StubBackend {
         .ok_or_else(|| BackendError::Other(format!("unknown region {id}")))?;
         self.waveforms.lock().await.clear_region(&id);
         Ok(track_id)
+    }
+
+    async fn duplicate_region(
+        &self,
+        source_region_id: EntityId,
+        at_samples: u64,
+        length_samples: Option<u64>,
+    ) -> Result<(), BackendError> {
+        let (track_id, regions) = {
+            let mut store = self.regions.lock().await;
+            let (track_id, source) = store
+                .find(&source_region_id)
+                .ok_or_else(|| BackendError::Other(format!("unknown region {source_region_id}")))?;
+            let id = crate::regions::fresh_region_id(self.next_dup_seed());
+            let mut clone = source.clone();
+            clone.id = id;
+            clone.start_samples = at_samples as i64;
+            clone.length_samples = length_samples.unwrap_or(source.length_samples).max(4_800);
+            // Keep the same source-media offset so MIDI / audio
+            // duplicates point at the same content as the source.
+            store.insert(clone);
+            let regions = store.regions_for(&track_id).clone();
+            (track_id, regions)
+        };
+        let _ = self.tx.send(Event::RegionsList {
+            track_id,
+            regions,
+            timeline: TimelineMeta {
+                sample_rate: 48_000,
+                length_samples: 48_000 * 60,
+            },
+        });
+        Ok(())
+    }
+
+    async fn duplicate_region_range(
+        &self,
+        source_region_id: EntityId,
+        source_offset_samples: u64,
+        length_samples: u64,
+        at_samples: u64,
+    ) -> Result<(), BackendError> {
+        if length_samples == 0 {
+            return Err(BackendError::Other(
+                "duplicate_region_range: length_samples must be > 0".into(),
+            ));
+        }
+        let (track_id, regions) = {
+            let mut store = self.regions.lock().await;
+            let (track_id, source) = store
+                .find(&source_region_id)
+                .ok_or_else(|| BackendError::Other(format!("unknown region {source_region_id}")))?;
+            // Clamp the slice to the source's actual length so a
+            // range that runs past the end gets truncated, not
+            // negative-clamped to a zero-length region.
+            let max_offset = source.length_samples.saturating_sub(1);
+            let offset = source_offset_samples.min(max_offset);
+            let max_len = source.length_samples.saturating_sub(offset);
+            let len = length_samples.min(max_len).max(4_800);
+            let id = crate::regions::fresh_region_id(self.next_dup_seed());
+            let mut clone = source.clone();
+            clone.id = id;
+            clone.start_samples = at_samples as i64;
+            clone.length_samples = len;
+            // For sliced duplicates we shift the source-media offset
+            // forward by `offset` so the new region's content aligns
+            // with what the user grabbed.
+            clone.source_offset_samples = Some(
+                source.source_offset_samples.unwrap_or(0).saturating_add(offset),
+            );
+            // MIDI note slicing in the stub is intentionally unsliced —
+            // notes use tick coordinates and slicing them by sample
+            // requires tempo + ppqn translation which the stub doesn't
+            // model precisely. The Ardour shim slices notes correctly
+            // because it has the live tempo map; the stub keeps the
+            // full source-region note list so the timeline still
+            // renders something sensible. Acceptable for tests since
+            // the audio cut/copy/paste path is what users care about.
+            store.insert(clone);
+            let regions = store.regions_for(&track_id).clone();
+            (track_id, regions)
+        };
+        let _ = self.tx.send(Event::RegionsList {
+            track_id,
+            regions,
+            timeline: TimelineMeta {
+                sample_rate: 48_000,
+                length_samples: 48_000 * 60,
+            },
+        });
+        Ok(())
     }
 
     async fn update_track(&self, id: EntityId, patch: TrackPatch) -> Result<Track, BackendError> {
