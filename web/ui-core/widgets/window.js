@@ -31,6 +31,7 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
+import { sessionScopedKey } from "foyer-core/session-scope.js";
 
 const STORAGE_PREFIX = "foyer.window:";
 const MIN_W = 320;
@@ -499,12 +500,22 @@ customElements.define("foyer-window", FoyerWindow);
 const PERSIST_KEY = "foyer.windows.open.v1";
 const FACTORIES = new Map();
 
+// The persisted open-list embeds per-session ids (track / region /
+// plugin), so we scope it by the active session — different .ardour
+// projects don't try to rehydrate each other's windows on reload.
+// `sessionScopedKey` returns the bare key when no session is open
+// (the launcher), so the previous "default" history still rehydrates
+// while the user is at the picker. Once a session loads, that
+// session's slot takes over.
+function _persistedListKey() {
+  return sessionScopedKey(PERSIST_KEY);
+}
 function _loadPersisted() {
-  try { return JSON.parse(localStorage.getItem(PERSIST_KEY) || "[]") || []; }
+  try { return JSON.parse(localStorage.getItem(_persistedListKey()) || "[]") || []; }
   catch { return []; }
 }
 function _savePersisted(arr) {
-  try { localStorage.setItem(PERSIST_KEY, JSON.stringify(arr)); } catch {}
+  try { localStorage.setItem(_persistedListKey(), JSON.stringify(arr)); } catch {}
 }
 function _persistKey(entry) {
   return `${entry.kind}::${entry.id ?? ""}`;

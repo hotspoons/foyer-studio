@@ -1,4 +1,5 @@
 import { LitElement, html, css } from "lit";
+import { sessionScopedKey } from "foyer-core/session-scope.js";
 
 export class PanEditorModal extends LitElement {
   static properties = {
@@ -137,7 +138,9 @@ export function openPanEditor(trackId) {
     wm.openWindow({
       title: "Pan editor",
       icon: "adjustments-horizontal",
-      storageKey: `pan-editor.${trackId}`,
+      // Session-scoped — same reasoning as track-editor (track id
+      // is a PBD number, ephemeral per .ardour project).
+      storageKey: sessionScopedKey(`pan-editor.${trackId}`),
       content: el,
       width: 420,
       height: 360,

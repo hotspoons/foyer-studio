@@ -21,6 +21,7 @@ import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
+import { sessionScopedKey } from "foyer-core/session-scope.js";
 
 // The <foyer-plugin-panel> tag is registered by the active UI
 // package (foyer-ui/components/plugin-panel.js). An alternate UI
@@ -399,7 +400,11 @@ export function openPluginFloat(pluginInstance) {
     openWindow({
       title: pluginInstance.name || "Plugin",
       icon: "puzzle-piece",
-      storageKey: `plugin.${pluginInstance.id}`,
+      // Session-scoped: plugin instance ids are per-session in
+      // libardour, so two projects can each surface a `plugin.7`
+      // for entirely different processors. Scope keeps each
+      // project's window bounds disjoint.
+      storageKey: sessionScopedKey(`plugin.${pluginInstance.id}`),
       content: panel,
       width: size.w,
       height: size.h,

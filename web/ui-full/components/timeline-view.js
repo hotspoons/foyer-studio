@@ -21,6 +21,7 @@ import { getVizPrefs } from "foyer-ui-core/viz/viz-settings.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { toast } from "foyer-ui-core/widgets/toast.js";
+import { sessionScopedKey } from "foyer-core/session-scope.js";
 
 const LANE_HEIGHT_DEFAULT = 52;
 const LANE_HEIGHT_MIN = 28;
@@ -535,16 +536,26 @@ export class TimelineView extends LitElement {
     }
   }
 
+  _laneHeightStorageKey() {
+    // Lane heights are keyed by trackId inside the JSON value, and
+    // trackIds (`track.<pbd>`) repeat across .ardour projects. Without
+    // session scoping, opening project B reuses project A's heights
+    // for whichever tracks happen to share an id (Rich, 2026-04-27).
+    return sessionScopedKey(LANE_HEIGHT_KEY);
+  }
   _loadLaneHeights() {
     try {
-      return JSON.parse(localStorage.getItem(LANE_HEIGHT_KEY) || "{}") || {};
+      return JSON.parse(localStorage.getItem(this._laneHeightStorageKey()) || "{}") || {};
     } catch {
       return {};
     }
   }
   _saveLaneHeights() {
     try {
-      localStorage.setItem(LANE_HEIGHT_KEY, JSON.stringify(this._laneHeights));
+      localStorage.setItem(
+        this._laneHeightStorageKey(),
+        JSON.stringify(this._laneHeights),
+      );
     } catch {}
   }
   _laneHeightFor(trackId) {
@@ -619,7 +630,14 @@ export class TimelineView extends LitElement {
   }
 
   updated(changed) {
-    if (changed.has("session")) this._fetchRegions();
+    if (changed.has("session")) {
+      // Lane heights are stored under a session-scoped key — reload
+      // from the new session's slot so users see their saved per-
+      // track heights instead of whatever the launcher / previous
+      // session left in the "default" scope.
+      this._laneHeights = this._loadLaneHeights();
+      this._fetchRegions();
+    }
     this._repaintWaveforms();
   }
 
