@@ -38,6 +38,9 @@ impl RegionStore {
                 if let Some(l) = patch.length_samples {
                     r.length_samples = l.max(4_800); // at least 0.1s
                 }
+                if let Some(off) = patch.source_offset_samples {
+                    r.source_offset_samples = Some(off);
+                }
                 if let Some(n) = &patch.name {
                     r.name = n.clone();
                 }

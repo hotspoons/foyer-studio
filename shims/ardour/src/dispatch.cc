@@ -288,6 +288,11 @@ struct DecodedCmd
 	std::int64_t  patch_start       = 0;
 	bool          has_patch_length  = false;
 	std::uint64_t patch_length      = 0;
+	// Source-media offset (Ardour's `Region::start`). Carried in a
+	// RegionPatch so a left-edge trim drag advances the source
+	// offset atomically with the new timeline position + length.
+	bool          has_patch_source_offset = false;
+	std::uint64_t patch_source_offset     = 0;
 	bool          has_patch_name    = false;
 	std::string   patch_name;
 	bool          has_patch_muted   = false;
@@ -801,6 +806,9 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 		} else if (pk == "length_samples") {
 			if (!in.read_u64 (out.patch_length)) return false;
 			out.has_patch_length = true;
+		} else if (pk == "source_offset_samples") {
+			if (!in.read_u64 (out.patch_source_offset)) return false;
+			out.has_patch_source_offset = true;
 		} else if (pk == "name") {
 			if (!in.read_str (out.patch_name)) return false;
 			out.has_patch_name = true;
@@ -1421,11 +1429,22 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer update region");
 				hit.region->clear_changes ();
-				if (snap.has_patch_start) {
-					hit.region->set_position (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_start)));
-				}
+				// Apply length BEFORE source offset: `Region::set_start`
+				// runs `verify_start(pos > source_length - _length)` and
+				// rejects any offset that would push the slice past the
+				// source's tail given the CURRENT length. For a left-
+				// trim drag the new length is shorter — applying it
+				// first widens the verify window so the new offset
+				// passes. (region.cc:1999-2012; learned the hard way
+				// in DuplicateRegionRange.)
 				if (snap.has_patch_length) {
 					hit.region->set_length (Temporal::timecnt_t::from_samples (static_cast<Temporal::samplepos_t> (snap.patch_length)));
+				}
+				if (snap.has_patch_source_offset) {
+					hit.region->set_start (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_source_offset)));
+				}
+				if (snap.has_patch_start) {
+					hit.region->set_position (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_start)));
 				}
 				if (snap.has_patch_name) {
 					hit.region->set_name (snap.patch_name);

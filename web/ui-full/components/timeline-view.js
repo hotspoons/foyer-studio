@@ -257,6 +257,27 @@ export class TimelineView extends LitElement {
         0 1px 3px rgba(0, 0, 0, 0.35);
       filter: brightness(1.08);
     }
+    /* Resize-preview placeholder: while a left-edge resize-drag is
+     * extending the region beyond the source bounds we have peaks
+     * for, the new (out-of-bounds) span paints as a striped
+     * neutral-grey scrim. Mirrors the recording-placeholder pattern
+     * but desaturated since this isn't a recording state — it's a
+     * "no decoded data here yet" hint. */
+    .region .resize-preview-placeholder {
+      position: absolute;
+      top: 4px; bottom: 4px;
+      background: repeating-linear-gradient(
+        45deg,
+        rgba(255, 255, 255, 0.04),
+        rgba(255, 255, 255, 0.04) 6px,
+        rgba(255, 255, 255, 0.10) 6px,
+        rgba(255, 255, 255, 0.10) 12px
+      );
+      border-left: 1px dashed rgba(255, 255, 255, 0.35);
+      pointer-events: none;
+      z-index: 1;
+    }
+
     /* Cut-pending slice overlay: a translucent scrim positioned over
      * the slice the user has queued for delete-on-paste. For whole-
      * region cuts the overlay spans 0..100% and looks like the legacy
@@ -2534,7 +2555,41 @@ export class TimelineView extends LitElement {
     const origs = new Map();
     for (const id of movingIds) {
       const r = this._regionForId(id);
-      if (r) origs.set(id, { start: r.start_samples, len: r.length_samples });
+      if (r) origs.set(id, {
+        start: r.start_samples,
+        len: r.length_samples,
+        offset: Number(r.source_offset_samples || 0),
+      });
+    }
+
+    // For resize-left we freeze the waveform at its pre-drag pixel
+    // resolution (`origPeaksPx`) and slide it under the region's
+    // `overflow:hidden` clip — so as the user trims, the waveform
+    // doesn't compress horizontally (which read as "time-stretch")
+    // but instead the trimmed portion crops off the left. Extending
+    // the start (only possible when `o.offset > 0`) shifts the peaks
+    // right and surfaces a striped placeholder in the gap, since we
+    // don't have peaks for the source span we just exposed. The
+    // freeze is reverted in `up` so the post-RegionUpdated peak
+    // refetch repaints normally.
+    let resizeLeftPreview = null;
+    if (mode === "resize-left") {
+      const o = origs.get(region.id);
+      const regionEl = this.renderRoot.querySelector(`.region[data-id="${region.id}"]`);
+      const wfEl = regionEl?.querySelector("foyer-waveform-gl");
+      if (o && regionEl && wfEl) {
+        const origPeaksPx = (o.len / sr) * pxPerSec;
+        wfEl.freezeViewport(origPeaksPx);
+        // Placeholder div lives inside the region. Sized inline as
+        // the drag progresses; hidden when dx >= 0.
+        const placeholder = document.createElement("div");
+        placeholder.className = "resize-preview-placeholder";
+        placeholder.style.left = "0px";
+        placeholder.style.width = "0px";
+        placeholder.style.display = "none";
+        regionEl.appendChild(placeholder);
+        resizeLeftPreview = { wfEl, placeholder, origPeaksPx };
+      }
     }
 
     // During the drag we only update the local preview — no
@@ -2576,18 +2631,53 @@ export class TimelineView extends LitElement {
         } else if (mode === "resize-right") {
           preview.length_samples = Math.max(4800, o.len + dxSamples);
         } else if (mode === "resize-left") {
-          // Left-resize can drag the start before zero; keep at least
-          // one render-stable length (4800 samples ≈ 0.1 s at 48 kHz).
-          const newStart = o.start + dxSamples;
-          const newLen = Math.max(4800, o.len - (newStart - o.start));
-          preview.start_samples = newStart;
-          preview.length_samples = newLen;
+          // Trim from the start: advance the source-media offset by
+          // the same amount the timeline edge moves, so the lozenge
+          // shrinks AND the underlying content slides forward (rather
+          // than the whole region translating, which is what the
+          // earlier code did). Clamp:
+          //   * dxSamples >= -o.offset  → can't trim past the
+          //     source's actual start
+          //   * newLen >= 4800          → can't shrink to nothing
+          // The right edge stays anchored at o.start + o.len.
+          const minDx = -o.offset;            // most we can trim leftward
+          const maxDx = o.len - 4_800;         // most we can trim rightward
+          const dx = Math.max(minDx, Math.min(maxDx, dxSamples));
+          preview.start_samples = o.start + dx;
+          preview.length_samples = o.len - dx;
+          preview.source_offset_samples = o.offset + dx;
+          // Slide the frozen waveform under the region's clip so
+          // peaks stay at fixed pixel-per-sample. dx > 0 (trim):
+          // peaks shift left and crop. dx < 0 (extend): peaks shift
+          // right and the new gap gets a striped placeholder.
+          if (resizeLeftPreview && id === region.id) {
+            const dxPx = (dx / sr) * pxPerSec;
+            const wf = resizeLeftPreview.wfEl;
+            const ph = resizeLeftPreview.placeholder;
+            wf.style.left = `${-dxPx}px`;
+            wf.style.right = "auto";
+            wf.style.width = `${resizeLeftPreview.origPeaksPx}px`;
+            if (dx < 0) {
+              ph.style.display = "";
+              ph.style.left = "0px";
+              ph.style.width = `${-dxPx}px`;
+            } else {
+              ph.style.display = "none";
+            }
+          }
         }
         this._patchRegionLocally(preview);
       }
     };
     const up = () => {
       for (const el of els) el.classList.remove("dragging");
+      // Drop the waveform freeze + placeholder. The post-commit
+      // RegionUpdated event will invalidate the wf cache and the
+      // next ensure() call refetches peaks for the new offset+length.
+      if (resizeLeftPreview) {
+        resizeLeftPreview.wfEl.unfreezeViewport();
+        resizeLeftPreview.placeholder.remove();
+      }
       // Click without drag on a member of a multi-selection collapses
       // the selection to just that member — standard "click is a
       // single-select; drag preserves multi" behavior.
@@ -2600,20 +2690,32 @@ export class TimelineView extends LitElement {
         this.requestUpdate();
       }
       // Single committed update per region, with the final position +
-      // length. The shim wraps each in a reversible command, so the
-      // user gets one undo entry per drag.
+      // length (+ source offset for left-trim drags). The shim wraps
+      // each in a reversible command, so the user gets one undo entry
+      // per drag.
       for (const id of movingIds) {
         const r = this._regionForId(id);
         if (!r) continue;
         const o = origs.get(id);
         if (!o) continue;
+        const newOffset = Number(r.source_offset_samples || 0);
+        const offsetMoved = newOffset !== o.offset;
         // Skip the round-trip if nothing actually moved (e.g. the
         // user click-dragged but landed back at the start).
-        if (r.start_samples === o.start && r.length_samples === o.len) continue;
+        if (
+          r.start_samples === o.start
+          && r.length_samples === o.len
+          && !offsetMoved
+        ) continue;
+        const patch = {
+          start_samples: r.start_samples,
+          length_samples: r.length_samples,
+        };
+        if (offsetMoved) patch.source_offset_samples = newOffset;
         window.__foyer?.ws?.send({
           type: "update_region",
           id: r.id,
-          patch: { start_samples: r.start_samples, length_samples: r.length_samples },
+          patch,
         });
       }
       window.removeEventListener("pointermove", move);

@@ -126,11 +126,10 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   - **Fix the clone process.** `just prep` (or wherever Ardour gets cloned) probably hardcodes a branch instead of the tag. Make it `git -c advice.detachedHead=false clone --depth 1 --branch v9.2.0 https://...`, parameterized by an `ARDOUR_TAG` env var with a sensible default. Then the CI matrix sets `ARDOUR_TAG` per cell. — This is a 5-line change to the Justfile when you're ready.
 
 
-- [/] Cut/copy/paste/delete/duplicate/mute region selections
-  - Need this standard DAW workflow to function for true basic feature completion, and it needs to work with multiple tracks selected. Getting waveform previews of ranges can either be easy or hard depending on how Ardour handles this internally - if they are just crops to existing full waveforms, it should be pretty easy. Nothing under edit excep undo and redo works, but this is all well handled on the back end so it should just be tapping into that and making sure we update front end visualizations
+- [x] Cut/copy/paste/delete/duplicate/mute region selections
   - **Shipped 2026-04-27 (overnight + morning):** per-tab region clipboard
     on `<foyer-timeline-view>` (`copyRegionSelection` /
-    `cutRegionSelection` / `pasteRegionsAtPlayhead` /
+    `cutRegionSelection` / `pasteRegions` /
     `duplicateRegionSelection` / `toggleMuteRegionSelection`). Each
     batch wraps the underlying ws commands in
     `undo_group_begin/end` so one Ctrl+Z undoes the whole op. Bound to
@@ -138,26 +137,60 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     [keybinds.js](../web/ui-core/layout/keybinds.js); region context
     menu grows the same items with chord glyphs. Toast feedback on
     every op (`Copied 1 region` / `Pasted 1 region` / `Nothing
-    selected — click a region first`) — the morning bug "does nothing"
-    was an invisible-success problem since cut defers the delete until
-    paste so the original stays put. Specs in
-    [tests-ui/specs/region-clipboard.spec.js](../tests-ui/specs/region-clipboard.spec.js)
-    cover all five ops + the toast feedback path.
+    selected — click a region first`).
+  - **Shipped 2026-04-27 (afternoon, time-range slice + edit-menu fix):**
+    - `Command::DuplicateRegionRange { source_region_id,
+      source_offset_samples, length_samples, at_samples }` end-to-end:
+      schema → server WS → stub backend (with start-time-ordered
+      `RegionStore::insert`) → Ardour shim (uses `RegionFactory::create
+      (source, offset, plist, announce)` overload — the `set_start()`-
+      after-create path silently no-op'd whenever
+      `pos > source_length - _length` because of `verify_start`,
+      leaving the clone showing source[0..len] instead of the carved
+      slice).
+    - Time-range slice cut/copy: when the user has BOTH a region
+      click-selection AND an active ruler time selection,
+      `copyRegionSelection` carves only the temporal overlap from each
+      region (slice_start / slice_len stored in clipboard items) and
+      paste sends `duplicate_region_range` per item.
+    - Cut split-around-slice: cut + paste of a slice no longer deletes
+      the entire source — instead it sends a `duplicate_region_range`
+      for the "after" piece + an `update_region` truncating the source
+      to the "before" length, leaving a gap where the slice was
+      (Reaper's standard cut-a-chunk-out behavior). Whole-region cuts
+      keep the simple delete path.
+    - Paste-at-mouse default (Ctrl/Cmd+V drops near the cursor);
+      Ctrl/Cmd+Shift+V pastes at the playhead. Context menu offers
+      both. `_lastMouseGridX` is captured on `_onGridHoverMove`.
+    - Cut visual decoration: the cut-pending overlay covers ONLY the
+      slice rectangle (offset% / 100% of the region) instead of dimming
+      the whole lozenge. Whole-region cuts span the full width.
+    - Edit-menu Cut/Copy/Paste now route client-side via `findTimeline()`
+      → `cutRegionSelection()` etc. — the catalog action `edit.copy`
+      previously fell through to `invoke_action`, which the headless
+      shim refuses ("only available in GUI Ardour"), so the menu items
+      silently no-op'd. Same `findTimeline()` walk also fixes
+      `view.zoom_*` and `edit.{delete,mute}_selection`.
+    - Specs in
+      [tests-ui/specs/region-slice.spec.js](../tests-ui/specs/region-slice.spec.js)
+      cover all four bugs.
+  - **Known pre-existing issue (NOT introduced by this batch):**
+    `Event::RegionsList` (broadcast via the backend's pump) and
+    `Event::RegionRemoved` (broadcast via `state.tx`) take different
+    paths and arrive out-of-order on the client. Cut + paste sometimes
+    leaves the original behind because the duplicate's full-list
+    snapshot (which includes the soon-to-be-deleted source) lands AFTER
+    the RegionRemoved event. Fix: emit a granular `Event::RegionAdded`
+    on duplicate so we don't stomp the entire track list. (Out of scope
+    for the slice work; logged here so the next person can find it.)
   - **Still pending:**
-    - Multi-track paste. `DuplicateRegion` keys on `source_region_id`
-      and lands on the SOURCE track; the schema doesn't have a "paste
-      onto target track" surface yet. Single-track copy/paste works
-      end-to-end; copy from track A and paste lands back on A.
-      Cross-track would need either a new schema command or a
-      client-side translation that re-posts as `CreateRegion` against
-      the destination — defer until someone actually wants it.
-    - Cut visual indicator. Originals stay in place after cut (so the
-      DuplicateRegion source IDs are still valid at paste time). A
-      dashed border / lower opacity on cut-pending regions would make
-      the "queued for cut" state obvious — currently only the toast
-      message conveys it.
-    - Time-range delete (Delete key with a ruler selection but no
-      region selection) already worked pre-batch; not changed here.
+    - Multi-track paste. `DuplicateRegion` / `DuplicateRegionRange` key
+      on `source_region_id` and land on the SOURCE track; the schema
+      doesn't have a "paste onto target track" surface yet. Single-
+      track copy/paste works end-to-end. Cross-track would need either
+      a new schema command or a client-side translation that re-posts
+      as `CreateRegion` against the destination — defer until someone
+      actually wants it.
 - [x] Need beats per bar and note value to provide proper timing grid/time signature for composition
   - **Shipped 2026-04-27:** time-signature surface in the transport bar's
     new session-meta cluster — two number inputs styled `N/D` next to
@@ -218,6 +251,116 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     convention), otherwise → just the dragged lane. Spec in
     [tests-ui/specs/timeline-multi-resize.spec.js](../tests-ui/specs/timeline-multi-resize.spec.js)
     covers all four cases.
+- [x] Region left-edge resize trims from the start (was translating + stretching)
+  - **Shipped 2026-04-27:** added `source_offset_samples` to
+    `RegionPatch` (schema → stub → Ardour shim's UpdateRegion handler,
+    which now calls `set_length` BEFORE `set_start` so `verify_start`
+    doesn't reject the new offset). The resize-left handler in
+    [timeline-view.js](../web/ui-full/components/timeline-view.js)
+    `_startDrag` now advances the source-media offset by the same
+    amount the timeline edge moves — the lozenge shrinks AND the
+    underlying content slides forward, with the right edge pinned.
+    Clamped so dragging can't push the offset below 0 or shrink the
+    region below the 4800-sample (0.1s) floor.
+
+## Region edits — DAW timeline backlog
+
+Common region-edit operations that aren't wired yet. Most reduce to a
+combination of `update_region` + `duplicate_region_range` +
+`delete_region` on the existing schema; a few need new schema verbs
+(noted inline). Order is roughly by user impact.
+
+- [ ] Time-stretch on edge drag (modifier-held, e.g. Ctrl/Cmd+drag)
+  - Today edge-drag = trim. With a modifier, the region length should
+    change WHILE the source content stretches/compresses to fill the
+    new span. Ardour's `Region::set_length_unchecked` + a non-trivial
+    `Region::stretch_to` aren't directly exposed yet; needs a
+    `Command::StretchRegion { id, new_length_samples }` that the shim
+    routes through `Editor::commit_resize_drag` (Stretch) or the
+    region-fx time-stretch chain.
+  - Web side: same edge-drag handler, but with modifier set send the
+    stretch command instead of the trim command. UI cue: a
+    different cursor + a "stretch" badge during drag.
+  - Visual during drag: the waveform stretching that the trim path
+    currently shows accidentally is *exactly* what stretch should
+    look like — this is mostly a backend wiring + a modifier check.
+- [ ] Crossfades on overlapping regions
+  - When two regions on the same track overlap, render a crossfade
+    in the overlap region (linear by default, exposed shape later).
+    Ardour models this as `AudioRegion::set_fade_in_length` /
+    `set_fade_out_length` plus the playlist-level overlap detection.
+    Schema needs `RegionPatch.fade_{in,out}_samples` + a fade-shape
+    enum, and the timeline view needs to draw the X curve in the
+    overlap. Hover handles on the overlap edges adjust the curve.
+- [ ] Fade-in / fade-out per region (independent of crossfade)
+  - Same `fade_{in,out}_samples` patch fields, applied to a
+    non-overlapping region. UI: a small triangular handle in the top-
+    inside corner of the lozenge that you drag inward to set the fade
+    length. Holding the modifier rotates through fade shapes (linear,
+    log, exp, S-curve).
+- [ ] Razor / split tool — split a region at the playhead or at click
+  - Bind to S (Reaper's keybind). Sends a `Command::SplitRegion {
+    id, at_samples }` that the shim implements via
+    `Playlist::cut(timerange)` or `Region::trim_to_internal` twice.
+    Stub equivalent: replace one region with two whose lengths sum
+    to the original. Multi-region split if the playhead crosses
+    multiple selected regions.
+- [ ] Glue / consolidate selected regions into one
+  - Render the selected regions to a single audio file (or, for MIDI,
+    merge the note streams into one region) and replace them with the
+    rendered region. Backend-heavy: needs a new offline-render verb
+    that returns a `source_path`. Useful for printing FX chains.
+- [ ] Strip silence / detect transients
+  - Per-region analysis pass that splits at silence boundaries (RMS
+    threshold + min-gap configuration). Returns N new regions. UI:
+    a region-context-menu item that opens a parameter modal, then
+    fires a single undo-grouped batch of split + delete operations.
+- [ ] Region groups (linked-edit)
+  - Mark several regions as a group; subsequent move / trim / fade /
+    delete on any one applies to all. Ardour has a native
+    `RegionGroup` concept; surface it as
+    `Command::CreateRegionGroup { region_ids }` + a group-id field
+    in the `Region` payload, then the timeline view applies edits to
+    every group sibling.
+- [ ] Quantize region start to grid
+  - Snap a region's `start_samples` to the nearest beat / bar / sub-
+    division of the active grid. Per-region or per-selection. Schema-
+    only — already expressible as `update_region` with the snapped
+    start; needs a context-menu entry + a "Quantize" toolbar widget.
+- [ ] Reverse region (audio)
+  - Render a reversed copy of the source media as a new source and
+    swap the region onto it. Backend offline-render path overlaps
+    with Glue. Cheap UI surface.
+- [ ] Pitch-shift region
+  - Per-region semitone offset stored in `Region.pitch_shift_cents`
+    or similar. Audio path uses Ardour's region FX
+    `a-pitchshifter`; MIDI path is just transposing the note list.
+    UI: a context-menu submenu with ±semitone increments and a
+    free-form input for cents.
+- [ ] Region gain handle (per-region volume)
+  - A draggable strip across the region top renders gain in dB. Edge
+    cases: live preview during the drag without sending N
+    `update_region`s (use a `RegionGainPreview` envelope or just one
+    write on pointer-up, like the move/resize commit pattern).
+- [ ] Snap-to-grid on region drag (move + resize)
+  - Scaffolding is already in place (the grid math gives a sample-
+    aligned step list — see entry under the chord modifier item
+    above). Needs hookup in `_startDrag` so a Shift-held drag commits
+    to the nearest grid step. Modifier choice TBD.
+- [ ] Fit selection to view (zoom + scroll to selection bounds)
+  - "Z" or "F" key. Already partially wired via `zoomToSelection`;
+    extend so a region selection (not just a time range) drives the
+    same fit. Trivial in `timeline-view.js`.
+- [ ] Nudge region left/right by grid step (arrow keys)
+  - Plain Left/Right when a region is selected nudges by the active
+    grid sub-step (16th by default); Shift+arrow nudges by a beat;
+    Ctrl/Cmd+arrow nudges by 1 sample. Already partially wired for
+    automation points; extend the same handler to regions.
+- [ ] Crop / trim around time selection
+  - With a region + ruler time selection, "Crop to selection" trims
+    the region to the carved range (mirror of Cut, but destructive
+    on the original — the slice REPLACES the region). One menu
+    entry; reuses the existing slice-capture math.
 
 ## Bugs
 
