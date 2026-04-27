@@ -118,7 +118,78 @@ export class TransportBar extends LitElement {
       letter-spacing: 0.06em;
       text-transform: uppercase;
     }
+    /* Session-meta cluster: clock + time-sig + tempo. Hideable via the
+       eye toggle on the right of the cluster (Rich's TODO #131-#132 —
+       not always required to drive the DAW). */
+    .meta-cluster {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .clock {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      font-family: var(--font-mono, ui-monospace, "JetBrains Mono", monospace);
+      font-size: 12px;
+      line-height: 1;
+      padding: 2px 8px;
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: 4px;
+      min-width: 88px;
+      text-align: right;
+      color: var(--color-text);
+    }
+    .clock .bbt {
+      font-size: 10px;
+      color: var(--color-text-muted);
+    }
+    .ts {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      font-family: var(--font-mono, ui-monospace, monospace);
+    }
+    .ts input {
+      width: 32px;
+      padding: 2px 4px;
+      background: var(--color-surface);
+      color: var(--color-text);
+      border: 1px solid var(--color-border);
+      border-radius: 3px;
+      font: inherit;
+      text-align: center;
+    }
+    .ts input:disabled { color: var(--color-text-muted); cursor: not-allowed; }
+    .ts .slash { color: var(--color-text-muted); padding: 0 1px; }
+    .ts label {
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+      margin-right: 2px;
+    }
+    .meta-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      border: 1px solid var(--color-border);
+      border-radius: 4px;
+      background: var(--color-surface);
+      color: var(--color-text-muted);
+      cursor: pointer;
+      padding: 0;
+    }
+    .meta-toggle:hover { color: var(--color-text); border-color: var(--color-accent-3); }
+    .meta-toggle.hidden { color: color-mix(in oklab, var(--color-text-muted), transparent 35%); }
   `;
+
+  static properties = {
+    _showMeta: { state: true },
+  };
 
   constructor() {
     super();
@@ -126,7 +197,19 @@ export class TransportBar extends LitElement {
     this._recCtl = null;
     this._loopCtl = null;
     this._tempoCtl = null;
+    this._posCtl = null;
+    this._tsNumCtl = null;
+    this._tsDenCtl = null;
     this._onStoreChange = () => this.requestUpdate();
+    // Persist the visibility toggle for the session-meta cluster
+    // (clock + time-sig + tempo). Default: shown — the cluster is
+    // useful enough that newcomers should see it; users who don't
+    // want it can hide it once.
+    try {
+      this._showMeta = localStorage.getItem("foyer.transport.show-meta.v1") !== "0";
+    } catch {
+      this._showMeta = true;
+    }
   }
 
   connectedCallback() {
@@ -136,6 +219,12 @@ export class TransportBar extends LitElement {
     this._recCtl   = new ControlController(this, store, "transport.recording");
     this._loopCtl  = new ControlController(this, store, "transport.looping");
     this._tempoCtl = new ControlController(this, store, "transport.tempo");
+    // Position drives the wall-clock readout; ts.num/den drive the
+    // time-signature surface. ControlController auto-subscribes per
+    // id and triggers a host requestUpdate on change.
+    this._posCtl   = new ControlController(this, store, "transport.position");
+    this._tsNumCtl = new ControlController(this, store, "transport.ts.num");
+    this._tsDenCtl = new ControlController(this, store, "transport.ts.den");
     // Repaint when the session.dirty flag flips — the Save button
     // enables/disables off that.
     store.addEventListener("change", this._onStoreChange);
@@ -173,6 +262,70 @@ export class TransportBar extends LitElement {
     }
     return out;
   }
+
+  /**
+   * Format the current playhead as M:SS.mmm (or H:MM:SS.mmm for sessions
+   * over an hour long). Reads transport.position (samples) and the
+   * session's sample-rate from `meta.sample_rate`.
+   */
+  _formatClockTime() {
+    const samples = Number(this._posCtl?.value || 0);
+    const sr = Number(window.__foyer?.store?.state?.session?.meta?.sample_rate || 48_000);
+    const totalSec = Math.max(0, samples / sr);
+    const ms = Math.floor((totalSec % 1) * 1000);
+    const totalIntSec = Math.floor(totalSec);
+    const s = totalIntSec % 60;
+    const m = Math.floor(totalIntSec / 60) % 60;
+    const h = Math.floor(totalIntSec / 3600);
+    const pad2 = (n) => n.toString().padStart(2, "0");
+    const pad3 = (n) => n.toString().padStart(3, "0");
+    if (h > 0) return `${h}:${pad2(m)}:${pad2(s)}.${pad3(ms)}`;
+    return `${m}:${pad2(s)}.${pad3(ms)}`;
+  }
+
+  /**
+   * Format the playhead as bar.beat.subdiv. Bars and beats are
+   * 1-indexed (matches Ardour, Logic, every DAW with a bar/beat clock).
+   * Subdivision is the 16th-note position within the current beat —
+   * good enough for visual feedback without surfacing PPQ
+   * microticks. Returns "—" when the inputs aren't valid yet.
+   */
+  _formatBarBeat() {
+    const samples = Number(this._posCtl?.value || 0);
+    const sr = Number(window.__foyer?.store?.state?.session?.meta?.sample_rate || 48_000);
+    const tempo = Number(this._tempoCtl?.value || 0);
+    const tsNum = Math.max(1, Number(this._tsNumCtl?.value || 4));
+    if (!sr || !tempo) return "—";
+    const totalBeats = (samples / sr) * (tempo / 60);
+    const bar = Math.floor(totalBeats / tsNum) + 1;
+    const beatInBar = Math.floor(totalBeats % tsNum) + 1;
+    const subdiv = Math.floor((totalBeats % 1) * 4) + 1;
+    return `${bar}.${beatInBar}.${subdiv}`;
+  }
+
+  _toggleMetaCluster = () => {
+    this._showMeta = !this._showMeta;
+    try {
+      localStorage.setItem("foyer.transport.show-meta.v1", this._showMeta ? "1" : "0");
+    } catch {}
+  };
+
+  _onTsNum = (ev) => {
+    const n = Math.max(1, Math.min(32, Math.round(Number(ev.currentTarget.value) || 4)));
+    window.__foyer?.ws?.controlSet("transport.ts.num", n);
+  };
+
+  _onTsDen = (ev) => {
+    const raw = Math.max(1, Math.min(32, Math.round(Number(ev.currentTarget.value) || 4)));
+    // Real-world note values are powers of 2 (1, 2, 4, 8, 16, 32). Snap
+    // to the nearest one rather than letting the user pick "5/3" — that
+    // would round-trip through Ardour but isn't a meter the engine can
+    // actually click to.
+    const pow2 = [1, 2, 4, 8, 16, 32].reduce((best, v) =>
+      Math.abs(v - raw) < Math.abs(best - raw) ? v : best,
+    );
+    window.__foyer?.ws?.controlSet("transport.ts.den", pow2);
+  };
 
   async _toggleAssignedMic() {
     const tracks = this._myAssignedTracks();
@@ -273,21 +426,47 @@ export class TransportBar extends LitElement {
         <div class="sep"></div>
       ` : null}
       ${this._renderSourceMic()}
-      <foyer-number
-        label="Tempo"
-        unit="BPM"
-        .value=${tempo}
-        .min=${20}
-        .max=${300}
-        .step=${1}
-        .fineStep=${0.1}
-        .coarseStep=${10}
-        .precision=${1}
-        .pxPerStep=${3}
-        ?disabled=${!canControl}
-        @input=${canControl ? this._onTempo : null}
-        @change=${canControl ? this._onTempo : null}
-      ></foyer-number>
+      ${this._showMeta ? html`
+        <div class="meta-cluster">
+          <div class="clock"
+               title="Playhead — top: time · bottom: bar.beat.16th">
+            <span>${this._formatClockTime()}</span>
+            <span class="bbt">${this._formatBarBeat()}</span>
+          </div>
+          <div class="ts" title="Time signature (numerator / denominator)">
+            <label>TS</label>
+            <input type="number" min="1" max="32" step="1"
+                   .value=${String(Number(this._tsNumCtl?.value ?? 4))}
+                   ?disabled=${!canControl}
+                   @change=${canControl ? this._onTsNum : null}>
+            <span class="slash">/</span>
+            <input type="number" min="1" max="32" step="1"
+                   .value=${String(Number(this._tsDenCtl?.value ?? 4))}
+                   ?disabled=${!canControl}
+                   @change=${canControl ? this._onTsDen : null}>
+          </div>
+          <foyer-number
+            label="Tempo"
+            unit="BPM"
+            .value=${tempo}
+            .min=${20}
+            .max=${300}
+            .step=${1}
+            .fineStep=${0.1}
+            .coarseStep=${10}
+            .precision=${1}
+            .pxPerStep=${3}
+            ?disabled=${!canControl}
+            @input=${canControl ? this._onTempo : null}
+            @change=${canControl ? this._onTempo : null}
+          ></foyer-number>
+        </div>
+      ` : null}
+      <button class="meta-toggle ${this._showMeta ? "" : "hidden"}"
+              title="${this._showMeta ? "Hide" : "Show"} clock / time-sig / tempo"
+              @click=${this._toggleMetaCluster}>
+        ${icon(this._showMeta ? "eye" : "eye-slash", 14)}
+      </button>
       <span class="spacer"></span>
       <span class="meta">Foyer · M4 transport</span>
     `;
