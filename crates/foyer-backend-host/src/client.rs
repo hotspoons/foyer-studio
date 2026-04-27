@@ -162,9 +162,7 @@ impl HostClient {
             next_seq: AtomicU64::new(1),
             out_tx,
             events: events_tx,
-            sample_rate: std::sync::atomic::AtomicU32::new(
-                foyer_schema::DEFAULT_SAMPLE_RATE,
-            ),
+            sample_rate: std::sync::atomic::AtomicU32::new(foyer_schema::DEFAULT_SAMPLE_RATE),
             pending_egress: Mutex::new(HashMap::new()),
             pending_ingress: Mutex::new(HashMap::new()),
             pending_latency: Mutex::new(HashMap::new()),
@@ -243,10 +241,9 @@ impl HostClient {
         // request bypasses the SessionSnapshot event-handling path
         // (the shim sends the response directly to the waiter), so
         // the cache update has to happen here too.
-        self.shared.sample_rate.store(
-            session.sample_rate,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        self.shared
+            .sample_rate
+            .store(session.sample_rate, std::sync::atomic::Ordering::Relaxed);
         Ok(session)
     }
 
@@ -876,10 +873,9 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     // Mirror the snapshot's sample rate into the cached
                     // atomic so `HostBackend::sample_rate()` returns the
                     // shim's actual rate without a snapshot round-trip.
-                    shared.sample_rate.store(
-                        session.sample_rate,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    shared
+                        .sample_rate
+                        .store(session.sample_rate, std::sync::atomic::Ordering::Relaxed);
                     let waiters = std::mem::take(&mut *shared.pending_snapshot.lock().await);
                     for w in waiters {
                         let _ = w.send((**session).clone());

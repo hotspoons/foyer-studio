@@ -216,7 +216,6 @@ impl Backend for StubBackend {
         self.sample_rate.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-
     async fn snapshot(&self) -> Result<Session, BackendError> {
         Ok(self.state.lock().await.session_clone())
     }
@@ -393,7 +392,12 @@ impl Backend for StubBackend {
         track_id: EntityId,
     ) -> Result<(TimelineMeta, Vec<Region>), BackendError> {
         let meta = self.timeline_meta();
-        let regions = self.regions.lock().await.regions_for(&track_id, self.sample_rate()).clone();
+        let regions = self
+            .regions
+            .lock()
+            .await
+            .regions_for(&track_id, self.sample_rate())
+            .clone();
         Ok((meta, regions))
     }
 
@@ -470,7 +474,10 @@ impl Backend for StubBackend {
             // forward by `offset` so the new region's content aligns
             // with what the user grabbed.
             clone.source_offset_samples = Some(
-                source.source_offset_samples.unwrap_or(0).saturating_add(offset),
+                source
+                    .source_offset_samples
+                    .unwrap_or(0)
+                    .saturating_add(offset),
             );
             // MIDI note slicing in the stub is intentionally unsliced —
             // notes use tick coordinates and slicing them by sample
