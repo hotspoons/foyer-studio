@@ -302,6 +302,15 @@ do_install() {
 
     [ "$cleanup_workdir" = 1 ] && rm -rf "$workdir" && trap - EXIT
 
+    # Pick the right "how to re-run me" line for the uninstall hint.
+    # `$0` resolves to `bash` when invoked through `curl … | bash`
+    # (the most common path), so printing it is useless. Give the
+    # actual one-liner instead, plus a fallback for users who have
+    # the script on disk.
+    local install_url="https://raw.githubusercontent.com/$REPO/main/install.sh"
+    local uninstall_cmd="curl -fsSL $install_url | bash -s -- uninstall"
+    local purge_cmd="curl -fsSL $install_url | bash -s -- uninstall --purge"
+
     cat <<EOF
 
 foyer installed.
@@ -311,10 +320,35 @@ Open a new shell, or run:
 
 Then start Ardour and enable "Foyer Studio Shim" under
   Edit → Preferences → Control Surfaces.
+EOF
+
+    # macOS-specific: stock Ardour9.app is signed with the hardened
+    # runtime, which by default refuses to load any dylib not signed
+    # by Ardour's identity. Our CI shim is unsigned, so it gets
+    # blocked silently — the surface never appears in Ardour's
+    # Control Surfaces list. Re-signing Ardour ad-hoc strips the
+    # hardened runtime + library validation. (Rich's bug,
+    # 2026-04-28: shim landed on disk but didn't show up in the list.)
+    if [ "$OS" = "macos" ]; then
+        cat <<EOF
+
+If "Foyer Studio Shim" doesn't appear in the Control Surfaces list,
+macOS library validation is blocking the dylib. Quit Ardour fully
+(⌘Q), then re-sign it ad-hoc to drop the hardened runtime:
+
+  sudo codesign --force --deep --sign - /Applications/Ardour9.app
+
+Relaunch Ardour and check the list again. Diagnostics:
+  ls -la "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT"
+  tail -50 "\$HOME/Library/Preferences/Ardour9/stderr.log"
+EOF
+    fi
+
+    cat <<EOF
 
 Uninstall later with:
-  $0 uninstall          # remove files
-  $0 uninstall --purge  # also wipe $PREFIX
+  $uninstall_cmd
+  $purge_cmd        # also wipe $PREFIX
 EOF
 }
 

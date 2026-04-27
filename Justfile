@@ -99,13 +99,15 @@ fmt-check:
     cargo fmt --all -- --check
 
 # Apply every autofixer that resolves a `just verify` failure
-# (formatting, lint auto-fixes, etc.). Run this before pushing —
-# `just verify` is the read-only gate (mirrors GitHub Actions); this
-# recipe is the writeable companion. Add new fixers here as the
-# project picks them up.
-ci:
+# (formatting, lint auto-fixes, etc.) AND then run `just verify` so
+# the same gate CI runs is what gates a local push. Without the
+# verify chain `just ci` was a write-only autofix that didn't catch
+# what it couldn't fix — e.g. a clippy error landed in CI on
+# 2026-04-28 because the dev had run `just ci` and assumed it was
+# enough. Now `just ci` is the one-shot "make it green" command.
+ci: && verify
     cargo fmt --all
-    @echo "✅ ci: applied"
+    @echo "✅ ci: autofixers applied — running verify…"
 
 test:
     cargo test --workspace --all-targets
