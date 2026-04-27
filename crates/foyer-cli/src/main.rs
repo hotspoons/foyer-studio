@@ -1113,10 +1113,10 @@ fn resolve_web_root(explicit: Option<PathBuf>) -> Result<Option<PathBuf>> {
         // the binary and is otherwise stuck on the old UI. The empty
         // / debug stub stamp `0000000000000000` matches itself, so
         // dev builds don't churn.
-        match std::fs::read_to_string(&stamp_path) {
-            Ok(existing) if existing.trim() == BUNDLED_WEB_STAMP => false,
-            _ => true,
-        }
+        !matches!(
+            std::fs::read_to_string(&stamp_path),
+            Ok(existing) if existing.trim() == BUNDLED_WEB_STAMP,
+        )
     };
     if needs_extract {
         extract_bundled_web(&data_dir)
