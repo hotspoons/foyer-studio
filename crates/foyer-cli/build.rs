@@ -24,7 +24,7 @@
 // behave like release (real `web/`, real per-file tracking). Set
 // this when testing the extract-on-first-run code path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -53,7 +53,24 @@ fn main() {
         stub.to_string_lossy().into_owned()
     };
 
+    // Hash the bundle contents so the runtime can detect when the
+    // binary's embedded UI is newer than whatever's already been
+    // extracted to `$XDG_DATA_HOME/foyer/web/`. Without this stamp,
+    // upgrading the binary leaves users on the old extracted tree
+    // (Rich's bug, 2026-04-28: `--latest-ci` install on macOS still
+    // served yesterday's UI). Hash is FNV-1a 64-bit over (relative
+    // path + content) for every file in the bundle, walked in sorted
+    // order so it's stable across hosts. Cheap to compute, no extra
+    // build deps.
+    let stamp = if want_real_bundle {
+        hash_bundle(Path::new(&resolved))
+    } else {
+        // Stub bundle is empty by design; pin a constant so the
+        // runtime sees "no real bundle, never re-extract".
+        0
+    };
     println!("cargo:rustc-env=FOYER_BUNDLED_WEB={resolved}");
+    println!("cargo:rustc-env=FOYER_BUNDLED_WEB_STAMP={stamp:016x}");
     println!("cargo:rerun-if-env-changed=FOYER_BUNDLED_WEB");
     println!("cargo:rerun-if-env-changed=FOYER_BUNDLE_WATCH_DEBUG");
     // Belt-and-braces: ask cargo to re-run this script on web/ tree
@@ -61,5 +78,55 @@ fn main() {
     // Debug + stub doesn't need the watcher — the stub never changes.
     if want_real_bundle {
         println!("cargo:rerun-if-changed={resolved}");
+    }
+}
+
+/// FNV-1a 64-bit over the bundle's contents. Walks the tree in sorted
+/// order so the output is reproducible between builds on different
+/// machines as long as the source tree matches.
+fn hash_bundle(root: &Path) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut entries: Vec<PathBuf> = Vec::new();
+    collect_files(root, root, &mut entries);
+    entries.sort();
+    for rel in &entries {
+        let abs = root.join(rel);
+        let bytes = match std::fs::read(&abs) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        // Mix in the relative path so a rename changes the hash.
+        for b in rel.to_string_lossy().as_bytes() {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x100000001b3);
+        for b in &bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for entry in read.flatten() {
+        let p = entry.path();
+        // Skip Tailwind's build output — it's a regen artifact, not
+        // part of the source-of-truth bundle, and on dev machines its
+        // mtime constantly churns.
+        if p.file_name().is_some_and(|n| n == "node_modules" || n == ".DS_Store") {
+            continue;
+        }
+        if p.is_dir() {
+            collect_files(root, &p, out);
+        } else if let Ok(rel) = p.strip_prefix(root) {
+            out.push(rel.to_path_buf());
+        }
     }
 }

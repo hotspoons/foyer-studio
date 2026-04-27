@@ -1071,6 +1071,14 @@ fn redirect_short_wrapper(exec: &std::path::Path) -> Option<PathBuf> {
 /// further hack the UI in place; see `web/HACKING.md`.
 static BUNDLED_WEB: include_dir::Dir<'static> = include_dir::include_dir!("$FOYER_BUNDLED_WEB");
 
+/// Content hash of the bundled `web/` tree at build time. Written
+/// alongside the extracted assets as `.foyer-bundle-version`; on
+/// startup we compare the binary's stamp to the file. A mismatch
+/// means the user upgraded the binary — re-extract so they don't
+/// stay on yesterday's UI. Computed in `build.rs`.
+const BUNDLED_WEB_STAMP: &str = env!("FOYER_BUNDLED_WEB_STAMP");
+const BUNDLED_WEB_STAMP_FILE: &str = ".foyer-bundle-version";
+
 /// Resolve the `web_root` the server should serve from.
 ///
 /// Priority (first hit wins):
@@ -1096,29 +1104,84 @@ fn resolve_web_root(explicit: Option<PathBuf>) -> Result<Option<PathBuf>> {
         .ok_or_else(|| anyhow!("cannot resolve $XDG_DATA_HOME"))?
         .join("foyer")
         .join("web");
-    if !data_dir.join("index.html").exists() {
+    let stamp_path = data_dir.join(BUNDLED_WEB_STAMP_FILE);
+    let needs_extract = if !data_dir.join("index.html").exists() {
+        true
+    } else {
+        // Compare the stamp the previous extract wrote to whatever
+        // this binary's bundle hashes to. Mismatch = the user upgraded
+        // the binary and is otherwise stuck on the old UI. The empty
+        // / debug stub stamp `0000000000000000` matches itself, so
+        // dev builds don't churn.
+        match std::fs::read_to_string(&stamp_path) {
+            Ok(existing) if existing.trim() == BUNDLED_WEB_STAMP => false,
+            _ => true,
+        }
+    };
+    if needs_extract {
         extract_bundled_web(&data_dir)
             .with_context(|| format!("extracting bundled web/ to {}", data_dir.display()))?;
     }
     Ok(Some(data_dir))
 }
 
-/// First-run extract: write every file in `BUNDLED_WEB` to `dst`.
-/// Creates parent directories as needed and overwrites nothing (the
-/// existence check in `resolve_web_root` already guaranteed this is
-/// a fresh extract).
+/// Extract the binary's bundled `web/` to `dst`. Called both on
+/// first run (no extracted tree yet) and on every upgrade where the
+/// binary's `BUNDLED_WEB_STAMP` differs from the stamp file written
+/// by the previous extract.
+///
+/// Upgrade path: if `dst` already exists with content, rotate it to
+/// `dst.bak.<old-stamp>` first so any user edits aren't silently
+/// blown away — they're recoverable from the rename. We don't try
+/// to merge: the bundled tree is the source of truth, and the user
+/// can copy specific files back if they want.
 fn extract_bundled_web(dst: &Path) -> Result<()> {
+    if dst.join("index.html").exists() {
+        let old_stamp = std::fs::read_to_string(dst.join(BUNDLED_WEB_STAMP_FILE))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "unknown".into());
+        let backup = dst.with_file_name(format!(
+            "{}.bak.{old_stamp}",
+            dst.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("web"),
+        ));
+        // If a backup with the same stamp is already there (rare:
+        // user upgraded twice without hitting the new bundle), drop
+        // the older snapshot — the more recent edits are what they
+        // care about.
+        if backup.exists() {
+            let _ = std::fs::remove_dir_all(&backup);
+        }
+        std::fs::rename(dst, &backup)
+            .with_context(|| format!("rotate {} → {}", dst.display(), backup.display()))?;
+        tracing::info!(
+            "stale extracted web/ found (stamp {old_stamp}); rotated to {} \
+             before re-extracting bundled assets",
+            backup.display(),
+        );
+    }
     std::fs::create_dir_all(dst).with_context(|| format!("mkdir -p {}", dst.display()))?;
-    tracing::info!("extracting bundled web/ to {}", dst.display());
+    tracing::info!(
+        "extracting bundled web/ (stamp {}) to {}",
+        BUNDLED_WEB_STAMP,
+        dst.display(),
+    );
     write_dir_contents(&BUNDLED_WEB, dst)?;
+    // Stamp file lets the next launch detect a binary upgrade.
+    let _ = std::fs::write(dst.join(BUNDLED_WEB_STAMP_FILE), BUNDLED_WEB_STAMP);
     // Drop a breadcrumb so users know where to hack and how to reset.
     let readme = dst.join("INSTALLED-HERE.txt");
     let _ = std::fs::write(
         &readme,
-        "This directory was seeded from the Foyer binary's bundled web/ on\n\
-         first run. You can edit anything here — refresh the browser to see\n\
-         changes. See HACKING.md for recipes.\n\n\
-         To reset to the shipped assets: delete this folder and restart `foyer serve`.\n",
+        "This directory was seeded from the Foyer binary's bundled web/.\n\
+         You can edit anything here — refresh the browser to see changes.\n\
+         See HACKING.md for recipes.\n\n\
+         When you upgrade the foyer binary, this folder is re-extracted\n\
+         from the new bundle. Your previous tree (if any) is rotated\n\
+         to ./web.bak.<old-stamp>/ — copy custom edits back from there.\n\n\
+         To force a fresh re-extract: delete this folder + the .foyer-\n\
+         bundle-version sibling, then restart `foyer serve`.\n",
     );
     Ok(())
 }
