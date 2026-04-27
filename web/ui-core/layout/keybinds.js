@@ -75,6 +75,39 @@ export class Keybinds {
       return;
     }
 
+    // Cut/Copy/Paste/Duplicate region clipboard ops. Mod is the
+    // platform-conventional Ctrl on Linux/Windows, Cmd on macOS — the
+    // same `ctrlKey || metaKey` shape every other Foyer shortcut uses.
+    // We only fire when there's an actual region selection so the
+    // browser's native copy of the page text still works elsewhere.
+    {
+      const isMod = (e.ctrlKey || e.metaKey) && !e.altKey;
+      const lower = e.key?.toLowerCase?.();
+      if (isMod && !e.shiftKey && (lower === "c" || lower === "x" || lower === "v" || lower === "d")) {
+        const tl = queryDeep("foyer-timeline-view");
+        if (!tl) return;
+        const hasSel = (tl.getSelectedRegionIds?.() || []).length > 0;
+        if (lower === "c" && hasSel) { e.preventDefault(); tl.copyRegionSelection?.(); return; }
+        if (lower === "x" && hasSel) { e.preventDefault(); tl.cutRegionSelection?.(); return; }
+        if (lower === "d" && hasSel) { e.preventDefault(); tl.duplicateRegionSelection?.(); return; }
+        if (lower === "v" && tl.hasClipboard?.()) {
+          e.preventDefault();
+          tl.pasteRegionsAtPlayhead?.();
+          return;
+        }
+      }
+      // Mute toggle: bare M, region selection required. Skip if any
+      // modifier is held so M-with-modifier stays free for other use.
+      if (lower === "m" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const tl = queryDeep("foyer-timeline-view");
+        if (tl?.getSelectedRegionIds?.()?.length) {
+          e.preventDefault();
+          tl.toggleMuteRegionSelection?.();
+          return;
+        }
+      }
+    }
+
     // Delete key (no modifiers) → delete regions in the current
     // selection. If there's a time-range selection OR track selection
     // with regions in it, delete. Only fires when no modifier is

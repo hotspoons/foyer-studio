@@ -444,6 +444,14 @@ export class TimelineView extends LitElement {
     this._zoomStackMax = 32;
     // Region click selection (distinct from ruler time-range selection).
     this._selectedRegionIds = new Set();
+    // Per-tab region clipboard for cut/copy/paste. `null` when empty.
+    // Shape: { mode: "copy"|"cut", anchor_samples, items: [{ region_id,
+    // track_id, offset_samples, length_samples }] }. We snapshot region
+    // IDs (not their bodies) — the duplicate command on the server
+    // fans out a fresh region from the live source. That means a cut
+    // can't be undone by clearing the clipboard; the originals persist
+    // until paste actually fires the delete. Matches Reaper's flow.
+    this._regionClipboard = null;
     // Last seq that updated transport.position; guards against stale
     // out-of-order position packets causing visible playhead jump-back.
     this._lastTransportSeq = 0;
@@ -1132,6 +1140,159 @@ export class TimelineView extends LitElement {
     return ids.length;
   }
 
+  // ── clipboard ops (cut/copy/paste/duplicate) ───────────────────────
+  /**
+   * Snapshot the current click-selection of regions into the clipboard.
+   * Captures relative offsets so a multi-region paste preserves the
+   * original spacing. Returns the count snapshotted.
+   */
+  copyRegionSelection({ mode = "copy" } = {}) {
+    const ids = [...this._selectedRegionIds];
+    if (!ids.length) return 0;
+    const tracks = this.session?.tracks || [];
+    const items = [];
+    let anchor = Number.POSITIVE_INFINITY;
+    for (const id of ids) {
+      let region = null;
+      let track = null;
+      for (const t of tracks) {
+        const r = (this._regionsByTrack[t.id] || []).find((r) => r.id === id);
+        if (r) { region = r; track = t; break; }
+      }
+      if (!region) continue;
+      const start = Number(region.start_samples || 0);
+      const len = Number(region.length_samples || 0);
+      anchor = Math.min(anchor, start);
+      items.push({
+        region_id: region.id,
+        track_id: track.id,
+        start_samples: start,
+        length_samples: len,
+      });
+    }
+    if (!items.length) return 0;
+    // Re-key offsets from the earliest region in the set so paste
+    // re-anchors to the playhead while keeping internal spacing.
+    for (const it of items) it.offset_samples = it.start_samples - anchor;
+    this._regionClipboard = { mode, anchor_samples: anchor, items };
+    return items.length;
+  }
+
+  cutRegionSelection() {
+    // Same snapshot as copy; the actual delete happens on paste so the
+    // server-side region IDs stay valid until DuplicateRegion fires.
+    // If the user never pastes, originals are preserved (intentional).
+    return this.copyRegionSelection({ mode: "cut" });
+  }
+
+  /**
+   * Paste the clipboard at the current playhead. For cut-mode, the
+   * originals are deleted after the duplicates land. Returns the number
+   * of regions written.
+   */
+  pasteRegionsAtPlayhead() {
+    const clip = this._regionClipboard;
+    if (!clip || !clip.items.length) return 0;
+    const ws = window.__foyer?.ws;
+    const cursor = Number(
+      window.__foyer?.store?.state?.controls?.get("transport.position") || 0,
+    );
+    const cut = clip.mode === "cut";
+    const groupLabel = cut
+      ? `Foyer paste ${clip.items.length} regions (cut)`
+      : `Foyer paste ${clip.items.length} regions`;
+    ws?.send({ type: "undo_group_begin", name: groupLabel });
+    for (const it of clip.items) {
+      ws?.send({
+        type: "duplicate_region",
+        source_region_id: it.region_id,
+        at_samples: cursor + it.offset_samples,
+        length_samples: it.length_samples,
+      });
+    }
+    if (cut) {
+      for (const it of clip.items) {
+        ws?.send({ type: "delete_region", id: it.region_id });
+      }
+      // After a cut/paste, the clipboard slot is consumed so a second
+      // paste doesn't re-delete already-gone originals. Clear it.
+      this._regionClipboard = null;
+    }
+    ws?.send({ type: "undo_group_end" });
+    return clip.items.length;
+  }
+
+  /**
+   * Duplicate every region in the click-selection to a position right
+   * after the original (start_samples + length_samples). Same-track
+   * only — DuplicateRegion is keyed on source_region_id. Wrapped in
+   * one undo group.
+   */
+  duplicateRegionSelection() {
+    const ids = [...this._selectedRegionIds];
+    if (!ids.length) return 0;
+    const tracks = this.session?.tracks || [];
+    const ws = window.__foyer?.ws;
+    const groupLabel = ids.length === 1
+      ? "Foyer duplicate region"
+      : `Foyer duplicate ${ids.length} regions`;
+    ws?.send({ type: "undo_group_begin", name: groupLabel });
+    let written = 0;
+    for (const id of ids) {
+      let region = null;
+      for (const t of tracks) {
+        const r = (this._regionsByTrack[t.id] || []).find((r) => r.id === id);
+        if (r) { region = r; break; }
+      }
+      if (!region) continue;
+      ws?.send({
+        type: "duplicate_region",
+        source_region_id: region.id,
+        at_samples: Number(region.start_samples || 0) + Number(region.length_samples || 0),
+        length_samples: Number(region.length_samples || 0),
+      });
+      written += 1;
+    }
+    ws?.send({ type: "undo_group_end" });
+    return written;
+  }
+
+  /**
+   * Toggle mute on every region in the click-selection. Mirrors
+   * `muteSelection()` (which works off time-range), so the user gets
+   * a consistent op whether they shift-click regions or drag a range.
+   */
+  toggleMuteRegionSelection() {
+    const ids = [...this._selectedRegionIds];
+    if (!ids.length) return 0;
+    const tracks = this.session?.tracks || [];
+    const regions = [];
+    for (const id of ids) {
+      for (const t of tracks) {
+        const r = (this._regionsByTrack[t.id] || []).find((r) => r.id === id);
+        if (r) { regions.push(r); break; }
+      }
+    }
+    if (!regions.length) return 0;
+    const anyUnmuted = regions.some((r) => !r.muted);
+    const target = anyUnmuted; // any unmuted → mute all; else unmute all
+    const ws = window.__foyer?.ws;
+    const groupLabel = regions.length === 1
+      ? (target ? "Foyer mute region" : "Foyer unmute region")
+      : `Foyer ${target ? "mute" : "unmute"} ${regions.length} regions`;
+    ws?.send({ type: "undo_group_begin", name: groupLabel });
+    for (const r of regions) {
+      ws?.send({ type: "update_region", id: r.id, patch: { muted: target } });
+    }
+    ws?.send({ type: "undo_group_end" });
+    return regions.length;
+  }
+
+  /** Shallow status of the clipboard for UI affordances. */
+  hasClipboard() {
+    return !!(this._regionClipboard && this._regionClipboard.items?.length);
+  }
+
   /** Toggle mute on regions overlapping the selection. If the set has
    *  any unmuted region, mute all. Otherwise unmute all. */
   muteSelection() {
@@ -1208,7 +1369,6 @@ export class TimelineView extends LitElement {
           </select>
         ` : null}
         <foyer-viz-picker></foyer-viz-picker>
-        <button @click=${this._clearCache} title="Drop all cached peak files">Clear peak cache</button>
         <span>${totalSec.toFixed(1)}s · ${sr} Hz · wheel to zoom · Alt-wheel for lane height</span>
         ${this._diagEnabled() ? html`
           <span>
@@ -1646,13 +1806,58 @@ export class TimelineView extends LitElement {
       });
     }
     items.push({ separator: true });
+    // Treat any context-click on a region as "this region is the
+    // selection" if it isn't already part of the multi-selection. That
+    // way the clipboard ops act on what the user clicked, not on a
+    // stale prior selection invisible behind the menu.
+    const inSelection = this._selectedRegionIds.has(region.id);
+    const ensureSelection = () => {
+      if (!inSelection) {
+        this._selectedRegionIds.clear();
+        this._selectedRegionIds.add(region.id);
+        this.requestUpdate();
+      }
+    };
+    const meta = this._metaChord();
+    items.push({
+      label: "Cut",
+      icon: "scissors",
+      hint: `${meta}+X`,
+      action: () => { ensureSelection(); this.cutRegionSelection(); },
+    });
+    items.push({
+      label: "Copy",
+      icon: "document-duplicate",
+      hint: `${meta}+C`,
+      action: () => { ensureSelection(); this.copyRegionSelection(); },
+    });
+    items.push({
+      label: "Paste at playhead",
+      icon: "clipboard",
+      hint: `${meta}+V`,
+      disabled: !this.hasClipboard(),
+      action: () => this.pasteRegionsAtPlayhead(),
+    });
+    items.push({
+      label: "Duplicate",
+      icon: "plus",
+      hint: `${meta}+D`,
+      action: () => { ensureSelection(); this.duplicateRegionSelection(); },
+    });
+    items.push({ separator: true });
     items.push({
       label: "Delete region",
       icon: "trash",
       tone: "danger",
+      hint: "Del",
       action: () => window.__foyer?.ws?.send({ type: "delete_region", id: region.id }),
     });
     showContextMenu(ev, items);
+  }
+
+  /** Platform meta-key glyph for menu hints. Mac → ⌘, else → Ctrl. */
+  _metaChord() {
+    return navigator.platform?.startsWith?.("Mac") ? "⌘" : "Ctrl";
   }
 
   _onRegionPointerDown(ev, region) {
@@ -1790,13 +1995,26 @@ export class TimelineView extends LitElement {
     ev.stopPropagation();
     const start = ev.clientY;
     const tracks = this.session?.tracks || [];
-    // Hold Shift to resize every lane by the same delta. Saves having
-    // to drag each one individually when the user wants a uniform
-    // set-height pass (common ergonomic ask).
+    // Resize-target picker, in priority order:
+    //   1. Shift held → resize EVERY lane (uniform pass).
+    //   2. Multi-track selection that includes the dragged track → resize
+    //      every selected track. Mirrors the common DAW expectation that
+    //      bulk-edit operations apply to the selection.
+    //   3. Otherwise → resize just the dragged lane.
+    const sel = window.__foyer?.store?.state?.selectedTrackIds;
+    const dragInSelection = sel && sel.size > 1 && sel.has(trackId);
     const resizeAll = ev.shiftKey;
-    const origHeights = resizeAll
-      ? Object.fromEntries(tracks.map((t) => [t.id, this._laneHeightFor(t.id)]))
-      : { [trackId]: this._laneHeightFor(trackId) };
+    let targetIds;
+    if (resizeAll) {
+      targetIds = tracks.map((t) => t.id);
+    } else if (dragInSelection) {
+      targetIds = tracks.filter((t) => sel.has(t.id)).map((t) => t.id);
+    } else {
+      targetIds = [trackId];
+    }
+    const origHeights = Object.fromEntries(
+      targetIds.map((id) => [id, this._laneHeightFor(id)]),
+    );
     const move = (e) => {
       const dy = e.clientY - start;
       const next = { ...this._laneHeights };
@@ -2094,9 +2312,5 @@ export class TimelineView extends LitElement {
     this._regionsByTrack = { ...this._regionsByTrack, [region.track_id]: copy };
   }
 
-  _clearCache() {
-    this._wfCache?.invalidate?.("");
-    window.__foyer?.ws?.send({ type: "clear_waveform_cache" });
-  }
 }
 customElements.define("foyer-timeline-view", TimelineView);
