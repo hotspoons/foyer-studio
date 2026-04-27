@@ -88,11 +88,58 @@ version.
 
 ## Running it
 
-Right now there's no packaged `foyer` binary or prebuilt Ardour
-shim. The dev container is the only way to run it at the moment — it handles
-the C++ toolchain, Ardour's deps, JACK, and the sidecar build.
-Windows, Mac, and Linux hosts all work; only native Linux hosts
-can currently pass real audio hardware through.
+Two paths: install a prebuilt binary on a host that already has
+Ardour, or run the whole stack inside the dev container. There's
+no tagged release yet, so today the prebuilt path pulls the most
+recent passing CI build from `main`.
+
+### Install via the script (CI builds)
+
+Targets Linux + Apple Silicon macOS hosts that already have Ardour
+9 installed. The installer drops the `foyer` sidecar in
+`$XDG_DATA_HOME/foyer/bin` (or `$HOME/.foyer/bin` if XDG isn't set)
+and copies the `libfoyer_shim.so` / `.dylib` into Ardour's
+control-surface directory so the next time you launch Ardour the
+"Foyer Studio" surface shows up under **Preferences → Control
+Surfaces**.
+
+```bash
+# Latest passing CI build, no GitHub auth required (proxied
+# through nightly.link).
+curl -fsSL https://raw.githubusercontent.com/hotspoons/foyer-studio/main/install.sh \
+  | bash -s -- --latest-ci
+```
+
+If the install adds a new directory to your `PATH`, the script
+prints the line you'd source — restart your shell or `source` the
+rc file it edited, then:
+
+```bash
+foyer serve --backend ardour
+```
+
+…and open <http://127.0.0.1:3838>. With Ardour already running and
+the Foyer surface enabled, the sidecar attaches over the shim's
+Unix socket; otherwise pick a project from the launcher and
+`foyer` will spawn a headless Ardour for you.
+
+Other useful flags:
+
+- `--version vX.Y.Z` — install a specific tagged release (none yet)
+- `--from-bundle DIR` — install from a local directory of artifacts
+- `uninstall [--purge]` — remove the installed binary + shim;
+  `--purge` also wipes the install root
+
+Intel Mac hosts aren't supported by the prebuilt release (GitHub
+retired the Intel runners) — build from source via the dev
+container instead.
+
+### From source — the dev container
+
+The dev container handles the C++ toolchain, Ardour's deps, JACK,
+and the sidecar build, so you don't have to install any of that on
+the host. Windows, Mac, and Linux hosts all work; only native
+Linux hosts can currently pass real audio hardware through.
 
 Prerequisites:
 
@@ -136,7 +183,11 @@ used `run-tls`). To share the session off-host, use **Session →
 Remote Access...** to open a Cloudflare tunnel, then invite
 collaborators via the role picker.
 
-### Linux hosts — passing real hardware
+For the full development workflow — overlaying your own UI
+variants, running the test suite, the CI gate, the Justfile recipe
+catalog — see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+#### Linux hosts — passing real hardware
 
 Native Linux hosts can expose ALSA devices to the container so the
 container-owned `jackd` drives real hardware. Uncomment the

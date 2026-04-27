@@ -243,6 +243,7 @@ struct DecodedCmd
 		AudioIngressOpen,
 		AudioIngressClose,
 		DuplicateRegion,
+		DuplicateRegionRange,
 		CreateRegion,
 		ReplaceRegionNotes,
 		ListPlugins,
@@ -287,6 +288,11 @@ struct DecodedCmd
 	std::int64_t  patch_start       = 0;
 	bool          has_patch_length  = false;
 	std::uint64_t patch_length      = 0;
+	// Source-media offset (Ardour's `Region::start`). Carried in a
+	// RegionPatch so a left-edge trim drag advances the source
+	// offset atomically with the new timeline position + length.
+	bool          has_patch_source_offset = false;
+	std::uint64_t patch_source_offset     = 0;
 	bool          has_patch_name    = false;
 	std::string   patch_name;
 	bool          has_patch_muted   = false;
@@ -347,6 +353,12 @@ struct DecodedCmd
 	std::uint64_t dup_at_samples = 0;
 	bool          dup_has_length = false;
 	std::uint64_t dup_length_samples = 0;
+	// DuplicateRegionRange payload — same source_id + at_samples as
+	// DuplicateRegion plus a slice carve-out. `dup_source_offset_samples`
+	// is the offset INTO the source region's content, not into the
+	// underlying media; the handler adds it to the source's own start
+	// offset to get the absolute source-media position.
+	std::uint64_t dup_source_offset_samples = 0;
 
 	// CreateRegion payload. Shares at/length/name with DuplicateRegion /
 	// RegionPatch; `create_kind` is the region's media type ("midi" is
@@ -794,6 +806,9 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 		} else if (pk == "length_samples") {
 			if (!in.read_u64 (out.patch_length)) return false;
 			out.has_patch_length = true;
+		} else if (pk == "source_offset_samples") {
+			if (!in.read_u64 (out.patch_source_offset)) return false;
+			out.has_patch_source_offset = true;
 		} else if (pk == "name") {
 			if (!in.read_str (out.patch_name)) return false;
 			out.has_patch_name = true;
@@ -900,12 +915,19 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.create_kind)) return out;
 				} else if (k == "at_samples") {
 					if (!in.read_u64 (out.dup_at_samples)) return out;
+				} else if (k == "source_offset_samples") {
+					// DuplicateRegionRange's slice anchor — offset
+					// INTO the source region's content.
+					if (!in.read_u64 (out.dup_source_offset_samples)) return out;
 				} else if (k == "length_samples") {
 					// Top-level length_samples is DuplicateRegion's
 					// optional length override. UpdateRegion sends
 					// `length_samples` inside a nested `patch` map
 					// which goes through read_region_patch_or_note,
 					// so there's no collision here.
+					// For DuplicateRegionRange the length is
+					// REQUIRED; the handler treats has_length=false
+					// as a 0-length error.
 					if (!in.read_u64 (out.dup_length_samples)) return out;
 					out.dup_has_length = true;
 				} else if (k == "notes") {
@@ -1130,6 +1152,7 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "audio_ingress_open")  out.kind = DecodedCmd::Kind::AudioIngressOpen;
 			else if (cmd_type == "audio_ingress_close") out.kind = DecodedCmd::Kind::AudioIngressClose;
 			else if (cmd_type == "duplicate_region")    out.kind = DecodedCmd::Kind::DuplicateRegion;
+			else if (cmd_type == "duplicate_region_range") out.kind = DecodedCmd::Kind::DuplicateRegionRange;
 			else if (cmd_type == "create_region")       out.kind = DecodedCmd::Kind::CreateRegion;
 			else if (cmd_type == "replace_region_notes") out.kind = DecodedCmd::Kind::ReplaceRegionNotes;
             else if (cmd_type == "list_plugins")        out.kind = DecodedCmd::Kind::ListPlugins;
@@ -1406,11 +1429,22 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer update region");
 				hit.region->clear_changes ();
-				if (snap.has_patch_start) {
-					hit.region->set_position (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_start)));
-				}
+				// Apply length BEFORE source offset: `Region::set_start`
+				// runs `verify_start(pos > source_length - _length)` and
+				// rejects any offset that would push the slice past the
+				// source's tail given the CURRENT length. For a left-
+				// trim drag the new length is shorter — applying it
+				// first widens the verify window so the new offset
+				// passes. (region.cc:1999-2012; learned the hard way
+				// in DuplicateRegionRange.)
 				if (snap.has_patch_length) {
 					hit.region->set_length (Temporal::timecnt_t::from_samples (static_cast<Temporal::samplepos_t> (snap.patch_length)));
+				}
+				if (snap.has_patch_source_offset) {
+					hit.region->set_start (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_source_offset)));
+				}
+				if (snap.has_patch_start) {
+					hit.region->set_position (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_start)));
 				}
 				if (snap.has_patch_name) {
 					hit.region->set_name (snap.patch_name);
@@ -1724,7 +1758,8 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			if (cmd.dup_source_id.empty ()) break;
 			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
 				auto hit = schema_map::find_region (shim->session (), snap.dup_source_id);
 				if (!hit.region) {
 					PBD::warning << "foyer_shim: duplicate_region: unknown source: "
@@ -1752,23 +1787,125 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// ctor in region.cc:474-477 does `new XMLNode(*other)` on
 				// the extra_xml tree). That's why duplicating a beat-
 				// sequencer region carries the layout across for free.
+				//
+				// Wrap the playlist mutation in a reversible-command
+				// transaction with a `StatefulDiffCommand` capturing
+				// the playlist's before/after diff — without that, the
+				// undo entry is empty and Ctrl+Z does nothing. When
+				// already inside a Foyer undo group (cut+paste batch),
+				// participate in that transaction instead so the entire
+				// group commits as one entry. WITHOUT this fix, paste
+				// regions weren't reversible AT ALL — Ardour's undo
+				// stack got confused state from concurrent unwrapped
+				// adds and the symptom was random ghost regions
+				// reappearing on undo (Rich's morning bug report).
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer duplicate region");
 				PBD::PropertyList plist;
 				auto clone = ARDOUR::RegionFactory::create (
 					std::shared_ptr<const ARDOUR::Region> (hit.region),
 					true /* announce */, false /* fork */);
 				if (!clone) {
 					PBD::warning << "foyer_shim: duplicate_region: RegionFactory returned null" << endmsg;
+					if (own_txn) session.commit_reversible_command ();
 					return;
 				}
 				if (snap.dup_has_length) {
 					clone->set_length (Temporal::timecnt_t::from_samples (
 						static_cast<Temporal::samplepos_t> (snap.dup_length_samples)));
 				}
+				playlist->clear_changes ();
 				playlist->add_region (clone, Temporal::timepos_t (
 					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
-				shim->session ().set_dirty ();
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
 				// Playlist's RegionAdded signal fires an echo; we
 				// don't emit one manually here.
+			});
+			break;
+		}
+		case DecodedCmd::Kind::DuplicateRegionRange: {
+			if (cmd.dup_source_id.empty ()) break;
+			if (!cmd.dup_has_length || cmd.dup_length_samples == 0) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.dup_source_id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: duplicate_region_range: unknown source: "
+					             << snap.dup_source_id << endmsg;
+					return;
+				}
+				std::shared_ptr<ARDOUR::Playlist> playlist;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					auto track = std::dynamic_pointer_cast<Track> (r);
+					if (!track) continue;
+					auto pl = track->playlist ();
+					if (pl && pl->region_by_id (hit.region->id ())) {
+						playlist = pl; break;
+					}
+				}
+				if (!playlist) {
+					PBD::warning << "foyer_shim: duplicate_region_range: source not on any playlist" << endmsg;
+					return;
+				}
+				// Use the offset-based RegionFactory overload so the
+				// clone is constructed with `_start = source._start +
+				// offset` and `_length` set atomically (region.cc:428-
+				// 429). The earlier "create plain copy, then
+				// set_start()/set_length()" path silently no-op'd
+				// set_start when called BEFORE shrinking the length:
+				// `Region::verify_start` rejects positions where
+				// `pos > source_length - _length` and aborts the
+				// change (region.cc:1999-2012). The freshly-cloned
+				// region still has the source's full length, so
+				// any non-zero offset for a region covering most of
+				// its source got silently dropped — leaving the
+				// clone showing source[0..len] instead of
+				// source[off..off+len]. The factory's offset ctor
+				// applies the shift before _length is finalized, so
+				// it doesn't trip the verify check.
+				auto& session = shim->session ();
+				const Temporal::samplecnt_t src_len_samples =
+					hit.region->length ().samples ();
+				Temporal::samplepos_t off = static_cast<Temporal::samplepos_t> (
+					std::min<std::uint64_t> (snap.dup_source_offset_samples,
+					                         static_cast<std::uint64_t> (src_len_samples)));
+				Temporal::samplecnt_t max_len =
+					src_len_samples - off;
+				Temporal::samplecnt_t len = static_cast<Temporal::samplecnt_t> (
+					std::min<std::uint64_t> (snap.dup_length_samples,
+					                         static_cast<std::uint64_t> (max_len)));
+				if (len <= 0) {
+					PBD::warning << "foyer_shim: duplicate_region_range: zero-length slice after clamp" << endmsg;
+					return;
+				}
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer duplicate region range");
+				PBD::PropertyList plist;
+				plist.add (ARDOUR::Properties::length,
+					Temporal::timecnt_t::from_samples (len));
+				auto clone = ARDOUR::RegionFactory::create (
+					hit.region,
+					Temporal::timecnt_t::from_samples (off),
+					plist,
+					true /* announce */);
+				if (!clone) {
+					PBD::warning << "foyer_shim: duplicate_region_range: RegionFactory returned null" << endmsg;
+					if (own_txn) session.commit_reversible_command ();
+					return;
+				}
+				playlist->clear_changes ();
+				playlist->add_region (clone, Temporal::timepos_t (
+					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
 			});
 			break;
 		}

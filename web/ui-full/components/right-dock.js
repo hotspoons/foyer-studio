@@ -776,9 +776,9 @@ export class RightDock extends LitElement {
       // disabled — see app.js. Order kept stable for the survivors so
       // the rail doesn't reshuffle as variants register in different
       // dynamic-import orders.
-      "foyer.windows",
-      "foyer.chat",
       "foyer.layout-fab.v1",
+      "foyer.chat",
+      "foyer.windows",
     ];
     const rank = (id) => {
       const i = ORDER.indexOf(id);

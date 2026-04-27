@@ -68,8 +68,21 @@ test.describe("shipping UI chrome", () => {
     // Snapshot a body element identity, then force several store
     // changes and check the element is the same object. Lit's
     // static-html keeps one ChildPart per tag, so the node persists.
+    // foyer-tile-leaf lives ≥2 shadow roots deep (foyer-app →
+    // foyer-tile-container → here), so a flat document.querySelector
+    // returns null. Walk the closed shadow trees instead.
     const sameNode = await page.evaluate(async () => {
-      const leaf = document.querySelector("foyer-tile-leaf");
+      function deepFind(tag) {
+        const stack = [document];
+        while (stack.length) {
+          const r = stack.pop();
+          const hit = r.querySelector(tag);
+          if (hit) return hit;
+          for (const el of r.querySelectorAll("*")) if (el.shadowRoot) stack.push(el.shadowRoot);
+        }
+        return null;
+      }
+      const leaf = deepFind("foyer-tile-leaf");
       const bodyWrap = leaf.shadowRoot.querySelector(".body");
       const before = bodyWrap.firstElementChild;
       for (let i = 0; i < 5; i++) {

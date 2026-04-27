@@ -45,6 +45,13 @@ impl StubState {
         self.session.clone()
     }
 
+    /// Override the session's sample rate. Used by the stub's
+    /// `with_sample_rate` builder so a CLI / config / env override
+    /// reaches the snapshot consumers, not just the cached atomic.
+    pub(crate) fn set_sample_rate(&mut self, sr: u32) {
+        self.session.sample_rate = sr;
+    }
+
     pub(crate) fn set_control(
         &mut self,
         id: &EntityId,
@@ -107,14 +114,11 @@ impl StubState {
             ControlValue::Bool(true)
         );
         if playing {
-            // Ticker runs every ~33ms; sample_rate=48_000. Advance by one
-            // tick's worth of samples per tick.
-            let sr: f64 = self
-                .session
-                .meta
-                .get("sample_rate")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(48_000.0);
+            // Ticker runs every ~33ms. Advance by one tick's worth of
+            // samples at the session's actual rate, modding against
+            // the same 60-second wall-clock window the stub timeline
+            // exposes via `TimelineMeta`.
+            let sr = f64::from(self.session.sample_rate);
             let step = sr * 0.033;
             let pos = &mut self.session.transport.position_beats;
             let current = match pos.value {
@@ -122,7 +126,7 @@ impl StubState {
                 ControlValue::Int(i) => i as f64,
                 _ => 0.0,
             };
-            let length_samples: f64 = 48_000.0 * 60.0; // 60s demo timeline
+            let length_samples = sr * 60.0; // 60s demo timeline
             let next = (current + step) % length_samples;
             pos.value = ControlValue::Float(next);
             out.push(ControlUpdate {

@@ -213,6 +213,16 @@ pub struct BackendConfig {
     /// path debugging. CLI `--stub-test-tone` overrides this.
     #[serde(default, skip_serializing_if = "is_default_false")]
     pub stub_test_tone: bool,
+    /// Engine sample rate, in Hz. Used by the stub backend (sets
+    /// [`foyer_schema::Session::sample_rate`] and every fabricated
+    /// `TimelineMeta`); a future hook for Ardour spawns where the
+    /// launcher needs to pin a rate before the session opens.
+    ///
+    /// `None` falls through to [`foyer_schema::DEFAULT_SAMPLE_RATE`].
+    /// Override priority is CLI flag > `FOYER_SAMPLE_RATE` env > this
+    /// field > schema default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
 }
 
 fn is_default_false(b: &bool) -> bool {
@@ -301,6 +311,7 @@ pub fn seed_default() -> Config {
         args: Vec::new(),
         env: Default::default(),
         stub_test_tone: false,
+        sample_rate: None,
     }];
     backends.push(BackendConfig {
         id: "ardour".into(),
@@ -311,6 +322,7 @@ pub fn seed_default() -> Config {
         args: Vec::new(),
         env: Default::default(),
         stub_test_tone: false,
+        sample_rate: None,
     });
     Config {
         version: CONFIG_SCHEMA_VERSION,

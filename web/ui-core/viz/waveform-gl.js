@@ -131,6 +131,36 @@ export class WaveformGl extends LitElement {
     this._draw();
   }
 
+  /**
+   * Drag-preview mode. While frozen we skip viewport recalcs (the
+   * caller is positioning the host element directly via inline
+   * styles to produce a "fixed pixel-per-bucket" preview of an
+   * in-progress edge resize). The host's own `_regionWidth` is
+   * pinned to the pre-drag pixel width so the bucket-to-pixel
+   * mapping inside `_draw` doesn't compress as the parent shrinks.
+   * Caller is responsible for setting style.left/width and calling
+   * `unfreeze()` when the drag commits.
+   */
+  freezeViewport(regionWidthPx) {
+    this._frozen = true;
+    this._regionWidth = regionWidthPx;
+    this._visibleLeft = 0;
+    this._visibleWidth = regionWidthPx;
+    this._draw();
+  }
+  unfreezeViewport() {
+    this._frozen = false;
+    // Strip any inline overrides the caller layered on. The
+    // ResizeObserver from `firstUpdated` will catch the parent's new
+    // bounds and call `_updateViewport` next frame — which will
+    // re-set style.left/width from `_visibleLeft`/`_visibleWidth`.
+    this.style.left = "";
+    this.style.right = "";
+    this.style.width = "";
+    this._updateViewport();
+    this._draw();
+  }
+
   _hookScroll() {
     // Walk up the composed tree for the nearest scrollable ancestor.
     // For our embed inside <foyer-timeline-view>'s `.scroll` div we
@@ -175,6 +205,7 @@ export class WaveformGl extends LitElement {
   /** Compute the visible slice of our host div in its own pixel
    *  frame. Returns { left, width } in CSS px. */
   _updateViewport() {
+    if (this._frozen) return;
     const region = this.parentElement;
     if (!region) return;
     const regionRect = region.getBoundingClientRect();

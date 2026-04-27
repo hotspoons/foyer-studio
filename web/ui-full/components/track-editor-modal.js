@@ -16,6 +16,7 @@ import "./midi-manager.js";
 import { openPanEditor } from "./pan-editor-modal.js";
 import { DENSITIES } from "foyer-core/mixer-density.js";
 import { AudioIngress } from "foyer-core/audio/audio-ingress.js";
+import { sessionScopedKey } from "foyer-core/session-scope.js";
 
 // Global registry of per-track browser-mic ingresses. Keyed by track
 // id so the lifecycle survives modal open/close (closing the editor
@@ -808,7 +809,11 @@ export function openTrackEditor(trackId, options = {}) {
   return import("foyer-ui-core/widgets/window.js").then((m) => m.openWindow({
     title: "Track editor",
     icon: "adjustments-horizontal",
-    storageKey: `track-editor.${trackId}`,
+    // Session-scoped: track ids are PBD numbers that can collide across
+    // .ardour projects (Rich, 2026-04-27). `sessionScopedKey` prefixes
+    // the active session's stable id so reopening project A finds
+    // project A's bounds and not whichever B set the same numeric id.
+    storageKey: sessionScopedKey(`track-editor.${trackId}`),
     content: el,
     persist: {
       kind: "track-editor",

@@ -598,8 +598,9 @@ pub(crate) fn initial_session() -> Session {
         ],
         groups: vec![],
         dirty: false,
+        sample_rate: foyer_schema::DEFAULT_SAMPLE_RATE,
         ppqn: Some(960),
-        meta: serde_json::json!({ "project": "demo", "sample_rate": 48000 }),
+        meta: serde_json::json!({ "project": "demo" }),
     }
 }
 
@@ -610,7 +611,7 @@ pub(crate) fn initial_session() -> Session {
 pub(crate) fn empty_session() -> Session {
     let mut s = initial_session();
     s.tracks.clear();
-    s.meta = serde_json::json!({ "project": null, "sample_rate": 48000, "launcher": true });
+    s.meta = serde_json::json!({ "project": null, "launcher": true });
     s
 }
 

@@ -87,6 +87,13 @@ struct Shared {
     next_seq: AtomicU64,
     out_tx: mpsc::Sender<WriteItem>,
     events: broadcast::Sender<Event>,
+    /// Latest engine sample rate the shim has reported, mirrored
+    /// off `Session::sample_rate` whenever a `SessionSnapshot` lands.
+    /// Read by `HostBackend::sample_rate()` so callers don't have to
+    /// `.await` a snapshot for what's a hot read (timeline pixel math
+    /// and peak-cache decisions). Defaults to the schema constant
+    /// until the first snapshot arrives.
+    sample_rate: std::sync::atomic::AtomicU32,
     /// For audio.* commands, which arrive asynchronously: a registry of in-flight
     /// requests keyed by stream_id, resolved when the matching event comes back.
     pending_egress: Mutex<HashMap<u32, oneshot::Sender<Result<(), ClientError>>>>,
@@ -155,6 +162,7 @@ impl HostClient {
             next_seq: AtomicU64::new(1),
             out_tx,
             events: events_tx,
+            sample_rate: std::sync::atomic::AtomicU32::new(foyer_schema::DEFAULT_SAMPLE_RATE),
             pending_egress: Mutex::new(HashMap::new()),
             pending_ingress: Mutex::new(HashMap::new()),
             pending_latency: Mutex::new(HashMap::new()),
@@ -213,11 +221,30 @@ impl HostClient {
             .map_err(|_| ClientError::WriterClosed)
     }
 
+    /// Latest engine sample rate the shim has reported. Updated on
+    /// every `SessionSnapshot` event from the reader task; read
+    /// without locking so it's safe to call from any thread.
+    /// Defaults to the schema constant until the first snapshot
+    /// arrives.
+    pub fn cached_sample_rate(&self) -> u32 {
+        self.shared
+            .sample_rate
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub async fn request_snapshot(&self) -> Result<Session, ClientError> {
         let (tx, rx) = oneshot::channel();
         self.shared.pending_snapshot.lock().await.push(tx);
         self.send_command(Command::RequestSnapshot).await?;
-        timeout(rx, "snapshot").await
+        let session = timeout(rx, "snapshot").await?;
+        // Mirror SR into the cached atomic — a direct snapshot
+        // request bypasses the SessionSnapshot event-handling path
+        // (the shim sends the response directly to the waiter), so
+        // the cache update has to happen here too.
+        self.shared
+            .sample_rate
+            .store(session.sample_rate, std::sync::atomic::Ordering::Relaxed);
+        Ok(session)
     }
 
     pub async fn subscribe(
@@ -397,6 +424,22 @@ impl HostClient {
             source_region_id,
             at_samples,
             length_samples,
+        })
+        .await
+    }
+
+    pub async fn duplicate_region_range(
+        &self,
+        source_region_id: EntityId,
+        source_offset_samples: u64,
+        length_samples: u64,
+        at_samples: u64,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::DuplicateRegionRange {
+            source_region_id,
+            source_offset_samples,
+            length_samples,
+            at_samples,
         })
         .await
     }
@@ -827,6 +870,12 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
         Control::Event(ev) => {
             match &ev {
                 Event::SessionSnapshot { session } => {
+                    // Mirror the snapshot's sample rate into the cached
+                    // atomic so `HostBackend::sample_rate()` returns the
+                    // shim's actual rate without a snapshot round-trip.
+                    shared
+                        .sample_rate
+                        .store(session.sample_rate, std::sync::atomic::Ordering::Relaxed);
                     let waiters = std::mem::take(&mut *shared.pending_snapshot.lock().await);
                     for w in waiters {
                         let _ = w.send((**session).clone());

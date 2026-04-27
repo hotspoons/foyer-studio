@@ -75,6 +75,48 @@ export class Keybinds {
       return;
     }
 
+    // Cut/Copy/Paste/Duplicate region clipboard ops. Mod is the
+    // platform-conventional Ctrl on Linux/Windows, Cmd on macOS — the
+    // same `ctrlKey || metaKey` shape every other Foyer shortcut uses.
+    // We only fire when there's an actual region selection so the
+    // browser's native copy of the page text still works elsewhere.
+    {
+      const isMod = (e.ctrlKey || e.metaKey) && !e.altKey;
+      const lower = e.key?.toLowerCase?.();
+      if (isMod && (lower === "c" || lower === "x" || lower === "v" || lower === "d")) {
+        const tl = queryDeep("foyer-timeline-view");
+        if (!tl) return;
+        const hasSel = (tl.getSelectedRegionIds?.() || []).length > 0;
+        // C/X/D require a region selection; the un-shift forms are the
+        // canonical bindings and Shift+C/X/D are reserved.
+        if (!e.shiftKey && lower === "c" && hasSel) { e.preventDefault(); tl.copyRegionSelection?.(); return; }
+        if (!e.shiftKey && lower === "x" && hasSel) { e.preventDefault(); tl.cutRegionSelection?.(); return; }
+        if (!e.shiftKey && lower === "d" && hasSel) { e.preventDefault(); tl.duplicateRegionSelection?.(); return; }
+        // Paste:
+        //   Ctrl/Cmd+V       → paste at the mouse cursor (Reaper /
+        //                       Ableton default — most useful when the
+        //                       user is dragging selections around).
+        //   Ctrl/Cmd+Shift+V → paste at the playhead (legacy default;
+        //                       useful when the cursor is off-grid or
+        //                       the user wants timeline-anchored paste).
+        if (lower === "v" && tl.hasClipboard?.()) {
+          e.preventDefault();
+          tl.pasteRegions?.({ at: e.shiftKey ? "playhead" : "mouse" });
+          return;
+        }
+      }
+      // Mute toggle: bare M, region selection required. Skip if any
+      // modifier is held so M-with-modifier stays free for other use.
+      if (lower === "m" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const tl = queryDeep("foyer-timeline-view");
+        if (tl?.getSelectedRegionIds?.()?.length) {
+          e.preventDefault();
+          tl.toggleMuteRegionSelection?.();
+          return;
+        }
+      }
+    }
+
     // Delete key (no modifiers) → delete regions in the current
     // selection. If there's a time-range selection OR track selection
     // with regions in it, delete. Only fires when no modifier is

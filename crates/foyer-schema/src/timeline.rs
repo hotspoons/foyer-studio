@@ -117,6 +117,13 @@ pub struct RegionPatch {
     pub start_samples: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub length_samples: Option<u64>,
+    /// Source-media offset (Ardour's `Region::start`). Carried in the
+    /// patch so a trim-from-left edge drag can advance the offset
+    /// without losing the source material — the timeline lozenge
+    /// shrinks AND the content slides forward atomically. `None` =
+    /// leave the offset untouched.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_offset_samples: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]

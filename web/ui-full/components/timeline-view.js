@@ -20,6 +20,8 @@ import "foyer-ui-core/viz/viz-picker.js";
 import { getVizPrefs } from "foyer-ui-core/viz/viz-settings.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
+import { toast } from "foyer-ui-core/widgets/toast.js";
+import { sessionScopedKey } from "foyer-core/session-scope.js";
 
 const LANE_HEIGHT_DEFAULT = 52;
 const LANE_HEIGHT_MIN = 28;
@@ -256,6 +258,43 @@ export class TimelineView extends LitElement {
         0 1px 3px rgba(0, 0, 0, 0.35);
       filter: brightness(1.08);
     }
+    /* Resize-preview placeholder: while a left-edge resize-drag is
+     * extending the region beyond the source bounds we have peaks
+     * for, the new (out-of-bounds) span paints as a striped
+     * neutral-grey scrim. Mirrors the recording-placeholder pattern
+     * but desaturated since this isn't a recording state — it's a
+     * "no decoded data here yet" hint. */
+    .region .resize-preview-placeholder {
+      position: absolute;
+      top: 4px; bottom: 4px;
+      background: repeating-linear-gradient(
+        45deg,
+        rgba(255, 255, 255, 0.04),
+        rgba(255, 255, 255, 0.04) 6px,
+        rgba(255, 255, 255, 0.10) 6px,
+        rgba(255, 255, 255, 0.10) 12px
+      );
+      border-left: 1px dashed rgba(255, 255, 255, 0.35);
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    /* Cut-pending slice overlay: a translucent scrim positioned over
+     * the slice the user has queued for delete-on-paste. For whole-
+     * region cuts the overlay spans 0..100% and looks like the legacy
+     * dim. For time-range slice cuts the overlay covers ONLY the
+     * carved-out portion so the user can see exactly what's leaving
+     * vs. what's staying behind. The dashed border is on the overlay
+     * (not the region) so the lozenge boundary still reads cleanly. */
+    .region .cut-slice-overlay {
+      position: absolute;
+      top: 0; bottom: 0;
+      pointer-events: none;
+      background: rgba(0, 0, 0, 0.55);
+      border: 1px dashed rgba(255, 255, 255, 0.5);
+      box-sizing: border-box;
+      z-index: 2;
+    }
     .region .name {
       position: absolute;
       top: 2px; left: 6px; right: 6px;
@@ -405,6 +444,13 @@ export class TimelineView extends LitElement {
       pointer-events: none;
       z-index: 1;
     }
+    .quant-line.bar {
+      /* Bar boundaries are the strongest line. Twice the width of a
+       * beat line so they stand out against the per-beat grid; uses
+       * the same accent color so the user's viz prefs apply. */
+      background: var(--foyer-quant-grid, var(--color-accent-2));
+      width: 2px;
+    }
     .quant-line.beat {
       /* --foyer-quant-grid is set from viz prefs as a full rgba() so
        * the user's chosen alpha is already baked in. Beat lines use
@@ -421,6 +467,11 @@ export class TimelineView extends LitElement {
   constructor() {
     super();
     this._regionsByTrack = {};
+    // Initial guess until the first regions_list event lands. Only
+    // used for axis math before the backend has answered; the real
+    // rate comes from `session.sample_rate` (typed field on the
+    // Session schema since it was promoted out of `meta`) or the
+    // per-region `TimelineMeta.sample_rate`. See `_sampleRate()`.
     this._timeline = { sample_rate: 48_000, length_samples: 48_000 * 60 };
     this._zoom = 60;
     // Virtual timeline-length extension in seconds; grows only when
@@ -444,6 +495,29 @@ export class TimelineView extends LitElement {
     this._zoomStackMax = 32;
     // Region click selection (distinct from ruler time-range selection).
     this._selectedRegionIds = new Set();
+    // Per-tab region clipboard for cut/copy/paste. `null` when empty.
+    // Shape: { mode: "copy"|"cut", anchor_samples, items: [{ region_id,
+    // track_id, offset_samples, length_samples, slice_start, slice_len }] }.
+    // For whole-region copies, slice_start=0 and slice_len=length_samples;
+    // for time-range slice ops slice_{start,len} carve out the active
+    // sub-range and the wire command sends DuplicateRegionRange with
+    // those offsets. We snapshot region IDs (not their bodies) — the
+    // duplicate command on the server fans out a fresh region from the
+    // live source. That means a cut can't be undone by clearing the
+    // clipboard; the originals persist until paste actually fires the
+    // delete. Matches Reaper's flow.
+    this._regionClipboard = null;
+    // Region IDs currently dimmed on the timeline because they're
+    // queued for delete-on-paste. Stored as a Set for O(1) class-
+    // decision lookup during render; reconciled to the click-selection
+    // by `_reconcileCutPending()` whenever selection mutates AND
+    // defensively at the top of render() to catch indirect mutations.
+    // Last pointer X over the timeline grid in CSS px (relative to the
+    // grid's bounding rect, includes the head-column offset). Used by
+    // the default paste keybind to anchor at the mouse cursor instead
+    // of the playhead. `null` when the pointer is outside the grid;
+    // paste falls back to the playhead in that case.
+    this._lastMouseGridX = null;
     // Last seq that updated transport.position; guards against stale
     // out-of-order position packets causing visible playhead jump-back.
     this._lastTransportSeq = 0;
@@ -462,16 +536,26 @@ export class TimelineView extends LitElement {
     }
   }
 
+  _laneHeightStorageKey() {
+    // Lane heights are keyed by trackId inside the JSON value, and
+    // trackIds (`track.<pbd>`) repeat across .ardour projects. Without
+    // session scoping, opening project B reuses project A's heights
+    // for whichever tracks happen to share an id (Rich, 2026-04-27).
+    return sessionScopedKey(LANE_HEIGHT_KEY);
+  }
   _loadLaneHeights() {
     try {
-      return JSON.parse(localStorage.getItem(LANE_HEIGHT_KEY) || "{}") || {};
+      return JSON.parse(localStorage.getItem(this._laneHeightStorageKey()) || "{}") || {};
     } catch {
       return {};
     }
   }
   _saveLaneHeights() {
     try {
-      localStorage.setItem(LANE_HEIGHT_KEY, JSON.stringify(this._laneHeights));
+      localStorage.setItem(
+        this._laneHeightStorageKey(),
+        JSON.stringify(this._laneHeights),
+      );
     } catch {}
   }
   _laneHeightFor(trackId) {
@@ -546,7 +630,14 @@ export class TimelineView extends LitElement {
   }
 
   updated(changed) {
-    if (changed.has("session")) this._fetchRegions();
+    if (changed.has("session")) {
+      // Lane heights are stored under a session-scoped key — reload
+      // from the new session's slot so users see their saved per-
+      // track heights instead of whatever the launcher / previous
+      // session left in the "default" scope.
+      this._laneHeights = this._loadLaneHeights();
+      this._fetchRegions();
+    }
     this._repaintWaveforms();
   }
 
@@ -692,8 +783,21 @@ export class TimelineView extends LitElement {
     return lock == null ? reported : lock;
   }
 
+  /** Authoritative engine sample rate, read in priority order:
+   *  per-region `TimelineMeta.sample_rate` (most recent regions_list
+   *  echo), `session.sample_rate` (typed field, promoted out of the
+   *  legacy `meta.sample_rate` JSON convention), then 48k as the
+   *  built-in last resort. Every place that needs px-per-sample math
+   *  routes through this so the constant only lives in one place
+   *  and a 96k Ardour session no longer renders at half-scale. */
+  _sampleRate() {
+    return Number(this._timeline?.sample_rate)
+      || Number(this.session?.sample_rate)
+      || 48_000;
+  }
+
   _samplesPerPx() {
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     return sr / Math.max(1, this._zoom);
   }
 
@@ -853,7 +957,7 @@ export class TimelineView extends LitElement {
     if (!scroll) return;
     const bounds = scroll.getBoundingClientRect();
     const contentX = ev.clientX - bounds.left + scroll.scrollLeft - HEAD_WIDTH;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const atSamples = Math.max(0, Math.round((contentX / this._zoom) * sr));
     showContextMenu(ev, [
       { heading: `${track.name} · ${(atSamples / sr).toFixed(2)}s` },
@@ -1003,7 +1107,7 @@ export class TimelineView extends LitElement {
    *  nothing is selected. */
   zoomToSelection() {
     if (!this._selection) return false;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const a = Math.min(this._selection.startSamples, this._selection.endSamples);
     const b = Math.max(this._selection.startSamples, this._selection.endSamples);
     const selSec = Math.max(0.01, (b - a) / sr);
@@ -1132,6 +1236,338 @@ export class TimelineView extends LitElement {
     return ids.length;
   }
 
+  // ── clipboard ops (cut/copy/paste/duplicate) ───────────────────────
+  /**
+   * Snapshot the current click-selection of regions into the clipboard.
+   * Captures relative offsets so a multi-region paste preserves the
+   * original spacing. Returns the count snapshotted.
+   */
+  copyRegionSelection({ mode = "copy", silent = false } = {}) {
+    const ids = [...this._selectedRegionIds];
+    if (!ids.length) {
+      if (!silent) toast("Nothing selected — click a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
+    const tracks = this.session?.tracks || [];
+    // If the user has BOTH a region click-selection AND an active time
+    // range, slice the regions to that range (each region contributes
+    // only the bits that overlap the range). Otherwise capture the
+    // whole region. The slice-start/len are stored in clipboard items
+    // so paste can pick the right wire command.
+    const tr = this._selection
+      ? {
+          start: Math.min(this._selection.startSamples, this._selection.endSamples),
+          end: Math.max(this._selection.startSamples, this._selection.endSamples),
+        }
+      : null;
+    const items = [];
+    let anchor = Number.POSITIVE_INFINITY;
+    for (const id of ids) {
+      let region = null;
+      let track = null;
+      for (const t of tracks) {
+        const r = (this._regionsByTrack[t.id] || []).find((r) => r.id === id);
+        if (r) { region = r; track = t; break; }
+      }
+      if (!region) continue;
+      const start = Number(region.start_samples || 0);
+      const len = Number(region.length_samples || 0);
+      const end = start + len;
+      let sliceStart = 0;
+      let sliceLen = len;
+      let timelineAnchor = start;
+      if (tr) {
+        // Intersect [start, end] with [tr.start, tr.end].
+        const overlapStart = Math.max(start, tr.start);
+        const overlapEnd = Math.min(end, tr.end);
+        if (overlapEnd <= overlapStart) continue; // no overlap; skip
+        sliceStart = overlapStart - start; // offset INTO the source region
+        sliceLen = overlapEnd - overlapStart;
+        timelineAnchor = overlapStart;     // for paste-position offsets
+      }
+      anchor = Math.min(anchor, timelineAnchor);
+      items.push({
+        region_id: region.id,
+        track_id: track.id,
+        start_samples: timelineAnchor, // for offset bookkeeping below
+        length_samples: sliceLen,
+        slice_start: sliceStart,
+        slice_len: sliceLen,
+        full_length: len,
+        region_start_samples: start, // timeline pos of the source region
+      });
+    }
+    if (!items.length) {
+      if (!silent) toast("Nothing selected — click a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
+    // Re-key offsets from the earliest item so paste re-anchors to
+    // the cursor while keeping internal spacing between captured items.
+    for (const it of items) it.offset_samples = it.start_samples - anchor;
+    const sliced = !!tr;
+    this._regionClipboard = { mode, anchor_samples: anchor, items, sliced };
+    // Visual marker for cut-pending regions. Replaces any prior cut
+    // pending state — a fresh cut/copy supersedes the previous one.
+    // Stored as Map(region_id -> {sliceStart, sliceLen, fullLength}) so
+    // the renderer can dim only the slice (not the whole region) when
+    // a time-range cut is queued. For whole-region cuts the slice
+    // covers [0, fullLength] and the dim spans the entire lozenge as
+    // before.
+    if (mode === "cut") {
+      this._cutPending = new Map(
+        items.map((it) => [it.region_id, {
+          sliceStart: it.slice_start,
+          sliceLen: it.slice_len,
+          fullLength: it.full_length,
+        }]),
+      );
+    } else {
+      this._cutPending = new Map();
+    }
+    this.requestUpdate();
+    if (!silent) {
+      const noun = items.length === 1 ? "region" : "regions";
+      const sliceNote = sliced ? " (range slice)" : "";
+      toast(
+        mode === "cut"
+          ? `Cut ${items.length} ${noun}${sliceNote} — paste to commit`
+          : `Copied ${items.length} ${noun}${sliceNote}`,
+        { tone: "info", ttl: 2400 },
+      );
+    }
+    return items.length;
+  }
+
+  cutRegionSelection() {
+    // Same snapshot as copy; the actual delete happens on paste so the
+    // server-side region IDs stay valid until DuplicateRegion fires.
+    // If the user never pastes, originals are preserved (intentional).
+    return this.copyRegionSelection({ mode: "cut" });
+  }
+
+  /**
+   * Paste the clipboard. The anchor sample defaults to the mouse's
+   * current grid position so a Ctrl+V drops near the cursor — Reaper's
+   * default. Pass `{ at: "playhead" }` (or `{ at: <samples> }`) for
+   * other anchors (Ctrl+Shift+V is wired to playhead in keybinds.js).
+   *
+   * For sliced clipboards (region selection AND time range at capture
+   * time), each item is sent as `duplicate_region_range` so the shim
+   * can carve only the captured slice out of the source. Whole-region
+   * captures fall back to plain `duplicate_region`.
+   *
+   * For cut-mode, the originals are deleted after the duplicates land.
+   * Returns the number of regions written.
+   */
+  pasteRegions({ at = "mouse" } = {}) {
+    const clip = this._regionClipboard;
+    if (!clip || !clip.items.length) {
+      toast("Clipboard is empty — copy a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
+    const ws = window.__foyer?.ws;
+    let anchorSamples;
+    if (typeof at === "number") {
+      anchorSamples = at;
+    } else if (at === "playhead") {
+      anchorSamples = Number(
+        window.__foyer?.store?.state?.controls?.get("transport.position") || 0,
+      );
+    } else {
+      // Default: mouse. Falls back to playhead if the pointer is off
+      // the grid (e.g. user invoked the keybind with cursor over a FAB).
+      const fromMouse = this._mouseAnchorSamples();
+      anchorSamples = fromMouse != null
+        ? fromMouse
+        : Number(window.__foyer?.store?.state?.controls?.get("transport.position") || 0);
+    }
+    const cut = clip.mode === "cut";
+    const groupLabel = cut
+      ? `Foyer paste ${clip.items.length} regions (cut)`
+      : `Foyer paste ${clip.items.length} regions`;
+    ws?.send({ type: "undo_group_begin", name: groupLabel });
+    for (const it of clip.items) {
+      const at_samples = anchorSamples + it.offset_samples;
+      if (clip.sliced) {
+        ws?.send({
+          type: "duplicate_region_range",
+          source_region_id: it.region_id,
+          source_offset_samples: it.slice_start,
+          length_samples: it.slice_len,
+          at_samples,
+        });
+      } else {
+        ws?.send({
+          type: "duplicate_region",
+          source_region_id: it.region_id,
+          at_samples,
+          length_samples: it.length_samples,
+        });
+      }
+    }
+    if (cut) {
+      // Split-around-slice for sliced cuts: the source region becomes
+      // two pieces (the part BEFORE the slice + the part AFTER) so the
+      // user gets a gap where the slice used to be — Reaper's standard
+      // "cut a chunk out" behavior. Whole-region cuts collapse to the
+      // simple delete path.
+      //
+      // Order matters: create the "after" clone FIRST so the source
+      // region's full content is still available when the shim
+      // dereferences `source_region_id`. Trimming/deleting the source
+      // happens last.
+      for (const it of clip.items) {
+        const isSliced = clip.sliced
+          && !(it.slice_start === 0 && it.slice_len >= it.full_length);
+        if (!isSliced) {
+          ws?.send({ type: "delete_region", id: it.region_id });
+          continue;
+        }
+        const beforeLen = it.slice_start;
+        const afterOffset = it.slice_start + it.slice_len;
+        const afterLen = it.full_length - afterOffset;
+        if (afterLen > 0) {
+          ws?.send({
+            type: "duplicate_region_range",
+            source_region_id: it.region_id,
+            source_offset_samples: afterOffset,
+            length_samples: afterLen,
+            at_samples: it.region_start_samples + afterOffset,
+          });
+        }
+        if (beforeLen > 0) {
+          ws?.send({
+            type: "update_region",
+            id: it.region_id,
+            patch: { length_samples: beforeLen },
+          });
+        } else {
+          // No "before" piece; the after-clone replaces the source.
+          ws?.send({ type: "delete_region", id: it.region_id });
+        }
+      }
+      // After a cut/paste, the clipboard slot is consumed so a second
+      // paste doesn't re-delete already-gone originals. Clear it.
+      this._regionClipboard = null;
+      this._cutPending = new Map();
+      this.requestUpdate();
+    }
+    ws?.send({ type: "undo_group_end" });
+    const noun = clip.items.length === 1 ? "region" : "regions";
+    toast(
+      cut ? `Pasted ${clip.items.length} ${noun} (originals removed)`
+          : `Pasted ${clip.items.length} ${noun}`,
+      { tone: "info", ttl: 2400 },
+    );
+    return clip.items.length;
+  }
+
+  /** Back-compat shim — old callers (specs, agents) used the old name. */
+  pasteRegionsAtPlayhead() {
+    return this.pasteRegions({ at: "playhead" });
+  }
+
+  /**
+   * Translate the last-known mouse position over the timeline grid
+   * into a sample offset. Returns `null` when the cursor is outside
+   * the content area or before the head column. Mirrors the inverse
+   * of the leftPx math in `_renderLane` / region rects.
+   */
+  _mouseAnchorSamples() {
+    if (this._lastMouseGridX == null) return null;
+    const sr = this._sampleRate();
+    const x = this._lastMouseGridX - HEAD_WIDTH;
+    if (x < 0) return null;
+    const samples = (x / this._zoom) * sr;
+    return Math.max(0, Math.round(samples));
+  }
+
+  /**
+   * Duplicate every region in the click-selection to a position right
+   * after the original (start_samples + length_samples). Same-track
+   * only — DuplicateRegion is keyed on source_region_id. Wrapped in
+   * one undo group.
+   */
+  duplicateRegionSelection() {
+    const ids = [...this._selectedRegionIds];
+    if (!ids.length) {
+      toast("Nothing selected — click a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
+    const tracks = this.session?.tracks || [];
+    const ws = window.__foyer?.ws;
+    const groupLabel = ids.length === 1
+      ? "Foyer duplicate region"
+      : `Foyer duplicate ${ids.length} regions`;
+    ws?.send({ type: "undo_group_begin", name: groupLabel });
+    let written = 0;
+    for (const id of ids) {
+      let region = null;
+      for (const t of tracks) {
+        const r = (this._regionsByTrack[t.id] || []).find((r) => r.id === id);
+        if (r) { region = r; break; }
+      }
+      if (!region) continue;
+      ws?.send({
+        type: "duplicate_region",
+        source_region_id: region.id,
+        at_samples: Number(region.start_samples || 0) + Number(region.length_samples || 0),
+        length_samples: Number(region.length_samples || 0),
+      });
+      written += 1;
+    }
+    ws?.send({ type: "undo_group_end" });
+    if (written > 0) {
+      const noun = written === 1 ? "region" : "regions";
+      toast(`Duplicated ${written} ${noun}`, { tone: "info", ttl: 2400 });
+    }
+    return written;
+  }
+
+  /**
+   * Toggle mute on every region in the click-selection. Mirrors
+   * `muteSelection()` (which works off time-range), so the user gets
+   * a consistent op whether they shift-click regions or drag a range.
+   */
+  toggleMuteRegionSelection() {
+    const ids = [...this._selectedRegionIds];
+    if (!ids.length) {
+      toast("Nothing selected — click a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
+    const tracks = this.session?.tracks || [];
+    const regions = [];
+    for (const id of ids) {
+      for (const t of tracks) {
+        const r = (this._regionsByTrack[t.id] || []).find((r) => r.id === id);
+        if (r) { regions.push(r); break; }
+      }
+    }
+    if (!regions.length) return 0;
+    const anyUnmuted = regions.some((r) => !r.muted);
+    const target = anyUnmuted; // any unmuted → mute all; else unmute all
+    const ws = window.__foyer?.ws;
+    const groupLabel = regions.length === 1
+      ? (target ? "Foyer mute region" : "Foyer unmute region")
+      : `Foyer ${target ? "mute" : "unmute"} ${regions.length} regions`;
+    ws?.send({ type: "undo_group_begin", name: groupLabel });
+    for (const r of regions) {
+      ws?.send({ type: "update_region", id: r.id, patch: { muted: target } });
+    }
+    ws?.send({ type: "undo_group_end" });
+    const noun = regions.length === 1 ? "region" : "regions";
+    toast(
+      `${target ? "Muted" : "Unmuted"} ${regions.length} ${noun}`,
+      { tone: "info", ttl: 2000 },
+    );
+    return regions.length;
+  }
+
+  /** Shallow status of the clipboard for UI affordances. */
+  hasClipboard() {
+    return !!(this._regionClipboard && this._regionClipboard.items?.length);
+  }
+
   /** Toggle mute on regions overlapping the selection. If the set has
    *  any unmuted region, mute all. Otherwise unmute all. */
   muteSelection() {
@@ -1151,8 +1587,12 @@ export class TimelineView extends LitElement {
   }
 
   render() {
+    // Defensive cut-pending reconcile: catches selection changes
+    // routed through any of the half-dozen `_selectedRegionIds.clear()`
+    // sites in this file without having to instrument each one.
+    this._reconcileCutPending();
     const tracks = this.session?.tracks ?? [];
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     // Base content length: session length (or 30s min). Extended on the
     // fly by `_zoomPadSec` when the user scroll-zooms past the natural
     // content edge, so anchored zoom keeps the cursor pinned to the
@@ -1208,7 +1648,6 @@ export class TimelineView extends LitElement {
           </select>
         ` : null}
         <foyer-viz-picker></foyer-viz-picker>
-        <button @click=${this._clearCache} title="Drop all cached peak files">Clear peak cache</button>
         <span>${totalSec.toFixed(1)}s · ${sr} Hz · wheel to zoom · Alt-wheel for lane height</span>
         ${this._diagEnabled() ? html`
           <span>
@@ -1220,7 +1659,7 @@ export class TimelineView extends LitElement {
       <div class="scroll" @wheel=${(e) => this._onWheel(e)}>
         <div class="grid" style="width:${gridWidth}px"
              @pointermove=${(e) => this._onGridHoverMove(e)}
-             @pointerleave=${() => { this._hoverSamples = null; }}>
+             @pointerleave=${() => { this._hoverSamples = null; this._lastMouseGridX = null; }}>
           <div class="ruler"
                @wheel=${(e) => this._onRulerWheel(e)}
                @pointerdown=${(e) => this._onRulerPointerDown(e)}
@@ -1250,7 +1689,7 @@ export class TimelineView extends LitElement {
 
   _renderSelection() {
     if (!this._selection) return null;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const a = Math.min(this._selection.startSamples, this._selection.endSamples);
     const b = Math.max(this._selection.startSamples, this._selection.endSamples);
     const leftPx = HEAD_WIDTH + (a / sr) * this._zoom;
@@ -1271,6 +1710,17 @@ export class TimelineView extends LitElement {
   }
 
   _onGridHoverMove(ev) {
+    // Stash the grid-local pointer X for the mouse-anchored paste
+    // keybind. Captured eagerly (no rAF gate) so a paste fired right
+    // after a mouse move uses the latest position; cheap, just two
+    // assignments + a rect lookup. Stored as the offset from the grid
+    // element's left edge — `_mouseAnchorSamples()` subtracts the
+    // head column to get the content-area position.
+    const grid = this.renderRoot.querySelector(".grid");
+    if (grid) {
+      const r = grid.getBoundingClientRect();
+      this._lastMouseGridX = ev.clientX - r.left;
+    }
     // Throttle via rAF — pointermove fires at hardware rate and we
     // only need one update per paint frame.
     if (this._hoverRaf) return;
@@ -1285,24 +1735,48 @@ export class TimelineView extends LitElement {
 
   _renderQuantGrid() {
     if (!this._quantOn) return null;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const len = this._timeline?.length_samples || 0;
     const totalSec = len / sr;
-    const tempo = Number(window.__foyer?.store?.state?.controls?.get?.("transport.tempo")) || 120;
+    const ctls = window.__foyer?.store?.state?.controls;
+    const tempo = Number(ctls?.get?.("transport.tempo")) || 120;
     if (!Number.isFinite(tempo) || tempo <= 0) return null;
-    const beatSec = 60 / tempo;
+    // Ardour treats `transport.tempo` as quarter-note BPM. ts.den says
+    // which note value gets a beat — in 6/8 a beat is an eighth, so the
+    // perceptual beat is half as long as the quarter-note implied by
+    // tempo. Scale beatSec by 4/den so the visible beat lines reflect
+    // what the metronome actually clicks.
+    // Then ts.num gives beats-per-bar; every num-th beat gets a stronger
+    // bar line. This is what was missing — the old grid drew every beat
+    // with the same emphasis regardless of the time signature.
+    const tsNum = Math.max(1, Math.round(Number(ctls?.get?.("transport.ts.num")) || 4));
+    const tsDen = Math.max(1, Math.round(Number(ctls?.get?.("transport.ts.den")) || 4));
+    const beatSec = (60 / tempo) * (4 / tsDen);
     const div = Math.max(1, this._quantDiv | 0);
-    const stepSec = beatSec / (div / 4); // div=4 → quarter notes; div=16 → 16ths
+    // Subdivisions per beat. Dropdown values are quarter-note relative
+    // (1/4, 1/8, 1/16, …); convert to "per beat" given that a beat
+    // might be an 8th note. div=4 (quarter-notes) ÷ tsDen → for 4/4
+    // gives 1 sub/beat (just the beat itself), for 6/8 gives 0.5 which
+    // we floor to 1.
+    const subsPerBeat = Math.max(1, Math.round(div / tsDen));
+    const stepSec = beatSec / subsPerBeat;
     const lines = [];
-    let i = 0;
-    for (let t = 0; t <= totalSec + 1e-6; t += stepSec, i++) {
-      const onBeat = i % (div / 4) === 0;
-      lines.push({ t, beat: onBeat });
+    let beatIndex = 0;
+    let subIndex = 0;
+    for (let t = 0; t <= totalSec + 1e-6; t += stepSec) {
+      const onBeat = subIndex === 0;
+      const onBar = onBeat && beatIndex % tsNum === 0;
+      lines.push({ t, kind: onBar ? "bar" : onBeat ? "beat" : "sub" });
+      subIndex += 1;
+      if (subIndex >= subsPerBeat) {
+        subIndex = 0;
+        beatIndex += 1;
+      }
       // Cap to keep the DOM sane on long sessions at high subdivisions.
       if (lines.length > 4000) break;
     }
     return html`${lines.map((l) => html`
-      <span class="quant-line ${l.beat ? "beat" : "sub"}"
+      <span class="quant-line ${l.kind}"
             style="left:${HEAD_WIDTH + l.t * this._zoom}px"></span>
     `)}`;
   }
@@ -1318,7 +1792,7 @@ export class TimelineView extends LitElement {
 
   _renderHoverCursor() {
     if (this._hoverSamples == null) return null;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const x = HEAD_WIDTH + (this._hoverSamples / sr) * this._zoom;
     return html`<div class="cursor-line" style="left:${x}px"></div>`;
   }
@@ -1370,7 +1844,7 @@ export class TimelineView extends LitElement {
   }
 
   _renderPlayhead() {
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const x = HEAD_WIDTH + (this._playheadSamples / sr) * this._zoom;
     return html`<div class="playhead" style="left:${x}px"></div>`;
   }
@@ -1378,7 +1852,7 @@ export class TimelineView extends LitElement {
   /** Pixels for the live recording span (punch-in cursor → playhead), or null. */
   _recordingSpanPixels(controls) {
     if (!controls || !controls.get("transport.recording")) return null;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     this._syncRecordingAnchor();
     let recStart = this._recordingAnchorSamples;
     if (!Number.isFinite(recStart)) recStart = controls.get("transport.record_position");
@@ -1407,7 +1881,7 @@ export class TimelineView extends LitElement {
 
   _renderLane(track) {
     const regions = this._regionsByTrack[track.id] || [];
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const h = this._laneHeightFor(track.id);
     const store = window.__foyer?.store;
     const controls = store?.state?.controls;
@@ -1475,6 +1949,25 @@ export class TimelineView extends LitElement {
           // foyer-backend-host/src/lib.rs:244), which is a visual lie.
           const isMidi = track.kind === "midi";
           const regionSelected = this._selectedRegionIds.has(r.id);
+          const cutInfo = this._cutPending?.get(r.id);
+          // For sliced cuts, dim only the slice (overlay div positioned
+          // relative to the region). For whole-region cuts (slice covers
+          // the whole region) the overlay matches the region's full
+          // width, so we keep the same code path either way and skip
+          // the legacy `cut-pending` class on the outer div — the
+          // overlay handles the dim.
+          const regionLen = Math.max(1, Number(r.length_samples) || 1);
+          let cutOverlay = null;
+          if (cutInfo) {
+            const sliceStart = Math.max(0, Math.min(cutInfo.sliceStart, regionLen));
+            const sliceEnd = Math.max(sliceStart, Math.min(sliceStart + cutInfo.sliceLen, regionLen));
+            const leftPct = (sliceStart / regionLen) * 100;
+            const rightPct = ((regionLen - sliceEnd) / regionLen) * 100;
+            cutOverlay = html`
+              <div class="cut-slice-overlay"
+                   style="left:${leftPct}%;right:${rightPct}%"></div>
+            `;
+          }
           return html`
             <div class="region ${regionSelected ? "selected" : ""}" data-id=${r.id}
                  tabindex="0"
@@ -1485,6 +1978,7 @@ export class TimelineView extends LitElement {
               ${isMidi
                 ? html`<foyer-midi-strip class="viz" .notes=${r.notes || []} .color=${track.color || ""}></foyer-midi-strip>`
                 : html`<foyer-waveform-gl class="viz" data-id=${r.id}></foyer-waveform-gl>`}
+              ${cutOverlay}
               <div class="name">${r.name}</div>
               <div class="edge left"  @pointerdown=${(e) => this._startDrag(e, r, "resize-left")}></div>
               <div class="edge right" @pointerdown=${(e) => this._startDrag(e, r, "resize-right")}></div>
@@ -1579,7 +2073,7 @@ export class TimelineView extends LitElement {
     const viewportRest = scroll.clientWidth - HEAD_WIDTH;
     const neededContentPx = targetScrollLeft + viewportRest + 80;
     const neededSec = Math.max(0, neededContentPx / next);
-    const baseSec = Math.max(30, (this._timeline?.length_samples || 48000 * 30) / (this._timeline?.sample_rate || 48000));
+    const baseSec = Math.max(30, (this._timeline?.length_samples || (this._sampleRate() * 30)) / this._sampleRate());
     if (neededSec > baseSec) {
       this._zoomPadSec = Math.max(this._zoomPadSec || 0, neededSec);
     } else {
@@ -1607,6 +2101,7 @@ export class TimelineView extends LitElement {
       {
         label: region.muted ? "Unmute" : "Mute",
         icon: region.muted ? "speaker-wave" : "speaker-x-mark",
+        shortcut: "M",
         action: () => window.__foyer?.ws?.send({
           type: "update_region",
           id: region.id,
@@ -1646,13 +2141,79 @@ export class TimelineView extends LitElement {
       });
     }
     items.push({ separator: true });
+    // Treat any context-click on a region as "this region is the
+    // selection" if it isn't already part of the multi-selection. That
+    // way the clipboard ops act on what the user clicked, not on a
+    // stale prior selection invisible behind the menu.
+    const inSelection = this._selectedRegionIds.has(region.id);
+    const ensureSelection = () => {
+      if (!inSelection) {
+        this._selectedRegionIds.clear();
+        this._selectedRegionIds.add(region.id);
+        this.requestUpdate();
+      }
+    };
+    const meta = this._metaChord();
+    items.push({
+      label: "Cut",
+      icon: "scissors",
+      shortcut: `${meta}+X`,
+      action: () => { ensureSelection(); this.cutRegionSelection(); },
+    });
+    items.push({
+      label: "Copy",
+      icon: "document-duplicate",
+      shortcut: `${meta}+C`,
+      action: () => { ensureSelection(); this.copyRegionSelection(); },
+    });
+    items.push({
+      label: "Paste at cursor",
+      icon: "clipboard",
+      shortcut: `${meta}+V`,
+      disabled: !this.hasClipboard(),
+      action: (ev) => {
+        // The context-click already supplied a clientX/Y on the grid;
+        // use it as the paste anchor instead of the last hovered grid
+        // X (which is stale once the menu opens and intercepts pointer
+        // events). Falls back to mouse-anchor → playhead chain.
+        const clientX = ev?.clientX;
+        if (Number.isFinite(clientX)) {
+          const grid = this.renderRoot.querySelector(".grid");
+          if (grid) {
+            const r = grid.getBoundingClientRect();
+            this._lastMouseGridX = clientX - r.left;
+          }
+        }
+        this.pasteRegions({ at: "mouse" });
+      },
+    });
+    items.push({
+      label: "Paste at playhead",
+      icon: "clipboard",
+      shortcut: `${meta}+Shift+V`,
+      disabled: !this.hasClipboard(),
+      action: () => this.pasteRegions({ at: "playhead" }),
+    });
+    items.push({
+      label: "Duplicate",
+      icon: "plus",
+      shortcut: `${meta}+D`,
+      action: () => { ensureSelection(); this.duplicateRegionSelection(); },
+    });
+    items.push({ separator: true });
     items.push({
       label: "Delete region",
       icon: "trash",
       tone: "danger",
+      shortcut: "Del",
       action: () => window.__foyer?.ws?.send({ type: "delete_region", id: region.id }),
     });
     showContextMenu(ev, items);
+  }
+
+  /** Platform meta-key glyph for menu hints. Mac → ⌘, else → Ctrl. */
+  _metaChord() {
+    return navigator.platform?.startsWith?.("Mac") ? "⌘" : "Ctrl";
   }
 
   _onRegionPointerDown(ev, region) {
@@ -1661,6 +2222,7 @@ export class TimelineView extends LitElement {
       if (this._selectedRegionIds.has(region.id)) this._selectedRegionIds.delete(region.id);
       else this._selectedRegionIds.add(region.id);
       this._pendingDemoteRegionId = null;
+      this._reconcileCutPending();
       this.requestUpdate();
       return;
     }
@@ -1680,7 +2242,37 @@ export class TimelineView extends LitElement {
     this._selectedRegionIds.clear();
     this._selectedRegionIds.add(region.id);
     this._pendingDemoteRegionId = null;
+    this._reconcileCutPending();
     this.requestUpdate();
+  }
+
+  /**
+   * Drop cut-pending state for any region that's no longer part of
+   * the click-selection. If that empties the cut-pending set, also
+   * abandon the clipboard — the user's "next" cut transaction starts
+   * fresh, and a stale cut clipboard would otherwise delete random
+   * regions on a later paste.
+   */
+  _reconcileCutPending() {
+    if (!this._cutPending) {
+      this._cutPending = new Map();
+      return;
+    }
+    if (this._cutPending.size === 0) return;
+    let changed = false;
+    for (const id of [...this._cutPending.keys()]) {
+      if (!this._selectedRegionIds.has(id)) {
+        this._cutPending.delete(id);
+        changed = true;
+      }
+    }
+    if (changed && this._cutPending.size === 0
+        && this._regionClipboard?.mode === "cut") {
+      // The user navigated away from every cut-pending region; treat
+      // that as cancelling the cut. Without this, the next paste would
+      // try to delete regions the user no longer cares about.
+      this._regionClipboard = null;
+    }
   }
 
   _isMidiRegion(region) {
@@ -1790,13 +2382,26 @@ export class TimelineView extends LitElement {
     ev.stopPropagation();
     const start = ev.clientY;
     const tracks = this.session?.tracks || [];
-    // Hold Shift to resize every lane by the same delta. Saves having
-    // to drag each one individually when the user wants a uniform
-    // set-height pass (common ergonomic ask).
+    // Resize-target picker, in priority order:
+    //   1. Shift held → resize EVERY lane (uniform pass).
+    //   2. Multi-track selection that includes the dragged track → resize
+    //      every selected track. Mirrors the common DAW expectation that
+    //      bulk-edit operations apply to the selection.
+    //   3. Otherwise → resize just the dragged lane.
+    const sel = window.__foyer?.store?.state?.selectedTrackIds;
+    const dragInSelection = sel && sel.size > 1 && sel.has(trackId);
     const resizeAll = ev.shiftKey;
-    const origHeights = resizeAll
-      ? Object.fromEntries(tracks.map((t) => [t.id, this._laneHeightFor(t.id)]))
-      : { [trackId]: this._laneHeightFor(trackId) };
+    let targetIds;
+    if (resizeAll) {
+      targetIds = tracks.map((t) => t.id);
+    } else if (dragInSelection) {
+      targetIds = tracks.filter((t) => sel.has(t.id)).map((t) => t.id);
+    } else {
+      targetIds = [trackId];
+    }
+    const origHeights = Object.fromEntries(
+      targetIds.map((id) => [id, this._laneHeightFor(id)]),
+    );
     const move = (e) => {
       const dy = e.clientY - start;
       const next = { ...this._laneHeights };
@@ -1843,7 +2448,7 @@ export class TimelineView extends LitElement {
   _samplesAtX(clientX, rulerEl) {
     const rect = rulerEl.getBoundingClientRect();
     const x = clientX - rect.left - HEAD_WIDTH;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     return Math.max(0, Math.round((x / this._zoom) * sr));
   }
 
@@ -1979,14 +2584,48 @@ export class TimelineView extends LitElement {
       const el = this.renderRoot.querySelector(`.region[data-id="${id}"]`);
       if (el) { el.classList.add("dragging"); els.push(el); }
     }
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const startX = ev.clientX;
     const pxPerSec = this._zoom;
 
     const origs = new Map();
     for (const id of movingIds) {
       const r = this._regionForId(id);
-      if (r) origs.set(id, { start: r.start_samples, len: r.length_samples });
+      if (r) origs.set(id, {
+        start: r.start_samples,
+        len: r.length_samples,
+        offset: Number(r.source_offset_samples || 0),
+      });
+    }
+
+    // For resize-left we freeze the waveform at its pre-drag pixel
+    // resolution (`origPeaksPx`) and slide it under the region's
+    // `overflow:hidden` clip — so as the user trims, the waveform
+    // doesn't compress horizontally (which read as "time-stretch")
+    // but instead the trimmed portion crops off the left. Extending
+    // the start (only possible when `o.offset > 0`) shifts the peaks
+    // right and surfaces a striped placeholder in the gap, since we
+    // don't have peaks for the source span we just exposed. The
+    // freeze is reverted in `up` so the post-RegionUpdated peak
+    // refetch repaints normally.
+    let resizeLeftPreview = null;
+    if (mode === "resize-left") {
+      const o = origs.get(region.id);
+      const regionEl = this.renderRoot.querySelector(`.region[data-id="${region.id}"]`);
+      const wfEl = regionEl?.querySelector("foyer-waveform-gl");
+      if (o && regionEl && wfEl) {
+        const origPeaksPx = (o.len / sr) * pxPerSec;
+        wfEl.freezeViewport(origPeaksPx);
+        // Placeholder div lives inside the region. Sized inline as
+        // the drag progresses; hidden when dx >= 0.
+        const placeholder = document.createElement("div");
+        placeholder.className = "resize-preview-placeholder";
+        placeholder.style.left = "0px";
+        placeholder.style.width = "0px";
+        placeholder.style.display = "none";
+        regionEl.appendChild(placeholder);
+        resizeLeftPreview = { wfEl, placeholder, origPeaksPx };
+      }
     }
 
     // During the drag we only update the local preview — no
@@ -2028,18 +2667,53 @@ export class TimelineView extends LitElement {
         } else if (mode === "resize-right") {
           preview.length_samples = Math.max(4800, o.len + dxSamples);
         } else if (mode === "resize-left") {
-          // Left-resize can drag the start before zero; keep at least
-          // one render-stable length (4800 samples ≈ 0.1 s at 48 kHz).
-          const newStart = o.start + dxSamples;
-          const newLen = Math.max(4800, o.len - (newStart - o.start));
-          preview.start_samples = newStart;
-          preview.length_samples = newLen;
+          // Trim from the start: advance the source-media offset by
+          // the same amount the timeline edge moves, so the lozenge
+          // shrinks AND the underlying content slides forward (rather
+          // than the whole region translating, which is what the
+          // earlier code did). Clamp:
+          //   * dxSamples >= -o.offset  → can't trim past the
+          //     source's actual start
+          //   * newLen >= 4800          → can't shrink to nothing
+          // The right edge stays anchored at o.start + o.len.
+          const minDx = -o.offset;            // most we can trim leftward
+          const maxDx = o.len - 4_800;         // most we can trim rightward
+          const dx = Math.max(minDx, Math.min(maxDx, dxSamples));
+          preview.start_samples = o.start + dx;
+          preview.length_samples = o.len - dx;
+          preview.source_offset_samples = o.offset + dx;
+          // Slide the frozen waveform under the region's clip so
+          // peaks stay at fixed pixel-per-sample. dx > 0 (trim):
+          // peaks shift left and crop. dx < 0 (extend): peaks shift
+          // right and the new gap gets a striped placeholder.
+          if (resizeLeftPreview && id === region.id) {
+            const dxPx = (dx / sr) * pxPerSec;
+            const wf = resizeLeftPreview.wfEl;
+            const ph = resizeLeftPreview.placeholder;
+            wf.style.left = `${-dxPx}px`;
+            wf.style.right = "auto";
+            wf.style.width = `${resizeLeftPreview.origPeaksPx}px`;
+            if (dx < 0) {
+              ph.style.display = "";
+              ph.style.left = "0px";
+              ph.style.width = `${-dxPx}px`;
+            } else {
+              ph.style.display = "none";
+            }
+          }
         }
         this._patchRegionLocally(preview);
       }
     };
     const up = () => {
       for (const el of els) el.classList.remove("dragging");
+      // Drop the waveform freeze + placeholder. The post-commit
+      // RegionUpdated event will invalidate the wf cache and the
+      // next ensure() call refetches peaks for the new offset+length.
+      if (resizeLeftPreview) {
+        resizeLeftPreview.wfEl.unfreezeViewport();
+        resizeLeftPreview.placeholder.remove();
+      }
       // Click without drag on a member of a multi-selection collapses
       // the selection to just that member — standard "click is a
       // single-select; drag preserves multi" behavior.
@@ -2048,23 +2722,36 @@ export class TimelineView extends LitElement {
         this._pendingDemoteRegionId = null;
         this._selectedRegionIds.clear();
         this._selectedRegionIds.add(demoteId);
+        this._reconcileCutPending();
         this.requestUpdate();
       }
       // Single committed update per region, with the final position +
-      // length. The shim wraps each in a reversible command, so the
-      // user gets one undo entry per drag.
+      // length (+ source offset for left-trim drags). The shim wraps
+      // each in a reversible command, so the user gets one undo entry
+      // per drag.
       for (const id of movingIds) {
         const r = this._regionForId(id);
         if (!r) continue;
         const o = origs.get(id);
         if (!o) continue;
+        const newOffset = Number(r.source_offset_samples || 0);
+        const offsetMoved = newOffset !== o.offset;
         // Skip the round-trip if nothing actually moved (e.g. the
         // user click-dragged but landed back at the start).
-        if (r.start_samples === o.start && r.length_samples === o.len) continue;
+        if (
+          r.start_samples === o.start
+          && r.length_samples === o.len
+          && !offsetMoved
+        ) continue;
+        const patch = {
+          start_samples: r.start_samples,
+          length_samples: r.length_samples,
+        };
+        if (offsetMoved) patch.source_offset_samples = newOffset;
         window.__foyer?.ws?.send({
           type: "update_region",
           id: r.id,
-          patch: { start_samples: r.start_samples, length_samples: r.length_samples },
+          patch,
         });
       }
       window.removeEventListener("pointermove", move);
@@ -2094,9 +2781,5 @@ export class TimelineView extends LitElement {
     this._regionsByTrack = { ...this._regionsByTrack, [region.track_id]: copy };
   }
 
-  _clearCache() {
-    this._wfCache?.invalidate?.("");
-    window.__foyer?.ws?.send({ type: "clear_waveform_cache" });
-  }
 }
 customElements.define("foyer-timeline-view", TimelineView);

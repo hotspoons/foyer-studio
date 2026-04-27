@@ -61,6 +61,10 @@ impl HostBackend {
 
 #[async_trait]
 impl Backend for HostBackend {
+    fn sample_rate(&self) -> u32 {
+        self.client.cached_sample_rate()
+    }
+
     async fn snapshot(&self) -> Result<Session, BackendError> {
         self.client
             .request_snapshot()
@@ -227,6 +231,24 @@ impl Backend for HostBackend {
     ) -> Result<(), BackendError> {
         self.client
             .duplicate_region(source_region_id, at_samples, length_samples)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn duplicate_region_range(
+        &self,
+        source_region_id: EntityId,
+        source_offset_samples: u64,
+        length_samples: u64,
+        at_samples: u64,
+    ) -> Result<(), BackendError> {
+        self.client
+            .duplicate_region_range(
+                source_region_id,
+                source_offset_samples,
+                length_samples,
+                at_samples,
+            )
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }

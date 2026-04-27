@@ -9,6 +9,9 @@ Cargo.lock.bak
 /tests-ui/node_modules
 /tests-ui/report
 /tests-ui/test-results
+# Stray Playwright artifact: `.last-run.json` lands in cwd when
+# `bunx playwright test` runs outside `tests-ui/`.
+/test-results
 
 # Core dumps — sometimes a crashed hardour / foyer / shim dumps into the repo root.
 /core
