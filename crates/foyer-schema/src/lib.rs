@@ -40,6 +40,7 @@ pub use midi::{
 pub use plugin::{PluginCatalogEntry, PluginFormat, PluginPreset, PluginRole};
 pub use session::{
     Bus, Group, GroupPatch, PluginInstance, Send, Session, Track, TrackKind, TrackPatch, Transport,
+    DEFAULT_SAMPLE_RATE,
 };
 pub use timeline::{Region, RegionPatch, TimelineMeta, WaveformPeaks, WaveformRequest};
 pub use tunnel::{

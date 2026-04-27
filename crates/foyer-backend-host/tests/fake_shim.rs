@@ -133,6 +133,7 @@ fn fake_session() -> Session {
         }],
         groups: vec![],
         dirty: false,
+        sample_rate: foyer_schema::DEFAULT_SAMPLE_RATE,
         ppqn: Some(960),
         meta: serde_json::Value::Null,
     }

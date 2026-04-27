@@ -266,11 +266,17 @@ export class TransportBar extends LitElement {
   /**
    * Format the current playhead as M:SS.mmm (or H:MM:SS.mmm for sessions
    * over an hour long). Reads transport.position (samples) and the
-   * session's sample-rate from `meta.sample_rate`.
+   * session's sample rate from `session.sample_rate` (typed schema
+   * field), falling back to the legacy `meta.sample_rate` JSON key
+   * for older payloads.
    */
   _formatClockTime() {
     const samples = Number(this._posCtl?.value || 0);
-    const sr = Number(window.__foyer?.store?.state?.session?.meta?.sample_rate || 48_000);
+    const sr = Number(
+      window.__foyer?.store?.state?.session?.sample_rate
+        || window.__foyer?.store?.state?.session?.meta?.sample_rate
+        || 48_000,
+    );
     const totalSec = Math.max(0, samples / sr);
     const ms = Math.floor((totalSec % 1) * 1000);
     const totalIntSec = Math.floor(totalSec);
@@ -292,7 +298,11 @@ export class TransportBar extends LitElement {
    */
   _formatBarBeat() {
     const samples = Number(this._posCtl?.value || 0);
-    const sr = Number(window.__foyer?.store?.state?.session?.meta?.sample_rate || 48_000);
+    const sr = Number(
+      window.__foyer?.store?.state?.session?.sample_rate
+        || window.__foyer?.store?.state?.session?.meta?.sample_rate
+        || 48_000,
+    );
     const tempo = Number(this._tempoCtl?.value || 0);
     const tsNum = Math.max(1, Number(this._tsNumCtl?.value || 4));
     if (!sr || !tempo) return "—";
@@ -501,12 +511,20 @@ export class TransportBar extends LitElement {
   // shim-side transport.speed endpoint.
   _rewind = () => {
     const cur = Number(window.__foyer?.store?.state?.controls?.get("transport.position") || 0);
-    const sr = Number(window.__foyer?.store?.state?.session?.meta?.sample_rate || 48_000);
+    const sr = Number(
+      window.__foyer?.store?.state?.session?.sample_rate
+        || window.__foyer?.store?.state?.session?.meta?.sample_rate
+        || 48_000,
+    );
     this._seek(cur - 5 * sr);
   };
   _fastForward = () => {
     const cur = Number(window.__foyer?.store?.state?.controls?.get("transport.position") || 0);
-    const sr = Number(window.__foyer?.store?.state?.session?.meta?.sample_rate || 48_000);
+    const sr = Number(
+      window.__foyer?.store?.state?.session?.sample_rate
+        || window.__foyer?.store?.state?.session?.meta?.sample_rate
+        || 48_000,
+    );
     this._seek(cur + 5 * sr);
   };
 

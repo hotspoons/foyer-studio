@@ -32,6 +32,11 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Each `Serve` flag surfaces as its own field per clap's derive idiom;
+// boxing them to placate `large_enum_variant` would just push the
+// fan-out one layer deeper. The Configure variant is small but rarely
+// constructed, so the size delta vs. Serve is fine in practice.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Run the WebSocket server + UI.
     Serve {
@@ -103,6 +108,17 @@ enum Command {
         /// `backends[id=stub].stub_test_tone` from config.yaml.
         #[arg(long, default_value_t = false)]
         stub_test_tone: bool,
+
+        /// Engine sample rate, in Hz. Overrides `sample_rate` from the
+        /// resolved backend config. Falls through to the schema
+        /// default (`foyer_schema::DEFAULT_SAMPLE_RATE`, 48k) when
+        /// nothing is set anywhere. The `FOYER_SAMPLE_RATE` env var
+        /// is honored too — it slots in below this flag and above
+        /// the config field. Today only the stub honors this; the
+        /// Ardour shim reports whatever rate libardour negotiates
+        /// with JACK.
+        #[arg(long, value_name = "HZ")]
+        sample_rate: Option<u32>,
     },
     /// Print the resolved config and exit.
     Backends,
@@ -179,6 +195,7 @@ async fn main() -> Result<()> {
             tls_cert,
             tls_key,
             stub_test_tone,
+            sample_rate,
         } => {
             if list_shims {
                 return list_available_shims();
@@ -222,6 +239,7 @@ async fn main() -> Result<()> {
                 jail,
                 tls,
                 stub_test_tone,
+                sample_rate,
             )
             .await
         }
@@ -352,6 +370,7 @@ async fn serve(
     jail_override: Option<PathBuf>,
     tls: Option<foyer_server::TlsConfig>,
     stub_test_tone: bool,
+    sample_rate_override: Option<u32>,
 ) -> Result<()> {
     // Resolve backend: CLI override wins, then config default.
     let backend = match backend_override.as_deref() {
@@ -415,10 +434,41 @@ async fn serve(
             .find(|b| b.id == "stub")
             .map(|b| b.stub_test_tone)
             .unwrap_or(false);
+
+    // Resolve sample rate: CLI flag > FOYER_SAMPLE_RATE env > backend
+    // config > schema default. We don't pull env via clap (would
+    // require its `env` cargo feature) — std::env keeps the dep
+    // surface tight and the precedence is the same. Picked from the
+    // resolved backend so per-backend rate selection
+    // (`--backend stub` while config sets a different rate per
+    // backend) does the expected thing.
+    let sr_from_env = std::env::var("FOYER_SAMPLE_RATE")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let sample_rate_resolved = sample_rate_override
+        .or(sr_from_env)
+        .or(backend.sample_rate)
+        .unwrap_or(foyer_schema::DEFAULT_SAMPLE_RATE);
+    if let Some(r) = sample_rate_override {
+        tracing::info!("engine sample rate: {r} Hz (--sample-rate)");
+    } else if let Some(r) = sr_from_env {
+        tracing::info!("engine sample rate: {r} Hz (FOYER_SAMPLE_RATE)");
+    } else if let Some(r) = backend.sample_rate {
+        tracing::info!(
+            "engine sample rate: {r} Hz (from backend `{}` config)",
+            backend.id
+        );
+    } else {
+        tracing::info!(
+            "engine sample rate: {sample_rate_resolved} Hz (schema default — no override set)"
+        );
+    }
+
     let spawner = Arc::new(CliSpawner {
         config: config.clone(),
         jail: jail.clone(),
         stub_test_tone: stub_test_tone_resolved,
+        sample_rate: sample_rate_resolved,
     });
     let initial_backend_id = backend.id.clone();
 
@@ -473,7 +523,9 @@ async fn serve(
                         "no Ardour shim advertised — booting empty launcher; pick a project \
                          in the session view to spawn Ardour"
                     );
-                    let mut b = StubBackend::launcher().with_test_tone(stub_test_tone_resolved);
+                    let mut b = StubBackend::launcher()
+                        .with_test_tone(stub_test_tone_resolved)
+                        .with_sample_rate(sample_rate_resolved);
                     if let Some(root) = &jail {
                         b = b.with_jail(root.clone());
                     }
@@ -524,6 +576,11 @@ struct CliSpawner {
     /// `backends[id=stub].stub_test_tone`. Stamped onto every stub
     /// instance the spawner builds.
     stub_test_tone: bool,
+    /// Resolved engine sample rate (CLI / env > config > schema
+    /// default). Stamped onto every stub instance and forwarded to
+    /// the Ardour child as a future hook (right now Ardour negotiates
+    /// with JACK and we just trust whatever it reports).
+    sample_rate: u32,
 }
 
 #[async_trait::async_trait]
@@ -559,7 +616,14 @@ impl BackendSpawner for CliSpawner {
         }
         match cfg_backend.kind {
             BackendKind::Stub => {
-                let mut b = StubBackend::new().with_test_tone(self.stub_test_tone);
+                // Per-backend `sample_rate` config wins over the
+                // CliSpawner-resolved rate when set, since this
+                // launch path is per-id and the config field is
+                // documented as a per-backend override.
+                let sr = cfg_backend.sample_rate.unwrap_or(self.sample_rate);
+                let mut b = StubBackend::new()
+                    .with_test_tone(self.stub_test_tone)
+                    .with_sample_rate(sr);
                 if let Some(root) = &self.jail {
                     b = b.with_jail(root.clone());
                 }

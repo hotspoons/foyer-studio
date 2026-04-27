@@ -56,6 +56,13 @@ pub struct StubBackend {
     /// Monotonic seed for `regions::fresh_region_id` — bumped on every
     /// duplicate so concurrent paste batches don't collide.
     dup_seed: std::sync::atomic::AtomicU64,
+    /// Mirror of `Session::sample_rate` — kept on the backend so the
+    /// sync `Backend::sample_rate()` call doesn't need to acquire
+    /// the state mutex for what's a hot read (timeline pixel math
+    /// and peak-cache decisions hit it on every render). Stays in
+    /// sync with the session because there's no API to change SR
+    /// after construction.
+    sample_rate: std::sync::atomic::AtomicU32,
     /// Handle to the meter-tick task — aborted on drop so repeated
     /// backend-swaps don't leak a tick task per swap.
     meter_handle: Option<tokio::task::JoinHandle<()>>,
@@ -80,6 +87,7 @@ impl StubBackend {
     pub fn new() -> Self {
         let state = Arc::new(Mutex::new(StubState::new()));
         let (tx, _) = broadcast::channel(EVENT_CHANNEL_CAP);
+        let sr = foyer_schema::DEFAULT_SAMPLE_RATE;
         let mut backend = Self {
             state,
             tx,
@@ -88,6 +96,7 @@ impl StubBackend {
             regions: Arc::new(Mutex::new(regions::RegionStore::new())),
             waveforms: Arc::new(Mutex::new(waveform::WaveformCache::new())),
             dup_seed: std::sync::atomic::AtomicU64::new(1),
+            sample_rate: std::sync::atomic::AtomicU32::new(sr),
             meter_handle: None,
             test_tone: false,
         };
@@ -112,6 +121,7 @@ impl StubBackend {
             regions: Arc::new(Mutex::new(regions::RegionStore::new())),
             waveforms: Arc::new(Mutex::new(waveform::WaveformCache::new())),
             dup_seed: std::sync::atomic::AtomicU64::new(1),
+            sample_rate: std::sync::atomic::AtomicU32::new(foyer_schema::DEFAULT_SAMPLE_RATE),
             meter_handle: None,
             test_tone: false,
         }
@@ -122,11 +132,48 @@ impl StubBackend {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// `TimelineMeta` snapshot for the stub's fake 60-second timeline.
+    /// Sample rate comes from the live atomic so future "switch SR
+    /// at runtime" wiring (whenever it lands) doesn't have to hunt
+    /// every event-emit site. Keeping the length scaled by SR keeps
+    /// the timeline a constant 60 wall-clock seconds regardless of
+    /// rate.
+    fn timeline_meta(&self) -> TimelineMeta {
+        let sr = self.sample_rate();
+        TimelineMeta {
+            sample_rate: sr,
+            length_samples: u64::from(sr) * 60,
+        }
+    }
+
     /// Enable the 440 Hz reference test tone on egress streams.
     /// Off by default — the stub is silent until a real DAW backend
     /// takes over. Useful for end-to-end audio path debugging.
     pub fn with_test_tone(mut self, on: bool) -> Self {
         self.test_tone = on;
+        self
+    }
+
+    /// Pin the engine sample rate. Updates both the cached atomic
+    /// and the underlying `Session::sample_rate` so subsequent
+    /// snapshot calls + region-list events agree. Resolution chain
+    /// for callers (CLI > env > config > schema default) lives in
+    /// the binary; this method is just a typed setter so each
+    /// construction site can take whatever value the resolver
+    /// settled on.
+    pub fn with_sample_rate(self, sr: u32) -> Self {
+        let sr = sr.max(8_000);
+        self.sample_rate
+            .store(sr, std::sync::atomic::Ordering::Relaxed);
+        // Mutating via a blocking lock is fine here — `with_*`
+        // builders are called pre-spawn before any task subscribes.
+        // Use try_lock so the helper stays non-async; in the rare
+        // race where the meter tick already grabbed the mutex we
+        // skip and let the next snapshot reflect the new SR via the
+        // atomic mirror.
+        if let Ok(mut state) = self.state.try_lock() {
+            state.set_sample_rate(sr);
+        }
         self
     }
 
@@ -165,6 +212,11 @@ impl Default for StubBackend {
 
 #[async_trait]
 impl Backend for StubBackend {
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+
     async fn snapshot(&self) -> Result<Session, BackendError> {
         Ok(self.state.lock().await.session_clone())
     }
@@ -266,10 +318,12 @@ impl Backend for StubBackend {
     }
 
     async fn measure_latency(&self, _stream_id: u32) -> Result<LatencyReport, BackendError> {
-        // Fixed synthetic number for the stub: 4800 samples @ 48k = 100ms round-trip.
+        // Fixed synthetic number for the stub: ~100ms round-trip at
+        // whatever the configured rate is (4800 samples at 48k).
+        let sr = self.sample_rate();
         Ok(LatencyReport {
-            round_trip_samples: 4800,
-            sample_rate: 48_000,
+            round_trip_samples: (sr / 10) as u64,
+            sample_rate: sr,
             jitter_samples: 8,
         })
     }
@@ -338,11 +392,8 @@ impl Backend for StubBackend {
         &self,
         track_id: EntityId,
     ) -> Result<(TimelineMeta, Vec<Region>), BackendError> {
-        let meta = TimelineMeta {
-            sample_rate: 48_000,
-            length_samples: 48_000 * 60, // 60 seconds of timeline
-        };
-        let regions = self.regions.lock().await.regions_for(&track_id).clone();
+        let meta = self.timeline_meta();
+        let regions = self.regions.lock().await.regions_for(&track_id, self.sample_rate()).clone();
         Ok((meta, regions))
     }
 
@@ -375,16 +426,13 @@ impl Backend for StubBackend {
             // Keep the same source-media offset so MIDI / audio
             // duplicates point at the same content as the source.
             store.insert(clone);
-            let regions = store.regions_for(&track_id).clone();
+            let regions = store.regions_for(&track_id, self.sample_rate()).clone();
             (track_id, regions)
         };
         let _ = self.tx.send(Event::RegionsList {
             track_id,
             regions,
-            timeline: TimelineMeta {
-                sample_rate: 48_000,
-                length_samples: 48_000 * 60,
-            },
+            timeline: self.timeline_meta(),
         });
         Ok(())
     }
@@ -433,16 +481,13 @@ impl Backend for StubBackend {
             // renders something sensible. Acceptable for tests since
             // the audio cut/copy/paste path is what users care about.
             store.insert(clone);
-            let regions = store.regions_for(&track_id).clone();
+            let regions = store.regions_for(&track_id, self.sample_rate()).clone();
             (track_id, regions)
         };
         let _ = self.tx.send(Event::RegionsList {
             track_id,
             regions,
-            timeline: TimelineMeta {
-                sample_rate: 48_000,
-                length_samples: 48_000 * 60,
-            },
+            timeline: self.timeline_meta(),
         });
         Ok(())
     }
@@ -539,18 +584,19 @@ impl Backend for StubBackend {
         samples_per_peak: u32,
     ) -> Result<WaveformPeaks, BackendError> {
         // Look up the region across all tracks.
+        let sr = self.sample_rate();
         let maybe_region = {
             let mut store = self.regions.lock().await;
             // We need to scan all known tracks; eagerly materialize known
             // tracks from the session so refs survive.
             let session = self.state.lock().await.session_clone();
             for t in &session.tracks {
-                store.regions_for(&t.id);
+                store.regions_for(&t.id, sr);
             }
             // Find the region anywhere.
             let mut found: Option<Region> = None;
             for t in &session.tracks {
-                for r in store.regions_for(&t.id) {
+                for r in store.regions_for(&t.id, sr) {
                     if r.id == region_id {
                         found = Some(r.clone());
                         break;

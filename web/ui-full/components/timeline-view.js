@@ -466,6 +466,11 @@ export class TimelineView extends LitElement {
   constructor() {
     super();
     this._regionsByTrack = {};
+    // Initial guess until the first regions_list event lands. Only
+    // used for axis math before the backend has answered; the real
+    // rate comes from `session.sample_rate` (typed field on the
+    // Session schema since it was promoted out of `meta`) or the
+    // per-region `TimelineMeta.sample_rate`. See `_sampleRate()`.
     this._timeline = { sample_rate: 48_000, length_samples: 48_000 * 60 };
     this._zoom = 60;
     // Virtual timeline-length extension in seconds; grows only when
@@ -760,8 +765,21 @@ export class TimelineView extends LitElement {
     return lock == null ? reported : lock;
   }
 
+  /** Authoritative engine sample rate, read in priority order:
+   *  per-region `TimelineMeta.sample_rate` (most recent regions_list
+   *  echo), `session.sample_rate` (typed field, promoted out of the
+   *  legacy `meta.sample_rate` JSON convention), then 48k as the
+   *  built-in last resort. Every place that needs px-per-sample math
+   *  routes through this so the constant only lives in one place
+   *  and a 96k Ardour session no longer renders at half-scale. */
+  _sampleRate() {
+    return Number(this._timeline?.sample_rate)
+      || Number(this.session?.sample_rate)
+      || 48_000;
+  }
+
   _samplesPerPx() {
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     return sr / Math.max(1, this._zoom);
   }
 
@@ -921,7 +939,7 @@ export class TimelineView extends LitElement {
     if (!scroll) return;
     const bounds = scroll.getBoundingClientRect();
     const contentX = ev.clientX - bounds.left + scroll.scrollLeft - HEAD_WIDTH;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const atSamples = Math.max(0, Math.round((contentX / this._zoom) * sr));
     showContextMenu(ev, [
       { heading: `${track.name} · ${(atSamples / sr).toFixed(2)}s` },
@@ -1071,7 +1089,7 @@ export class TimelineView extends LitElement {
    *  nothing is selected. */
   zoomToSelection() {
     if (!this._selection) return false;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const a = Math.min(this._selection.startSamples, this._selection.endSamples);
     const b = Math.max(this._selection.startSamples, this._selection.endSamples);
     const selSec = Math.max(0.01, (b - a) / sr);
@@ -1439,7 +1457,7 @@ export class TimelineView extends LitElement {
    */
   _mouseAnchorSamples() {
     if (this._lastMouseGridX == null) return null;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const x = this._lastMouseGridX - HEAD_WIDTH;
     if (x < 0) return null;
     const samples = (x / this._zoom) * sr;
@@ -1556,7 +1574,7 @@ export class TimelineView extends LitElement {
     // sites in this file without having to instrument each one.
     this._reconcileCutPending();
     const tracks = this.session?.tracks ?? [];
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     // Base content length: session length (or 30s min). Extended on the
     // fly by `_zoomPadSec` when the user scroll-zooms past the natural
     // content edge, so anchored zoom keeps the cursor pinned to the
@@ -1653,7 +1671,7 @@ export class TimelineView extends LitElement {
 
   _renderSelection() {
     if (!this._selection) return null;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const a = Math.min(this._selection.startSamples, this._selection.endSamples);
     const b = Math.max(this._selection.startSamples, this._selection.endSamples);
     const leftPx = HEAD_WIDTH + (a / sr) * this._zoom;
@@ -1699,7 +1717,7 @@ export class TimelineView extends LitElement {
 
   _renderQuantGrid() {
     if (!this._quantOn) return null;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const len = this._timeline?.length_samples || 0;
     const totalSec = len / sr;
     const ctls = window.__foyer?.store?.state?.controls;
@@ -1756,7 +1774,7 @@ export class TimelineView extends LitElement {
 
   _renderHoverCursor() {
     if (this._hoverSamples == null) return null;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const x = HEAD_WIDTH + (this._hoverSamples / sr) * this._zoom;
     return html`<div class="cursor-line" style="left:${x}px"></div>`;
   }
@@ -1808,7 +1826,7 @@ export class TimelineView extends LitElement {
   }
 
   _renderPlayhead() {
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const x = HEAD_WIDTH + (this._playheadSamples / sr) * this._zoom;
     return html`<div class="playhead" style="left:${x}px"></div>`;
   }
@@ -1816,7 +1834,7 @@ export class TimelineView extends LitElement {
   /** Pixels for the live recording span (punch-in cursor → playhead), or null. */
   _recordingSpanPixels(controls) {
     if (!controls || !controls.get("transport.recording")) return null;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     this._syncRecordingAnchor();
     let recStart = this._recordingAnchorSamples;
     if (!Number.isFinite(recStart)) recStart = controls.get("transport.record_position");
@@ -1845,7 +1863,7 @@ export class TimelineView extends LitElement {
 
   _renderLane(track) {
     const regions = this._regionsByTrack[track.id] || [];
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const h = this._laneHeightFor(track.id);
     const store = window.__foyer?.store;
     const controls = store?.state?.controls;
@@ -2037,7 +2055,7 @@ export class TimelineView extends LitElement {
     const viewportRest = scroll.clientWidth - HEAD_WIDTH;
     const neededContentPx = targetScrollLeft + viewportRest + 80;
     const neededSec = Math.max(0, neededContentPx / next);
-    const baseSec = Math.max(30, (this._timeline?.length_samples || 48000 * 30) / (this._timeline?.sample_rate || 48000));
+    const baseSec = Math.max(30, (this._timeline?.length_samples || (this._sampleRate() * 30)) / this._sampleRate());
     if (neededSec > baseSec) {
       this._zoomPadSec = Math.max(this._zoomPadSec || 0, neededSec);
     } else {
@@ -2412,7 +2430,7 @@ export class TimelineView extends LitElement {
   _samplesAtX(clientX, rulerEl) {
     const rect = rulerEl.getBoundingClientRect();
     const x = clientX - rect.left - HEAD_WIDTH;
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     return Math.max(0, Math.round((x / this._zoom) * sr));
   }
 
@@ -2548,7 +2566,7 @@ export class TimelineView extends LitElement {
       const el = this.renderRoot.querySelector(`.region[data-id="${id}"]`);
       if (el) { el.classList.add("dragging"); els.push(el); }
     }
-    const sr = this._timeline?.sample_rate || 48_000;
+    const sr = this._sampleRate();
     const startX = ev.clientX;
     const pxPerSec = this._zoom;
 

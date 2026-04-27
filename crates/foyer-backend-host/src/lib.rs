@@ -61,6 +61,10 @@ impl HostBackend {
 
 #[async_trait]
 impl Backend for HostBackend {
+    fn sample_rate(&self) -> u32 {
+        self.client.cached_sample_rate()
+    }
+
     async fn snapshot(&self) -> Result<Session, BackendError> {
         self.client
             .request_snapshot()

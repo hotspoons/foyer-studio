@@ -81,6 +81,18 @@ pub trait Backend: Send + Sync + 'static {
         "unknown"
     }
 
+    /// Engine sample rate the backend is currently running at, in Hz.
+    /// Default returns the schema-wide constant; concrete backends
+    /// override with the live value (the Ardour shim emits
+    /// `session.sample_rate()`, the stub returns its configured rate).
+    /// Callers that need the rate without doing a full
+    /// `snapshot().await` (e.g. fabricating a `TimelineMeta` for a
+    /// region list, choosing peak-decimation tiers, sizing default
+    /// loop ranges) should read this instead of hard-coding 48k.
+    fn sample_rate(&self) -> u32 {
+        foyer_schema::DEFAULT_SAMPLE_RATE
+    }
+
     async fn snapshot(&self) -> Result<Session, BackendError>;
     async fn subscribe(&self) -> Result<EventStream, BackendError>;
     async fn set_control(&self, id: EntityId, value: ControlValue) -> Result<(), BackendError>;
@@ -186,7 +198,7 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<(TimelineMeta, Vec<Region>), BackendError> {
         Ok((
             TimelineMeta {
-                sample_rate: 48_000,
+                sample_rate: self.sample_rate(),
                 length_samples: 0,
             },
             Vec::new(),

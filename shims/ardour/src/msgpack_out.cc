@@ -521,8 +521,11 @@ encode_session_snapshot (Session& session,
 		o.str ("type"); o.str ("session_snapshot");
 		o.str ("session");
 
-		// Session { schema_version, transport, tracks, groups, dirty, meta }
-		o.map (6);
+		// Session { schema_version, transport, tracks, groups, dirty,
+		// sample_rate, meta }. `sample_rate` was promoted out of the
+		// `meta` JSON blob so consumers don't have to fish through
+		// untyped data — see `Session.sample_rate` in foyer-schema.
+		o.map (7);
 		o.str ("schema_version"); o.array (2); o.u (0); o.u (1);
 
 		// Transport is a struct; map keys are Rust field names, values are Parameter structs.
@@ -827,6 +830,7 @@ encode_session_snapshot (Session& session,
 		}
 
 		o.str ("dirty"); o.b (session.dirty ());
+		o.str ("sample_rate"); o.u (static_cast<std::uint32_t> (session.sample_rate ()));
 		o.str ("meta"); o.nil ();
 	});
 }

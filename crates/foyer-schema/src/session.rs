@@ -187,6 +187,12 @@ pub struct Transport {
     pub sync_source: Option<Parameter>,
 }
 
+/// Default session sample rate when no DAW has reported one yet. Matches
+/// what every other layer (audio engine spawns, default Opus codec
+/// negotiation, the standalone stub) assumes — exposed as a constant
+/// so the assumption is one-name-grep'able if it ever needs to change.
+pub const DEFAULT_SAMPLE_RATE: u32 = 48_000;
+
 /// The full session snapshot. Shipped on connect and on demand for resync.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -202,13 +208,31 @@ pub struct Session {
     /// changes. Updated via [`crate::Event::SessionDirtyChanged`].
     #[serde(default)]
     pub dirty: bool,
+    /// Engine sample rate, in Hz. Sourced from `Session::sample_rate()`
+    /// on the Ardour side and from the stub's configured value
+    /// otherwise. Promoted out of the free-form `meta` blob so every
+    /// consumer (timeline pixel math, automation lanes, transport
+    /// clock) reads from one typed field instead of fishing through
+    /// JSON. Defaults to [`DEFAULT_SAMPLE_RATE`] when the snapshot
+    /// pre-dates this field — that matches the legacy hard-coded 48k
+    /// every layer was already assuming.
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: u32,
     /// Ticks per quarter note for MIDI data. `None` falls back to the
     /// MIDI de-facto 960 on the client side.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub ppqn: Option<u32>,
-    /// Optional free-form metadata: project name, sample rate, etc.
+    /// Optional free-form metadata: project name, etc. Sample rate
+    /// USED to live here as a JSON `sample_rate` key — that path is
+    /// retired in favor of the typed field above. Keep `meta` for
+    /// open-ended host-specific extras that don't deserve a schema
+    /// bump.
     #[serde(default)]
     pub meta: serde_json::Value,
+}
+
+const fn default_sample_rate() -> u32 {
+    DEFAULT_SAMPLE_RATE
 }
 
 #[cfg(test)]
@@ -333,8 +357,9 @@ mod tests {
             }],
             groups: vec![],
             dirty: false,
+            sample_rate: 96_000,
             ppqn: Some(960),
-            meta: serde_json::json!({"project": "demo", "sample_rate": 48000}),
+            meta: serde_json::json!({ "project": "demo" }),
         };
 
         let j = serde_json::to_string(&session).unwrap();

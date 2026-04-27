@@ -21,12 +21,15 @@ impl RegionStore {
         }
     }
 
-    /// Get-or-synthesize the region list for a track.
-    pub fn regions_for(&mut self, track_id: &EntityId) -> &Vec<Region> {
+    /// Get-or-synthesize the region list for a track. Synthesized
+    /// regions are scaled to `sample_rate` so tracks always look like
+    /// "4 × 6-second clips with 2-second gaps" regardless of the
+    /// session's configured SR.
+    pub fn regions_for(&mut self, track_id: &EntityId, sample_rate: u32) -> &Vec<Region> {
         let key = track_id.as_str().to_string();
         self.by_track
             .entry(key.clone())
-            .or_insert_with(|| synthesize_for(track_id))
+            .or_insert_with(|| synthesize_for(track_id, sample_rate))
     }
 
     pub fn update(&mut self, id: &EntityId, patch: &foyer_schema::RegionPatch) -> Option<Region> {
@@ -97,7 +100,7 @@ pub(crate) fn fresh_region_id(seed: u64) -> EntityId {
     EntityId::new(format!("region.dup.{seed}"))
 }
 
-fn synthesize_for(track_id: &EntityId) -> Vec<Region> {
+fn synthesize_for(track_id: &EntityId, sample_rate: u32) -> Vec<Region> {
     let slug = track_id
         .as_str()
         .rsplit('.')
@@ -110,9 +113,10 @@ fn synthesize_for(track_id: &EntityId) -> Vec<Region> {
         .as_str()
         .bytes()
         .fold(0u64, |a, b| a.wrapping_mul(131).wrapping_add(b as u64));
-    let start_offset = (seed % 4) * 48_000;
-    let gap = 2 * 48_000; // 2 seconds
-    let dur = 6 * 48_000; // 6 seconds
+    let sr = u64::from(sample_rate);
+    let start_offset = (seed % 4) * sr;
+    let gap = 2 * sr; // 2 seconds
+    let dur = 6 * sr; // 6 seconds
     let mut out = Vec::new();
     for i in 0..4u64 {
         let start = start_offset + i * (dur + gap);
