@@ -126,13 +126,98 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   - **Fix the clone process.** `just prep` (or wherever Ardour gets cloned) probably hardcodes a branch instead of the tag. Make it `git -c advice.detachedHead=false clone --depth 1 --branch v9.2.0 https://...`, parameterized by an `ARDOUR_TAG` env var with a sensible default. Then the CI matrix sets `ARDOUR_TAG` per cell. — This is a 5-line change to the Justfile when you're ready.
 
 
-- [ ] Cut/copy/paste/delete/duplicate/mute region selections 
+- [/] Cut/copy/paste/delete/duplicate/mute region selections
   - Need this standard DAW workflow to function for true basic feature completion, and it needs to work with multiple tracks selected. Getting waveform previews of ranges can either be easy or hard depending on how Ardour handles this internally - if they are just crops to existing full waveforms, it should be pretty easy. Nothing under edit excep undo and redo works, but this is all well handled on the back end so it should just be tapping into that and making sure we update front end visualizations
-- [ ] Need beats per bar and note value to provide proper timing grid/time signature for composition
-- [ ] Need clock view (should be hide-able, maybe in a common grouping with tempo and time signature - this isn't always required to run the DAW so having this so it can be hidden or shown when not needed would be helpful)
-- [ ] Layouts should be first menu item in FAB dock, windows last item
-- [ ] Clear peak cache doesn't seem to do anything, maybe we delete
-- [ ] Adjusting track height on one track when multiple are selected in the timeline should resize all of the selected tracks, not just the one being resized
+  - **Shipped 2026-04-27 (overnight + morning):** per-tab region clipboard
+    on `<foyer-timeline-view>` (`copyRegionSelection` /
+    `cutRegionSelection` / `pasteRegionsAtPlayhead` /
+    `duplicateRegionSelection` / `toggleMuteRegionSelection`). Each
+    batch wraps the underlying ws commands in
+    `undo_group_begin/end` so one Ctrl+Z undoes the whole op. Bound to
+    Ctrl/Cmd+C/X/V/D plus bare M in
+    [keybinds.js](../web/ui-core/layout/keybinds.js); region context
+    menu grows the same items with chord glyphs. Toast feedback on
+    every op (`Copied 1 region` / `Pasted 1 region` / `Nothing
+    selected — click a region first`) — the morning bug "does nothing"
+    was an invisible-success problem since cut defers the delete until
+    paste so the original stays put. Specs in
+    [tests-ui/specs/region-clipboard.spec.js](../tests-ui/specs/region-clipboard.spec.js)
+    cover all five ops + the toast feedback path.
+  - **Still pending:**
+    - Multi-track paste. `DuplicateRegion` keys on `source_region_id`
+      and lands on the SOURCE track; the schema doesn't have a "paste
+      onto target track" surface yet. Single-track copy/paste works
+      end-to-end; copy from track A and paste lands back on A.
+      Cross-track would need either a new schema command or a
+      client-side translation that re-posts as `CreateRegion` against
+      the destination — defer until someone actually wants it.
+    - Cut visual indicator. Originals stay in place after cut (so the
+      DuplicateRegion source IDs are still valid at paste time). A
+      dashed border / lower opacity on cut-pending regions would make
+      the "queued for cut" state obvious — currently only the toast
+      message conveys it.
+    - Time-range delete (Delete key with a ruler selection but no
+      region selection) already worked pre-batch; not changed here.
+- [x] Need beats per bar and note value to provide proper timing grid/time signature for composition
+  - **Shipped 2026-04-27:** time-signature surface in the transport bar's
+    new session-meta cluster — two number inputs styled `N/D` next to
+    the tempo. Edits round-trip through `transport.ts.{num,den}`
+    (already in `foyer-schema` + the stub + the Ardour shim's
+    `msgpack_out` emitter — only the UI surface was missing).
+    Denominator snaps to the nearest power of 2 on commit, since the
+    Ardour metronome only clicks on pow-2 note values.
+    [transport-bar.js](../web/ui-full/components/transport-bar.js).
+  - **Plus:** the BPM-quantized timeline grid now actually honors the
+    time signature. Before this, the grid drew every quarter-note as a
+    generic "beat" with no concept of bar boundaries; changing
+    `ts.{num,den}` had no visible effect. Now reads ts.num/ts.den, the
+    `.quant-line.bar` tier (2px, full alpha) lands every `ts.num`
+    beats, and beat duration scales by `4/ts.den` so a 6/8 grid steps
+    in eighths. Live — re-renders on every `"control"` event.
+    See [timeline-view.js](../web/ui-full/components/timeline-view.js)
+    `_renderQuantGrid`. Spec in
+    [tests-ui/specs/timeline-grid-time-sig.spec.js](../tests-ui/specs/timeline-grid-time-sig.spec.js).
+- [x] Need clock view (should be hide-able, maybe in a common grouping with tempo and time signature - this isn't always required to run the DAW so having this so it can be hidden or shown when not needed would be helpful)
+  - **Shipped 2026-04-27:** clock readout in the transport bar's new
+    session-meta cluster (top: `M:SS.mmm` for sessions under an hour,
+    `H:MM:SS.mmm` past that; bottom: `bar.beat.16th`). Reads
+    `transport.position` (samples) + `session.meta.sample_rate` for
+    time, plus tempo + ts.num for bars/beats. Repaints on every
+    position update via a fresh `ControlController` on
+    `transport.position`.
+  - **Hide toggle:** an eye button (`eye` ↔ `eye-slash`) next to the
+    cluster collapses the whole grouping (clock + time-sig + tempo).
+    Persists in localStorage as `foyer.transport.show-meta.v1`. Cluster
+    is shown by default — newcomers see it; users who don't want it
+    hide it once. See
+    [transport-bar.js](../web/ui-full/components/transport-bar.js)
+    `.meta-cluster` block + `_toggleMetaCluster`. Spec in
+    [tests-ui/specs/transport-meta-cluster.spec.js](../tests-ui/specs/transport-meta-cluster.spec.js).
+- [x] Layouts should be first menu item in FAB dock, windows last item
+  - **Shipped 2026-04-27:** order swap in the explicit `ORDER` array at
+    [right-dock.js](../web/ui-full/components/right-dock.js)
+    `_renderDockedFabs` — `foyer.layout-fab.v1` first, `foyer.chat`
+    middle, `foyer.windows` last. Single-line fix.
+- [x] Clear peak cache doesn't seem to do anything, maybe we delete
+  - **Shipped 2026-04-27 (deleted):** the button was effectively a
+    no-op against the Ardour backend — `HostBackend` inherits the
+    default `clear_waveform_cache` trait impl that returns 0, and the
+    client-side `_wfCache.invalidate("")` call was already dead code
+    (the cache keys are `${id}@${tier}`, no key starts with `@`). Per
+    your "maybe we delete" note, removed the button + the dead
+    `_clearCache` method from
+    [timeline-view.js](../web/ui-full/components/timeline-view.js).
+    Schema/server/stub plumbing left intact (tests use it; future
+    Ardour shim wiring is straightforward).
+- [x] Adjusting track height on one track when multiple are selected in the timeline should resize all of the selected tracks, not just the one being resized
+  - **Shipped 2026-04-27:** three-tier target picker in
+    [timeline-view.js](../web/ui-full/components/timeline-view.js)
+    `_startLaneResize` — Shift held → resize EVERY lane (uniform
+    pass), dragged track is part of a multi-track selection → resize
+    the whole selection (mirrors the bulk-edit-follows-selection DAW
+    convention), otherwise → just the dragged lane. Spec in
+    [tests-ui/specs/timeline-multi-resize.spec.js](../tests-ui/specs/timeline-multi-resize.spec.js)
+    covers all four cases.
 
 ## Bugs
 
