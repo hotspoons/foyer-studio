@@ -126,6 +126,14 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   - **Fix the clone process.** `just prep` (or wherever Ardour gets cloned) probably hardcodes a branch instead of the tag. Make it `git -c advice.detachedHead=false clone --depth 1 --branch v9.2.0 https://...`, parameterized by an `ARDOUR_TAG` env var with a sensible default. Then the CI matrix sets `ARDOUR_TAG` per cell. — This is a 5-line change to the Justfile when you're ready.
 
 
+- [ ] Cut/copy/paste/delete/duplicate/mute region selections 
+  - Need this standard DAW workflow to function for true basic feature completion, and it needs to work with multiple tracks selected. Getting waveform previews of ranges can either be easy or hard depending on how Ardour handles this internally - if they are just crops to existing full waveforms, it should be pretty easy. Nothing under edit excep undo and redo works, but this is all well handled on the back end so it should just be tapping into that and making sure we update front end visualizations
+- [ ] Need beats per bar and note value to provide proper timing grid/time signature for composition
+- [ ] Need clock view (should be hide-able, maybe in a common grouping with tempo and time signature - this isn't always required to run the DAW so having this so it can be hidden or shown when not needed would be helpful)
+- [ ] Layouts should be first menu item in FAB dock, windows last item
+- [ ] Clear peak cache doesn't seem to do anything, maybe we delete
+- [ ] Adjusting track height on one track when multiple are selected in the timeline should resize all of the selected tracks, not just the one being resized
+
 ## Bugs
 
 - [ ] Time marker (see head) doesn't align with MIDI, and it doesn't align with audio
