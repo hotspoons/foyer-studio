@@ -760,6 +760,15 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
         // `exec ... "$@" "$DIR" "$NAME"` line in the script.
         c
     } else {
+        // Pre-flight the session XML so the shim actually instantiates.
+        // Ardour 9 only loads protocols listed with active="1" in the
+        // session file; the global preferences toggle just seeds NEW
+        // sessions. Without this, the .dylib gets dlopened but never
+        // instantiated and the discovery loop below times out at 30s.
+        // Mirrors what the dev-build bash branch above does inline.
+        // Shadowing here keeps the dev-build path's bindings intact.
+        let (session_dir, snapshot_name) =
+            preflight_session(&resolved_exec, &session_dir, &snapshot_name);
         tracing::info!(
             "spawning {} {} {} {}",
             resolved_exec.display(),
@@ -768,6 +777,27 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
             snapshot_name,
         );
         let mut c = tokio::process::Command::new(&resolved_exec);
+        // macOS `.app` bundles need `ARDOUR_BUNDLED=true` for the binary
+        // to derive its DLL/DATA/CONFIG paths from the bundle layout
+        // instead of exiting with "ARDOUR_DLL_PATH not set in environment".
+        // LaunchServices would normally set this via Info.plist's
+        // `LSEnvironment`, but a direct spawn bypasses that path. We set
+        // it ourselves so we keep stdio piped to daw.log (an `open -na`
+        // form would detach stdio and route everything through launchd).
+        // Note: when bundled, Ardour also redirects its own stdout/stderr
+        // to `~/Library/Preferences/Ardour9/{stdout,stderr}.log`, so the
+        // foyer-side daw.log stays mostly empty on macOS — the link is
+        // logged below for users who tail it.
+        if let Some(bundle) = macos_app_bundle(&resolved_exec) {
+            tracing::info!(
+                "macOS .app bundle detected at {}; setting ARDOUR_BUNDLED=true",
+                bundle.display(),
+            );
+            tracing::info!(
+                "Ardour's own stdio will land in ~/Library/Preferences/Ardour9/{{stdout,stderr}}.log"
+            );
+            c.env("ARDOUR_BUNDLED", "true");
+        }
         for a in extra_args {
             c.arg(a);
         }
@@ -823,6 +853,30 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
             ));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Return the enclosing `.app` bundle for a Mach-O exec path, if any.
+/// Recognizes the standard `<X>.app/Contents/MacOS/<bin>` layout and
+/// returns `<X>.app`. Returns `None` on non-macOS targets, on non-bundle
+/// layouts (system installs, dev builds), or when any segment is missing.
+fn macos_app_bundle(exec: &std::path::Path) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let macos = exec.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let app = contents.parent()?;
+    if app.extension().and_then(|s| s.to_str()) == Some("app") {
+        Some(app.to_path_buf())
+    } else {
+        None
     }
 }
 
@@ -1037,4 +1091,352 @@ fn shell_escape(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+/// Pre-flight the Ardour session file on the released-binary path.
+///
+/// Ports the bootstrap and `<Protocol name="Foyer Studio Shim">` edit
+/// from the dev-build bash branch at the top of
+/// [`launch_and_wait_for_shim`] into Rust so the released binary gets
+/// the same treatment. The dev-build path keeps its bash version
+/// untouched — that runs in dev containers with GNU sed and isn't
+/// worth re-litigating.
+///
+/// Two responsibilities:
+///   1. If `<dir>/<name>.ardour` doesn't exist, locate
+///      `ardour*-new_empty_session` next to the resolved exec and run
+///      it to bootstrap a session under `<dir>/<name>/`. Returns the
+///      adjusted `(dir, name)` if that succeeds.
+///   2. Edit the session XML so `<Protocol name="Foyer Studio Shim"
+///      active="1"/>` is present inside `<ControlProtocols>`.
+///
+/// Fails open: any I/O error, non-zero helper exit, or unparseable
+/// XML shape just logs a warning and returns the inputs unchanged.
+/// Mirrors the `|| true` semantics of the bash version.
+fn preflight_session(
+    resolved_exec: &Path,
+    session_dir: &Path,
+    snapshot_name: &str,
+) -> (PathBuf, String) {
+    let (dir, name) = bootstrap_session_if_missing(resolved_exec, session_dir, snapshot_name);
+    let session_file = dir.join(format!("{name}.ardour"));
+    if session_file.is_file() {
+        if let Err(e) = ensure_foyer_shim_active(&session_file) {
+            tracing::warn!(
+                "foyer: failed to update Foyer Studio Shim entry in {}: {e:#}",
+                session_file.display(),
+            );
+        }
+    }
+    (dir, name)
+}
+
+/// Step 1 of `preflight_session`: if the session file is missing,
+/// invoke `ardour*-new_empty_session` to create it under
+/// `<session_dir>/<snapshot_name>/`. Returns the (possibly redirected)
+/// `(dir, name)` to pass to Ardour as argv.
+fn bootstrap_session_if_missing(
+    resolved_exec: &Path,
+    session_dir: &Path,
+    snapshot_name: &str,
+) -> (PathBuf, String) {
+    let session_file = session_dir.join(format!("{snapshot_name}.ardour"));
+    if session_file.is_file() {
+        return (session_dir.to_path_buf(), snapshot_name.to_string());
+    }
+    let leaf_dir = session_dir.join(snapshot_name);
+    // The helper refuses to run when the leaf dir already exists. If a
+    // previous failed launch left an empty leaf, clean it up. A
+    // populated leaf we leave alone — caller can `rm -rf` once they're
+    // sure. Same policy as the bash version.
+    if leaf_dir.is_dir() {
+        if let Ok(mut it) = std::fs::read_dir(&leaf_dir) {
+            if it.next().is_none() {
+                let _ = std::fs::remove_dir(&leaf_dir);
+            }
+        }
+    }
+    let helper = match find_new_empty_session_helper(resolved_exec) {
+        Some(h) => h,
+        None => {
+            tracing::warn!(
+                "foyer: no ardour*-new_empty_session helper found near {} — Ardour will show its own session dialog",
+                resolved_exec.display(),
+            );
+            return (session_dir.to_path_buf(), snapshot_name.to_string());
+        }
+    };
+    tracing::info!(
+        "foyer: bootstrapping new session {} via {}",
+        leaf_dir.display(),
+        helper.display(),
+    );
+    match std::process::Command::new(&helper)
+        .arg(&leaf_dir)
+        .arg(snapshot_name)
+        .status()
+    {
+        Ok(s) if !s.success() => {
+            tracing::warn!(
+                "foyer: {} exited with status {} — letting Ardour show its own dialog",
+                helper.display(),
+                s,
+            );
+        }
+        Err(e) => {
+            tracing::warn!("foyer: failed to invoke {}: {e}", helper.display());
+        }
+        _ => {}
+    }
+    let leaf_session = leaf_dir.join(format!("{snapshot_name}.ardour"));
+    if leaf_session.is_file() {
+        (leaf_dir, snapshot_name.to_string())
+    } else {
+        (session_dir.to_path_buf(), snapshot_name.to_string())
+    }
+}
+
+/// Look for `ardour*-new_empty_session` next to the resolved Ardour
+/// exec. The bundled-app layout on macOS puts it at
+/// `…/Ardour9.app/Contents/MacOS/ardour9-new_empty_session` (lowercase
+/// even though the GUI binary is `Ardour9`); a Linux package install
+/// puts it next to `ardour9` in `/usr/bin`. Scans the parent dir for a
+/// case-insensitive `ardour*-new_empty_session` match and picks the
+/// first regular-file hit.
+fn find_new_empty_session_helper(resolved_exec: &Path) -> Option<PathBuf> {
+    let dir = resolved_exec.parent()?;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let lower = name.to_string_lossy().to_lowercase();
+        if lower.starts_with("ardour") && lower.ends_with("-new_empty_session") {
+            let path = entry.path();
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Step 2 of `preflight_session`: read the session XML, apply the
+/// Foyer Studio Shim activation rule, write the result back atomically
+/// when something changed.
+fn ensure_foyer_shim_active(session_file: &Path) -> Result<()> {
+    let original = std::fs::read_to_string(session_file)
+        .with_context(|| format!("read session file {}", session_file.display()))?;
+    match apply_foyer_shim_edit(&original) {
+        FoyerShimEdit::AlreadyActive => {}
+        FoyerShimEdit::FlippedToActive { updated } => {
+            tracing::info!(
+                "foyer: flipping Foyer Studio Shim to active=\"1\" in {}",
+                session_file.display(),
+            );
+            write_atomic(session_file, &updated)
+                .with_context(|| format!("write session file {}", session_file.display()))?;
+        }
+        FoyerShimEdit::Inserted { updated } => {
+            tracing::info!(
+                "foyer: inserting Foyer Studio Shim into {}",
+                session_file.display(),
+            );
+            write_atomic(session_file, &updated)
+                .with_context(|| format!("write session file {}", session_file.display()))?;
+        }
+        FoyerShimEdit::ListedButUnknownShape => {
+            tracing::warn!(
+                "foyer: Foyer Studio Shim already listed in {} but in a non-canonical shape — leaving alone",
+                session_file.display(),
+            );
+        }
+        FoyerShimEdit::NoControlProtocolsBlock => {
+            tracing::warn!(
+                "foyer: WARNING no <ControlProtocols> block found in {} — add Foyer Studio Shim by hand",
+                session_file.display(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Outcome of one pass of the Foyer Studio Shim activation rule over
+/// a session XML blob. Pure value — `apply_foyer_shim_edit` does no
+/// I/O, so the rule is unit-testable without an Ardour install.
+#[derive(Debug, PartialEq, Eq)]
+enum FoyerShimEdit {
+    /// Already listed with `active="1"`. No-op.
+    AlreadyActive,
+    /// Element was listed with `active="0"` in the canonical attr
+    /// order; flipped to `active="1"` in place.
+    FlippedToActive { updated: String },
+    /// Element wasn't listed at all but `</ControlProtocols>` exists;
+    /// inserted a fresh `<Protocol …/>` line just before the closer.
+    Inserted { updated: String },
+    /// Listed but in an attr ordering / shape we don't recognize.
+    /// Don't insert (would duplicate) and don't flip (don't know how
+    /// to do it safely). Caller logs a warning and leaves the file
+    /// alone.
+    ListedButUnknownShape,
+    /// No `<ControlProtocols>` block at all — extremely old session
+    /// or a manual hand-edit. Caller logs a warning.
+    NoControlProtocolsBlock,
+}
+
+/// Apply the Foyer Studio Shim activation rule to a session XML blob.
+/// Mirrors the dev-build bash sed patterns at the top of
+/// [`launch_and_wait_for_shim`]. Priority order:
+///   1. Already-active substring present → AlreadyActive.
+///   2. Element listed with canonical `name="…" active="0"` ordering
+///      → flip in place.
+///   3. Listed in some other shape → ListedButUnknownShape (warn, no
+///      edit). This case is hit when Ardour writes attrs in a
+///      different order than the bash sed expects; trying to flip it
+///      heuristically risks corrupting the XML.
+///   4. Not listed but `</ControlProtocols>` present → insert.
+///   5. None of the above → NoControlProtocolsBlock.
+fn apply_foyer_shim_edit(input: &str) -> FoyerShimEdit {
+    if input.contains(r#"name="Foyer Studio Shim" active="1""#) {
+        return FoyerShimEdit::AlreadyActive;
+    }
+    if input.contains(r#"name="Foyer Studio Shim""#) {
+        let start_anchor = r#"<Protocol name="Foyer Studio Shim" active="0""#;
+        if let Some(anchor) = input.find(start_anchor) {
+            // Bound the rewrite to the matching void element so we
+            // never reach across into another `<Protocol .../>`.
+            if let Some(rel_end) = input[anchor..].find("/>") {
+                let abs_end = anchor + rel_end + 2;
+                let mut new = String::with_capacity(input.len());
+                new.push_str(&input[..anchor]);
+                new.push_str(r#"<Protocol name="Foyer Studio Shim" active="1""#);
+                new.push_str(&input[anchor + start_anchor.len()..abs_end]);
+                new.push_str(&input[abs_end..]);
+                return FoyerShimEdit::FlippedToActive { updated: new };
+            }
+        }
+        return FoyerShimEdit::ListedButUnknownShape;
+    }
+    if let Some(idx) = input.find("</ControlProtocols>") {
+        // Match the indentation the bash version emits — four spaces
+        // for the inserted protocol, two before the closer. Ardour
+        // re-indents on save anyway, so absolute fidelity isn't
+        // required, but matching makes the diff readable.
+        let insertion = "    <Protocol name=\"Foyer Studio Shim\" active=\"1\"/>\n  ";
+        let mut new = String::with_capacity(input.len() + insertion.len());
+        new.push_str(&input[..idx]);
+        new.push_str(insertion);
+        new.push_str(&input[idx..]);
+        return FoyerShimEdit::Inserted { updated: new };
+    }
+    FoyerShimEdit::NoControlProtocolsBlock
+}
+
+/// Write `contents` to `path` atomically: stage in a sibling temp
+/// file, then rename. Avoids leaving a half-written `.ardour` behind
+/// if the process is killed mid-write — Ardour treats a truncated
+/// session file as unrecoverable.
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("session");
+    let tmp = dir.join(format!(".{stem}.foyer-tmp"));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xml_already_active_is_noop() {
+        let input = r#"<Session>
+  <ControlProtocols>
+    <Protocol name="Foyer Studio Shim" active="1"/>
+    <Protocol name="OSC" active="0"/>
+  </ControlProtocols>
+</Session>"#;
+        assert_eq!(apply_foyer_shim_edit(input), FoyerShimEdit::AlreadyActive);
+    }
+
+    #[test]
+    fn xml_listed_inactive_gets_flipped() {
+        let input = r#"<Session>
+  <ControlProtocols>
+    <Protocol name="OSC" active="0"/>
+    <Protocol name="Foyer Studio Shim" active="0"/>
+  </ControlProtocols>
+</Session>"#;
+        match apply_foyer_shim_edit(input) {
+            FoyerShimEdit::FlippedToActive { updated } => {
+                assert!(updated.contains(r#"<Protocol name="Foyer Studio Shim" active="1"/>"#));
+                // Other elements left intact.
+                assert!(updated.contains(r#"<Protocol name="OSC" active="0"/>"#));
+                // No stray active="0" remains on the Foyer element.
+                assert!(!updated.contains(r#"name="Foyer Studio Shim" active="0""#));
+            }
+            other => panic!("expected FlippedToActive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xml_listed_inactive_with_extra_attrs_preserved() {
+        // Ardour writes additional attrs (feedback, strict-id, etc.) on
+        // each Protocol. The flip must preserve them — we only touch
+        // active="0" → active="1", nothing else inside the element.
+        let input = r#"<Protocol name="Foyer Studio Shim" active="0" feedback="0"/>"#;
+        match apply_foyer_shim_edit(input) {
+            FoyerShimEdit::FlippedToActive { updated } => {
+                assert_eq!(
+                    updated,
+                    r#"<Protocol name="Foyer Studio Shim" active="1" feedback="0"/>"#
+                );
+            }
+            other => panic!("expected FlippedToActive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xml_not_listed_gets_inserted() {
+        let input = r#"<Session>
+  <ControlProtocols>
+    <Protocol name="OSC" active="0"/>
+  </ControlProtocols>
+</Session>"#;
+        match apply_foyer_shim_edit(input) {
+            FoyerShimEdit::Inserted { updated } => {
+                assert!(updated.contains(r#"<Protocol name="Foyer Studio Shim" active="1"/>"#));
+                assert!(updated.contains(r#"<Protocol name="OSC" active="0"/>"#));
+                let shim_idx = updated.find("Foyer Studio Shim").unwrap();
+                let close_idx = updated.find("</ControlProtocols>").unwrap();
+                assert!(
+                    shim_idx < close_idx,
+                    "insertion must sit before </ControlProtocols>",
+                );
+            }
+            other => panic!("expected Inserted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xml_listed_in_unknown_shape_is_left_alone() {
+        // Attrs in a non-canonical order — bash sed wouldn't flip this
+        // either. We refuse rather than risk a duplicate-insert.
+        let input = r#"<Protocol active="0" name="Foyer Studio Shim"/>"#;
+        assert_eq!(
+            apply_foyer_shim_edit(input),
+            FoyerShimEdit::ListedButUnknownShape,
+        );
+    }
+
+    #[test]
+    fn xml_no_control_protocols_block_is_warn() {
+        let input = r#"<Session>
+  <Other/>
+</Session>"#;
+        assert_eq!(
+            apply_foyer_shim_edit(input),
+            FoyerShimEdit::NoControlProtocolsBlock,
+        );
+    }
 }
