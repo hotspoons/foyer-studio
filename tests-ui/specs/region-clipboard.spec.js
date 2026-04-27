@@ -206,4 +206,49 @@ test.describe("region clipboard / mute / duplicate", () => {
       return deepFind("foyer-timeline-view").hasClipboard();
     })()`)).toBe(false);
   });
+
+  test("user-visible toast feedback for empty selection / copy / paste", async ({ page }) => {
+    // Regression: when this batch first shipped, copying a region produced
+    // no visible feedback (cut even less so — originals stay until paste).
+    // Users assumed the keybind / menu item was broken. The fix adds a
+    // toast on every clipboard op + a warning when there's no selection.
+    // Listed last in the file because the paste it does adds a region
+    // and confuses the cut/paste test's pickPopulatedTrack heuristic
+    // when the cut/paste test runs after.
+    await bootTimeline(page);
+    const seed = await pickPopulatedTrack(page);
+
+    await page.evaluate(`(() => {
+      ${DEEP_FIND}
+      const tv = deepFind("foyer-timeline-view");
+      tv._selectedRegionIds.clear();
+      tv.copyRegionSelection();
+    })()`);
+    await page.waitForFunction(() => {
+      const stack = document.getElementById("foyer-toast-stack");
+      return !!stack && Array.from(stack.children)
+        .some((el) => /Nothing selected/.test(el.textContent || ""));
+    });
+
+    await selectRegion(page, seed.regionId);
+    await page.evaluate(`(() => {
+      ${DEEP_FIND}
+      deepFind("foyer-timeline-view").copyRegionSelection();
+    })()`);
+    await page.waitForFunction(() => {
+      const stack = document.getElementById("foyer-toast-stack");
+      return !!stack && Array.from(stack.children)
+        .some((el) => /Copied 1 region/.test(el.textContent || ""));
+    });
+
+    await page.evaluate(`(() => {
+      ${DEEP_FIND}
+      deepFind("foyer-timeline-view").pasteRegionsAtPlayhead();
+    })()`);
+    await page.waitForFunction(() => {
+      const stack = document.getElementById("foyer-toast-stack");
+      return !!stack && Array.from(stack.children)
+        .some((el) => /Pasted 1 region/.test(el.textContent || ""));
+    });
+  });
 });

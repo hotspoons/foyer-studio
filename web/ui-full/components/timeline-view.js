@@ -20,6 +20,7 @@ import "foyer-ui-core/viz/viz-picker.js";
 import { getVizPrefs } from "foyer-ui-core/viz/viz-settings.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
+import { toast } from "foyer-ui-core/widgets/toast.js";
 
 const LANE_HEIGHT_DEFAULT = 52;
 const LANE_HEIGHT_MIN = 28;
@@ -404,6 +405,13 @@ export class TimelineView extends LitElement {
       width: 1px;
       pointer-events: none;
       z-index: 1;
+    }
+    .quant-line.bar {
+      /* Bar boundaries are the strongest line. Twice the width of a
+       * beat line so they stand out against the per-beat grid; uses
+       * the same accent color so the user's viz prefs apply. */
+      background: var(--foyer-quant-grid, var(--color-accent-2));
+      width: 2px;
     }
     .quant-line.beat {
       /* --foyer-quant-grid is set from viz prefs as a full rgba() so
@@ -1146,9 +1154,12 @@ export class TimelineView extends LitElement {
    * Captures relative offsets so a multi-region paste preserves the
    * original spacing. Returns the count snapshotted.
    */
-  copyRegionSelection({ mode = "copy" } = {}) {
+  copyRegionSelection({ mode = "copy", silent = false } = {}) {
     const ids = [...this._selectedRegionIds];
-    if (!ids.length) return 0;
+    if (!ids.length) {
+      if (!silent) toast("Nothing selected — click a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
     const tracks = this.session?.tracks || [];
     const items = [];
     let anchor = Number.POSITIVE_INFINITY;
@@ -1170,11 +1181,23 @@ export class TimelineView extends LitElement {
         length_samples: len,
       });
     }
-    if (!items.length) return 0;
+    if (!items.length) {
+      if (!silent) toast("Nothing selected — click a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
     // Re-key offsets from the earliest region in the set so paste
     // re-anchors to the playhead while keeping internal spacing.
     for (const it of items) it.offset_samples = it.start_samples - anchor;
     this._regionClipboard = { mode, anchor_samples: anchor, items };
+    if (!silent) {
+      const noun = items.length === 1 ? "region" : "regions";
+      toast(
+        mode === "cut"
+          ? `Cut ${items.length} ${noun} — paste to commit`
+          : `Copied ${items.length} ${noun}`,
+        { tone: "info", ttl: 2400 },
+      );
+    }
     return items.length;
   }
 
@@ -1192,7 +1215,10 @@ export class TimelineView extends LitElement {
    */
   pasteRegionsAtPlayhead() {
     const clip = this._regionClipboard;
-    if (!clip || !clip.items.length) return 0;
+    if (!clip || !clip.items.length) {
+      toast("Clipboard is empty — copy a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
     const ws = window.__foyer?.ws;
     const cursor = Number(
       window.__foyer?.store?.state?.controls?.get("transport.position") || 0,
@@ -1219,6 +1245,12 @@ export class TimelineView extends LitElement {
       this._regionClipboard = null;
     }
     ws?.send({ type: "undo_group_end" });
+    const noun = clip.items.length === 1 ? "region" : "regions";
+    toast(
+      cut ? `Pasted ${clip.items.length} ${noun} (originals removed)`
+          : `Pasted ${clip.items.length} ${noun}`,
+      { tone: "info", ttl: 2400 },
+    );
     return clip.items.length;
   }
 
@@ -1230,7 +1262,10 @@ export class TimelineView extends LitElement {
    */
   duplicateRegionSelection() {
     const ids = [...this._selectedRegionIds];
-    if (!ids.length) return 0;
+    if (!ids.length) {
+      toast("Nothing selected — click a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
     const tracks = this.session?.tracks || [];
     const ws = window.__foyer?.ws;
     const groupLabel = ids.length === 1
@@ -1254,6 +1289,10 @@ export class TimelineView extends LitElement {
       written += 1;
     }
     ws?.send({ type: "undo_group_end" });
+    if (written > 0) {
+      const noun = written === 1 ? "region" : "regions";
+      toast(`Duplicated ${written} ${noun}`, { tone: "info", ttl: 2400 });
+    }
     return written;
   }
 
@@ -1264,7 +1303,10 @@ export class TimelineView extends LitElement {
    */
   toggleMuteRegionSelection() {
     const ids = [...this._selectedRegionIds];
-    if (!ids.length) return 0;
+    if (!ids.length) {
+      toast("Nothing selected — click a region first", { tone: "warn", ttl: 2400 });
+      return 0;
+    }
     const tracks = this.session?.tracks || [];
     const regions = [];
     for (const id of ids) {
@@ -1285,6 +1327,11 @@ export class TimelineView extends LitElement {
       ws?.send({ type: "update_region", id: r.id, patch: { muted: target } });
     }
     ws?.send({ type: "undo_group_end" });
+    const noun = regions.length === 1 ? "region" : "regions";
+    toast(
+      `${target ? "Muted" : "Unmuted"} ${regions.length} ${noun}`,
+      { tone: "info", ttl: 2000 },
+    );
     return regions.length;
   }
 
@@ -1448,21 +1495,45 @@ export class TimelineView extends LitElement {
     const sr = this._timeline?.sample_rate || 48_000;
     const len = this._timeline?.length_samples || 0;
     const totalSec = len / sr;
-    const tempo = Number(window.__foyer?.store?.state?.controls?.get?.("transport.tempo")) || 120;
+    const ctls = window.__foyer?.store?.state?.controls;
+    const tempo = Number(ctls?.get?.("transport.tempo")) || 120;
     if (!Number.isFinite(tempo) || tempo <= 0) return null;
-    const beatSec = 60 / tempo;
+    // Ardour treats `transport.tempo` as quarter-note BPM. ts.den says
+    // which note value gets a beat — in 6/8 a beat is an eighth, so the
+    // perceptual beat is half as long as the quarter-note implied by
+    // tempo. Scale beatSec by 4/den so the visible beat lines reflect
+    // what the metronome actually clicks.
+    // Then ts.num gives beats-per-bar; every num-th beat gets a stronger
+    // bar line. This is what was missing — the old grid drew every beat
+    // with the same emphasis regardless of the time signature.
+    const tsNum = Math.max(1, Math.round(Number(ctls?.get?.("transport.ts.num")) || 4));
+    const tsDen = Math.max(1, Math.round(Number(ctls?.get?.("transport.ts.den")) || 4));
+    const beatSec = (60 / tempo) * (4 / tsDen);
     const div = Math.max(1, this._quantDiv | 0);
-    const stepSec = beatSec / (div / 4); // div=4 → quarter notes; div=16 → 16ths
+    // Subdivisions per beat. Dropdown values are quarter-note relative
+    // (1/4, 1/8, 1/16, …); convert to "per beat" given that a beat
+    // might be an 8th note. div=4 (quarter-notes) ÷ tsDen → for 4/4
+    // gives 1 sub/beat (just the beat itself), for 6/8 gives 0.5 which
+    // we floor to 1.
+    const subsPerBeat = Math.max(1, Math.round(div / tsDen));
+    const stepSec = beatSec / subsPerBeat;
     const lines = [];
-    let i = 0;
-    for (let t = 0; t <= totalSec + 1e-6; t += stepSec, i++) {
-      const onBeat = i % (div / 4) === 0;
-      lines.push({ t, beat: onBeat });
+    let beatIndex = 0;
+    let subIndex = 0;
+    for (let t = 0; t <= totalSec + 1e-6; t += stepSec) {
+      const onBeat = subIndex === 0;
+      const onBar = onBeat && beatIndex % tsNum === 0;
+      lines.push({ t, kind: onBar ? "bar" : onBeat ? "beat" : "sub" });
+      subIndex += 1;
+      if (subIndex >= subsPerBeat) {
+        subIndex = 0;
+        beatIndex += 1;
+      }
       // Cap to keep the DOM sane on long sessions at high subdivisions.
       if (lines.length > 4000) break;
     }
     return html`${lines.map((l) => html`
-      <span class="quant-line ${l.beat ? "beat" : "sub"}"
+      <span class="quant-line ${l.kind}"
             style="left:${HEAD_WIDTH + l.t * this._zoom}px"></span>
     `)}`;
   }
@@ -1767,6 +1838,7 @@ export class TimelineView extends LitElement {
       {
         label: region.muted ? "Unmute" : "Mute",
         icon: region.muted ? "speaker-wave" : "speaker-x-mark",
+        shortcut: "M",
         action: () => window.__foyer?.ws?.send({
           type: "update_region",
           id: region.id,
@@ -1822,26 +1894,26 @@ export class TimelineView extends LitElement {
     items.push({
       label: "Cut",
       icon: "scissors",
-      hint: `${meta}+X`,
+      shortcut: `${meta}+X`,
       action: () => { ensureSelection(); this.cutRegionSelection(); },
     });
     items.push({
       label: "Copy",
       icon: "document-duplicate",
-      hint: `${meta}+C`,
+      shortcut: `${meta}+C`,
       action: () => { ensureSelection(); this.copyRegionSelection(); },
     });
     items.push({
       label: "Paste at playhead",
       icon: "clipboard",
-      hint: `${meta}+V`,
+      shortcut: `${meta}+V`,
       disabled: !this.hasClipboard(),
       action: () => this.pasteRegionsAtPlayhead(),
     });
     items.push({
       label: "Duplicate",
       icon: "plus",
-      hint: `${meta}+D`,
+      shortcut: `${meta}+D`,
       action: () => { ensureSelection(); this.duplicateRegionSelection(); },
     });
     items.push({ separator: true });
@@ -1849,7 +1921,7 @@ export class TimelineView extends LitElement {
       label: "Delete region",
       icon: "trash",
       tone: "danger",
-      hint: "Del",
+      shortcut: "Del",
       action: () => window.__foyer?.ws?.send({ type: "delete_region", id: region.id }),
     });
     showContextMenu(ev, items);
