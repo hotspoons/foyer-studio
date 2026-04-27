@@ -168,6 +168,127 @@ curl -s http://127.0.0.1:3838/       # index.html — smoke test static serving
 RUST_LOG=foyer_server=debug just run
 ```
 
+### Authoring Playwright specs (gotchas earned in anger)
+
+The probe loop above is fast for one-offs; for anything you want to
+keep, write a spec under [tests-ui/specs/](tests-ui/specs/).
+
+**Wait on capabilities, not visibility.** The smoke test waits for
+`foyer-app` to be visible, but `__foyer.layout` is attached during
+the variant's `connectedCallback`, which lags visibility by a few
+hundred ms in a cold headless boot. The right wait is the one you
+actually need:
+
+```js
+await page.goto("/");
+await page.waitForFunction(() => window.__foyer?.store?.state?.status === "open");
+await page.waitForFunction(
+  () => typeof window.__foyer?.layout?.setTree === "function",
+);
+```
+
+**Default timeouts are not enough.** Variant boot can take >5 s on a
+cold headless start. Set `page.setDefaultTimeout(20_000)` at the top
+of each test that needs to interact with mounted views; otherwise
+`waitForFunction` quietly hits the 5 s default and gives you a
+`Timeout 5000ms` you'll waste 30 minutes chasing.
+
+**Walk shadow roots — `document.querySelector` lies.** Most live
+views are nested ≥2 shadow roots deep
+(`foyer-app → foyer-tile-container → foyer-tile-leaf → foyer-…`).
+Playwright locators pierce closed roots automatically; raw DOM
+inside `page.evaluate` doesn't. The pattern that works in any spec:
+
+```js
+const DEEP_FIND = `
+  function deepFind(tag) {
+    const stack = [document.querySelector("foyer-app").shadowRoot];
+    while (stack.length) {
+      const r = stack.pop();
+      const hit = r.querySelector(tag);
+      if (hit) return hit;
+      for (const el of r.querySelectorAll("*")) if (el.shadowRoot) stack.push(el.shadowRoot);
+    }
+    return null;
+  }
+`;
+// then inside an evaluate:
+await page.evaluate(`(() => {
+  ${DEEP_FIND}
+  const tv = deepFind("foyer-timeline-view");
+  // …
+})()`);
+```
+
+**Mount what you need with `setTree`.** A fresh stub session opens
+into the `mixer` leaf by default. To exercise timeline / piano roll /
+beat sequencer ops, swap the tree first:
+
+```js
+await page.evaluate(() => {
+  window.__foyer.layout.setTree({
+    kind: "leaf", id: "test_t", view: "timeline", props: {},
+  });
+});
+await page.waitForFunction(`(() => {
+  ${DEEP_FIND}
+  return !!deepFind("foyer-timeline-view");
+})()`);
+```
+
+Lit re-renders are batched on a microtask + animation frame; if
+you skip the deep-find wait you'll race the tile-leaf swap.
+
+**Drive features by calling methods, not by simulating drags.**
+Synthesizing pointer events that have to traverse shadow boundaries
+is brittle. For state-mutating ops, prefer:
+
+```js
+await page.evaluate(`(() => {
+  ${DEEP_FIND}
+  deepFind("foyer-timeline-view").duplicateRegionSelection();
+})()`);
+```
+
+…and then `await page.waitForFunction(...)` on the resulting state.
+Reserve real pointer simulation for tests where the gesture itself
+is what's under test (e.g. drag-to-resize, marquee-select).
+
+**Wait on state transitions, not arbitrary timeouts.** WS round-trips
+are typically 100–400 ms but vary; `setTimeout(400)` will be flaky
+across runs. Poll the predicate that the op actually changes:
+
+```js
+await page.waitForFunction(
+  `() => deepFind("foyer-timeline-view")
+    ._regionsByTrack[${JSON.stringify(trackId)}].length === ${target}`,
+);
+```
+
+**Stub state persists between tests in a single playwright run.**
+With `workers: 1` (default), each test gets a fresh page but they all
+hit the same stub-backend process, which retains region edits, control
+values, etc. Don't write `expect(count).toBe(2)` — capture `before`,
+then `expect(after).toBe(before + N)`.
+
+**Stash debugging probes in `/tmp` not `tests-ui/specs`.** When
+something is genuinely racy, drop a `bun /tmp/probe-foo.js` script
+that runs the same boot sequence as your spec and dumps state. It's
+faster than rerunning `bunx playwright test` and lets you log freely
+without the spec runner eating stdout.
+
+### Running a tight inner loop
+
+```bash
+just run --backend stub                                  # background
+bunx playwright test specs/your-spec.spec.js --reporter=line   # iterate
+just verify                                              # gate before commit
+```
+
+`just run` already passes `--web-root web`, so a saved file is live
+on the next probe — no rebuild needed for client-side fixes. Server
+or schema changes require `cargo run` + restart.
+
 ## Gotchas
 
 - **`./web` is NOT served by default.** `foyer serve` with no flag
