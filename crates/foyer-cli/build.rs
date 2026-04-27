@@ -120,7 +120,9 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
         // Skip Tailwind's build output — it's a regen artifact, not
         // part of the source-of-truth bundle, and on dev machines its
         // mtime constantly churns.
-        if p.file_name().is_some_and(|n| n == "node_modules" || n == ".DS_Store") {
+        if p.file_name()
+            .is_some_and(|n| n == "node_modules" || n == ".DS_Store")
+        {
             continue;
         }
         if p.is_dir() {

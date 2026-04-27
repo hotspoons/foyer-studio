@@ -1142,9 +1142,7 @@ fn extract_bundled_web(dst: &Path) -> Result<()> {
             .unwrap_or_else(|_| "unknown".into());
         let backup = dst.with_file_name(format!(
             "{}.bak.{old_stamp}",
-            dst.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("web"),
+            dst.file_name().and_then(|n| n.to_str()).unwrap_or("web"),
         ));
         // If a backup with the same stamp is already there (rare:
         // user upgraded twice without hitting the new bundle), drop
