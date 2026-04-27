@@ -40,8 +40,22 @@ async function bootSession(page) {
 test.describe("transport meta cluster", () => {
   test.setTimeout(60_000);
 
-  test("clock readout shows time + bar.beat.16th, time signature is 4/4 by default", async ({ page }) => {
+  test("clock readout shows time + bar.beat.16th, time signature renders the live ts.num/den", async ({ page }) => {
     await bootSession(page);
+    // Pin ts.num/den explicitly. Stub state persists across specs in
+    // a single playwright run (workers: 1), so the
+    // `timeline-grid-time-sig` spec earlier in the queue may have
+    // left ts.num at a non-4 value. The point of this test is the
+    // CLOCK + INPUT round-trip, not "stub starts in 4/4" — pin the
+    // values we expect to read back.
+    await page.evaluate(() => {
+      window.__foyer.ws.controlSet("transport.ts.num", 4);
+      window.__foyer.ws.controlSet("transport.ts.den", 4);
+    });
+    await page.waitForFunction(
+      () => window.__foyer.store.state.controls.get("transport.ts.num") === 4
+        && window.__foyer.store.state.controls.get("transport.ts.den") === 4,
+    );
     const readout = await page.evaluate(`(() => {
       ${DEEP_FIND}
       const tb = deepFind("foyer-transport-bar");

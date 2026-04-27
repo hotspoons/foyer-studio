@@ -408,6 +408,30 @@ impl Backend for StubBackend {
         }
         .ok_or_else(|| BackendError::Other(format!("unknown region {id}")))?;
         self.waveforms.lock().await.clear_region(&id);
+        // Emit a fresh `RegionsList` for the affected track so the
+        // client's view reflects the post-delete state. The server
+        // also broadcasts `RegionRemoved` via `broadcast_event` (its
+        // own state.tx channel), but that event races with the
+        // `RegionsList` that `duplicate_region` emits — both go
+        // through different async tasks before reaching the WS
+        // writer, and on a busy stub the snapshot from duplicate
+        // can land AFTER the granular remove, leaving the just-
+        // deleted source ressurrected (Rich's CI failure on
+        // `cut + paste removes the original`, 2026-04-27). Emitting
+        // a settled snapshot from the same backend pump that
+        // duplicate uses guarantees ordering — pump_session
+        // serializes events from `self.tx` into `reg.tx` in send
+        // order, so duplicate's snapshot can never overwrite this
+        // post-delete one.
+        let regions = {
+            let mut store = self.regions.lock().await;
+            store.regions_for(&track_id, self.sample_rate()).clone()
+        };
+        let _ = self.tx.send(Event::RegionsList {
+            track_id: track_id.clone(),
+            regions,
+            timeline: self.timeline_meta(),
+        });
         Ok(track_id)
     }
 

@@ -228,7 +228,12 @@ function sanitize(node) {
 // ── default trees ────────────────────────────────────────────────────────
 
 export function defaultTree() {
-  return leaf("mixer");
+  // Mixer + Timeline side-by-side — most users want both surfaces
+  // visible at once, and this matches the labelled "Mixer + Timeline"
+  // preset in the layout picker. First-run users get a usable two-
+  // pane workspace instead of a lone mixer they have to manually
+  // split. Saved layouts override this on subsequent loads.
+  return split(DIR.ROW, [leaf("mixer"), leaf("timeline")]);
 }
 
 export const PRESETS = {
