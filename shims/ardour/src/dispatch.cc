@@ -76,17 +76,70 @@ struct In
 {
 	const std::uint8_t* p;
 	const std::uint8_t* end;
+	bool failed { false };
+	int depth { 0 };
 
-	bool ok () const { return p <= end; }
-	std::uint8_t peek () const { return *p; }
-	std::uint8_t take_u8 () { return *p++; }
-	std::uint16_t take_be16 () { std::uint16_t v = (std::uint16_t (p[0]) << 8) | p[1]; p += 2; return v; }
-	std::uint32_t take_be32 () { std::uint32_t v = (std::uint32_t (p[0]) << 24) | (std::uint32_t (p[1]) << 16) | (std::uint32_t (p[2]) << 8) | p[3]; p += 4; return v; }
-	std::uint64_t take_be64 () { std::uint64_t hi = take_be32 (); std::uint64_t lo = take_be32 (); return (hi << 32) | lo; }
+	// Cap per-message recursion depth and per-array element counts.
+	// A malicious peer can pack `0xdd ff ff ff ff` to claim a 4G-element
+	// array; without a cap the loop iterates 4G times even though
+	// each take_u8 fails fast — that's still a CPU burn primitive.
+	// We cap at the bytes remaining (you can't have more elements than
+	// bytes once each element is at least 1 byte) and at a sane upper
+	// bound so reserve()-callers can't be tricked into huge allocs.
+	static constexpr int MaxDepth = 64;
+	static constexpr std::size_t MaxArrayCount = 1u << 20; // 1M
+
+	bool ok () const { return !failed && p <= end; }
+	std::size_t remaining () const { return failed ? 0 : static_cast<std::size_t> (end - p); }
+	bool have (std::size_t n) const { return !failed && n <= remaining (); }
+	void fail () { failed = true; }
+
+	// Cap a wire-supplied count to whatever's actually decodable from
+	// the remaining bytes (and a hard upper bound). Used everywhere a
+	// length comes off the wire and feeds an alloc/reserve/loop.
+	std::size_t cap_count (std::size_t n) const
+	{
+		std::size_t lim = std::min<std::size_t> (MaxArrayCount, remaining ());
+		return std::min (n, lim);
+	}
+
+	std::uint8_t peek ()
+	{
+		if (!have (1)) { fail (); return 0; }
+		return *p;
+	}
+	std::uint8_t take_u8 ()
+	{
+		if (!have (1)) { fail (); return 0; }
+		return *p++;
+	}
+	std::uint16_t take_be16 ()
+	{
+		if (!have (2)) { fail (); return 0; }
+		std::uint16_t v = (std::uint16_t (p[0]) << 8) | p[1];
+		p += 2;
+		return v;
+	}
+	std::uint32_t take_be32 ()
+	{
+		if (!have (4)) { fail (); return 0; }
+		std::uint32_t v = (std::uint32_t (p[0]) << 24)
+		                | (std::uint32_t (p[1]) << 16)
+		                | (std::uint32_t (p[2]) << 8)
+		                |  std::uint32_t (p[3]);
+		p += 4;
+		return v;
+	}
+	std::uint64_t take_be64 ()
+	{
+		std::uint64_t hi = take_be32 ();
+		std::uint64_t lo = take_be32 ();
+		return (hi << 32) | lo;
+	}
 
 	bool read_str (std::string& out)
 	{
-		if (p >= end) return false;
+		if (!have (1)) return false;
 		std::uint8_t b = take_u8 ();
 		std::size_t n = 0;
 		if ((b & 0xe0) == 0xa0) n = b & 0x1f;
@@ -94,31 +147,33 @@ struct In
 		else if (b == 0xda) n = take_be16 ();
 		else if (b == 0xdb) n = take_be32 ();
 		else return false;
-		if (p + n > end) return false;
+		if (!have (n)) return false;
 		out.assign (reinterpret_cast<const char*> (p), n);
 		p += n;
-		return true;
+		return ok ();
 	}
 
 	bool read_f64 (double& out)
 	{
-		if (p >= end) return false;
+		if (!have (1)) return false;
 		std::uint8_t b = take_u8 ();
 		if (b == 0xca) {
 			std::uint32_t bits = take_be32 ();
+			if (failed) return false;
 			float f; std::memcpy (&f, &bits, 4); out = f; return true;
 		}
 		if (b == 0xcb) {
 			std::uint64_t bits = take_be64 ();
+			if (failed) return false;
 			std::memcpy (&out, &bits, 8); return true;
 		}
 		if (b <= 0x7f)  { out = static_cast<double> (b); return true; }
 		if (b >= 0xe0)  { out = static_cast<double> (static_cast<std::int8_t> (b)); return true; }
-		if (b == 0xcc)  { out = static_cast<double> (take_u8 ()); return true; }
-		if (b == 0xcd)  { out = static_cast<double> (take_be16 ()); return true; }
-		if (b == 0xce)  { out = static_cast<double> (take_be32 ()); return true; }
-		if (b == 0xcf)  { out = static_cast<double> (take_be64 ()); return true; }
-		if (b == 0xd0)  { out = static_cast<double> (static_cast<std::int8_t> (take_u8 ())); return true; }
+		if (b == 0xcc)  { auto v = take_u8 ();  if (failed) return false; out = static_cast<double> (v); return true; }
+		if (b == 0xcd)  { auto v = take_be16 (); if (failed) return false; out = static_cast<double> (v); return true; }
+		if (b == 0xce)  { auto v = take_be32 (); if (failed) return false; out = static_cast<double> (v); return true; }
+		if (b == 0xcf)  { auto v = take_be64 (); if (failed) return false; out = static_cast<double> (v); return true; }
+		if (b == 0xd0)  { auto v = take_u8 ();  if (failed) return false; out = static_cast<double> (static_cast<std::int8_t> (v)); return true; }
 		if (b == 0xc3)  { out = 1.0; return true; }
 		if (b == 0xc2)  { out = 0.0; return true; }
 		return false;
@@ -126,25 +181,25 @@ struct In
 
 	bool read_u64 (std::uint64_t& out)
 	{
-		if (p >= end) return false;
+		if (!have (1)) return false;
 		std::uint8_t b = take_u8 ();
 		if (b <= 0x7f)  { out = b; return true; }
-		if (b == 0xcc)  { out = take_u8 ();  return true; }
-		if (b == 0xcd)  { out = take_be16 (); return true; }
-		if (b == 0xce)  { out = take_be32 (); return true; }
-		if (b == 0xcf)  { out = take_be64 (); return true; }
+		if (b == 0xcc)  { auto v = take_u8 ();  if (failed) return false; out = v; return true; }
+		if (b == 0xcd)  { auto v = take_be16 (); if (failed) return false; out = v; return true; }
+		if (b == 0xce)  { auto v = take_be32 (); if (failed) return false; out = v; return true; }
+		if (b == 0xcf)  { auto v = take_be64 (); if (failed) return false; out = v; return true; }
 		// Positive-but-signed forms also show up on the wire when serde picks
 		// the smallest representation; accept them.
-		if (b == 0xd0)  { std::int8_t v  = static_cast<std::int8_t>  (take_u8 ());  if (v < 0) return false; out = v; return true; }
-		if (b == 0xd1)  { std::int16_t v = static_cast<std::int16_t> (take_be16 ()); if (v < 0) return false; out = v; return true; }
-		if (b == 0xd2)  { std::int32_t v = static_cast<std::int32_t> (take_be32 ()); if (v < 0) return false; out = v; return true; }
-		if (b == 0xd3)  { std::int64_t v = static_cast<std::int64_t> (take_be64 ()); if (v < 0) return false; out = static_cast<std::uint64_t> (v); return true; }
+		if (b == 0xd0)  { std::int8_t v  = static_cast<std::int8_t>  (take_u8 ());  if (failed || v < 0) return false; out = v; return true; }
+		if (b == 0xd1)  { std::int16_t v = static_cast<std::int16_t> (take_be16 ()); if (failed || v < 0) return false; out = v; return true; }
+		if (b == 0xd2)  { std::int32_t v = static_cast<std::int32_t> (take_be32 ()); if (failed || v < 0) return false; out = v; return true; }
+		if (b == 0xd3)  { std::int64_t v = static_cast<std::int64_t> (take_be64 ()); if (failed || v < 0) return false; out = static_cast<std::uint64_t> (v); return true; }
 		return false;
 	}
 
 	bool read_bool (bool& out)
 	{
-		if (p >= end) return false;
+		if (!have (1)) return false;
 		std::uint8_t b = take_u8 ();
 		if (b == 0xc2) { out = false; return true; }
 		if (b == 0xc3) { out = true;  return true; }
@@ -153,56 +208,63 @@ struct In
 
 	bool read_map_header (std::size_t& n)
 	{
-		if (p >= end) return false;
+		if (!have (1)) return false;
 		std::uint8_t b = take_u8 ();
 		if ((b & 0xf0) == 0x80) { n = b & 0x0f; return true; }
-		if (b == 0xde) { n = take_be16 (); return true; }
-		if (b == 0xdf) { n = take_be32 (); return true; }
+		if (b == 0xde) { n = take_be16 (); return ok (); }
+		if (b == 0xdf) { n = take_be32 (); return ok (); }
 		return false;
 	}
 
 	bool skip_value ()
 	{
-		if (p >= end) return false;
+		if (depth >= MaxDepth) { fail (); return false; }
+		++depth;
+		struct DepthGuard { int& d; ~DepthGuard () { --d; } } guard { depth };
+
+		if (!have (1)) return false;
 		std::uint8_t b = take_u8 ();
-		if ((b & 0xe0) == 0xa0) { p += (b & 0x1f); return p <= end; }
-		if (b == 0xd9) { p += take_u8 (); return p <= end; }
-		if (b == 0xda) { p += take_be16 (); return p <= end; }
-		if (b == 0xdb) { p += take_be32 (); return p <= end; }
+		if ((b & 0xe0) == 0xa0) { std::size_t n = b & 0x1f; if (!have (n)) return false; p += n; return true; }
+		if (b == 0xd9) { std::size_t n = take_u8 ();  if (!have (n)) return false; p += n; return true; }
+		if (b == 0xda) { std::size_t n = take_be16 (); if (!have (n)) return false; p += n; return true; }
+		if (b == 0xdb) { std::size_t n = take_be32 (); if (!have (n)) return false; p += n; return true; }
 		if (b <= 0x7f || b >= 0xe0 || b == 0xc0 || b == 0xc2 || b == 0xc3) return true;
-		if (b == 0xcc || b == 0xd0) { p += 1; return p <= end; }
-		if (b == 0xcd || b == 0xd1) { p += 2; return p <= end; }
-		if (b == 0xca || b == 0xce || b == 0xd2) { p += 4; return p <= end; }
-		if (b == 0xcb || b == 0xcf || b == 0xd3) { p += 8; return p <= end; }
+		if (b == 0xcc || b == 0xd0) { if (!have (1)) return false; p += 1; return true; }
+		if (b == 0xcd || b == 0xd1) { if (!have (2)) return false; p += 2; return true; }
+		if (b == 0xca || b == 0xce || b == 0xd2) { if (!have (4)) return false; p += 4; return true; }
+		if (b == 0xcb || b == 0xcf || b == 0xd3) { if (!have (8)) return false; p += 8; return true; }
 		if ((b & 0xf0) == 0x90) {
-			std::size_t n = b & 0x0f;
+			std::size_t n = cap_count (b & 0x0f);
 			for (std::size_t i = 0; i < n; ++i) { if (!skip_value ()) return false; }
 			return true;
 		}
 		if (b == 0xdc) {
-			std::size_t n = take_be16 ();
+			std::size_t n = cap_count (take_be16 ());
 			for (std::size_t i = 0; i < n; ++i) { if (!skip_value ()) return false; }
-			return true;
+			return ok ();
 		}
 		if (b == 0xdd) {
-			std::size_t n = take_be32 ();
+			std::size_t n = cap_count (take_be32 ());
 			for (std::size_t i = 0; i < n; ++i) { if (!skip_value ()) return false; }
-			return true;
+			return ok ();
 		}
 		if ((b & 0xf0) == 0x80) {
-			std::size_t n = b & 0x0f;
-			for (std::size_t i = 0; i < 2 * n; ++i) { if (!skip_value ()) return false; }
+			std::size_t pairs = b & 0x0f;
+			std::size_t n = cap_count (pairs * 2);
+			for (std::size_t i = 0; i < n; ++i) { if (!skip_value ()) return false; }
 			return true;
 		}
 		if (b == 0xde) {
-			std::size_t n = take_be16 ();
-			for (std::size_t i = 0; i < 2 * n; ++i) { if (!skip_value ()) return false; }
-			return true;
+			std::size_t pairs = take_be16 ();
+			std::size_t n = cap_count (pairs * 2);
+			for (std::size_t i = 0; i < n; ++i) { if (!skip_value ()) return false; }
+			return ok ();
 		}
 		if (b == 0xdf) {
-			std::size_t n = take_be32 ();
-			for (std::size_t i = 0; i < 2 * n; ++i) { if (!skip_value ()) return false; }
-			return true;
+			std::size_t pairs = take_be32 ();
+			std::size_t n = cap_count (pairs * 2);
+			for (std::size_t i = 0; i < n; ++i) { if (!skip_value ()) return false; }
+			return ok ();
 		}
 		return false;
 	}
@@ -709,6 +771,10 @@ read_replace_notes_array (In& in, DecodedCmd& out)
 	else if (b == 0xdc)     { in.take_u8 (); n = in.take_be16 (); }
 	else if (b == 0xdd)     { in.take_u8 (); n = in.take_be32 (); }
 	else return false;
+	if (!in.ok ()) return false;
+	// Cap the wire-supplied count before reserve so a malicious peer
+	// can't claim a 4G-element array and force a multi-GB allocation.
+	n = in.cap_count (n);
 	out.replace_notes.reserve (n);
 	for (std::size_t i = 0; i < n; ++i) {
 		std::size_t m = 0;
@@ -990,6 +1056,8 @@ decode (const std::vector<std::uint8_t>& buf)
 					else if (b == 0xdc)     { in.take_u8 (); n = in.take_be16 (); }
 					else if (b == 0xdd)     { in.take_u8 (); n = in.take_be32 (); }
 					else return out;
+					if (!in.ok ()) return out;
+					n = in.cap_count (n);
 					out.ordered_track_ids.clear ();
 					out.ordered_track_ids.reserve (n);
 					for (std::size_t i = 0; i < n; ++i) {
@@ -1103,6 +1171,8 @@ decode (const std::vector<std::uint8_t>& buf)
 					else if (b == 0xdc)     { in.take_u8 (); pn = in.take_be16 (); }
 					else if (b == 0xdd)     { in.take_u8 (); pn = in.take_be32 (); }
 					else return out;
+					if (!in.ok ()) return out;
+					pn = in.cap_count (pn);
 					out.auto_points.reserve (pn);
 					for (std::size_t qi = 0; qi < pn; ++qi) {
 						std::size_t m = 0;

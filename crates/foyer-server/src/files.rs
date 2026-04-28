@@ -1,11 +1,18 @@
 //! `/files/<jail-relative-path>` — raw file bytes for the text-preview
 //! component. Paths are resolved through the same `Jail` that `browse_path`
 //! uses, so the same symlink-escape protection applies.
+//!
+//! When the request arrives over the tunnel listener (carrying a
+//! `TunnelOrigin` extension), we additionally require a valid `?token=`
+//! query parameter that matches an authenticated tunnel connection.
+//! LAN connections (no `TunnelOrigin`) skip the check, mirroring how
+//! the WS upgrade treats LAN as trusted.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Extension, Path as AxumPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 
@@ -13,8 +20,21 @@ use crate::AppState;
 
 pub(crate) async fn serve_file(
     AxumPath(raw): AxumPath<String>,
+    Query(q): Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
+    tunnel_origin: Option<Extension<crate::ws::TunnelOrigin>>,
 ) -> Response {
+    if tunnel_origin.is_some() {
+        let token = q.get("token").map(String::as_str);
+        let authorized = match token {
+            Some(t) => crate::tunnel::verify_token(&state, t).await.is_some(),
+            None => false,
+        };
+        if !authorized {
+            return (StatusCode::UNAUTHORIZED, "auth required").into_response();
+        }
+    }
+
     let Some(jail) = state.jail.as_ref() else {
         return (StatusCode::FORBIDDEN, "no jail configured").into_response();
     };

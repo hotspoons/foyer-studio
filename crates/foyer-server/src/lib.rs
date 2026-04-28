@@ -32,10 +32,11 @@ pub(crate) mod ws;
 pub use jail::{Jail, JailError};
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -266,7 +267,24 @@ pub(crate) struct AppState {
     /// `?ui=` URL override, localStorage preference, or its own
     /// heuristic match. Broadcast in `ClientGreeting.default_ui_variant`.
     pub(crate) default_ui_variant: Option<String>,
+    /// Per-client-IP login attempt counter for the `/login` endpoint.
+    /// Sliding-window rate limiter — without this, an attacker on the
+    /// public tunnel can brute-force credentials at line speed.
+    pub(crate) login_gate: tokio::sync::Mutex<HashMap<IpAddr, LoginAttempts>>,
 }
+
+/// One IP's recent login attempt count. Reset when the window expires.
+#[derive(Debug)]
+pub(crate) struct LoginAttempts {
+    pub count: u32,
+    pub window_start: Instant,
+}
+
+/// Cap login attempts at this many per `LOGIN_WINDOW`. Picked to allow
+/// a few mistypes without locking out a legitimate user, but small
+/// enough that an online dictionary attack is hopeless.
+pub(crate) const LOGIN_MAX_PER_WINDOW: u32 = 10;
+pub(crate) const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 
 impl AppState {
     fn next_seq(&self) -> u64 {
@@ -470,6 +488,7 @@ impl Server {
             roles_policy: RwLock::new(foyer_config::RolesConfig::bundled_default()),
             peers: RwLock::new(HashMap::new()),
             default_ui_variant: None,
+            login_gate: tokio::sync::Mutex::new(HashMap::new()),
         });
         Self { state }
     }
@@ -891,10 +910,33 @@ struct LoginReply {
 
 async fn login_post(
     State(state): SharedState,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    tunnel_origin: Option<axum::extract::Extension<crate::ws::TunnelOrigin>>,
+    headers: axum::http::HeaderMap,
     axum::Json(req): axum::Json<LoginRequest>,
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
     use axum::Json;
+
+    // Rate-limit per-IP. On the tunnel listener every TCP peer is
+    // `127.0.0.1` (cloudflared talks to us over loopback), so we
+    // resolve the real client from `Cf-Connecting-IP` — cloudflared
+    // sets this for every tunnel request and ignores attempts from
+    // the public side to override it. We only honor proxy headers
+    // when the request actually arrived via the tunnel listener; on
+    // LAN we always use the connection peer, so a malicious LAN
+    // client can't spoof the header to dodge the gate.
+    let is_tunnel = tunnel_origin.is_some();
+    let client_ip = if is_tunnel {
+        client_ip_from_tunnel(&headers, peer.ip())
+    } else {
+        peer.ip()
+    };
+    if !check_login_rate(&state, client_ip).await {
+        tracing::warn!("login rate limit hit for {client_ip}");
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({}))).into_response();
+    }
+
     if crate::tunnel::verify_credentials(&state, &req.email, &req.password)
         .await
         .is_none()
@@ -903,6 +945,59 @@ async fn login_post(
     }
     let token = crate::tunnel::token_for_credentials(&req.email, &req.password);
     (StatusCode::OK, Json(LoginReply { token })).into_response()
+}
+
+/// Extract the real tunnel client IP from `Cf-Connecting-IP`, or
+/// `X-Forwarded-For` as a last resort. Cloudflare's edge always sets
+/// `cf-connecting-ip` to the originating client and strips any value
+/// the public side tried to inject, so it's the trustworthy header
+/// here. Only call this when we know the request came in via the
+/// tunnel listener.
+fn client_ip_from_tunnel(headers: &axum::http::HeaderMap, peer: IpAddr) -> IpAddr {
+    if let Some(v) = headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Ok(ip) = v.parse() {
+            return ip;
+        }
+    }
+    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = v.split(',').next() {
+            if let Ok(ip) = first.trim().parse() {
+                return ip;
+            }
+        }
+    }
+    peer
+}
+
+/// Returns true if this IP is allowed to attempt a login right now.
+/// Sliding window: bucket resets after `LOGIN_WINDOW` has elapsed
+/// since the first attempt in the current window.
+async fn check_login_rate(state: &AppState, ip: IpAddr) -> bool {
+    let mut gate = state.login_gate.lock().await;
+    let now = Instant::now();
+    let entry = gate.entry(ip).or_insert(LoginAttempts {
+        count: 0,
+        window_start: now,
+    });
+    if now.duration_since(entry.window_start) > LOGIN_WINDOW {
+        entry.count = 0;
+        entry.window_start = now;
+    }
+    entry.count = entry.count.saturating_add(1);
+    // Best-effort housekeeping: drop entries from IPs that haven't
+    // been seen in a while so the map can't grow without bound from
+    // a slow scan attack.
+    if gate.len() > 1024 {
+        gate.retain(|_, e| now.duration_since(e.window_start) <= LOGIN_WINDOW);
+    }
+    let allowed = gate
+        .get(&ip)
+        .map(|e| e.count <= LOGIN_MAX_PER_WINDOW)
+        .unwrap_or(true);
+    allowed
 }
 
 async fn variants_json(State(state): SharedState) -> impl IntoResponse {

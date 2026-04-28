@@ -1245,10 +1245,22 @@ fn preflight_session(
 ) -> (PathBuf, String) {
     let (dir, name) = bootstrap_session_if_missing(resolved_exec, session_dir, snapshot_name);
     let session_file = dir.join(format!("{name}.ardour"));
-    if session_file.is_file() {
-        if let Err(e) = ensure_foyer_shim_active(&session_file) {
+    // `symlink_metadata` here mirrors the check inside
+    // `ensure_foyer_shim_active`. We do it twice on purpose: this gate
+    // skips the entire flow if the path is a symlink (no log spam),
+    // and the inner check is the load-bearing one in case the path
+    // changed type between the two calls.
+    if let Ok(m) = std::fs::symlink_metadata(&session_file) {
+        if m.file_type().is_file() {
+            if let Err(e) = ensure_foyer_shim_active(&session_file) {
+                tracing::warn!(
+                    "foyer: failed to update Foyer Studio Shim entry in {}: {e:#}",
+                    session_file.display(),
+                );
+            }
+        } else {
             tracing::warn!(
-                "foyer: failed to update Foyer Studio Shim entry in {}: {e:#}",
+                "foyer: session file {} is not a regular file — skipping shim activation",
                 session_file.display(),
             );
         }
@@ -1346,7 +1358,24 @@ fn find_new_empty_session_helper(resolved_exec: &Path) -> Option<PathBuf> {
 /// Step 2 of `preflight_session`: read the session XML, apply the
 /// Foyer Studio Shim activation rule, write the result back atomically
 /// when something changed.
+///
+/// Refuses to follow symlinks. The session_file path comes from the
+/// CLI args / launcher and is supposed to live inside the configured
+/// session_dir. If an attacker (or stale state) plants a symlink at
+/// that path, the previous version would happily read /etc/passwd or
+/// any other readable file and might write a temp sibling next to it.
+/// `symlink_metadata` ensures we only operate on a regular file at
+/// `session_file` itself.
 fn ensure_foyer_shim_active(session_file: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(session_file)
+        .with_context(|| format!("stat session file {}", session_file.display()))?;
+    if !meta.file_type().is_file() {
+        anyhow::bail!(
+            "session file {} is not a regular file (symlink or special file?) — \
+             refusing to follow",
+            session_file.display(),
+        );
+    }
     let original = std::fs::read_to_string(session_file)
         .with_context(|| format!("read session file {}", session_file.display()))?;
     match apply_foyer_shim_edit(&original) {
