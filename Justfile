@@ -1,0 +1,288 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+default:
+    @echo "Top-level recipes:"
+    @just --list
+    @echo ""
+    @echo "Subcommands:"
+    @./scripts/dev/ardour.sh help
+    @./scripts/dev/autovocoder.sh help
+    @./scripts/dev/shim.sh help
+    @./scripts/dev/tw.sh help
+    @./scripts/dev/jack.sh help
+
+prep:
+    ./scripts/dev/tw.sh check
+    ./scripts/dev/ardour.sh ensure
+    ./scripts/dev/autovocoder.sh ensure
+    ./scripts/dev/jack.sh start
+    ./scripts/dev/shim.sh check
+    ./scripts/dev/nuke-web-install.sh
+
+run *args='': prep
+    #!/usr/bin/env bash
+    # Explicit --web-root so the dev loop edits the repo tree, not the
+    # installed copy under $XDG_DATA_HOME/foyer/web. Without a flag the
+    # binary always serves the install dir (that's the canonical
+    # hackability target; see web/HACKING.md).
+    #
+    # Set FOYER_WEB_OVERLAY to a sibling dir (or colon-separated list)
+    # to layer your own UI variants on top of the main tree — no edits
+    # to this repo's web/ needed. The server checks overlays first
+    # (earlier entry = higher priority), falls back to --web-root, and
+    # /variants.json scans all of them so any `ui-*/` folders in an
+    # overlay appear automatically in boot.js. See DEVELOPMENT.md.
+    overlay_args=()
+    if [ -n "${FOYER_WEB_OVERLAY:-}" ]; then
+        IFS=':' read -r -a _overlays <<< "$FOYER_WEB_OVERLAY"
+        for ol in "${_overlays[@]}"; do
+            [ -z "$ol" ] && continue
+            overlay_args+=("--web-overlay" "$ol")
+        done
+    fi
+    cargo run --bin foyer -- serve \
+        --listen 0.0.0.0:3838 \
+        --web-root web \
+        "${overlay_args[@]}" \
+        {{args}}
+
+# Run the binary the way an end user does: without `--web-root`, so
+# foyer extracts its bundled web/ to `$XDG_DATA_HOME/foyer/web/` on
+# first boot and serves from there. `prep` already nukes any existing
+# extract via `scripts/dev/nuke-web-install.sh`, so each `just
+# run-static` cycle re-bakes the bundle and re-extracts cleanly —
+# ideal for testing JS changes through the actual ship-path
+# (include_dir! → extract → serve) before cutting a static binary.
+#
+# Why this exists separate from `just run`: `just run` deliberately
+# bypasses extract via `--web-root web` so dev iteration is
+# immediate. `just run-static` exercises the path real users hit
+# (and where stale extracts have bitten before — the bundled tree
+# is hackable per web/HACKING.md and edits survive restarts, which
+# is great for users but means a freshly-rebuilt binary doesn't
+# automatically refresh someone else's hacked copy).
+#
+# `FOYER_BUNDLE_WATCH_DEBUG=1`: debug builds normally use an empty
+# stub tree for `include_dir!` so JS edits don't trigger a 20 s
+# rebuild every iteration (see build.rs). This recipe opts back in
+# so the bundled tree is actually populated. First build after
+# enabling is slower; subsequent builds are incremental.
+run-static *args='': prep
+    FOYER_BUNDLE_WATCH_DEBUG=1 cargo build --bin foyer
+    ./target/debug/foyer serve --listen 0.0.0.0:3838 {{args}}
+
+run-tls *args='': prep
+    #!/usr/bin/env bash
+    tls_dir="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/tls"
+    mkdir -p "$tls_dir"
+    cert="$tls_dir/dev.pem"
+    key="$tls_dir/dev-key.pem"
+    if [ ! -f "$cert" ] || [ ! -f "$key" ]; then
+        echo "Generating self-signed cert at $tls_dir/"
+        san_lines=("DNS:localhost" "IP:127.0.0.1" "IP:::1")
+        for ip in $(hostname -I 2>/dev/null); do
+            case "$ip" in
+                127.*|172.17.*|172.18.*|172.19.*|172.20.*) continue ;;
+            esac
+            san_lines+=("IP:$ip")
+        done
+        san_joined=$(IFS=,; echo "${san_lines[*]}")
+        openssl req -x509 -newkey rsa:2048 -nodes             -days 365             -keyout "$key" -out "$cert"             -subj "/CN=foyer-dev"             -addext "subjectAltName=$san_joined"             2>/dev/null
+        echo "SAN: $san_joined"
+    fi
+    cargo run --bin foyer -- serve         --listen 0.0.0.0:3838         --tls-cert "$cert" --tls-key "$key"         --web-root web         {{args}}
+
+clippy:
+    cargo clippy --workspace --all-targets -- -D warnings
+
+fmt-check:
+    cargo fmt --all -- --check
+
+# Apply every autofixer that resolves a `just verify` failure
+# (formatting, lint auto-fixes, etc.) AND then run `just verify` so
+# the same gate CI runs is what gates a local push. Without the
+# verify chain `just ci` was a write-only autofix that didn't catch
+# what it couldn't fix — e.g. a clippy error landed in CI on
+# 2026-04-28 because the dev had run `just ci` and assumed it was
+# enough. Now `just ci` is the one-shot "make it green" command.
+ci: && verify
+    cargo fmt --all
+    @echo "✅ ci: autofixers applied — running verify…"
+
+test:
+    cargo test --workspace --all-targets
+
+e2e:
+    ./scripts/dev/shim.sh e2e
+
+# Run the Playwright UI smoke suite. By default assumes a server is
+# already on 127.0.0.1:3838 — quick to iterate when you're already
+# running `just run`. Pass `--auto-serve` (or set FOYER_AUTO_SERVE=1)
+# to spin up a short-lived stub server for the tests. Extra args
+# forward to Playwright (e.g. `just test-ui smoke.spec.js`).
+test-ui *args='':
+    ./scripts/dev/ui-test.sh {{args}}
+
+# Boot a stub server in the background, run test-ui against it, kill.
+# This is the form CI uses — no shim, no Ardour, no JACK needed, just
+# exercises the browser + Rust server boundary. Exits with the
+# Playwright exit code.
+#
+# Set FOYER_BIN=/path/to/foyer to skip the cargo build and use a
+# prebuilt binary instead — the GitHub Actions ui-smoke job uses this
+# to consume the binary the rust job already built.
+test-ui-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin="${FOYER_BIN:-./target/debug/foyer}"
+    if [ ! -x "$bin" ]; then
+        if [ -n "${FOYER_BIN:-}" ]; then
+            echo "FOYER_BIN=$FOYER_BIN is not executable — refusing to fall back to a build" >&2
+            exit 1
+        fi
+        cargo build --bin foyer
+    fi
+    # Sanity: print binary metadata so a CI log shows what we're
+    # about to launch (helps when "ERR_CONNECTION_REFUSED" is the
+    # only signal Playwright gives us).
+    echo "==> launching $bin"
+    file "$bin" || true
+    "$bin" --version 2>&1 || echo "(no --version, proceeding)"
+    # Use the repo's working web/ so CI validates the tree that just
+    # got committed — NOT whatever happens to be extracted in the
+    # runner's $XDG_DATA_HOME. Without this flag the CLI serves the
+    # install dir (the canonical hackability target for users).
+    log=/tmp/foyer-ci.log
+    "$bin" serve \
+        --backend stub --listen 127.0.0.1:3838 --web-root web \
+        > "$log" 2>&1 &
+    server_pid=$!
+    trap "kill $server_pid 2>/dev/null || true" EXIT
+    # Poll readiness — and FAIL LOUD when it never comes up. Previous
+    # version proceeded to Playwright regardless, which buried the
+    # actual error (panic, missing libc dep, port collision, etc.) in
+    # `ERR_CONNECTION_REFUSED` from the test side.
+    ready=0
+    for _ in $(seq 1 30); do
+        if curl -fsS -o /dev/null http://127.0.0.1:3838/ 2>/dev/null; then
+            ready=1
+            break
+        fi
+        # Bail early if the server already exited.
+        if ! kill -0 "$server_pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.5
+    done
+    if [ "$ready" -ne 1 ]; then
+        echo "==> foyer never bound 127.0.0.1:3838" >&2
+        echo "==> server_pid=$server_pid alive? $(kill -0 "$server_pid" 2>/dev/null && echo yes || echo no)" >&2
+        echo "==> --- $log ---" >&2
+        cat "$log" >&2 || true
+        echo "==> --- end log ---" >&2
+        exit 1
+    fi
+    ./scripts/dev/ui-test.sh
+
+# Full gate — mirrors what CI runs on a PR. Any failure = not ready
+# to merge. Runs fmt + clippy + cargo test + UI smoke back-to-back so
+# a single `just verify` locally matches a green check on the PR.
+# The companion `just ci` recipe applies autofixers (fmt, etc.) for
+# anything in here that has a writeable counterpart.
+verify: fmt-check clippy test test-ui-ci
+    @echo "✅ verify: clean"
+
+# Drive the live UI from the CLI — screenshot, click, eval JS, probe
+# store state. Useful for scripting reproducers and remote-control
+# agents that can't open a browser themselves.
+#   just ui-probe screenshot /tmp/foyer.png
+#   just ui-probe eval 'window.__foyer.store.state.status'
+#   just ui-probe click 'foyer-main-menu button'
+ui-probe *args='':
+    ./scripts/dev/ui-probe.sh {{args}}
+
+config-reset:
+    #!/usr/bin/env bash
+    cfg_path="$(cargo run --bin foyer -- config-path | awk 'NF { line=$0 } END { print line }')"
+    if [ -n "$cfg_path" ] && [ -f "$cfg_path" ]; then
+        rm -f "$cfg_path"
+        echo "Removed $cfg_path"
+    fi
+    cargo run --bin foyer -- configure --force
+
+tw-build:
+    ./scripts/dev/tw.sh build
+
+# Build a release zip for the host platform. Mirrors what the
+# `release.yml` matrix does on each runner — useful for sanity-checking
+# the bundle layout, or for cutting an unsigned local build to hand to
+# someone on the same OS/arch.
+#
+# Requires: a built Ardour (just ardour ensure) and a built shim.
+# Override the Ardour tag with: ARDOUR_TAG=9.1.0 just release-bundle
+# Build a release bundle that matches what CI ships:
+#   * Linux: `*-unknown-linux-musl` + `+crt-static` + static libopus →
+#     fully self-contained (zero .so deps).
+#   * macOS: standard apple target + static libopus (libSystem.dylib
+#     is always linked dynamically and that's by design).
+#
+# `cargo build` / `just run` are deliberately NOT this — local dev
+# stays fast on glibc + dynamic libopus. Only this recipe pays the
+# libopus-from-source build tax.
+#
+# Linux requires `musl-tools` (apt) for `musl-gcc`. The recipe checks
+# and aborts with a clear hint if missing.
+release-bundle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/dev/tw.sh build
+
+    case "$(uname -s)" in
+        Linux)
+            arch_triple="$(uname -m)-unknown-linux-musl"
+            if ! command -v musl-gcc >/dev/null 2>&1; then
+                echo "release-bundle: missing musl-gcc — install with:" >&2
+                echo "    sudo apt-get install -y musl-tools" >&2
+                exit 1
+            fi
+            rustup target add "$arch_triple" >/dev/null 2>&1 || true
+            export CC=musl-gcc
+            export CC_x86_64_unknown_linux_musl=musl-gcc
+            export CC_aarch64_unknown_linux_musl=musl-gcc
+            export RUSTFLAGS="-C target-feature=+crt-static"
+            ;;
+        Darwin)
+            case "$(uname -m)" in
+                arm64) arch_triple="aarch64-apple-darwin" ;;
+                x86_64) arch_triple="x86_64-apple-darwin" ;;
+                *) echo "release-bundle: unsupported macOS arch $(uname -m)" >&2; exit 1 ;;
+            esac
+            ;;
+        *)
+            echo "release-bundle: unsupported OS $(uname -s)" >&2
+            exit 1
+            ;;
+    esac
+
+    export OPUS_STATIC=1
+    export OPUS_NO_PKG=1
+    cargo build --release --target "$arch_triple" --bin foyer
+
+    ./scripts/dev/shim.sh build
+    FOYER_BIN="$(pwd)/target/$arch_triple/release/foyer" \
+        ./scripts/release/bundle.sh
+
+ardour cmd='help' *args='':
+    ./scripts/dev/ardour.sh {{cmd}} {{args}}
+
+autovocoder cmd='help' *args='':
+    ./scripts/dev/autovocoder.sh {{cmd}} {{args}}
+
+shim cmd='help' *args='':
+    ./scripts/dev/shim.sh {{cmd}} {{args}}
+
+tw cmd='help' *args='':
+    ./scripts/dev/tw.sh {{cmd}} {{args}}
+
+jack cmd='help' *args='':
+    ./scripts/dev/jack.sh {{cmd}} {{args}}

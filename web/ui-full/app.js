@@ -1,0 +1,484 @@
+// SPDX-License-Identifier: Apache-2.0
+// Foyer Studio — top-level app shell with tiling layout.
+//
+// This is the shipping Foyer UI (`foyer-ui`). It consumes foyer-core
+// (state + ws + registries) and foyer-ui-core (tiling + widgets).
+// Alternate UIs replace this entry and its components; core and
+// ui-core stay as-is.
+
+import { LitElement, html, css } from "lit";
+
+import { FoyerWs } from "foyer-core/ws.js";
+import { Store } from "foyer-core/store.js";
+import { applyTheme } from "foyer-ui-core/theme.js";
+import { installTransportReturn } from "foyer-core/transport-return.js";
+import { audioController } from "foyer-core/audio/master-controller.js";
+import { rehydrateWindows } from "foyer-ui-core/widgets/window.js";
+import { bootRegionCache } from "foyer-core/region-cache.js";
+
+import { LayoutStore } from "foyer-ui-core/layout/layout-store.js";
+import { Keybinds } from "foyer-ui-core/layout/keybinds.js";
+import "foyer-ui-core/layout/tile-container.js";
+import "foyer-ui-core/layout/tile-leaf.js";
+import "foyer-ui-core/layout/floating-tiles.js";
+import "foyer-ui-core/layout/plugin-layer.js";
+
+// View tags — these register themselves via side-effect import.
+// nav-bar.js also publishes them to foyer-core's view registry, and
+// tile-leaf creates them on-demand by tag at render time.
+import "./components/nav-bar.js";
+import "./components/mixer.js";
+import "./components/timeline-view.js";
+import "./components/plugins-view.js";
+import "./components/session-view.js";
+import "./components/console-view.js";
+import "./components/diagnostics.js";
+
+import "./components/status-bar.js";
+import "./components/transport-bar.js";
+import "./components/main-menu.js";
+import "./components/right-dock.js";
+// Agent panel disabled — leaving the import OUT (and the tag below
+// commented) parks the chat-agent surface without deleting the file.
+// Revisit when the agent integration is re-enabled.
+// import "./components/agent-panel.js";
+import "./components/chat-panel.js";
+// Actions + Session-info FABs removed — they didn't add value over
+// the menu bar / project picker. The components remain on disk but
+// nothing imports them, so they're not registered with the FAB
+// registry and don't appear in the rail.
+import "./components/windows-fab.js";
+import "./components/command-palette.js";
+import "./components/layout-fab.js";
+import "./components/automation-panel.js";
+import "./components/startup-errors.js";
+import "./components/backend-lost-modal.js";
+import "./components/login-modal.js";
+import "./components/welcome-screen.js";
+// Plugin UI tag — ui-core's plugin-layer + floating-tiles render
+// `<foyer-plugin-panel>` but don't import it (the tag belongs to the
+// UI layer). Without this side-effect import the plugin float's
+// body shows up as an empty black rectangle.
+import "./components/plugin-panel.js";
+import { bootAutomation } from "./components/automation-panel.js";
+import { installBindingsRuntime } from "foyer-ui-core/layout/layout-bindings.js";
+import { installSlotKeybinds } from "foyer-ui-core/layout/slot-keybinds.js";
+
+applyTheme();
+
+// Desktop-environment mindset: hijack the browser's context menu everywhere
+// so we can route right-click gestures to our own descriptor-driven menu (or
+// suppress them on chrome surfaces). Individual components that WANT a
+// context menu listen for `contextmenu` themselves and `preventDefault` to
+// call `showContextMenu(event, items)`.
+document.addEventListener("contextmenu", (ev) => {
+  const t = ev.target;
+  // Text-bearing surfaces keep the native menu so users can copy/paste.
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
+      || (t && t.isContentEditable)) {
+    return;
+  }
+  ev.preventDefault();
+});
+
+// Boot-time: install whatever automation script the user has saved.
+bootAutomation();
+
+// Globally blur any `<select>` once it commits a change, so a stale
+// focus on a combo box (plugin enum param, drum-kit picker, future
+// scale-root chooser) doesn't swallow the next Space press into
+// reopening the dropdown instead of toggling transport. Individual
+// callers used to remember `ev.target.blur()` per onchange handler;
+// every new combo box was a fresh chance to forget it. Capture-phase
+// listener so we beat any handler that re-focuses the element on
+// change. (Rich, TODO #53.)
+document.addEventListener("change", (ev) => {
+  const t = ev.target;
+  if (t && t.tagName === "SELECT") {
+    queueMicrotask(() => { try { t.blur(); } catch {} });
+  }
+}, true);
+
+export class FoyerApp extends LitElement {
+  static properties = {
+    _status:  { state: true },
+    _session: { state: true },
+    _sessions: { state: true },
+    _projectLaunching: { state: true },
+  };
+
+  static styles = css`
+    :host {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      background: var(--color-surface);
+      color: var(--color-text);
+    }
+    .main {
+      flex: 1 1 auto;
+      display: flex;
+      min-height: 0;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .workspace {
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      overflow: hidden;
+    }
+    .launch-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      background: color-mix(in oklab, var(--color-surface) 92%, transparent);
+      backdrop-filter: blur(10px);
+      color: var(--color-text);
+      font-family: var(--font-sans);
+      pointer-events: auto;
+    }
+    .launch-overlay .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid color-mix(in oklab, var(--color-accent) 30%, transparent);
+      border-top-color: var(--color-accent);
+      border-radius: 50%;
+      animation: foyer-app-launch-spin 0.85s linear infinite;
+    }
+    .launch-overlay .title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      color: var(--color-text-muted);
+    }
+    .launch-overlay .path {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-accent-3);
+      max-width: min(560px, 90vw);
+      text-align: center;
+      word-break: break-all;
+    }
+    @keyframes foyer-app-launch-spin {
+      to { transform: rotate(360deg); }
+    }
+  `;
+
+  constructor() {
+    super();
+    this._projectLaunching = false;
+    this._launchPath = "";
+
+    // Core already created store + ws and wired them via bootFoyerCore
+    // (see /boot.js). Reuse them so we don't double-subscribe or
+    // double-connect. When running the app standalone (tests), fall
+    // back to building our own so existing test harnesses keep working.
+    this.windowIndex = this._resolveWindowIndex();
+    const originTag = `web-${this.windowIndex}`;
+    if (globalThis.__foyer?.store && globalThis.__foyer?.ws) {
+      this.ws = globalThis.__foyer.ws;
+      this.store = globalThis.__foyer.store;
+    } else {
+      const wsUrl = this._resolveWsUrl();
+      this.ws = new FoyerWs({ url: wsUrl, origin: originTag });
+      this.store = new Store({ selfOrigin: originTag });
+      this.store.attach(this.ws);
+      installTransportReturn({ store: this.store, ws: this.ws });
+    }
+    // Prime from the store's current state — bootstrap creates the
+    // store + ws before mounting this element, so greeting +
+    // session_list can land *before* our listener attaches and fire
+    // `sessions` into the void. Over a tunnel where the greeting is
+    // a few hundred ms slower than the render-ready signal, this is
+    // the common path. Without priming, `hasSessions` is `false`
+    // even with sessions open and the welcome screen gets stuck.
+    this._status = this.store.state.status || "idle";
+    this._session = this.store.state.session || null;
+    this._sessions = this.store.state.sessions || [];
+    this.store.addEventListener("change", () => {
+      this._status = this.store.state.status;
+      this._session = this.store.state.session;
+      this._sessions = this.store.state.sessions;
+      // Re-render tile leaves (they read session from window.__foyer.store).
+      const root = this.renderRoot.querySelector("foyer-tile-container");
+      root?.requestUpdate();
+    });
+    this.store.addEventListener("sessions", () => {
+      this._sessions = this.store.state.sessions;
+      this.requestUpdate();
+    });
+
+    this.layout = new LayoutStore();
+    this.layout.addEventListener("change", () => this.requestUpdate());
+
+    // Auto-hide the widgets layer when the user clicks back into a
+    // core tile. The layer's renderers are pos:fixed children of the
+    // app shell, so a real tile-leaf click cannot bubble up THROUGH a
+    // visible widget — that means we only get here when the tile was
+    // actually the click target. Walk the composed path looking for
+    // `foyer-tile-leaf` (the tile-content wrapper) or any node with
+    // `data-tile-click="dismiss"`. A widget click stays inside the
+    // widget's own subtree and we ignore it.
+    this._onDocClickForWidgets = (ev) => {
+      const path = ev.composedPath?.() || [];
+      let hitTile = false;
+      let hitWidget = false;
+      for (const n of path) {
+        if (!n || !n.tagName) continue;
+        const tag = n.tagName.toLowerCase();
+        if (tag === "foyer-tile-leaf" || tag === "foyer-tile-container") {
+          hitTile = true;
+          break;
+        }
+        // Anything with explicit dismiss opt-out short-circuits.
+        if (n.dataset?.tileClick === "ignore") return;
+        // Inside a widget — let the layer keep its current visibility.
+        if (
+          tag === "foyer-floating-tiles"
+          || tag === "foyer-plugin-layer"
+          || tag === "foyer-right-dock"
+          || tag === "foyer-plugin-panel"
+        ) {
+          hitWidget = true;
+          break;
+        }
+      }
+      if (hitTile && !hitWidget) {
+        this.layout.notifyTileClicked();
+      }
+    };
+    document.addEventListener("pointerdown", this._onDocClickForWidgets, true);
+
+    // User-defined chords for layouts (preset or named) fire before Keybinds.
+    installBindingsRuntime(this.layout);
+    // Rectangle-style slot chords (Ctrl+Alt+Shift+<key>) snap the focused
+    // window to a named slot. See web/src/layout/slots.js SLOT_SHORTCUTS
+    // for the default map.
+    installSlotKeybinds(this.layout);
+
+    this.keybinds = new Keybinds(this.layout, () => this._collectRects());
+
+    this._onProjectLaunchStart = () => {
+      this._projectLaunching = true;
+      this.requestUpdate();
+    };
+    this._onWsEnvelope = (ev) => {
+      const b = ev.detail?.body;
+      if (!b) return;
+      if (
+        b.type === "backend_swapped"
+        || (b.type === "error" && b.code === "launch_failed")
+      ) {
+        this._projectLaunching = false;
+        this._launchPath = "";
+        this.requestUpdate();
+      }
+    };
+    this.ws.addEventListener("project_launch_start", (ev) => {
+      this._launchPath = ev.detail?.project_path || "";
+      this._onProjectLaunchStart();
+    });
+    this.ws.addEventListener("envelope", this._onWsEnvelope);
+
+    // Extend the global __foyer (bootstrap populated ws+store already;
+    // we attach the UI-owned handles — layout store, workspace rect,
+    // window index). Use Object.assign so we don't clobber what core
+    // set up.
+    Object.assign(window.__foyer = window.__foyer || {}, {
+      ws: this.ws,
+      store: this.store,
+      layout: this.layout,
+      audio: audioController,
+      workspaceRect: () => this._workspaceRect(),
+      windowIndex: this.windowIndex,
+    });
+
+    // Boot the master-bus audio listener as a singleton owned by the
+    // app shell, not by the mixer view. This unblocks tunnel guests
+    // who haven't opened the mixer yet (TODO 38) and survives mixer
+    // mount/unmount cycles. The mixer's toggle becomes a thin
+    // observer of this controller's state.
+    audioController.attach(this.ws, this.store);
+
+    // Boot the global region cache so MIDI-editor / beat-sequencer
+    // rehydrate factories can resolve `regionId → region` without
+    // having to wait for the timeline to mount. The cache subscribes
+    // to envelope traffic + fires `list_regions` for every track in
+    // the session snapshot. (Rich, 2026-04-26.)
+    bootRegionCache();
+
+    // Replay foyer-window open-set across boot. Trigger sources, in
+    // the order they typically fire:
+    //   1. Immediate — console / diagnostics / plugin factories whose
+    //      props don't depend on session data spawn right away.
+    //   2. `sessions` event — track-editor factories key off live
+    //      tracks; they need the session snapshot.
+    //   3. `foyer:region-cache-updated` event — MIDI / Beat factories
+    //      need the region cache populated. Region cache emits this
+    //      whenever a `regions_list` reply lands. Closes the 1-2
+    //      second gap where windows used to pop in on a fallback
+    //      timer.
+    // The 800ms / 2500ms backstops stay in place as belt-and-braces
+    // for rare cases where we miss the cache update event (e.g. boot
+    // ordering races). Rehydrate is idempotent so extra calls are
+    // cheap.
+    //
+    // Subscribing to the firehose `change` event (we tried that
+    // briefly) creates a rehydrate→editor-mount→list_regions→change→
+    // rehydrate loop that flashes editor windows in and out of
+    // existence — keep it off the change firehose. (Rich, 2026-04-26.)
+    const fire = () => {
+      try { rehydrateWindows(); } catch (e) { console.warn("rehydrate failed", e); }
+    };
+    fire();
+    this.store.addEventListener("sessions", fire);
+    window.addEventListener("foyer:region-cache-updated", fire);
+    setTimeout(fire, 800);
+    setTimeout(fire, 2500);
+  }
+
+  /**
+   * Returns the rectangle inside which floating windows should live when
+   * docked to a slot. Fallbacks to the full viewport if the DOM isn't
+   * ready yet (pre-first-paint).
+   */
+  _workspaceRect() {
+    const main = this.renderRoot?.querySelector(".main");
+    if (main) {
+      const r = main.getBoundingClientRect();
+      // Reserve the FULL right-dock width — rail + any expanded panel +
+      // any docked-FAB pop-out that's currently visible. The right-dock is
+      // "hallowed ground" (per Rich's framing): a window clamped to
+      // left-half must shrink if the right-dock grows. Using the dock's
+      // host bounding rect captures rail-only, rail+panel, rail+panel+
+      // docked-FAB-sheet — whatever is open at the moment.
+      const rd = window.__foyer?.rightDock;
+      const dockRect = rd?.outerRect ? rd.outerRect() : null;
+      const rightEdge = dockRect ? dockRect.left : r.right;
+      return {
+        top: r.top,
+        left: r.left,
+        right: rightEdge,
+        bottom: r.bottom,
+        width: rightEdge - r.left,
+        height: r.bottom - r.top,
+      };
+    }
+    return {
+      top: 0,
+      left: 0,
+      right: window.innerWidth,
+      bottom: window.innerHeight,
+      width: window.innerWidth,
+      height: window.innerHeight,
+    };
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this.keybinds.install();
+    // When this element was created by the bootstrap the ws is already
+    // connected (or connecting). Only dial when we built our own ws as
+    // a standalone fallback.
+    const ownedWs = !(globalThis.__foyer?.ws === this.ws && this.ws._ws);
+    if (ownedWs) this.ws.connect();
+  }
+  disconnectedCallback() {
+    this.ws.removeEventListener("envelope", this._onWsEnvelope);
+    this.keybinds.uninstall();
+    super.disconnectedCallback();
+  }
+
+  /** Collect all leaf DOM rects for keyboard neighbor search. */
+  _collectRects() {
+    const out = new Map();
+    const leaves = this.renderRoot.querySelectorAll("foyer-tile-leaf");
+    for (const el of leaves) {
+      if (el.leaf?.id) out.set(el.leaf.id, el.getBoundingClientRect());
+    }
+    return out;
+  }
+
+  _resolveWsUrl() {
+    const loc = window.location;
+    const proto = loc.protocol === "https:" ? "wss:" : "ws:";
+    return `${proto}//${loc.host}/ws`;
+  }
+
+  /**
+   * Resolve the zero-indexed window slot for this browser window. Default
+   * 0. Override by loading `?window=N` in the URL. Used as the suffix in
+   * the WS `origin` tag (`web-0`, `web-1`, …) so the sidecar can tell
+   * multiple Foyer windows apart — e.g. one per monitor in a future
+   * multi-monitor setup. Non-integer or negative values collapse to 0.
+   */
+  _resolveWindowIndex() {
+    try {
+      const raw = new URLSearchParams(window.location.search).get("window");
+      if (raw == null || raw === "") return 0;
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isFinite(n) || n < 0) return 0;
+      return n;
+    } catch {
+      return 0;
+    }
+  }
+
+  render() {
+    // Welcome screen replaces the tile workspace whenever no real
+    // session is attached. We check `sessions.length` (the
+    // authoritative multi-session list from the sidecar) rather than
+    // `this._session` because the launcher-mode stub backend emits
+    // an empty SessionSnapshot that would otherwise look like a
+    // valid session. Any orphans + recents still render inside the
+    // welcome screen so the user can resolve them without leaving
+    // this view.
+    const hasSessions = (this._sessions || []).length > 0;
+    return html`
+      <foyer-status-bar .status=${this._status}></foyer-status-bar>
+      <foyer-transport-bar></foyer-transport-bar>
+      ${this._projectLaunching ? html`
+        <div class="launch-overlay" aria-busy="true" aria-live="polite">
+          <div class="spinner"></div>
+          <div class="title">Opening project…</div>
+          ${this._launchPath
+            ? html`<div class="path">${this._launchPath}</div>`
+            : null}
+        </div>
+      ` : null}
+      <div class="main">
+        <div class="workspace">
+          ${hasSessions ? html`
+            <foyer-tile-container
+              .node=${this.layout.tree}
+              .store=${this.layout}
+            ></foyer-tile-container>
+          ` : html`
+            <foyer-welcome-screen></foyer-welcome-screen>
+          `}
+        </div>
+        <foyer-right-dock @resize=${() => this.requestUpdate()}></foyer-right-dock>
+      </div>
+      <foyer-plugin-layer .store=${this.layout}></foyer-plugin-layer>
+      <foyer-floating-tiles .store=${this.layout}></foyer-floating-tiles>
+      <!-- <foyer-agent-panel></foyer-agent-panel> disabled, see import comment -->
+      <foyer-chat-panel></foyer-chat-panel>
+      <!-- <foyer-actions-fab>, <foyer-session-fab> retired -->
+      <foyer-windows-fab></foyer-windows-fab>
+      <foyer-layout-fab .store=${this.layout}></foyer-layout-fab>
+      <foyer-command-palette></foyer-command-palette>
+      <foyer-automation-panel></foyer-automation-panel>
+      <foyer-startup-errors></foyer-startup-errors>
+      <foyer-backend-lost-modal></foyer-backend-lost-modal>
+      <foyer-login-modal></foyer-login-modal>
+    `;
+  }
+}
+customElements.define("foyer-app", FoyerApp);

@@ -1,0 +1,31 @@
+[package]
+name = "foyer-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Foyer Studio CLI entrypoint."
+
+[[bin]]
+name = "foyer"
+path = "src/main.rs"
+
+[dependencies]
+foyer-server = { workspace = true, default-features = true }
+foyer-schema.workspace = true
+foyer-backend.workspace = true
+foyer-backend-stub.workspace = true
+foyer-backend-host.workspace = true
+foyer-config.workspace = true
+async-trait.workspace = true
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "process"] }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# Bundle web/ into the binary so a shipped `foyer` is self-contained.
+# On first run the CLI extracts it to $XDG_DATA_HOME/foyer/web; users
+# edit in place to hack (see web/HACKING.md). `--web-root <path>`
+# overrides; `./web` takes precedence when it exists (dev mode).
+include_dir = "0.7"

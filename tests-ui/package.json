@@ -1,0 +1,15 @@
+{
+  "name": "foyer-ui-tests",
+  "private": true,
+  "type": "module",
+  "description": "Playwright harness for Foyer's web UI. Dev-only — not shipped in the Foyer build.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "install-browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

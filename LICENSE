@@ -1,0 +1,25 @@
+Foyer Studio
+============
+
+This repository is split across two license zones:
+
+1. **Main project** — everything outside `shims/ardour/` is licensed under
+   the Apache License, Version 2.0.  See [LICENSE-APACHE](LICENSE-APACHE).
+   This covers:
+     - `crates/*` — the Rust sidecar, backend trait, server, CLI, schemas.
+     - `web/*`    — the browser UI (Lit + Tailwind + vendored ES modules).
+     - `scripts/*`, `tests-ui/*`, `docs/*`, top-level config.
+
+2. **Ardour shim** — everything under `shims/ardour/` is licensed under
+   the GNU General Public License, version 2 or (at your option) any
+   later version.  See [shims/ardour/LICENSE-GPL](shims/ardour/LICENSE-GPL).
+   GPL coverage is intentionally confined to this folder because the
+   shim links against libardour (GPLv2+).  The Rust sidecar and web UI
+   sit above the IPC boundary and stay non-copyleft.
+
+See [docs/DECISIONS.md](docs/DECISIONS.md) entry 15 for the full
+rationale ("Per-layer licensing").
+
+SPDX identifiers used in source files:
+    SPDX-License-Identifier: Apache-2.0             (main project)
+    SPDX-License-Identifier: GPL-2.0-or-later       (shims/ardour)

@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<!--
+  Backward-edge curve tuning bakeoff for foyer-node-graph.
+
+  Ported from zip-ties' debug-curves.html. This is an intentionally standalone
+  page so we can tune without touching Foyer's app shell — point a browser at
+  /debug-curves.html on the dev server. Drag nodes, tweak sliders, hit a Pick
+  button, and the resulting JSON can be pasted into src/components/node-graph.js
+  as DEFAULT_CURVE_STYLE / DEFAULT_CURVE_CONFIG.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Foyer — curve bakeoff</title>
+<style>
+  :root {
+    --bg:        #0f172a;
+    --panel:     #1e293b;
+    --border:    #475569;
+    --text:      #f1f5f9;
+    --text-mut:  #94a3b8;
+    --accent:    #6366f1;
+    --accent-3:  #a78bfa;
+    --grid:      #1e293b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    height: 100vh;
+  }
+  .controls {
+    width: 320px;
+    padding: 16px;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .controls h2 { font-size: 14px; margin-bottom: 12px; color: var(--accent-3); }
+  .controls h3 {
+    font-size: 11px;
+    margin: 12px 0 6px;
+    color: var(--text-mut);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .controls h3 .toggle-vis {
+    width: 14px; height: 14px;
+    border-radius: 3px;
+    border: 1.5px solid #555;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .controls h3 .toggle-vis.on { border-color: var(--swatch-color); background: var(--swatch-color); }
+  .controls h3 .toggle-vis.on::after { content: '✓'; font-size: 9px; color: #161821; font-weight: 700; }
+  .field { margin-bottom: 8px; }
+  .field label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-mut);
+    margin-bottom: 2px;
+  }
+  .field label span { color: var(--accent-3); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .field input[type=range] { width: 100%; accent-color: var(--accent); }
+  .canvas-area { flex: 1; display: flex; flex-direction: column; }
+  .canvas-wrap { flex: 1; overflow: hidden; position: relative; }
+  .canvas-wrap svg { width: 100%; height: 100%; }
+  .zoom-controls {
+    position: absolute;
+    top: 8px; right: 8px;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+  .zoom-controls button {
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    border: 1px solid #555;
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .zoom-controls button:hover { background: #2a3040; border-color: var(--accent); }
+  .zoom-controls .zoom-level { font-size: 10px; color: var(--text-mut); min-width: 36px; text-align: center; }
+  .legend {
+    display: flex;
+    gap: 16px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .legend-item.off { opacity: 0.35; }
+  .legend-swatch { width: 20px; height: 3px; border-radius: 2px; }
+  .winner-bar {
+    display: flex;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    align-items: center;
+  }
+  .winner-bar button {
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 6px;
+    border: 1px solid #555;
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .winner-bar button:hover { background: #2a3040; border-color: var(--accent); }
+  .winner-bar button.pick { background: #0c4a6e; border-color: var(--accent); color: var(--accent-3); }
+  .winner-bar #json-out {
+    flex: 1;
+    font-size: 10px;
+    font-family: monospace;
+    color: #4ade80;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .node-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+  .node-controls .field { flex: 1; min-width: 130px; }
+  .style-section.disabled .field { opacity: 0.3; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div class="controls">
+  <h2>Curve Bakeoff</h2>
+
+  <h3>Node Positions</h3>
+  <div class="node-controls">
+    <div class="field">
+      <label>Source X <span id="v-sx">350</span></label>
+      <input type="range" id="sx" min="100" max="600" value="350">
+    </div>
+    <div class="field">
+      <label>Source Y <span id="v-sy">150</span></label>
+      <input type="range" id="sy" min="50" max="400" value="150">
+    </div>
+    <div class="field">
+      <label>Target X <span id="v-tx">100</span></label>
+      <input type="range" id="tx" min="20" max="600" value="100">
+    </div>
+    <div class="field">
+      <label>Target Y <span id="v-ty">150</span></label>
+      <input type="range" id="ty" min="50" max="400" value="150">
+    </div>
+  </div>
+
+  <h3>
+    <div class="toggle-vis on" style="--swatch-color:#f87171" data-style="A" onclick="toggleStyle('A', this)"></div>
+    Style A — Two-Segment (current)
+  </h3>
+  <div class="style-section" id="section-A">
+    <div class="field">
+      <label>turnR <span id="v-a-turnR">101</span></label>
+      <input type="range" id="a-turnR" min="10" max="150" value="101">
+    </div>
+    <div class="field">
+      <label>spreadBase <span id="v-a-spreadBase">0</span></label>
+      <input type="range" id="a-spreadBase" min="0" max="1" step="0.05" value="0">
+    </div>
+    <div class="field">
+      <label>vOffBase <span id="v-a-vOffBase">0</span></label>
+      <input type="range" id="a-vOffBase" min="0" max="1" step="0.05" value="0">
+    </div>
+    <div class="field">
+      <label>vOffMin <span id="v-a-vOffMin">20</span></label>
+      <input type="range" id="a-vOffMin" min="20" max="150" value="20">
+    </div>
+  </div>
+
+  <h3>
+    <div class="toggle-vis on" style="--swatch-color:#facc15" data-style="B" onclick="toggleStyle('B', this)"></div>
+    Style B — Wide Arc
+  </h3>
+  <div class="style-section" id="section-B">
+    <div class="field">
+      <label>turnR <span id="v-b-turnR">60</span></label>
+      <input type="range" id="b-turnR" min="10" max="150" value="60">
+    </div>
+    <div class="field">
+      <label>loopMinY <span id="v-b-loopMinY">80</span></label>
+      <input type="range" id="b-loopMinY" min="30" max="200" value="80">
+    </div>
+    <div class="field">
+      <label>vScale <span id="v-b-vScale">0.5</span></label>
+      <input type="range" id="b-vScale" min="0" max="1" step="0.05" value="0.5">
+    </div>
+  </div>
+
+  <h3>
+    <div class="toggle-vis on" style="--swatch-color:#4ade80" data-style="C" onclick="toggleStyle('C', this)"></div>
+    Style C — Rounded Rect
+  </h3>
+  <div class="style-section" id="section-C">
+    <div class="field">
+      <label>padX <span id="v-c-padX">40</span></label>
+      <input type="range" id="c-padX" min="10" max="120" value="40">
+    </div>
+    <div class="field">
+      <label>padY <span id="v-c-padY">60</span></label>
+      <input type="range" id="c-padY" min="20" max="200" value="60">
+    </div>
+    <div class="field">
+      <label>cornerR <span id="v-c-cornerR">25</span></label>
+      <input type="range" id="c-cornerR" min="5" max="80" value="25">
+    </div>
+  </div>
+
+  <h3>
+    <div class="toggle-vis on" style="--swatch-color:#a78bfa" data-style="D" onclick="toggleStyle('D', this)"></div>
+    Style D — Smooth Cubic (single)
+  </h3>
+  <div class="style-section" id="section-D">
+    <div class="field">
+      <label>hSpread <span id="v-d-hSpread">80</span></label>
+      <input type="range" id="d-hSpread" min="20" max="200" value="80">
+    </div>
+    <div class="field">
+      <label>vMin <span id="v-d-vMin">70</span></label>
+      <input type="range" id="d-vMin" min="20" max="200" value="70">
+    </div>
+    <div class="field">
+      <label>vGapScale <span id="v-d-vGapScale">0.4</span></label>
+      <input type="range" id="d-vGapScale" min="0" max="1" step="0.05" value="0.4">
+    </div>
+  </div>
+</div>
+
+<div class="canvas-area">
+  <div class="canvas-wrap">
+    <svg id="canvas" viewBox="0 0 700 500">
+      <defs>
+        <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+          <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+        </pattern>
+      </defs>
+      <rect id="bg" width="700" height="500" fill="#0f172a"/>
+      <rect id="bg-grid" width="700" height="500" fill="url(#grid)"/>
+      <g id="paths"></g>
+      <g id="src-node" style="cursor: grab">
+        <rect width="160" height="60" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+        <text x="10" y="26" fill="#f1f5f9" font-size="13" font-weight="600" style="pointer-events:none">source</text>
+        <text x="80" y="46" fill="#64748b" font-size="9" text-anchor="middle" style="pointer-events:none">drag to move</text>
+        <circle cx="160" cy="30" r="6" fill="#334155" stroke="#a78bfa" stroke-width="1.5" style="pointer-events:none"/>
+      </g>
+      <g id="tgt-node" style="cursor: grab">
+        <rect width="160" height="60" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+        <text x="10" y="26" fill="#f1f5f9" font-size="13" font-weight="600" style="pointer-events:none">target</text>
+        <text x="80" y="46" fill="#64748b" font-size="9" text-anchor="middle" style="pointer-events:none">drag to move</text>
+        <circle cx="0" cy="30" r="6" fill="#334155" stroke="#a78bfa" stroke-width="1.5" style="pointer-events:none"/>
+      </g>
+    </svg>
+    <div class="zoom-controls">
+      <button onclick="zoomBy(-0.15)" title="Zoom out">−</button>
+      <span class="zoom-level" id="zoom-level">100%</span>
+      <button onclick="zoomBy(0.15)" title="Zoom in">+</button>
+      <button onclick="zoomReset()" title="Reset" style="font-size:11px; width: auto; padding: 0 8px;">Reset</button>
+    </div>
+  </div>
+  <div class="legend">
+    <div class="legend-item" data-style="A" onclick="toggleStyleFromLegend('A')"><div class="legend-swatch" style="background:#f87171"></div> A — Two-Segment</div>
+    <div class="legend-item" data-style="B" onclick="toggleStyleFromLegend('B')"><div class="legend-swatch" style="background:#facc15"></div> B — Wide Arc</div>
+    <div class="legend-item" data-style="C" onclick="toggleStyleFromLegend('C')"><div class="legend-swatch" style="background:#4ade80"></div> C — Rounded Rect</div>
+    <div class="legend-item" data-style="D" onclick="toggleStyleFromLegend('D')"><div class="legend-swatch" style="background:#a78bfa"></div> D — Smooth Cubic</div>
+  </div>
+  <div class="winner-bar">
+    <button class="pick" onclick="pickWinner('A')">Pick A</button>
+    <button class="pick" onclick="pickWinner('B')">Pick B</button>
+    <button class="pick" onclick="pickWinner('C')">Pick C</button>
+    <button class="pick" onclick="pickWinner('D')">Pick D</button>
+    <span id="json-out">Click a Pick button to output config JSON</span>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const visible = { A: true, B: true, C: true, D: true };
+let vbX = 0, vbY = 0, vbW = 700, vbH = 500;
+const baseW = 700, baseH = 500;
+let isPanning = false, panStart = null, panOrigVb = null;
+let nodeDrag = null;
+const sliderIds = [
+  'sx', 'sy', 'tx', 'ty',
+  'a-turnR', 'a-spreadBase', 'a-vOffBase', 'a-vOffMin',
+  'b-turnR', 'b-loopMinY', 'b-vScale',
+  'c-padX', 'c-padY', 'c-cornerR',
+  'd-hSpread', 'd-vMin', 'd-vGapScale',
+];
+function val(id) { return parseFloat($(id).value); }
+function toggleStyle(style, el) {
+  visible[style] = !visible[style];
+  el.classList.toggle('on', visible[style]);
+  const legendItem = document.querySelector(`.legend-item[data-style="${style}"]`);
+  if (legendItem) legendItem.classList.toggle('off', !visible[style]);
+  const section = $('section-' + style);
+  if (section) section.classList.toggle('disabled', !visible[style]);
+  update();
+}
+function toggleStyleFromLegend(style) {
+  const toggle = document.querySelector(`.toggle-vis[data-style="${style}"]`);
+  if (toggle) toggleStyle(style, toggle);
+}
+function updateViewBox() {
+  $('canvas').setAttribute('viewBox', `${vbX} ${vbY} ${vbW} ${vbH}`);
+  for (const id of ['bg', 'bg-grid']) {
+    const el = $(id);
+    el.setAttribute('x', vbX - 100);
+    el.setAttribute('y', vbY - 100);
+    el.setAttribute('width', vbW + 200);
+    el.setAttribute('height', vbH + 200);
+  }
+  $('zoom-level').textContent = Math.round((baseW / vbW) * 100) + '%';
+}
+function zoomBy(delta) {
+  const factor = 1 - delta;
+  const cx = vbX + vbW / 2, cy = vbY + vbH / 2;
+  vbW *= factor; vbH *= factor;
+  vbX = cx - vbW / 2; vbY = cy - vbH / 2;
+  updateViewBox();
+}
+function zoomReset() { vbX = 0; vbY = 0; vbW = baseW; vbH = baseH; updateViewBox(); }
+$('canvas').addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const rect = $('canvas').getBoundingClientRect();
+  const mx = (e.clientX - rect.left) / rect.width;
+  const my = (e.clientY - rect.top) / rect.height;
+  const factor = e.deltaY > 0 ? 1.08 : 0.92;
+  const svgX = vbX + vbW * mx;
+  const svgY = vbY + vbH * my;
+  vbW *= factor; vbH *= factor;
+  vbX = svgX - vbW * mx; vbY = svgY - vbH * my;
+  updateViewBox();
+}, { passive: false });
+$('canvas').addEventListener('mousedown', (e) => {
+  if (e.button === 1 || e.button === 2 || e.shiftKey) {
+    e.preventDefault();
+    isPanning = true;
+    panStart = { x: e.clientX, y: e.clientY };
+    panOrigVb = { x: vbX, y: vbY };
+  }
+});
+$('canvas').addEventListener('contextmenu', (e) => e.preventDefault());
+document.addEventListener('mousemove', (e) => {
+  if (!isPanning || nodeDrag) return;
+  const rect = $('canvas').getBoundingClientRect();
+  const scaleX = vbW / rect.width;
+  const scaleY = vbH / rect.height;
+  vbX = panOrigVb.x - (e.clientX - panStart.x) * scaleX;
+  vbY = panOrigVb.y - (e.clientY - panStart.y) * scaleY;
+  updateViewBox();
+});
+document.addEventListener('mouseup', () => { isPanning = false; });
+function screenToSvg(e) {
+  const svg = $('canvas');
+  const rect = svg.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) / rect.width;
+  const my = (e.clientY - rect.top) / rect.height;
+  return { x: vbX + vbW * mx, y: vbY + vbH * my };
+}
+$('src-node').addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  e.stopPropagation(); e.preventDefault();
+  nodeDrag = { which: 'src', startSvg: screenToSvg(e), origVal: { x: val('sx'), y: val('sy') } };
+  $('src-node').style.cursor = 'grabbing';
+});
+$('tgt-node').addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  e.stopPropagation(); e.preventDefault();
+  nodeDrag = { which: 'tgt', startSvg: screenToSvg(e), origVal: { x: val('tx'), y: val('ty') } };
+  $('tgt-node').style.cursor = 'grabbing';
+});
+document.addEventListener('mousemove', (e) => {
+  if (!nodeDrag) return;
+  const pt = screenToSvg(e);
+  const dx = pt.x - nodeDrag.startSvg.x;
+  const dy = pt.y - nodeDrag.startSvg.y;
+  if (nodeDrag.which === 'src') {
+    $('sx').value = Math.round(Math.max(100, Math.min(600, nodeDrag.origVal.x + dx)));
+    $('sy').value = Math.round(Math.max(50, Math.min(400, nodeDrag.origVal.y + dy)));
+  } else {
+    $('tx').value = Math.round(Math.max(20, Math.min(600, nodeDrag.origVal.x + dx)));
+    $('ty').value = Math.round(Math.max(50, Math.min(400, nodeDrag.origVal.y + dy)));
+  }
+  update();
+});
+document.addEventListener('mouseup', () => {
+  if (nodeDrag) {
+    const el = nodeDrag.which === 'src' ? $('src-node') : $('tgt-node');
+    el.style.cursor = 'grab';
+    nodeDrag = null;
+  }
+});
+function update() {
+  for (const id of sliderIds) {
+    const display = $('v-' + id);
+    if (display) display.textContent = $(id).value;
+  }
+  const sx = val('sx'), sy = val('sy'), tx = val('tx'), ty = val('ty');
+  $('src-node').setAttribute('transform', `translate(${sx - 160}, ${sy - 30})`);
+  $('tgt-node').setAttribute('transform', `translate(${tx}, ${ty - 30})`);
+  const paths = $('paths');
+  paths.innerHTML = '';
+  const colors = { A: '#f87171', B: '#facc15', C: '#4ade80', D: '#a78bfa' };
+  if (visible.A) {
+    const turnR = val('a-turnR'), spreadBase = val('a-spreadBase'), vOffBase = val('a-vOffBase'), vOffMin = val('a-vOffMin');
+    const gap = Math.abs(tx - sx);
+    const spread = Math.max(turnR, gap * spreadBase + turnR);
+    const vOff = Math.abs(ty - sy) * vOffBase + vOffMin;
+    const midX = (sx + tx) / 2;
+    const midY = (sy + ty) / 2;
+    const loopY = sy <= ty ? midY - vOff : midY + vOff;
+    addPath(paths, `M ${sx} ${sy} C ${sx + turnR} ${sy}, ${sx + spread} ${loopY}, ${midX} ${loopY} C ${tx - spread} ${loopY}, ${tx - turnR} ${ty}, ${tx} ${ty}`, colors.A);
+  }
+  if (visible.B) {
+    const turnR = val('b-turnR'), loopMinY = val('b-loopMinY'), vScale = val('b-vScale');
+    const gap = Math.abs(tx - sx);
+    const vDist = Math.abs(ty - sy);
+    const vOff = Math.max(loopMinY, vDist * vScale + gap * 0.2);
+    const midX = (sx + tx) / 2;
+    const minEndY = Math.min(sy, ty);
+    const loopY = minEndY - vOff;
+    addPath(paths, `M ${sx} ${sy} C ${sx + turnR} ${sy}, ${midX + turnR} ${loopY}, ${midX} ${loopY} C ${midX - turnR} ${loopY}, ${tx - turnR} ${ty}, ${tx} ${ty}`, colors.B);
+  }
+  if (visible.C) {
+    const padX = val('c-padX'), padY = val('c-padY'), r = val('c-cornerR');
+    const rightX = Math.max(sx, tx) + padX;
+    const topY = Math.min(sy, ty) - padY;
+    const cr = Math.min(r, (rightX - sx) / 2, Math.abs(sy - topY) / 2, Math.abs(rightX - tx) / 2, Math.abs(ty - topY) / 2);
+    const d = [
+      `M ${sx} ${sy}`,
+      `L ${rightX - cr} ${sy}`,
+      `Q ${rightX} ${sy}, ${rightX} ${sy + (topY < sy ? -cr : cr)}`,
+      `L ${rightX} ${topY + (topY < sy ? cr : -cr)}`,
+      `Q ${rightX} ${topY}, ${rightX - cr} ${topY}`,
+      `L ${tx - padX + cr} ${topY}`,
+      `Q ${tx - padX} ${topY}, ${tx - padX} ${topY + cr}`,
+      `L ${tx - padX} ${ty - (topY < ty ? cr : -cr)}`,
+      `Q ${tx - padX} ${ty}, ${tx - padX + cr} ${ty}`,
+      `L ${tx} ${ty}`,
+    ].join(' ');
+    addPath(paths, d, colors.C);
+  }
+  if (visible.D) {
+    const hSpread = val('d-hSpread'), vMin = val('d-vMin'), vGapScale = val('d-vGapScale');
+    const gap = Math.abs(tx - sx);
+    const vOff = Math.max(vMin, Math.abs(ty - sy) * vGapScale + gap * 0.15);
+    const loopY = Math.min(sy, ty) - vOff;
+    addPath(paths, `M ${sx} ${sy} C ${sx + hSpread} ${loopY}, ${tx - hSpread} ${loopY}, ${tx} ${ty}`, colors.D);
+  }
+}
+function addPath(parent, d, color) {
+  const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  p.setAttribute('d', d);
+  p.setAttribute('fill', 'none');
+  p.setAttribute('stroke', color);
+  p.setAttribute('stroke-width', '2');
+  p.setAttribute('stroke-opacity', '0.8');
+  const m = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+  const id = 'arrow-' + color.replace('#', '');
+  m.setAttribute('id', id);
+  m.setAttribute('markerWidth', '8');
+  m.setAttribute('markerHeight', '6');
+  m.setAttribute('refX', '8');
+  m.setAttribute('refY', '3');
+  m.setAttribute('orient', 'auto');
+  m.innerHTML = `<polygon points="0 0, 8 3, 0 6" fill="${color}" opacity="0.8"/>`;
+  parent.appendChild(m);
+  p.setAttribute('marker-end', `url(#${id})`);
+  parent.appendChild(p);
+}
+function pickWinner(style) {
+  let config = {};
+  switch (style) {
+    case 'A': config = { style: 'two-segment', turnR: val('a-turnR'), spreadBase: val('a-spreadBase'), vOffBase: val('a-vOffBase'), vOffMin: val('a-vOffMin') }; break;
+    case 'B': config = { style: 'wide-arc',    turnR: val('b-turnR'), loopMinY: val('b-loopMinY'), vScale: val('b-vScale') }; break;
+    case 'C': config = { style: 'rounded-rect', padX: val('c-padX'), padY: val('c-padY'), cornerR: val('c-cornerR') }; break;
+    case 'D': config = { style: 'smooth-cubic', hSpread: val('d-hSpread'), vMin: val('d-vMin'), vGapScale: val('d-vGapScale') }; break;
+  }
+  const json = JSON.stringify(config, null, 2);
+  $('json-out').textContent = json;
+  navigator.clipboard.writeText(json).catch(() => {});
+  console.log('Winner:', style, config);
+}
+for (const id of sliderIds) $(id).addEventListener('input', update);
+update();
+</script>
+</body>
+</html>

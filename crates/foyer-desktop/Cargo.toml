@@ -1,0 +1,28 @@
+[package]
+name = "foyer-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Foyer Studio desktop shell — native window with system WebView. Host or client mode."
+
+[[bin]]
+name = "foyer-desktop"
+path = "src/main.rs"
+
+[dependencies]
+foyer-server.workspace = true
+foyer-backend-stub.workspace = true
+foyer-backend-host.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Native window + WebView primitives. tao provides window/event loop; wry provides
+# the system WebView wrapper (webkit2gtk on Linux, WebView2 on Windows, WKWebView
+# on macOS). Tauri is built on these same two crates — we skip the Tauri layer
+# to keep the frontend free of its asset pipeline, per our no-bundler stance.
+tao = "0.30"
+wry = "0.45"

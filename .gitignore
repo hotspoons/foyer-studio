@@ -1,0 +1,47 @@
+/target
+Cargo.lock.bak
+*.swp
+.DS_Store
+/web/styles/tw.build.css
+/.bin/
+
+# Playwright UI-test artifacts (specs themselves are tracked).
+/tests-ui/node_modules
+/tests-ui/report
+/tests-ui/test-results
+# Stray Playwright artifact: `.last-run.json` lands in cwd when
+# `bunx playwright test` runs outside `tests-ui/`.
+/test-results
+
+# Core dumps — sometimes a crashed hardour / foyer / shim dumps into the repo root.
+/core
+core.*
+*.core
+vgcore.*
+
+# Local DAW sessions, scratch projects, recordings. Drop downloaded Ardour
+# sessions here — the whole dir is untracked so session audio / binaries
+# never land in git. Point foyer's launcher.jail at this dir (or its
+# parent) to have the project picker see them.
+/sessions/
+
+# Out-of-tree shim build artifacts — CMake puts everything under
+# cmake-build/. Never commit build outputs; use `just shim-cmake-build`
+# to regenerate.
+/shims/*/cmake-build/
+/shims/*/build/
+
+/tmp
+/dist
+
+# External dependencies cloned into the repo for a one-checkout
+# workflow (Ardour, future DAW source trees). `ext/` replaces the
+# old sibling-workspace layout — see `just ardour clone`.
+/ext/
+
+.claude/*
+
+# Per-developer overrides for `.env`. `.env` itself IS committed (it
+# holds project defaults like ARDOUR_TAG); `.env.local` is for local
+# overrides that shouldn't be shared.
+.env.local
