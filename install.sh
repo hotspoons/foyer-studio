@@ -84,7 +84,21 @@ detect_target() {
     uname_m="$(uname -m)"
     case "$uname_s" in
         Linux)  OS=linux ; SHIM_EXT=so   ; SURFACES_DIR="$HOME/.config/ardour9/surfaces" ;;
-        Darwin) OS=macos ; SHIM_EXT=dylib; SURFACES_DIR="$HOME/Library/Preferences/Ardour9/surfaces" ;;
+        Darwin)
+            OS=macos
+            SHIM_EXT=dylib
+            # Install into Ardour's per-user surfaces dir. Ardour
+            # scans this path on startup alongside its bundled
+            # `Contents/lib/surfaces/`, and an ad-hoc-signed shim
+            # loads cleanly from here as long as its load commands
+            # resolve. Don't install into the app bundle — adding a
+            # new dylib next to Ardour's Developer-ID-signed +
+            # notarized libs leaves the bundle in an inconsistent
+            # state that the kernel rejects at fault-in time on
+            # macOS 26 (Tahoe), even when bundle-level codesign
+            # --verify passes.
+            SURFACES_DIR="$HOME/Library/Preferences/Ardour9/surfaces"
+            ;;
         *) die "unsupported OS: $uname_s" ;;
     esac
     case "$uname_m" in
@@ -170,6 +184,54 @@ download_and_extract_ci() {
     echo "$bundle"
 }
 
+# Defensive in-place rewrite for older CI artifacts that didn't
+# rewrite Homebrew paths. Modern CI (post-2026-04-28) ships a shim
+# whose load commands already resolve via @executable_path, so this
+# is a no-op on a current build. The script still runs unconditionally
+# so users on `--latest-ci` against an old run get fixed up too.
+#
+# Mirrors the rewrite logic in .github/workflows/ci.yml — keep them in
+# sync. Categories:
+#
+#   * /Users/runner/... → @executable_path/../lib/<basename>
+#   * /opt/homebrew/.../lib<x>.dylib → @executable_path/../lib/<basename>
+#     (Ardour bundles compatible glibmm/sigc/glib/gobject/intl)
+#   * /opt/homebrew/.../libxml2.16.dylib → @executable_path/../lib/
+#     libharfbuzz.0.dylib (vestigial dep — `nm -u` shows no libxml2
+#     symbols are referenced, but CMake's PkgConfig::LIBXML2 link
+#     adds an LC_LOAD_DYLIB anyway. Ardour bundles libxml2.2 which
+#     dyld rejects on compat-version grounds. libharfbuzz has a high
+#     enough current_version to satisfy the check; nothing in the
+#     shim ever calls into it.)
+macos_fixup_shim() {
+    local shim="$1"
+    local fixed=0
+    local dep name
+    while IFS= read -r dep; do
+        name=$(basename "$dep")
+        if [ "$name" = "libxml2.16.dylib" ]; then
+            install_name_tool -change "$dep" \
+                "@executable_path/../lib/libharfbuzz.0.dylib" "$shim" 2>/dev/null
+        else
+            install_name_tool -change "$dep" \
+                "@executable_path/../lib/$name" "$shim" 2>/dev/null
+        fi
+        fixed=$((fixed + 1))
+    done < <(otool -L "$shim" 2>/dev/null | awk '/^\t(\/Users\/runner|\/opt\/homebrew)/ {print $1}')
+    if [ "$fixed" -gt 0 ]; then
+        note "rewrote $fixed runner-only path(s) in shim load commands"
+    fi
+    # install_name_tool invalidates whatever signature was on the
+    # file. Ad-hoc resign so Apple Silicon dyld accepts it.
+    xattr -dr com.apple.quarantine "$shim" 2>/dev/null || true
+    if codesign --force --sign - "$shim" 2>/dev/null; then
+        note "ad-hoc signed $shim"
+    else
+        note "WARN: codesign failed on $shim — Ardour may refuse to load it."
+        note "  retry manually: codesign --force --sign - $shim"
+    fi
+}
+
 install_files() {
     local source_dir="$1"
     local foyer_src="$source_dir/foyer"
@@ -186,6 +248,9 @@ install_files() {
         mkdir -p "$SURFACES_DIR"
         install -m 0644 "$shim_src" "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT"
         note "installed $SURFACES_DIR/libfoyer_shim.$SHIM_EXT"
+        if [ "$OS" = "macos" ]; then
+            macos_fixup_shim "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT"
+        fi
     else
         note "bundle has no shim for $OS/$ARCH — installing foyer only."
         note "  to use foyer with a local Ardour, build the shim from source:"
@@ -197,9 +262,6 @@ install_files() {
     # exec the foyer binary on first launch.
     if [ "$OS" = "macos" ]; then
         xattr -dr com.apple.quarantine "$BIN_DIR/foyer" 2>/dev/null || true
-        if [ -f "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT" ]; then
-            xattr -dr com.apple.quarantine "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT" 2>/dev/null || true
-        fi
     fi
 
 }
@@ -322,25 +384,19 @@ Then start Ardour and enable "Foyer Studio Shim" under
   Edit → Preferences → Control Surfaces.
 EOF
 
-    # macOS-specific: stock Ardour9.app is signed with the hardened
-    # runtime, which by default refuses to load any dylib not signed
-    # by Ardour's identity. Our CI shim is unsigned, so it gets
-    # blocked silently — the surface never appears in Ardour's
-    # Control Surfaces list. Re-signing Ardour ad-hoc strips the
-    # hardened runtime + library validation. (Rich's bug,
-    # 2026-04-28: shim landed on disk but didn't show up in the list.)
+    # macOS: shim lives in the per-user surfaces dir, ad-hoc signed
+    # with @executable_path-relative load commands. Ardour scans this
+    # dir at startup, so a quit + relaunch is the only thing needed
+    # to pick up a freshly-installed shim.
     if [ "$OS" = "macos" ]; then
         cat <<EOF
 
-If "Foyer Studio Shim" doesn't appear in the Control Surfaces list,
-macOS library validation is blocking the dylib. Quit Ardour fully
-(⌘Q), then re-sign it ad-hoc to drop the hardened runtime:
-
-  sudo codesign --force --deep --sign - /Applications/Ardour9.app
-
-Relaunch Ardour and check the list again. Diagnostics:
+If Ardour was running during install, fully quit it (⌘Q) and
+relaunch — it scans surfaces/ once at startup. Diagnostics:
   ls -la "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT"
-  tail -50 "\$HOME/Library/Preferences/Ardour9/stderr.log"
+  otool -L  "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT" | head
+  codesign -dv "$SURFACES_DIR/libfoyer_shim.$SHIM_EXT" 2>&1 | grep -E "Signature|flags"
+  tail -50 "\$HOME/Library/Preferences/Ardour9/stdout.log"
 EOF
     fi
 
@@ -370,6 +426,19 @@ do_uninstall() {
     if [ -f "$shim_path" ]; then
         rm -f "$shim_path"
         note "removed $shim_path"
+    fi
+
+    # Older installers (pre-2026-04-28) dropped the shim into the
+    # Ardour app bundle directly. Clean that up too if it's still
+    # there. Needs sudo.
+    if [ "$OS" = "macos" ]; then
+        local bundle_shim="/Applications/Ardour9.app/Contents/lib/surfaces/libfoyer_shim.$SHIM_EXT"
+        if [ -f "$bundle_shim" ]; then
+            sudo rm -f "$bundle_shim"
+            note "removed $bundle_shim (legacy bundle install)"
+            note "  Ardour9's main executable signature may be stale — re-sign with:"
+            note "  sudo codesign --force --sign - /Applications/Ardour9.app/Contents/MacOS/Ardour9"
+        fi
     fi
     if [ -f "$foyer_path" ]; then
         rm -f "$foyer_path"

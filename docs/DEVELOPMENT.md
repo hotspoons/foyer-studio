@@ -39,6 +39,44 @@ expose audio devices, so ingress/egress rides the browser's
 `getUserMedia` and `AudioContext` paths — sufficient for remote
 collaboration but not for driving studio gear.
 
+## Pinning the Ardour version the shim builds against
+
+The shim links against a specific Ardour tag, branch, or commit —
+ABI changes between Ardour releases would break the shim against a
+user's installed Ardour. The pin lives in [.env](../.env):
+
+```ini
+ARDOUR_TAG=9.2
+```
+
+Tags are `major.minor` only (`9.2`, not `9.2.0`); branches
+(`master`) and full commit SHAs are also accepted. Bump this when
+you need to develop against a post-tag API; pin back to a release
+tag before shipping.
+
+The pin is consumed in three places, all driven by the same env
+var, so a single edit propagates:
+
+- **`scripts/dev/ardour.sh`** — clones / checks out
+  `ext/ardour@$ARDOUR_TAG`. After bumping, re-clone with
+  `rm -rf ext/ardour && ./scripts/dev/ardour.sh clone` (or just
+  delete `ext/ardour` and let the next `just run` re-clone).
+- **`.github/workflows/ci.yml`** — the `Load .env` step writes
+  `ARDOUR_TAG` into `$GITHUB_ENV`; cache keys include it, so
+  bumping invalidates the runner-side Ardour build cache cleanly.
+- **`shims/ardour/CMakeLists.txt`** — reads headers + built libs
+  out of `ext/ardour/{libs,build}` regardless of which ref is
+  checked out.
+
+Per-developer overrides: drop `ARDOUR_TAG=master` (or whatever) into
+`.env.local` — gitignored, takes precedence over `.env`. Or just
+export the var in your shell — process-env wins over both files.
+
+For a one-off CI run against a different ref, use
+**Actions → ci → Run workflow → ardour\_tag** in the GitHub UI;
+the matrix uses the `workflow_dispatch` input over `.env` for that
+run only.
+
 ## Running
 
 ```bash
