@@ -367,6 +367,81 @@ jobs:
             -DFOYER_ARDOUR_SOURCE="$PWD/ext/ardour"
           cmake --build shims/ardour/cmake-build -j
 
+      # Rewrite the shim's load commands so it resolves against the
+      # user's Ardour bundle at runtime, then ad-hoc sign. Three
+      # categories of absolute path get baked in by the linker on
+      # macos-14:
+      #
+      #   1. `/Users/runner/work/foyer-studio/foyer-studio/ext/
+      #      ardour/build/libs/.../lib<x>.dylib` — Ardour libraries
+      #      we built earlier in this job. Ardour's bundle ships the
+      #      same libs at `Contents/lib/lib<x>.dylib`, so rewriting
+      #      to `@executable_path/../lib/<basename>` resolves against
+      #      whatever Ardour binary dlopens us.
+      #
+      #   2. `/opt/homebrew/opt/<formula>/lib/lib<x>.dylib` — glibmm,
+      #      sigc++, glib, gobject, libintl. Ardour bundles compatible
+      #      copies of all of these at `Contents/lib/`, so the same
+      #      `@executable_path/../lib/<basename>` rewrite works.
+      #
+      #   3. `/opt/homebrew/opt/libxml2/lib/libxml2.16.dylib` — the
+      #      special case. CMakeLists.txt links `PkgConfig::LIBXML2`,
+      #      which adds an LC_LOAD_DYLIB entry, but the shim sources
+      #      only use libxml2 through PBD's XMLNode wrappers — `nm
+      #      -u libfoyer_shim.dylib | grep ^_xml` is empty. So the
+      #      load command exists but no symbols are actually
+      #      referenced against it. We can't drop the LC easily
+      #      post-build, and Ardour ships `libxml2.2.dylib` (compat
+      #      version 12), which dyld would reject against our compat
+      #      18.0.0 requirement. So we redirect to a bundled lib with
+      #      a high-enough current version (libharfbuzz.0, current
+      #      20601). dyld maps it; nothing in the shim ever calls
+      #      into it. Long-term fix is to drop the LIBXML2 link from
+      #      CMakeLists.
+      #
+      # install_name_tool invalidates whatever signature was on the
+      # file, so we ad-hoc resign last. This is what lets the shim
+      # land in `~/Library/Preferences/Ardour9/surfaces/` and load
+      # cleanly without modifying the (notarized) Ardour bundle.
+      #
+      # Rich's CI bug, 2026-04-28: shim built clean, was rewritten
+      # for `/Users/runner/...`, but Homebrew paths leaked through —
+      # dlopen failed at runtime with `Library not loaded:
+      # /opt/homebrew/opt/glibmm@2.66/lib/libglibmm-2.4.1.dylib`.
+      - name: Fix dylib paths + ad-hoc sign (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          shim=shims/ardour/cmake-build/libfoyer_shim.${{ matrix.shim_ext }}
+          echo "before:"
+          otool -L "$shim"
+          # Categories 1+2: rewrite every absolute /Users/runner/... or
+          # /opt/homebrew/... entry to @executable_path/../lib/<basename>.
+          otool -L "$shim" \
+            | awk '/^\t(\/Users\/runner|\/opt\/homebrew)/ {print $1}' \
+            | while read -r dep; do
+                name=$(basename "$dep")
+                # Category 3: libxml2.16 has no matching counterpart in
+                # Ardour's bundle. Redirect to libharfbuzz.0 (current
+                # version 20601 ≥ our compat 18). The shim doesn't
+                # actually reference any libxml2 symbols.
+                if [ "$name" = "libxml2.16.dylib" ]; then
+                  install_name_tool -change "$dep" \
+                    "@executable_path/../lib/libharfbuzz.0.dylib" "$shim"
+                else
+                  install_name_tool -change "$dep" \
+                    "@executable_path/../lib/$name" "$shim"
+                fi
+              done
+          echo "after:"
+          otool -L "$shim"
+          # Sanity: bail if anything still points at a runner-only path.
+          if otool -L "$shim" | grep -E "/Users/runner|/opt/homebrew"; then
+            echo "::error::libfoyer_shim still has runner-only paths in load commands"
+            exit 1
+          fi
+          codesign --force --sign - "$shim"
+          codesign -dv "$shim" 2>&1 | grep -E "Signature|flags"
+
       - name: Upload shim
         uses: actions/upload-artifact@v4
         with:
