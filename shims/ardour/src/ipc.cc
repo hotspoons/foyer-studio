@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -221,6 +222,31 @@ IpcServer::io_loop ()
 			PBD::error << "foyer_shim: accept(): " << strerror (errno) << endmsg;
 			break;
 		}
+
+		// Defense-in-depth: even though the socket lives in a 0700 dir
+		// under $XDG_RUNTIME_DIR, verify the connecting peer is the
+		// same uid as us. SO_PEERCRED is Linux-specific; on platforms
+		// without it we skip the check and rely on the directory
+		// permissions alone.
+#ifdef SO_PEERCRED
+		{
+			struct ucred cred {};
+			socklen_t cred_len = sizeof (cred);
+			if (::getsockopt (cfd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) < 0) {
+				PBD::error << "foyer_shim: SO_PEERCRED failed: " << strerror (errno)
+				           << " — refusing connection" << endmsg;
+				::close (cfd);
+				continue;
+			}
+			if (cred.uid != ::getuid ()) {
+				PBD::error << "foyer_shim: peer uid " << cred.uid
+				           << " != ours " << ::getuid () << " — refusing connection"
+				           << endmsg;
+				::close (cfd);
+				continue;
+			}
+		}
+#endif
 		_fd_client = cfd;
 
 		while (_running.load ()) {
@@ -266,8 +292,42 @@ IpcServer::send (foyer_ipc::FrameKind kind, const std::uint8_t* data, std::size_
 	header[4] = static_cast<std::uint8_t> (n & 0xff);
 
 	std::lock_guard<std::mutex> lock (_write_mu);
-	if (::write (cfd, header, sizeof (header)) != ssize_t (sizeof (header))) return;
-	if (len > 0 && ::write (cfd, data, len) != ssize_t (len)) return;
+
+	// writev with a partial-write loop. The previous version did two
+	// separate write() calls and returned silently if the second one
+	// short-wrote — a half-frame on the wire is worse than a dropped
+	// one because the peer's framer locks onto the wrong byte. If we
+	// can't write the whole frame, close the connection so the peer
+	// reconnects and resyncs.
+	struct iovec iov[2];
+	iov[0].iov_base = header;
+	iov[0].iov_len  = sizeof (header);
+	iov[1].iov_base = const_cast<std::uint8_t*> (data);
+	iov[1].iov_len  = len;
+	int iovcnt = (len > 0) ? 2 : 1;
+	int idx = 0;
+
+	while (idx < iovcnt) {
+		ssize_t w = ::writev (cfd, &iov[idx], iovcnt - idx);
+		if (w < 0) {
+			if (errno == EINTR) continue;
+			PBD::error << "foyer_shim: writev() failed: " << strerror (errno)
+			           << " — closing client" << endmsg;
+			int prev = _fd_client.exchange (-1);
+			if (prev >= 0) ::close (prev);
+			return;
+		}
+		// Walk the iovec advancing past the bytes we've drained.
+		std::size_t consumed = static_cast<std::size_t> (w);
+		while (idx < iovcnt && consumed >= iov[idx].iov_len) {
+			consumed -= iov[idx].iov_len;
+			++idx;
+		}
+		if (idx < iovcnt) {
+			iov[idx].iov_base = static_cast<std::uint8_t*> (iov[idx].iov_base) + consumed;
+			iov[idx].iov_len -= consumed;
+		}
+	}
 }
 
 } // namespace ArdourSurface

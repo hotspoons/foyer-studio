@@ -13,6 +13,9 @@
 //!   snapshot instead.
 //! - `origin=<string>` — free-form identifier attached to messages originated by this
 //!   client; shows up in `control.update` echoes so clients can detect self-echoes.
+//!   Honored only on LAN connections. On tunnel connections the server overrides
+//!   it with the per-connection `peer_id` so a guest can't spoof another peer's
+//!   origin label.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -227,6 +230,18 @@ async fn handle(
         is_tunnel: auth.is_tunnel(),
         role_id: connection_role_id.clone(),
         connected_at: now_ms(),
+    };
+
+    // Origin label propagated into every ControlUpdate this connection
+    // emits. On LAN we trust the user-supplied `?origin=` query param;
+    // on tunnel connections we replace it with the server-minted
+    // `peer_id` so a guest can't pretend to be the host (or another
+    // guest) in the audit trail. Self-echo detection still works
+    // because every client knows its own peer_id from the greeting.
+    let origin = if auth.is_tunnel() {
+        Some(format!("peer:{peer_id}"))
+    } else {
+        origin
     };
 
     {

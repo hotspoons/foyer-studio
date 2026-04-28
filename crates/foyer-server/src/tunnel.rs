@@ -230,7 +230,6 @@ pub async fn revoke_token(state: &AppState, id: &foyer_schema::EntityId) -> anyh
 /// Validate a tunnel URL token against the manifest. The token is
 /// `base64url(sha256_bytes(...))`; decoding gives us the hash directly,
 /// no knowledge of the original credentials needed.
-#[allow(dead_code)]
 pub async fn verify_token(state: &AppState, token: &str) -> Option<TunnelConnection> {
     let hash = decode_token_to_hash(token)?;
     let m = state.tunnel_manifest.read().await;
