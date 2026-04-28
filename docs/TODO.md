@@ -362,6 +362,59 @@ combination of `update_region` + `duplicate_region_range` +
     on the original — the slice REPLACES the region). One menu
     entry; reuses the existing slice-capture math.
 
+## Ingress drain — port off MasterTap dependency
+
+Today the browser-mic ingress soft-ports (`foyer-ingress-browser-*`)
+only deliver samples to the engine when `ShimInputPort::tick_all_rt()`
+ticks each cycle, and that tick is invoked **only** from inside
+`MasterTap::run()` / `silence()`
+([master_tap.cc:151](../shims/ardour/src/master_tap.cc#L151),
+[master_tap.cc:194](../shims/ardour/src/master_tap.cc#L194)). The
+MasterTap is a Processor that gets installed on `session.master_out()`
+when an `audio_stream_open` egress (browser monitoring of master) lands
+([dispatch.cc:3140](../shims/ardour/src/dispatch.cc#L3140)).
+
+Two failure modes fall out of this coupling:
+1. Sessions with **no master bus** can't attach a MasterTap at all →
+   ingress port reads silence → recordings come out as zero-filled WAVs.
+   (Hit live on the Mac, 2026-04-28: a brand-new test3 session, no
+   master, browser mic armed, recorded 4 seconds of all-zero float32.)
+2. Sessions WITH a master bus but **no active master listener** (e.g.
+   local user with `foyer.listen.master` pref unset → controller's
+   auto-on rule resolves false for `is_local=true`, so no
+   `audio_stream_open` is ever sent) also silently drop ingress.
+
+**Stop-gap shipped 2026-04-28:** auto-create a stereo master in
+`signal_bridge.cc::on_session_loaded` when `master_out()` is null. Fixes
+case (1). Case (2) still requires the user to click Listen in the mixer.
+
+- [ ] Decouple `ShimInputPort::tick_all_rt()` from MasterTap.
+  - Option A (cheapest): install a tiny always-on `IngressTickProcessor`
+    on `master_out()` at session load. Same shape as MasterTap but no
+    egress copy, no drain thread, no IPC; `run()` / `silence()` only
+    call `tick_all_rt(nframes)`. MasterTap then loses its
+    `tick_all_rt` calls and just does the egress copy.
+  - Option B (cleanest): hook `AudioEngine::process_callback` (or
+    `Session::process()`) directly so the ingress tick runs every cycle
+    regardless of route topology. Sidesteps the master dependency
+    entirely, but the engine-level hook isn't a documented control-
+    surface API — needs care around ProcessThread lifetime + the
+    weak_ptr cache.
+  - Option C: install the IngressTickProcessor on the Click route
+    (always present in every session) instead of the master. Falls
+    back gracefully when there's no master AND no other route.
+  - Recommendation: ship Option A, then revisit Option B when the
+    AudioEngine hook lifecycle is better understood. Option A also
+    unlocks deleting the auto-create-master stop-gap above — sessions
+    without a master would still capture mic audio correctly.
+- [ ] Remove the `add_master_bus` call from `on_session_loaded` once
+  Option A/B lands. Master is then an opt-in property, not a
+  prerequisite for ingress.
+- [ ] Add a regression test: stub backend session with no Master bus +
+  an active ingress stream should still deliver non-zero samples to
+  the connected track input. Currently un-coverable because the
+  MasterTap path is shim-only.
+
 ## Bugs
 
 - [ ] Time marker (see head) doesn't align with MIDI, and it doesn't align with audio

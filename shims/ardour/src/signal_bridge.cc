@@ -18,6 +18,7 @@ static constexpr bool LOG_TRANSPORT_TICK = false;
 #include <cstdlib>
 #include <iostream>
 
+#include "ardour/chan_count.h"
 #include "ardour/monitor_control.h"
 #include "ardour/playlist.h"
 #include "ardour/plugin.h"
@@ -322,6 +323,37 @@ SignalBridge::on_session_loaded ()
 	// empty until some other event happens to re-trigger a snapshot.
 	auto bytes = msgpack_out::encode_patch_reload ();
 	_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+
+	// Auto-create a stereo master bus if the loaded session is missing
+	// one. Ardour's New Session dialog lets you skip the master bus
+	// page and end up with a session whose only Route is the audio
+	// track you added — silent recordings result because the shim's
+	// ingress soft-port drain runs from MasterTap (a Processor on the
+	// master_out route), and no master means no tap can attach. Until
+	// the ingress drain is decoupled from MasterTap (see TODO.md),
+	// auto-add the master so existing browser-mic recording flows
+	// keep working without forcing the user to recreate the session.
+	//
+	// Defer to call_slot: SessionLoaded fires inside `Session::session_loaded()`
+	// which is mid-ctor — `add_master_bus` mutates the route list and
+	// locks `process_lock()`, neither of which is safe to do during
+	// the session's own initialization. The event-loop hop runs us
+	// after the ctor returns, when the session is fully stable.
+	if (!session.master_out ()) {
+		PBD::warning << "foyer_shim: session has no master_out — scheduling auto-create" << endmsg;
+		FoyerShim* shim = &_shim;
+		_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
+			Session& s = shim->session ();
+			if (s.master_out ()) return;
+			const int rv = s.add_master_bus (
+			    ARDOUR::ChanCount (ARDOUR::DataType::AUDIO, 2));
+			if (rv != 0) {
+				PBD::warning << "foyer_shim: auto add_master_bus failed rv=" << rv << endmsg;
+				return;
+			}
+			PBD::warning << "foyer_shim: auto-created stereo master bus" << endmsg;
+		});
+	}
 }
 
 void
