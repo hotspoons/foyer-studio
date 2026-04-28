@@ -32,6 +32,7 @@ static constexpr bool LOG_TRANSPORT_TICK = false;
 #include "pbd/controllable.h"
 #include "pbd/stacktrace.h"
 
+#include "ingress_tick.h"
 #include "ipc.h"
 #include "msgpack_out.h"
 #include "schema_map.h"
@@ -324,34 +325,67 @@ SignalBridge::on_session_loaded ()
 	auto bytes = msgpack_out::encode_patch_reload ();
 	_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 
-	// Auto-create a stereo master bus if the loaded session is missing
-	// one. Ardour's New Session dialog lets you skip the master bus
-	// page and end up with a session whose only Route is the audio
-	// track you added — silent recordings result because the shim's
-	// ingress soft-port drain runs from MasterTap (a Processor on the
-	// master_out route), and no master means no tap can attach. Until
-	// the ingress drain is decoupled from MasterTap (see TODO.md),
-	// auto-add the master so existing browser-mic recording flows
-	// keep working without forcing the user to recreate the session.
+	// Make sure the ingress soft-ports actually drain every cycle.
 	//
-	// Defer to call_slot: SessionLoaded fires inside `Session::session_loaded()`
-	// which is mid-ctor — `add_master_bus` mutates the route list and
-	// locks `process_lock()`, neither of which is safe to do during
-	// the session's own initialization. The event-loop hop runs us
-	// after the ctor returns, when the session is fully stable.
-	if (!session.master_out ()) {
-		PBD::warning << "foyer_shim: session has no master_out — scheduling auto-create" << endmsg;
+	// Two stacked problems used to bite recording from the browser mic:
+	//   1. If the session has NO master bus, no Processor host exists
+	//      for any of our processors — auto-add a stereo master.
+	//   2. The drain itself (`ShimInputPort::tick_all_rt`) used to be
+	//      a side effect of `MasterTap::run()`, which only attaches
+	//      when the user clicks Listen in the mixer. Without that,
+	//      the ingress port reads zeros and recordings come out
+	//      silent. Install a tiny always-on `IngressTickProcessor` so
+	//      the drain runs every audio cycle regardless of egress.
+	//
+	// Both steps are deferred to call_slot because SessionLoaded
+	// fires inside `Session::session_loaded()` (mid-ctor):
+	// `add_master_bus` and `Route::add_processor` both mutate the
+	// route list and lock `process_lock()`, neither of which is safe
+	// during the session's own initialization. call_slot hops us to
+	// the event loop, which runs after the ctor returns when the
+	// session is fully stable. The two steps share one lambda so
+	// they're guaranteed sequential — the install needs the master
+	// the auto-create just made.
+	{
 		FoyerShim* shim = &_shim;
-		_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
+		SignalBridge* self = this;
+		_shim.call_slot (MISSING_INVALIDATOR, [shim, self] () {
 			Session& s = shim->session ();
-			if (s.master_out ()) return;
-			const int rv = s.add_master_bus (
-			    ARDOUR::ChanCount (ARDOUR::DataType::AUDIO, 2));
-			if (rv != 0) {
-				PBD::warning << "foyer_shim: auto add_master_bus failed rv=" << rv << endmsg;
+			if (!s.master_out ()) {
+				const int rv = s.add_master_bus (
+				    ARDOUR::ChanCount (ARDOUR::DataType::AUDIO, 2));
+				if (rv != 0) {
+					PBD::warning << "foyer_shim: auto add_master_bus failed rv=" << rv << endmsg;
+					return;
+				}
+				PBD::warning << "foyer_shim: auto-created stereo master bus" << endmsg;
+			}
+			auto master = s.master_out ();
+			if (!master) {
+				PBD::warning << "foyer_shim: ingress tick install: no master_out (post-create)" << endmsg;
 				return;
 			}
-			PBD::warning << "foyer_shim: auto-created stereo master bus" << endmsg;
+			// Drop any prior tick processor from a previous load.
+			// The Route's _processors list keeps its own shared_ptr,
+			// so resetting ours here doesn't yank the live processor
+			// out from under Ardour — it just releases our hold.
+			self->_ingress_tick.reset ();
+			auto tick = std::make_shared<IngressTickProcessor> (s);
+			ARDOUR::Route::ProcessorStreams err;
+			const int add_rc = master->add_processor (
+			    tick, ARDOUR::PostFader, &err, true /* activation */);
+			if (add_rc != 0) {
+				PBD::warning << "foyer_shim: ingress tick add_processor failed rc=" << add_rc
+				             << " err.index=" << err.index << endmsg;
+				return;
+			}
+			// `add_processor` allows activation but doesn't itself
+			// flip `_pending_active`; the base Processor starts
+			// inactive and the process loop skips run() / silence()
+			// until activate() is called. Same dance MasterTap does.
+			tick->activate ();
+			self->_ingress_tick = tick;
+			PBD::warning << "foyer_shim: ingress tick processor installed on master_out" << endmsg;
 		});
 	}
 }

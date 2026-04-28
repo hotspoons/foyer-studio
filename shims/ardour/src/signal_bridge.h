@@ -26,6 +26,7 @@ typedef std::list<std::shared_ptr<Route>> RouteList;
 namespace ArdourSurface {
 
 class FoyerShim;
+class IngressTickProcessor;
 
 class SignalBridge
 {
@@ -116,6 +117,15 @@ private:
 	// the log on every subsequent route addition. `exchange` gives us
 	// atomic test-and-set in one operation.
 	std::atomic<bool>            _route_added_logged { false };
+
+	// Always-on ingress tick processor. Installed on `master_out()`
+	// at session-load so `ShimInputPort::tick_all_rt` runs every
+	// audio cycle regardless of whether anyone is listening to the
+	// master out (egress). Ardour's processor list keeps its own
+	// shared_ptr; ours just keeps the object alive while the
+	// SignalBridge does, and gets reset on session reload. Touched
+	// only on the event-loop thread (via call_slot).
+	std::shared_ptr<IngressTickProcessor> _ingress_tick;
 
 	void on_route_added (ARDOUR::RouteList&);
 	void on_session_loaded ();

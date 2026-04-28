@@ -207,6 +207,7 @@ add_library(foyer_shim SHARED
   src/schema_map.cc
   src/msgpack_out.cc
   src/master_tap.cc
+  src/ingress_tick.cc
   src/shim_input_port.cc
   src/session_uuid.cc
 )

@@ -20,7 +20,6 @@ static constexpr bool LOG_STEADY_STATE_STATS = false;
 #include "pbd/xml++.h"
 
 #include "ipc.h"
-#include "shim_input_port.h"
 #include "surface.h"
 
 namespace ArdourSurface {
@@ -143,12 +142,12 @@ MasterTap::run (BufferSet& bufs,
 	// profile, swap to an eventfd or atomic counter.
 	_wake_cv.notify_one ();
 
-	// Drive the ingress soft-ports' RT drain. MasterTap is the only
-	// RT hook the shim has (ControlProtocols don't get a per-cycle
-	// callback), so the master bus's process tick doubles as the
-	// system-wide ingress tick. See `shim_input_port.h` for why this
-	// has to run on the RT thread.
-	ShimInputPort::tick_all_rt (nframes);
+	// NOTE: ingress soft-port drain is now driven by
+	// `IngressTickProcessor` (always installed on master_out at
+	// session load), NOT by MasterTap. Calling tick_all_rt here too
+	// would double-drain each port's ring buffer per cycle, causing
+	// underruns and choppy audio. Egress copy (above) is independent
+	// and stays here.
 }
 
 void
@@ -189,9 +188,8 @@ MasterTap::silence (samplecnt_t nframes, samplepos_t /*start_sample*/)
 	}
 	_wake_cv.notify_one ();
 
-	// Same ingress tick as run() — Ardour calls one or the other
-	// every cycle, never both, so the ingress drain must hook both.
-	ShimInputPort::tick_all_rt (static_cast<pframes_t> (nframes));
+	// Ingress drain is owned by `IngressTickProcessor` — see the
+	// matching note in `run()`. Don't tick here.
 }
 
 void

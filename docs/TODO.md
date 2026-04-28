@@ -364,56 +364,45 @@ combination of `update_region` + `duplicate_region_range` +
 
 ## Ingress drain — port off MasterTap dependency
 
-Today the browser-mic ingress soft-ports (`foyer-ingress-browser-*`)
+Background: browser-mic ingress soft-ports (`foyer-ingress-browser-*`)
 only deliver samples to the engine when `ShimInputPort::tick_all_rt()`
-ticks each cycle, and that tick is invoked **only** from inside
-`MasterTap::run()` / `silence()`
-([master_tap.cc:151](../shims/ardour/src/master_tap.cc#L151),
-[master_tap.cc:194](../shims/ardour/src/master_tap.cc#L194)). The
-MasterTap is a Processor that gets installed on `session.master_out()`
-when an `audio_stream_open` egress (browser monitoring of master) lands
-([dispatch.cc:3140](../shims/ardour/src/dispatch.cc#L3140)).
+ticks each audio cycle. That tick used to be a side effect of
+`MasterTap::run()` / `silence()`, which only got installed when the
+user clicked Listen in the mixer (master-bus egress to the browser).
+Net effect: recordings from the browser mic came out silent unless
+someone was *also* monitoring the master out, AND the session had a
+master bus at all.
 
-Two failure modes fall out of this coupling:
-1. Sessions with **no master bus** can't attach a MasterTap at all →
-   ingress port reads silence → recordings come out as zero-filled WAVs.
-   (Hit live on the Mac, 2026-04-28: a brand-new test3 session, no
-   master, browser mic armed, recorded 4 seconds of all-zero float32.)
-2. Sessions WITH a master bus but **no active master listener** (e.g.
-   local user with `foyer.listen.master` pref unset → controller's
-   auto-on rule resolves false for `is_local=true`, so no
-   `audio_stream_open` is ever sent) also silently drop ingress.
-
-**Stop-gap shipped 2026-04-28:** auto-create a stereo master in
-`signal_bridge.cc::on_session_loaded` when `master_out()` is null. Fixes
-case (1). Case (2) still requires the user to click Listen in the mixer.
-
-- [ ] Decouple `ShimInputPort::tick_all_rt()` from MasterTap.
-  - Option A (cheapest): install a tiny always-on `IngressTickProcessor`
-    on `master_out()` at session load. Same shape as MasterTap but no
-    egress copy, no drain thread, no IPC; `run()` / `silence()` only
-    call `tick_all_rt(nframes)`. MasterTap then loses its
-    `tick_all_rt` calls and just does the egress copy.
-  - Option B (cleanest): hook `AudioEngine::process_callback` (or
-    `Session::process()`) directly so the ingress tick runs every cycle
-    regardless of route topology. Sidesteps the master dependency
-    entirely, but the engine-level hook isn't a documented control-
-    surface API — needs care around ProcessThread lifetime + the
-    weak_ptr cache.
-  - Option C: install the IngressTickProcessor on the Click route
-    (always present in every session) instead of the master. Falls
-    back gracefully when there's no master AND no other route.
-  - Recommendation: ship Option A, then revisit Option B when the
-    AudioEngine hook lifecycle is better understood. Option A also
-    unlocks deleting the auto-create-master stop-gap above — sessions
-    without a master would still capture mic audio correctly.
-- [ ] Remove the `add_master_bus` call from `on_session_loaded` once
-  Option A/B lands. Master is then an opt-in property, not a
-  prerequisite for ingress.
-- [ ] Add a regression test: stub backend session with no Master bus +
-  an active ingress stream should still deliver non-zero samples to
-  the connected track input. Currently un-coverable because the
-  MasterTap path is shim-only.
+- [x] **Decouple `tick_all_rt()` from MasterTap (Option A).**
+  Shipped 2026-04-28. New `IngressTickProcessor`
+  ([ingress_tick.h](../shims/ardour/src/ingress_tick.h) /
+  [ingress_tick.cc](../shims/ardour/src/ingress_tick.cc)): a minimal
+  always-on Processor with no egress copy / drain thread / IPC — its
+  `run()` and `silence()` only call `ShimInputPort::tick_all_rt()`.
+  Installed on `master_out()` from
+  [signal_bridge.cc::on_session_loaded](../shims/ardour/src/signal_bridge.cc),
+  bundled in the same `call_slot` lambda that auto-creates the master
+  bus when missing (so the install always finds a master to attach
+  to). MasterTap's `tick_all_rt` calls were stripped to avoid double-
+  draining the ring (would have caused per-cycle underruns); MasterTap
+  now does egress-only.
+- [x] **Auto-create master bus when missing.** Shipped 2026-04-28.
+  Same lambda as the tick install: if `session.master_out()` is null
+  at load, call `add_master_bus(ChanCount(AUDIO, 2))`. Catches the
+  failure mode where a user clicked through Ardour's New Session
+  dialog without enabling the master page.
+- [ ] **Engine-level tick (Option B), eventually.** Hook
+  `AudioEngine::process_callback` (or `Session::process()`) so the
+  ingress drain runs every cycle independent of route topology. Lets
+  us drop the auto-create-master step entirely — sessions without a
+  master would still capture mic audio. Deferred until the engine
+  hook's ProcessThread lifecycle is better understood; today's
+  Option A is correct for every realistic session shape.
+- [ ] **Regression test.** A stub-backend session with an active
+  ingress stream should deliver non-zero samples to the connected
+  track input even with no listener wired. Currently un-coverable in
+  the workspace test suite because the tick path is shim-only;
+  needs an Ardour integration test or a stub-side analog.
 
 ## Bugs
 
