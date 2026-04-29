@@ -33,6 +33,28 @@ axum = { version = "0.7", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls-pemfile = "2"
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+# Project archive endpoints (`/sessions/upload`, `/sessions/export`).
+# tar+gzip handles arbitrary directory trees with Unix metadata
+# preserved (mode bits matter for sample/MIDI files referenced by
+# .ardour XML). zip is supported on the upload path because that's
+# what users get when they download a zip from a cloud bucket; we
+# only ever emit tar.gz on the export path because it's lossless and
+# universally available on the runtime side.
+tar = "0.4"
+flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# zstd: increasingly common as `tar.zst` (Arch packages, modern Linux
+# tooling). Pure-Rust would be ideal but `zstd-rs` is the canonical
+# binding to upstream zstandard and ships with the C source bundled —
+# no system dep needed.
+zstd = "0.13"
+# Streaming XML scrubber for `.ardour` session files. Used post-
+# extract to strip the `<Script>` blocks that Ardour's session
+# loader auto-executes (RCE class) and to validate path-bearing
+# attributes before the project lands in the jail. quick-xml does
+# not expand entities by default, which sidesteps the
+# billion-laughs concern from libxml2's XML_PARSE_HUGE.
+quick-xml = "0.36"
 # M6a audio egress pipeline: libopus bindings + rubato resampler.
 audiopus = { workspace = true }
 rubato = { workspace = true }

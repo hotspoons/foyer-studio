@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+mod archive;
 mod audio;
 mod audio_opus;
 mod audio_ws;
@@ -24,12 +25,14 @@ mod ingress_ws;
 mod jail;
 pub mod orphans;
 mod ring;
+mod session_scrub;
 mod sessions;
 mod tunnel;
 mod tunnel_provider;
 pub(crate) mod ws;
 
 pub use jail::{Jail, JailError};
+pub use session_scrub::{restore_quarantined_xml, ScrubXmlError};
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -650,6 +653,18 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
         .route("/ws/audio/:stream_id", get(audio_ws::upgrade))
         .route("/ws/ingress/:stream_id", get(ingress_ws::upgrade))
         .route("/files/*path", get(files::serve_file))
+        // Project archive surface: upload accepts a zip or tar.gz body
+        // and extracts under the jail; export tar.gz's a project
+        // directory and streams it back. Both gated on jail config +
+        // tunnel auth (LAN connections trusted; mirrors files.rs).
+        // 1 GiB cap matches `archive::MAX_UPLOAD_BYTES` so a misuploaded
+        // multi-gig audio set fails fast at the request layer instead
+        // of OOM'ing during decompression.
+        .route(
+            "/sessions/upload",
+            post(archive::upload).layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)),
+        )
+        .route("/sessions/export", get(archive::export))
         .route("/console", get(console_tail))
         .route("/qr", get(qr_svg))
         // Form-login bridge for tunnel guests who reached the URL

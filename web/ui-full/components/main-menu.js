@@ -344,15 +344,17 @@ export class MainMenu extends LitElement {
       })();
       return;
     }
-    // Export: not wired end-to-end yet. Surface a short toast-style
-    // hint instead of silence so the user knows the verb is known
-    // but the pipeline is still TODO.
+    // Export: save the open session, then download a tar.gz of its
+    // jail-relative folder via `/sessions/export`.
     if (a.id === "session.export") {
-      const toast = document.createElement("div");
-      toast.textContent = "Export isn't wired yet — use Ardour's native Export dialog for now.";
-      toast.style.cssText = "position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--color-surface);border:1px solid var(--color-border);color:var(--color-text);padding:10px 16px;border-radius:6px;z-index:9999;font-family:var(--font-sans);font-size:12px;box-shadow:0 4px 18px rgba(0,0,0,.5)";
-      document.body.appendChild(toast);
-      setTimeout(() => toast.remove(), 3200);
+      import("./project-archive-modal.js").then((m) => m.exportCurrentSession());
+      return;
+    }
+    // Upload: dest-folder picker + archive picker → POST to
+    // `/sessions/upload`. Resulting project is offered for one-click
+    // open from the success card.
+    if (a.id === "session.upload") {
+      import("./project-archive-modal.js").then((m) => m.showUploadModal());
       return;
     }
     window.__foyer?.ws?.send({ type: "invoke_action", id: a.id });

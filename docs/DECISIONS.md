@@ -1997,3 +1997,121 @@ class view because the welcome screen is hard to find." If the
 welcome screen / Session menu is hard to find, fix THAT — don't
 duplicate the picker into a tile slot. The duplication was the
 problem; reach for the canonical surface.
+
+## 43. Project upload trust boundary lives in Rust, not Ardour
+
+**Date:** 2026-04-29
+
+**Context.** Adding a "Upload Project" surface (so a Cloud Run / fly
+deploy can take in-archive sessions from visitors) crossed Ardour's
+session loader with attacker-controlled bytes. An audit of the
+loader found enough RCE / DoS vectors to make "extract the archive,
+hand the dir to Ardour" a non-starter as a default path:
+
+1. `<Script>` blocks in the `.ardour` XML are base64-decoded and
+   handed to Ardour's Lua VM during `Session::set_state()`
+   (`session_state.cc:2391-2407`). Lua has `os.execute` — a 50-line
+   `.ardour` is sufficient for arbitrary command execution as the
+   Ardour user.
+2. Ardour's libarchive call (`file_archive.cc:404`) sets only
+   `ARCHIVE_EXTRACT_TIME` — none of `ARCHIVE_EXTRACT_SECURE_*`. So
+   absolute paths, `..`, and the classic symlink-then-overwrite
+   gambit all flow through.
+3. `<Source name=...>` seeds `_path = _name` in
+   `FileSource::FileSource`, then `find()` joins it onto
+   `source_search_path()` without normalization. A
+   `<Source name="../../../etc/passwd">` is an arbitrary-file-write
+   target when Ardour saves a peakfile.
+4. `<Videotimeline Filename>` is fed into xjadeo's stdin via
+   `SystemExec::write_to_stdin`. A newline injects extra
+   remote-control commands.
+5. `instant.xml`, `*.history`, `*.history.bak` are all parsed with
+   `XML_PARSE_HUGE` — billion-laughs DoS surface, no entity
+   expansion cap.
+6. Plugin loading goes through `PluginManager`'s pre-scanned list,
+   not paths in session XML — so a session can't smuggle a plugin
+   binary through the archive. (We accept residual risk on plugins
+   the operator pre-installs locally; a DAW that can't load plugins
+   isn't a DAW.)
+
+**Decision.** The upload trust boundary lives in
+`crates/foyer-server`, not Ardour. Specifically:
+
+- **Hardened Rust extractor** ([`archive.rs`](../crates/foyer-server/src/archive.rs)).
+  Refuses symlinks/hardlinks/special files; rejects any path with
+  `..`, absolute root, or drive letter; caps at 50 000 entries,
+  4 GiB total uncompressed, 1 GiB on the wire. We never invoke
+  `file_archive.cc`.
+
+- **XML scrubber** ([`session_scrub.rs`](../crates/foyer-server/src/session_scrub.rs)).
+  Walks every `*.ardour` / `*.ardour.bak` after extraction. Uses
+  `quick-xml` (no entity expansion → kills the billion-laughs
+  surface). Quarantines `<Script>`, `<LuaScripts>`,
+  `<Videotimeline>`, `<Videomonitor>`, `<XJSettings>` subtrees by
+  capturing them, base64-encoding, and emitting an inert
+  `<!-- foyer:scrubbed:Tag:base64 -->` comment in their place.
+  Validates path-bearing attributes (rejects the upload outright on
+  any `..` / absolute / drive-letter / NUL hit; this is a strong
+  signal of an exploit, not a usability issue).
+
+- **Risk-prone state files are deleted, not scrubbed.**
+  `instant.xml`, `*.history`, `*.history.bak`. They're regenerated
+  on next save and have no legitimate role in a fresh upload.
+
+- **Atomic install.** Extraction lands in a tempdir alongside the
+  destination; only after extractor + scrubber both succeed does
+  the project move into its final name (numeric-suffix collision
+  resolution). A failed upload never touches the jail.
+
+- **Quarantine, not delete, for `<Script>` etc.** The user's
+  original data is preserved as base64 inside the comment, so a
+  desktop operator can opt back in with
+  `foyer scrub-restore <session.ardour>` (CLI subcommand). The
+  HTTP path never restores — re-introducing scripts from
+  untrusted input would defeat the scrubber.
+
+**Alternatives considered.**
+
+- *Don't accept uploads at all.* Rejected. Cloud Run / shared-
+  desktop deploy flows are real and useful; refusing the surface
+  punts the problem to operators rolling their own sketchy
+  upload paths.
+
+- *Run Ardour in a per-session sandbox (bubblewrap, seccomp,
+  unshare-mount) and trust it less.* Considered for the future.
+  Doesn't replace the scrubber: even inside a sandbox, an
+  auto-executed `<Script>` can mess with the session, exfiltrate
+  state across shared mounts, or DoS the host. Sandbox would be
+  defense-in-depth on top of the scrubber.
+
+- *Strip `<Script>` blocks outright instead of quarantining.*
+  Rejected. The user's original data may be legitimate (Ardour Lua
+  scripts they wrote and want back on a trusted desktop). Base64
+  comments preserve every byte of the original subtree;
+  `scrub-restore` round-trips byte-equivalent.
+
+- *Allowlist plugin unique-IDs in session XML.* Deferred. Plugin
+  loading is keyed off `PluginManager`'s pre-scanned list, not
+  session-supplied paths, so a session can't bring its own plugin
+  binary. We'd reintroduce this gate if we ever support packaging
+  a plugin alongside a session.
+
+**Why this layer, this way.** Three reasons:
+
+1. The scrubber has to live in Rust because Ardour's loader is the
+   thing being defended against. By the time bytes reach
+   `Session::set_state()`, every defense point is past.
+2. Quarantine-not-delete preserves user data and keeps the
+   restore path operator-driven (you have to physically run
+   `foyer scrub-restore` on a trusted machine — not a remote
+   action).
+3. Caps + symlink/path rejection mirror the
+   `ARCHIVE_EXTRACT_SECURE_*` flag set Ardour itself doesn't use,
+   so we get the safety even when the user uploads from a
+   different machine where they can't influence Ardour's libarchive
+   choices.
+
+**Failure mode if re-introduced.** "Just hand the archive to
+Ardour's `FileArchive` — it works on the desktop." It does, on a
+desktop where the user is also the attacker and there's no security
+boundary. On a server with anonymous uploads it's a one-line RCE.

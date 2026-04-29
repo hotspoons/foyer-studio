@@ -52,6 +52,14 @@ tests-ui/                   Playwright harness (outside web/ so not bundled)
 scripts/dev/                Helper scripts invoked by the Justfile
 docs/                       PLAN, STATUS, DECISIONS, DEVELOPMENT, KEYBOARD, TODO
 .github/workflows/ci.yml    Calls `just` recipes — same as local gate
+.github/workflows/docker.yml Builds + pushes the container image to GHCR
+                             (snapshot-<sha>/snapshot-latest on branch
+                             pushes; main-<sha>/latest on main merges)
+.github/workflows/ghcr-cleanup.yml  Daily cron pruning old snapshot tags
+                             from GHCR (>14 days). Untagged orphans go at >7 days.
+.github/workflows/cloudrun-deploy.yml CD into Cloud Run on main-pipeline
+                             success (gated on `vars.GCP_PROJECT` — off by
+                             default in fresh forks).
 ```
 
 ## Web tree (three-tier split)
@@ -99,7 +107,7 @@ NOT edit `index.html` or `boot.js`.
   [`registerUiVariant`](web/core/registry/ui-variants.js).
 - **Decisions get logged.** Real architectural tradeoffs go in
   [docs/DECISIONS.md](docs/DECISIONS.md) as a new numbered entry.
-  Don't re-litigate in six months. Current entry count ≥ 41.
+  Don't re-litigate in six months. Current entry count ≥ 43.
 - **`just` over one-off scripts.** If it's worth doing twice, it's
   a recipe in the [Justfile](Justfile).
 - **Server is the RBAC enforcement point.** Client-side gating

@@ -272,6 +272,27 @@ release-bundle:
     FOYER_BIN="$(pwd)/target/$arch_triple/release/foyer" \
         ./scripts/release/bundle.sh
 
+# Build the production container image. Two-stage build (Ardour from
+# source + Foyer release binary in stage 1; slim runtime in stage 2).
+# Slow path is the Ardour compile (~15 min on a modern CPU); rebuilds
+# benefit from the BuildKit cache.
+#
+# Pass `image=foo:tag` to override the tag, or `args="--build-arg X=Y"`
+# to forward extra build args. Example:
+#   just docker-build image=ghcr.io/me/foyer:dev args="--build-arg ARDOUR_TAG=master"
+docker-build image='foyer-studio:latest' *args='':
+    DOCKER_BUILDKIT=1 docker build -t {{image}} {{args}} .
+
+# Run the production image locally on port 3838 with a named volume
+# for /projects. Useful for one-off "does the container actually
+# boot?" checks before pushing to a registry.
+docker-run image='foyer-studio:latest' *args='':
+    docker run --rm -it -p 3838:3838 \
+        -v foyer-projects:/projects \
+        -e PORT=3838 \
+        {{args}} \
+        {{image}}
+
 ardour cmd='help' *args='':
     ./scripts/dev/ardour.sh {{cmd}} {{args}}
 

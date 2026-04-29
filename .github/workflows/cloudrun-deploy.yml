@@ -1,0 +1,205 @@
+name: cloudrun-deploy
+
+# Deploy the production GHCR image to Google Cloud Run on every
+# successful main-branch build. Triggers off `workflow_run`
+# completion of `docker.yml` so we never deploy an image that
+# failed to publish.
+#
+# ───────────────────── one-time setup ──────────────────────
+#
+# This workflow is OFF until the operator does the following on
+# the GCP side. Until then, runs are skipped with a clear notice
+# (the `if:` on the `deploy` job gates on the GCP_PROJECT secret
+# being set).
+#
+# 1. Create a GCP project and a Cloud Run service:
+#       gcloud projects create $PROJECT_ID
+#       gcloud config set project $PROJECT_ID
+#       gcloud services enable run.googleapis.com \
+#                              iam.googleapis.com \
+#                              iamcredentials.googleapis.com
+#
+# 2. Set up Workload Identity Federation so this workflow can
+#    impersonate a deployer service account WITHOUT a long-lived
+#    JSON key. Replace placeholders with your IDs:
+#       gcloud iam workload-identity-pools create gh-pool \
+#         --location=global --display-name="GitHub Actions"
+#       gcloud iam workload-identity-pools providers create-oidc github \
+#         --location=global \
+#         --workload-identity-pool=gh-pool \
+#         --display-name="GitHub OIDC" \
+#         --issuer-uri="https://token.actions.githubusercontent.com" \
+#         --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
+#         --attribute-condition="assertion.repository_owner == 'YOUR_GH_OWNER'"
+#       gcloud iam service-accounts create foyer-deployer \
+#         --display-name="Foyer Cloud Run deployer"
+#       gcloud iam service-accounts add-iam-policy-binding \
+#         foyer-deployer@$PROJECT_ID.iam.gserviceaccount.com \
+#         --role=roles/iam.workloadIdentityUser \
+#         --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/gh-pool/attribute.repository/$GH_OWNER/$GH_REPO"
+#       gcloud projects add-iam-policy-binding $PROJECT_ID \
+#         --member=serviceAccount:foyer-deployer@$PROJECT_ID.iam.gserviceaccount.com \
+#         --role=roles/run.admin
+#       gcloud projects add-iam-policy-binding $PROJECT_ID \
+#         --member=serviceAccount:foyer-deployer@$PROJECT_ID.iam.gserviceaccount.com \
+#         --role=roles/iam.serviceAccountUser
+#
+# 3. Add these GitHub repository secrets / variables:
+#    SECRETS:
+#      GCP_WIF_PROVIDER  — full provider resource name, e.g.
+#                          projects/123456789/locations/global/workloadIdentityPools/gh-pool/providers/github
+#      GCP_SERVICE_ACCOUNT — foyer-deployer@$PROJECT_ID.iam.gserviceaccount.com
+#    VARIABLES (Repository → Settings → Secrets and variables → Actions → Variables):
+#      GCP_PROJECT       — your project id (presence is what gates this workflow)
+#      GCP_REGION        — Cloud Run region, e.g. us-central1
+#      CLOUDRUN_SERVICE  — service name, e.g. foyer-studio
+#      CLOUDRUN_MEMORY   — optional, default 2Gi
+#      CLOUDRUN_CPU      — optional, default 2
+#
+# 4. The first deploy needs the Cloud Run service to exist OR the
+#    `gcloud run deploy` command will create it on first call. We
+#    use `--allow-unauthenticated` for a public-facing share-link
+#    deploy; flip it via repo variable `CLOUDRUN_ALLOW_UNAUTH=false`
+#    if you want IAM-gated access.
+#
+# References:
+#   - https://cloud.google.com/run/docs/deploying
+#   - https://github.com/google-github-actions/auth#setting-up-workload-identity-federation
+
+on:
+  workflow_run:
+    workflows: ['docker']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "GHCR tag to deploy (default: latest). Use main-<sha> to pin a commit."
+        required: false
+        default: "latest"
+
+# Single-flight: never let two deploys race for the Cloud Run
+# revision pointer. main-merge cadence is low enough that
+# cancellations are fine.
+concurrency:
+  group: cloudrun-deploy
+  cancel-in-progress: false
+
+permissions:
+  # `id-token: write` is what `google-github-actions/auth` needs
+  # to mint an OIDC token GCP can verify. `contents: read` covers
+  # the checkout.
+  id-token: write
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    # Two gates:
+    #   1. (workflow_run path only) only deploy if the upstream
+    #      docker build succeeded — never pin a Cloud Run revision
+    #      to a half-built tag.
+    #   2. Always: skip if GCP isn't configured. Lets the workflow
+    #      land in a fresh fork without wedging CI; first time the
+    #      operator sets `vars.GCP_PROJECT`, the next push deploys.
+    if: |
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.conclusion == 'success') &&
+      vars.GCP_PROJECT != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: img
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            tag="${{ github.event.inputs.image_tag }}"
+          else
+            # workflow_run trigger — main pipeline always promotes `latest`
+            tag="latest"
+          fi
+          owner_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner_lower}:${tag}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "::notice::deploying $image"
+
+      - name: Authenticate to GCP via Workload Identity
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        env:
+          PROJECT: ${{ vars.GCP_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+          SERVICE: ${{ vars.CLOUDRUN_SERVICE }}
+          MEMORY: ${{ vars.CLOUDRUN_MEMORY || '2Gi' }}
+          CPU: ${{ vars.CLOUDRUN_CPU || '2' }}
+          IMAGE: ${{ steps.img.outputs.image }}
+          ALLOW_UNAUTH: ${{ vars.CLOUDRUN_ALLOW_UNAUTH || 'true' }}
+        run: |
+          set -euo pipefail
+          # `--execution-environment gen2` matters: gen1 doesn't
+          # expose /dev/shm the way `jackd` expects, and our
+          # entrypoint's embedded JACK mode silently degrades on
+          # gen1.
+          # `--max-instances 1`: Foyer's session state is
+          # in-memory + on a per-instance volume; multiple
+          # instances behind the LB would hand each visitor a
+          # different state on every request. If you need scale,
+          # the right answer is per-user dedicated services, not
+          # autoscaling one shared one.
+          # `--port 3838`: matches the Dockerfile's EXPOSE 3838.
+          # `--cpu-boost`: cuts cold-start time when the instance
+          # idle-shuts down between visitors.
+          unauth_flag="--no-allow-unauthenticated"
+          if [ "$ALLOW_UNAUTH" = "true" ]; then
+            unauth_flag="--allow-unauthenticated"
+          fi
+          gcloud run deploy "$SERVICE" \
+            --project "$PROJECT" \
+            --region "$REGION" \
+            --image "$IMAGE" \
+            --port 3838 \
+            --memory "$MEMORY" --cpu "$CPU" \
+            --min-instances 0 --max-instances 1 \
+            --execution-environment gen2 \
+            --cpu-boost \
+            --timeout 3600 \
+            $unauth_flag \
+            --quiet
+
+          # Surface the public URL in the run summary so a click
+          # gets you to the live deploy.
+          url=$(gcloud run services describe "$SERVICE" \
+            --project "$PROJECT" --region "$REGION" \
+            --format='value(status.url)')
+          {
+            echo "## Cloud Run deploy"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Service | \`$SERVICE\` |"
+            echo "| Region | $REGION |"
+            echo "| Image | \`$IMAGE\` |"
+            echo "| URL | $url |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  skipped:
+    runs-on: ubuntu-24.04
+    # Inverse condition: emit a clear notice when the deploy is
+    # gated off. Avoids the "did the workflow run?" confusion when
+    # a fresh fork sees green CI but no live deploy.
+    if: vars.GCP_PROJECT == ''
+    steps:
+      - run: |
+          echo "::notice::Cloud Run deploy is OFF — set repo var GCP_PROJECT (and the WIF secrets) to enable. See workflow file header for setup."

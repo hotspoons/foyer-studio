@@ -139,6 +139,19 @@ enum Command {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Restore `<Script>` blocks that the upload-time scrubber
+    /// quarantined into `<!-- foyer:scrubbed:... -->` comments.
+    /// Re-introduces auto-executing Lua, so this is OFF by default
+    /// over the network — operator must explicitly opt into it on a
+    /// trusted desktop. Pass `-` for stdin / stdout streaming.
+    ScrubRestore {
+        /// Source `.ardour` file (or `-` for stdin).
+        input: PathBuf,
+        /// Destination — defaults to overwriting `input` in place.
+        /// Pass `-` for stdout.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -183,6 +196,7 @@ async fn main() -> Result<()> {
             force,
             dry_run,
         ),
+        Command::ScrubRestore { input, output } => scrub_restore(&input, output.as_deref()),
         Command::Serve {
             backend,
             project,
@@ -244,6 +258,41 @@ async fn main() -> Result<()> {
             .await
         }
     }
+}
+
+/// Re-inflate `<!-- foyer:scrubbed:... -->` comments that the upload
+/// scrubber emitted in place of `<Script>` blocks. Refuses to read
+/// from `/dev/stdin` if it's a TTY — paste-by-accident isn't a
+/// recovery flow we want to support, and a hung CLI waiting for
+/// stdin in the wrong mode is a bad UX.
+fn scrub_restore(input: &Path, output: Option<&Path>) -> Result<()> {
+    use std::io::{Read, Write};
+    let bytes = if input == Path::new("-") {
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut buf)
+            .context("read stdin")?;
+        buf
+    } else {
+        std::fs::read(input).with_context(|| format!("read {}", input.display()))?
+    };
+    let restored = foyer_server::restore_quarantined_xml(&bytes)
+        .map_err(|e| anyhow!("restore failed: {e}"))?;
+    let dest = output.unwrap_or(input);
+    let dest_label = if dest == Path::new("-") {
+        std::io::stdout()
+            .write_all(&restored)
+            .context("write stdout")?;
+        "<stdout>".to_string()
+    } else {
+        std::fs::write(dest, &restored).with_context(|| format!("write {}", dest.display()))?;
+        dest.display().to_string()
+    };
+    eprintln!(
+        "scrub-restore: wrote {} bytes to {dest_label}",
+        restored.len()
+    );
+    Ok(())
 }
 
 fn configure(

@@ -351,6 +351,15 @@ export class WelcomeScreen extends LitElement {
     });
   }
 
+  _uploadProject() {
+    // Uploaded archive lands under whatever folder the user navigates
+    // to inside the upload modal's session-view. The success card
+    // exposes a one-click "Open it now" so most users hit the modal,
+    // pick an archive, and end up in their project without ever
+    // returning here.
+    import("./project-archive-modal.js").then((m) => m.showUploadModal());
+  }
+
   _reattachGroup(group) {
     const ws = window.__foyer?.ws;
     if (!ws || !group) return;
@@ -528,6 +537,13 @@ export class WelcomeScreen extends LitElement {
             <div>
               <div class="title">New session…</div>
               <div class="desc">Start from scratch. Pick a template and a destination folder.</div>
+            </div>
+          </button>
+          <button class="cta" @click=${() => this._uploadProject()}>
+            <span class="icon">${icon("arrow-up-tray", 18)}</span>
+            <div>
+              <div class="title">Upload project…</div>
+              <div class="desc">Drop a zip / tar.gz / tar.zst into the jail. Server unpacks and opens it.</div>
             </div>
           </button>
         </div>

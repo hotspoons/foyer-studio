@@ -1,0 +1,179 @@
+name: docker
+
+# Build and publish the production container image to GitHub Container
+# Registry. Two tagging schemes:
+#
+#   * Branch CI (any push that's NOT main):
+#       ghcr.io/<repo>:snapshot-<short-sha>   (immutable per-commit pin)
+#       ghcr.io/<repo>:snapshot-latest        (mutable — tracks the
+#                                              latest branch push)
+#
+#   * Main CI (push to refs/heads/main, i.e. after merge):
+#       ghcr.io/<repo>:main-<short-sha>       (immutable per-commit pin)
+#       ghcr.io/<repo>:latest                 (mutable — what
+#                                              `docker pull` defaults to)
+#
+# Why two pipelines, not one: the snapshot-* tags let a developer
+# preview an arbitrary feature-branch deploy ("docker run
+# ghcr.io/.../foyer-studio:snapshot-abc1234") without polluting the
+# `:latest` mutable tag that downstream Cloud Run / fly.io / k8s
+# deployments pin to. Merging to main is the explicit "this is the
+# new latest" promotion event.
+#
+# Performance: the slow path is the Ardour compile inside the
+# Dockerfile builder stage (~15-30 min from cold cache, ~30s warm).
+# We use BuildKit's GHA cache backend so subsequent pushes on the
+# same branch reuse the Ardour build layer; cache is scoped per
+# branch with main as fallback (GHA cache's default behavior), so a
+# fresh feature branch inherits main's warm cache automatically.
+#
+# Permissions: `packages: write` is the new perm that GITHUB_TOKEN
+# needs to push to GHCR. We don't grant it across the whole
+# workflow file — only on the publish job that needs it.
+
+on:
+  push:
+    branches: ['**']
+  # Manual dispatch lets ops re-cut an image without a code push
+  # (e.g. base-image security update day, where a rebuild against
+  # the same source brings in upstream OS patches).
+  workflow_dispatch:
+    inputs:
+      ardour_tag:
+        description: "Ardour ref the image's shim builds against. Empty = use .env."
+        required: false
+        default: ""
+
+# Cancel an in-flight build when a fresh push lands on the same
+# branch. Main is excluded so every merge produces a complete record
+# in GHCR with its sha-pinned tag — never racing a successor for
+# the `:latest` mutable update.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  publish:
+    name: build + publish to GHCR
+    runs-on: ubuntu-24.04
+    permissions:
+      # `contents: read` covers the checkout; `packages: write` is the
+      # GHCR push permission. Granted at job scope, not workflow scope,
+      # so reusable callers of this file inherit the principle of
+      # least privilege.
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Resolve ARDOUR_TAG so the Dockerfile's --build-arg picks up
+      # the same value the rest of CI uses. Workflow input wins,
+      # otherwise the value committed in `.env` (kept identical to
+      # what `scripts/dev/ardour.sh` reads).
+      - name: Resolve ARDOUR_TAG
+        id: ardour
+        run: |
+          if [ -n "${{ github.event.inputs.ardour_tag }}" ]; then
+            tag="${{ github.event.inputs.ardour_tag }}"
+            echo "::notice::ARDOUR_TAG=$tag (workflow_dispatch override)"
+          elif [ -f .env ]; then
+            tag=$(grep -E '^ARDOUR_TAG=' .env | head -n1 | cut -d= -f2)
+            echo "::notice::ARDOUR_TAG=$tag (from .env)"
+          else
+            echo "::error::No ARDOUR_TAG set and no .env file present"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # Compute the registry image base + the per-event tag list.
+      # ghcr.io demands the repo name be lowercase; `${{ github.repository
+      # }}` echoes whatever case the user typed when they created
+      # the repo, so we lowercase it explicitly.
+      - name: Compute image tags
+        id: tags
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          image="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            # Main pipeline — promote to `:latest` mutable and pin the
+            # commit-specific `:main-<sha>`.
+            tags="$image:main-$short_sha,$image:latest"
+            scope="main"
+          else
+            # Branch pipeline — keep the mutable tag namespaced under
+            # `snapshot-` so it can't clobber downstream `:latest`
+            # consumers by accident.
+            tags="$image:snapshot-$short_sha,$image:snapshot-latest"
+            scope="snapshot"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "::notice::publishing $tags"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          # `github.actor` works for both human pushes and merges; the
+          # GITHUB_TOKEN's `packages: write` perm is what actually
+          # gates the push.
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            ARDOUR_TAG=${{ steps.ardour.outputs.tag }}
+          # GHA cache backend — BuildKit serializes per-stage layers
+          # into actions/cache. Scope key separates main/branch caches
+          # so a hot main cache isn't poisoned by an experimental
+          # branch's mid-build state, but cache restores fall back to
+          # main automatically when a feature branch first builds.
+          cache-from: |
+            type=gha,scope=foyer-${{ steps.tags.outputs.scope }}
+            type=gha,scope=foyer-main
+          cache-to: type=gha,scope=foyer-${{ steps.tags.outputs.scope }},mode=max
+          # OCI labels surfaced in `docker inspect` so a deployed
+          # image self-identifies its origin. Pinned to the canonical
+          # OCI annotation keys.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.ref.name=${{ github.ref_name }}
+            org.opencontainers.image.title=foyer-studio
+            org.opencontainers.image.description=Web-native control surface for Ardour — sidecar + UI + bundled Ardour build
+
+      - name: Summary
+        run: |
+          {
+            echo "## Container image published"
+            echo ""
+            echo "| Tag | Mutability |"
+            echo "|---|---|"
+            for tag in $(echo "${{ steps.tags.outputs.tags }}" | tr ',' '\n'); do
+              case "$tag" in
+                *":latest"|*":snapshot-latest") mut="mutable" ;;
+                *) mut="immutable" ;;
+              esac
+              echo "| \`$tag\` | $mut |"
+            done
+            echo ""
+            echo "Pull with:"
+            echo "\`\`\`bash"
+            echo "docker pull ${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.scope }}-${{ steps.tags.outputs.short_sha }}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"

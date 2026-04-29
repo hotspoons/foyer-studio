@@ -263,6 +263,13 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     Clamped so dragging can't push the offset below 0 or shrink the
     region below the 4800-sample (0.1s) floor.
 
+## Plugin and instrument features
+
+- [ ] Update percussive vs sustain for note mode
+- [ ] Show UI warning on missing plugins (just silent now)
+- [ ] Functioning patch editor and bank picker and channel editor (not really working now)
+- [ ] Investigate a headless X server to render guis to for gui plugins, and see if we can forward it over the control socket so we can do guis
+
 ## Region edits — DAW timeline backlog
 
 Common region-edit operations that aren't wired yet. Most reduce to a
