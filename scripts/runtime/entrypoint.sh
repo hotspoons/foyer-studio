@@ -108,26 +108,99 @@ case "${FOYER_RUNTIME_MODE}" in
 esac
 log "runtime mode: ${FOYER_RUNTIME_MODE} (rtprio_max=${rtprio_max})"
 
-# In gui-dummy mode: spin up an Xvfb, seed Ardour's config so the
-# first-run wizard + AMS dialogs don't block boot, and skip the
-# jackd boot below (libardour's Dummy backend doesn't need it).
+# X server bring-up — same shape across both run modes so the user
+# can `docker run -p 14500:14500` and peek at whatever's on the X
+# session via xpra's HTML5 client (full desktop view, useful for
+# diagnosing stuck plugin GUIs that the foyer-window iframe filter
+# might be hiding). Two flavors:
+#
+#   * xpra present  → `xpra start :99 --xvfb=...` lets xpra OWN the
+#     Xvfb. Same socket the foyer-server's `/ws/plugin-gui` proxy
+#     connects to, so plugin GUI projection lights up automatically
+#     when a user clicks the toggle in the schema panel. Mirrors
+#     the dev-mode flags from the `just run-dummy` recipe.
+#   * xpra missing  → bare Xvfb fallback. Foyer's xpra capability
+#     probe will return false at startup so the UI hides the toggle
+#     entirely; Ardour itself still paints onto :99 fine.
+#
+# Run in BOTH gui-dummy (where ardour-9 paints into the display)
+# and jack-headless (where hardour doesn't open windows but xpra
+# is harmless and gives the user a debug peephole) modes. Skipped
+# only if `$DISPLAY` was already set externally (escape hatch:
+# bind-mount the host's /tmp/.X11-unix and pass `-e DISPLAY=:0`
+# for development against a host X server).
+XPRA_PID=""
 XVFB_PID=""
+start_x_session() {
+    if [ -n "${DISPLAY:-}" ] && [ "${DISPLAY}" != ":99" ]; then
+        log "DISPLAY=${DISPLAY} already set externally — skipping in-container X spawn"
+        return 0
+    fi
+    # If something else already listens on :99 / TCP 14500, reuse it.
+    if [ -e /tmp/.X11-unix/X99 ] || (echo > /dev/tcp/127.0.0.1/14500) 2>/dev/null; then
+        log "X session already up on :99 — reusing"
+        export DISPLAY=:99
+        return 0
+    fi
+    if command -v xpra >/dev/null 2>&1; then
+        log "starting xpra on :99 (HTML5 client at http://127.0.0.1:14500)"
+        # Flag rationale (mirrors `just run-dummy`):
+        #   --auth=none --tcp-auth=none --ws-auth=none — xpra 19+
+        #     defaults to credential prompts; the HTML5 client
+        #     uses the WS path so --ws-auth is the load-bearing
+        #     one. We bind to 127.0.0.1; foyer-server's same-origin
+        #     /ws/plugin-gui proxy is the only intended client
+        #     and it's already authenticated upstream.
+        #   --resize-display=no + fixed 1920x1280 Xvfb — keep the
+        #     virtual screen large enough that Ardour's editor
+        #     mixer "tall enough" check passes regardless of the
+        #     iframe size the user resizes to. ARDOUR_LOVES_STUPID_TINY_SCREENS
+        #     below is belt-and-braces for the same modal.
+        #   --html=on — serves xpra-html5 from xpra's bundled dist
+        #     on the same TCP socket we publish for plugin GUI
+        #     projection. So `http://localhost:14500/` in the host
+        #     browser shows the full desktop without going through
+        #     the foyer iframe (which only shows one matched
+        #     window). That's the troubleshooting peephole.
+        xpra start :99 \
+            --bind-tcp=127.0.0.1:14500 --html=on \
+            --auth=none --tcp-auth=none --ws-auth=none \
+            --start-via-proxy=no --no-pulseaudio --no-mdns \
+            --no-daemon \
+            --dpi=96 --resize-display=no \
+            --xvfb="Xvfb +extension Composite +extension DAMAGE +extension RANDR -screen 0 1920x1280x24+32 -nolisten tcp -noreset -dpi 96" \
+            >/tmp/foyer-xpra.log 2>&1 &
+        XPRA_PID=$!
+        # Wait for the TCP socket — that's the binary readiness
+        # signal across xpra versions (xpra 6+ uses abstract X11
+        # sockets so the file under /tmp/.X11-unix isn't created).
+        # 10s budget; xpra's Xvfb spawn dominates the cold-start.
+        for _ in $(seq 1 100); do
+            (echo > /dev/tcp/127.0.0.1/14500) 2>/dev/null && break
+            sleep 0.1
+        done
+        if (echo > /dev/tcp/127.0.0.1/14500) 2>/dev/null; then
+            log "xpra ready on :99 (PID ${XPRA_PID})"
+        else
+            log "WARNING: xpra spawned but TCP 14500 never came up — see /tmp/foyer-xpra.log"
+        fi
+    else
+        log "xpra not installed — falling back to bare Xvfb on :99 (plugin GUI projection unavailable)"
+        Xvfb :99 -screen 0 1920x1280x24 -nolisten tcp \
+            >/tmp/foyer-xvfb.log 2>&1 &
+        XVFB_PID=$!
+        for _ in $(seq 1 30); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.1
+        done
+    fi
+    export DISPLAY=:99
+}
+start_x_session
+log "DISPLAY=${DISPLAY:-<unset>}"
+
 if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
     FOYER_JACK_MODE=none
-    if [ -z "${DISPLAY:-}" ]; then
-        if [ ! -e /tmp/.X11-unix/X99 ]; then
-            log "starting Xvfb on :99 (no \$DISPLAY set)"
-            Xvfb :99 -screen 0 1280x720x24 -nolisten tcp \
-                >/tmp/xvfb.log 2>&1 &
-            XVFB_PID=$!
-            for _ in $(seq 1 30); do
-                [ -e /tmp/.X11-unix/X99 ] && break
-                sleep 0.1
-            done
-        fi
-        export DISPLAY=:99
-    fi
-    log "DISPLAY=${DISPLAY}"
     # Seed ~/.config/ardour9/{.a9,config} so first-run wizard and
     # AMS dialogs are skipped. We use `--force-ams-dummy` here (not
     # `--ams-dummy`) because in gui-dummy mode WE own the config —
@@ -293,6 +366,14 @@ shutdown() {
     if [ -n "${JACKD_PID}" ] && kill -0 "${JACKD_PID}" 2>/dev/null; then
         log "shutting down jackd (pid ${JACKD_PID})"
         kill -TERM "${JACKD_PID}" 2>/dev/null || true
+    fi
+    if [ -n "${XPRA_PID}" ] && kill -0 "${XPRA_PID}" 2>/dev/null; then
+        log "shutting down xpra (pid ${XPRA_PID})"
+        kill -TERM "${XPRA_PID}" 2>/dev/null || true
+    fi
+    if [ -n "${XVFB_PID}" ] && kill -0 "${XVFB_PID}" 2>/dev/null; then
+        log "shutting down Xvfb (pid ${XVFB_PID})"
+        kill -TERM "${XVFB_PID}" 2>/dev/null || true
     fi
 }
 trap shutdown EXIT INT TERM

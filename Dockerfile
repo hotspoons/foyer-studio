@@ -401,7 +401,14 @@ ENV PORT=3838 \
     LV2_PATH=/usr/lib/lv2:/home/foyer/.lv2 \
     FOYER_ARDOUR_BUILD_ROOT=/opt/ardour \
     ASAN_COREDUMP=0
-EXPOSE 3838
+# 3838 = foyer sidecar (HTTP+WS, the user-facing port).
+# 14500 = xpra HTML5 / TCP socket. Foyer's own UI proxies this through
+# `/_xpra/*` + `/ws/plugin-gui` on 3838 so the typical `docker run` only
+# needs to publish 3838. Publish 14500 too when you want to view the
+# whole headless X session in your browser (full Ardour desktop, useful
+# for diagnosing stuck plugin GUIs that the foyer-window iframe filter
+# might be hiding) — see `docs/USAGE.md` for the troubleshooting recipe.
+EXPOSE 3838 14500
 
 # tini reaps zombies + forwards SIGTERM cleanly to the foyer + jackd
 # children, which matters when the orchestrator (Cloud Run, Docker
