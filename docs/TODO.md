@@ -268,7 +268,47 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 - [ ] Update percussive vs sustain for note mode
 - [ ] Show UI warning on missing plugins (just silent now)
 - [ ] Functioning patch editor and bank picker and channel editor (not really working now)
-- [ ] Investigate a headless X server to render guis to for gui plugins, and see if we can forward it over the control socket so we can do guis
+- [/] Investigate a headless X server to render guis to for gui plugins, and see if we can forward it over the control socket so we can do guis using some remote projection system. Performance isn't paramount, it will be second class, just so we can provide it. It should be an option in the web-based dialog to show the native GUI for plugins and instruments that provide one, and it should be remembered per plugin if this was toggled
+  - **Plan:** in-shim Suil + IPlugView hosting (param sync from day one),
+    xpra as the projection layer, sidecar proxies xpra's TCP socket
+    through `/ws/plugin-gui/<plugin-id>`, browser mounts xpra-html5
+    inside a `<foyer-window>`. Full plan at
+    `~/.claude/plans/docs-todo-md-271-272-hey-can-you-jaunty-beacon.md`.
+  - **Phase 1 shipped 2026-04-30 (capability advertisement only — no
+    streaming yet):**
+    - Schema: added `has_native_gui: Option<bool>` and
+      `native_gui_kind: Option<String>` to `PluginInstance`
+      ([crates/foyer-schema/src/session.rs](../crates/foyer-schema/src/session.rs)).
+    - Shim: `PluginDesc` carries the same fields; `enumerate_plugins`
+      probes via `plug->has_editor()` (uniform virtual that LV2/VST3/
+      VST2/AU all override correctly) and tags the kind with the
+      existing `plugin_format_label` helper. Emitter only writes the
+      keys when `has_native_gui` is true. See
+      [shims/ardour/src/schema_map.cc](../shims/ardour/src/schema_map.cc)
+      and [shims/ardour/src/msgpack_out.cc](../shims/ardour/src/msgpack_out.cc).
+    - Web UI: dashed "Native GUI" badge in the plugin-panel header
+      next to the bypass button, only when `plugin.has_native_gui`.
+      Tooltip explains "streaming to the browser is coming soon".
+      Disabled (cursor: not-allowed) — no click handler yet. See
+      [web/ui-full/components/plugin-panel.js](../web/ui-full/components/plugin-panel.js).
+  - **Phase 2 pending:** xpra spawn from foyer-CLI, in-shim GTK + Suil
+    hosting, sidecar WS proxy, browser xpra-html5 widget. Wire-up of
+    `Command::OpenPluginGui` / `ClosePluginGui` and the new
+    `view_plugin_gui` RBAC permission.
+  - **Phase 3 pending:** VST3 IPlugView + IComponentHandler bridge.
+
+gcloud run deploy foyer-studio \
+  --image=ghcr.io/hotspoons/foyer-studio:latest \
+  --region=us-central1 \
+  --port=3838 \
+  --memory=2Gi --cpu=2 \
+  --min-instances=0 --max-instances=1 \
+  --execution-environment=gen2 \
+  --cpu-boost \
+  --timeout=3600 \
+  --allow-unauthenticated \
+  --add-volume=name=shm,type=in-memory,size-limit=512Mi \
+  --add-volume-mount=volume=shm,mount-path=/dev/shm
 
 ## Region edits — DAW timeline backlog
 

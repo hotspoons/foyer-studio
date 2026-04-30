@@ -91,6 +91,24 @@ export class PluginPanel extends LitElement {
     }
     header .bypass:hover { border-color: var(--color-accent); color: var(--color-text); }
 
+    /* "Show native GUI" toggle. Disabled in Phase 1 — the bit is
+       advertised by the shim (lilv probe / has_editor()) but the
+       projection layer isn't wired yet. */
+    header .native-gui {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 8px;
+      border: 1px dashed var(--color-border);
+      border-radius: var(--radius-sm);
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: not-allowed;
+      opacity: 0.7;
+      flex: 0 0 auto;
+    }
+
     header select.presets {
       flex: 0 0 auto;
       width: 120px;
@@ -329,6 +347,15 @@ export class PluginPanel extends LitElement {
               `)}
             </optgroup>` : null}
         </select>
+        ${p.has_native_gui ? html`
+          <span
+            class="native-gui"
+            title="This plugin ships a native GUI (${p.native_gui_kind || "native"}). Streaming to the browser is coming soon."
+          >
+            ${icon("eye", 12)}
+            Native GUI
+          </span>
+        ` : null}
         <button
           class="bypass"
           ?data-on=${bypassOn}

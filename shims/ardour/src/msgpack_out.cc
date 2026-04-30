@@ -383,15 +383,19 @@ emit_plugin_param (Out& o, const schema_map::ParamDesc& p)
 }
 
 // Plugin descriptor emitter — variable map shape so optional fields
-// (`current_preset`) only appear when set. Shared so the snapshot and
-// track_updated paths emit the same wire shape; if they drift, an
-// in-place track refresh wipes the metadata the client depends on.
+// (`current_preset`, `has_native_gui`, `native_gui_kind`) only appear
+// when set. Shared so the snapshot and track_updated paths emit the
+// same wire shape; if they drift, an in-place track refresh wipes the
+// metadata the client depends on.
 void
 emit_plugin_desc (Out& o, const schema_map::PluginDesc& pd)
 {
 	std::size_t n = 5; // id, name, uri, bypassed, params
-	const bool emit_preset = !pd.current_preset.empty ();
-	if (emit_preset) ++n;
+	const bool emit_preset    = !pd.current_preset.empty ();
+	const bool emit_gui_kind  = pd.has_native_gui && !pd.native_gui_kind.empty ();
+	if (emit_preset)        ++n;
+	if (pd.has_native_gui)  ++n;
+	if (emit_gui_kind)      ++n;
 	o.map (n);
 	o.str ("id");       o.str (pd.id);
 	o.str ("name");     o.str (pd.name);
@@ -400,6 +404,14 @@ emit_plugin_desc (Out& o, const schema_map::PluginDesc& pd)
 	if (emit_preset) {
 		o.str ("current_preset");
 		o.str (pd.current_preset);
+	}
+	if (pd.has_native_gui) {
+		o.str ("has_native_gui");
+		o.b (true);
+	}
+	if (emit_gui_kind) {
+		o.str ("native_gui_kind");
+		o.str (pd.native_gui_kind);
 	}
 	o.str ("params");
 	o.array (pd.params.size ());

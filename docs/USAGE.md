@@ -357,13 +357,24 @@ directly from GHCR (no need to push into Artifact Registry first):
 
 ```bash
 gcloud run deploy foyer-studio \
-  --image ghcr.io/hotspoons/foyer-studio:latest \
-  --port 3838 \
-  --memory 2Gi --cpu 2 \
-  --min-instances 0 --max-instances 1 \
+  --image=ghcr.io/hotspoons/foyer-studio:latest \
+  --region=us-central1 \
+  --port=3838 \
+  --memory=2Gi --cpu=2 \
+  --min-instances=0 --max-instances=1 \
+  --execution-environment=gen2 \
+  --cpu-boost \
+  --timeout=3600 \
   --allow-unauthenticated \
-  --execution-environment gen2
+  --add-volume=name=shm,type=in-memory,size-limit=512Mi \
+  --add-volume-mount=volume=shm,mount-path=/dev/shm
 ```
+
+The `/dev/shm` mount is non-negotiable: gen2's default tmpfs is
+~64 MB but libardour reserves ~107 MB on session load, so without
+the explicit volume Ardour fails open with an opaque ENOMEM. 512 MB
+is generous; `size-limit` is a cap, not an allocation, so it only
+consumes physical memory when actually used.
 
 **Continuous deployment.** [`.github/workflows/cloudrun-deploy.yml`](../.github/workflows/cloudrun-deploy.yml)
 auto-deploys the `:latest` GHCR image after every successful main
@@ -382,14 +393,17 @@ docker tag ghcr.io/hotspoons/foyer-studio:latest \
 docker push us-central1-docker.pkg.dev/$PROJECT/foyer/foyer-studio:latest
 
 gcloud run deploy foyer-studio \
-  --image us-central1-docker.pkg.dev/$PROJECT/foyer/foyer-studio:latest \
-  --port 3838 --memory 2Gi --cpu 2 \
-  --min-instances 0 --max-instances 1 \
-  --allow-unauthenticated --execution-environment gen2
+  --image=us-central1-docker.pkg.dev/$PROJECT/foyer/foyer-studio:latest \
+  --region=us-central1 \
+  --port=3838 --memory=2Gi --cpu=2 \
+  --min-instances=0 --max-instances=1 \
+  --allow-unauthenticated --execution-environment=gen2 \
+  --add-volume=name=shm,type=in-memory,size-limit=512Mi \
+  --add-volume-mount=volume=shm,mount-path=/dev/shm
 ```
 
-`--execution-environment gen2` matters: gen1 doesn't expose `/dev/shm`
-the way `jackd` expects. `--max-instances 1` is intentional —
+`--execution-environment=gen2` matters: gen1 doesn't expose
+`/dev/shm` the way `jackd` expects. `--max-instances=1` is intentional —
 multiple instances would each have their own in-memory state and
 `/projects` volume, so a load-balancer hop between them would lose
 the user's session. If you need horizontal scale, that's a

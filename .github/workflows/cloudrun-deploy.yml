@@ -161,6 +161,18 @@ jobs:
           # `--port 3838`: matches the Dockerfile's EXPOSE 3838.
           # `--cpu-boost`: cuts cold-start time when the instance
           # idle-shuts down between visitors.
+          # `--add-volume + --add-volume-mount` for /dev/shm:
+          # gen2's default shm tmpfs is small (~64 MB). libardour
+          # reserves ~107 MB of shm for the audio graph during
+          # session load, and jackd writes client state into
+          # /dev/shm/jack-*/. Without an explicit mount, session
+          # open fails with an opaque ENOMEM. 512 MiB is generous
+          # for typical workloads and `size-limit` is a CAP — it
+          # only consumes physical memory when actually used, so
+          # there's no cost penalty for sizing it loose. Re-passing
+          # both flags every deploy is required because Cloud Run
+          # treats omitted volume specs as "remove the volume"
+          # rather than "preserve the existing config."
           unauth_flag="--no-allow-unauthenticated"
           if [ "$ALLOW_UNAUTH" = "true" ]; then
             unauth_flag="--allow-unauthenticated"
@@ -175,6 +187,8 @@ jobs:
             --execution-environment gen2 \
             --cpu-boost \
             --timeout 3600 \
+            --add-volume=name=shm,type=in-memory,size-limit=512Mi \
+            --add-volume-mount=volume=shm,mount-path=/dev/shm \
             $unauth_flag \
             --quiet
 
