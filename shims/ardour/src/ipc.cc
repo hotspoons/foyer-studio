@@ -114,6 +114,29 @@ IpcServer::start ()
 		return;
 	}
 
+	// Escape hatch for short-lived libardour invocations that load the
+	// shim transiently (notably `ardour9-new_empty_session`, which the
+	// dev-build bash launcher spawns to bootstrap a brand-new session
+	// file before exec'ing the real ardour-9). Without this, that
+	// helper runs the shim's full IPC bring-up — advert written,
+	// listener up — and then tears it all down ~2 s later when the
+	// helper exits. foyer-cli's discovery polls every 250 ms, so it
+	// races and grabs the helper's transient socket; by the time
+	// HostBackend connects, the listener is gone and the connection
+	// gets EOF in milliseconds. Symptom: "Waiting for session…" UI on
+	// brand-new projects, "shim closed connection" in foyer-server log.
+	// FOYER_SHIM_NO_IPC=1 makes the shim skip IPC bring-up entirely so
+	// the helper produces no advert and no socket. The bash launcher
+	// sets this for the helper invocation only; the real ardour-9 spawn
+	// inherits a clean env and runs IPC normally.
+	if (const char* skip = std::getenv ("FOYER_SHIM_NO_IPC"); skip && *skip && *skip != '0') {
+		PBD::info << "foyer_shim: FOYER_SHIM_NO_IPC=" << skip
+		          << " — skipping IPC bring-up (transient libardour invocation)"
+		          << endmsg;
+		_running = false;
+		return;
+	}
+
 	// Resolve the path per the header contract:
 	//   explicit > env > $XDG_RUNTIME_DIR/foyer/ardour-<pid>.sock
 	if (!_explicit_path) {

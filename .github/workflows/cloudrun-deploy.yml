@@ -44,19 +44,40 @@ name: cloudrun-deploy
 #         --member=serviceAccount:foyer-deployer@$PROJECT_ID.iam.gserviceaccount.com \
 #         --role=roles/iam.serviceAccountUser
 #
-# 3. Add these GitHub repository secrets / variables:
+# 3. Create an Artifact Registry remote repository proxying ghcr.io.
+#    Cloud Run can ONLY pull from gcr.io / *-docker.pkg.dev / docker.io
+#    — it rejects `ghcr.io/...` image paths outright. The remote-repo
+#    feature lets AR transparently fetch and cache ghcr images on
+#    demand, preserving multi-arch manifests.
+#       gcloud services enable artifactregistry.googleapis.com
+#       gcloud artifacts repositories create ghcr-remote \
+#         --location=$REGION \
+#         --repository-format=docker \
+#         --mode=remote-repository \
+#         --remote-docker-repo=https://ghcr.io \
+#         --remote-repo-config-desc="ghcr.io passthrough"
+#    The default repo name `ghcr-remote` is what this workflow looks
+#    for; override via `vars.GCP_AR_REPO_NAME`. The Cloud Run runtime
+#    service account (default: $PROJECT_NUMBER-compute@developer.gserviceaccount.com)
+#    needs `roles/artifactregistry.reader` — usually granted at
+#    project level by default but worth verifying with:
+#       gcloud projects get-iam-policy $PROJECT_ID --flatten="bindings[].members" \
+#         --filter="bindings.role=roles/artifactregistry.reader"
+#
+# 4. Add these GitHub repository secrets / variables:
 #    SECRETS:
 #      GCP_WIF_PROVIDER  — full provider resource name, e.g.
 #                          projects/123456789/locations/global/workloadIdentityPools/gh-pool/providers/github
 #      GCP_SERVICE_ACCOUNT — foyer-deployer@$PROJECT_ID.iam.gserviceaccount.com
 #    VARIABLES (Repository → Settings → Secrets and variables → Actions → Variables):
-#      GCP_PROJECT       — your project id (presence is what gates this workflow)
-#      GCP_REGION        — Cloud Run region, e.g. us-central1
-#      CLOUDRUN_SERVICE  — service name, e.g. foyer-studio
-#      CLOUDRUN_MEMORY   — optional, default 2Gi
-#      CLOUDRUN_CPU      — optional, default 2
+#      GCP_PROJECT        — your project id (presence is what gates this workflow)
+#      GCP_REGION         — Cloud Run region, e.g. us-central1 (must match AR repo location)
+#      CLOUDRUN_SERVICE   — service name, e.g. foyer-studio
+#      CLOUDRUN_MEMORY    — optional, default 2Gi
+#      CLOUDRUN_CPU       — optional, default 2
+#      GCP_AR_REPO_NAME   — optional, default `ghcr-remote` (the AR remote-repo name from step 3)
 #
-# 4. The first deploy needs the Cloud Run service to exist OR the
+# 5. The first deploy needs the Cloud Run service to exist OR the
 #    `gcloud run deploy` command will create it on first call. We
 #    use `--allow-unauthenticated` for a public-facing share-link
 #    deploy; flip it via repo variable `CLOUDRUN_ALLOW_UNAUTH=false`
@@ -114,7 +135,15 @@ jobs:
 
       - name: Resolve image tag
         id: img
+        env:
+          GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          # Default matches the name in the workflow's setup
+          # instructions; override via repo variable if your AR
+          # remote repo is named differently.
+          AR_REPO_NAME: ${{ vars.GCP_AR_REPO_NAME || 'ghcr-remote' }}
         run: |
+          set -euo pipefail
           if [ -n "${{ github.event.inputs.image_tag }}" ]; then
             tag="${{ github.event.inputs.image_tag }}"
           else
@@ -122,7 +151,13 @@ jobs:
             tag="latest"
           fi
           owner_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
-          image="ghcr.io/${owner_lower}:${tag}"
+          # Cloud Run image registry: must be gcr.io / *-docker.pkg.dev /
+          # docker.io. We push to ghcr.io from docker.yml, then pull via
+          # an Artifact Registry remote-repo proxy. The proxy preserves
+          # the original ghcr path under the AR repo, so the final URL
+          # is `<region>-docker.pkg.dev/<project>/<ar-repo>/<gh-owner>/<gh-repo>:<tag>`.
+          ar_host="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO_NAME}"
+          image="${ar_host}/${owner_lower}:${tag}"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "::notice::deploying $image"
@@ -161,18 +196,17 @@ jobs:
           # `--port 3838`: matches the Dockerfile's EXPOSE 3838.
           # `--cpu-boost`: cuts cold-start time when the instance
           # idle-shuts down between visitors.
-          # `--add-volume + --add-volume-mount` for /dev/shm:
-          # gen2's default shm tmpfs is small (~64 MB). libardour
-          # reserves ~107 MB of shm for the audio graph during
-          # session load, and jackd writes client state into
-          # /dev/shm/jack-*/. Without an explicit mount, session
-          # open fails with an opaque ENOMEM. 512 MiB is generous
-          # for typical workloads and `size-limit` is a CAP — it
-          # only consumes physical memory when actually used, so
-          # there's no cost penalty for sizing it loose. Re-passing
-          # both flags every deploy is required because Cloud Run
-          # treats omitted volume specs as "remove the volume"
-          # rather than "preserve the existing config."
+          #
+          # /dev/shm sizing: Cloud Run gen2 provides /dev/shm
+          # automatically, scaled to ~50% of `--memory`. With
+          # `--memory=2Gi` that's ~1 GiB — plenty for libardour's
+          # ~107 MB audio graph plus jackd's client registry.
+          # Earlier revisions of this workflow tried to mount an
+          # in-memory volume at /dev/shm via
+          # `--add-volume + --add-volume-mount`, but Cloud Run
+          # rejects mounts under /dev (also /proc, /sys) with
+          # "Mount paths [/dev/shm] are in one of disallowed
+          # mount points". The system-provided shm is what we use.
           unauth_flag="--no-allow-unauthenticated"
           if [ "$ALLOW_UNAUTH" = "true" ]; then
             unauth_flag="--allow-unauthenticated"
@@ -187,8 +221,6 @@ jobs:
             --execution-environment gen2 \
             --cpu-boost \
             --timeout 3600 \
-            --add-volume=name=shm,type=in-memory,size-limit=512Mi \
-            --add-volume-mount=volume=shm,mount-path=/dev/shm \
             $unauth_flag \
             --quiet
 

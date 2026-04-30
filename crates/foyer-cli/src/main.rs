@@ -793,6 +793,13 @@ export TOP={top}
 source "$TOP/build/gtk2_ardour/ardev_common_waf.sh"
 : "${{ARDOUR_BACKEND:=None (Dummy)}}"
 export ARDOUR_BACKEND
+# Suppress Ardour's "this screen is not tall enough" dialog. The
+# check at editor_mixer.cc:91 fires when screen height < 700 — true
+# whenever the iframe (or xpra-html5 reported screen) is short.
+# This env var is Ardour's own escape hatch, designed exactly for
+# headless / virtual-screen deploys. Without it, the modal blocks
+# session load with no human there to dismiss it.
+export ARDOUR_LOVES_STUPID_TINY_SCREENS=1
 FOYER_SHIM_DIR={shim}
 export ARDOUR_SURFACES_PATH="$FOYER_SHIM_DIR${{ARDOUR_SURFACES_PATH:+:$ARDOUR_SURFACES_PATH}}"
 
@@ -819,7 +826,17 @@ if [ ! -f "$SESSION_FILE" ]; then
     for HELPER in "$TOP"/build/session_utils/ardour*-new_empty_session; do
         if [ -x "$HELPER" ]; then
             echo "foyer: bootstrapping new session $LEAF_DIR via $HELPER" >&2
-            "$HELPER" "$LEAF_DIR" "$NAME" || true
+            # FOYER_SHIM_NO_IPC=1 makes the foyer_shim surface skip its
+            # IPC bring-up for THIS invocation only — the helper still
+            # loads the .so (it's in ARDOUR_SURFACES_PATH) but the
+            # control protocol becomes a no-op. Without it, the helper
+            # spins up an advert + listener that races foyer-cli's
+            # discovery (250 ms poll) and gets claimed before the real
+            # ardour-9 below ever advertises. Symptom: "Waiting for
+            # session…" UI on every new project. The exec below
+            # inherits a clean env, so the real ardour-9 runs IPC
+            # normally.
+            FOYER_SHIM_NO_IPC=1 "$HELPER" "$LEAF_DIR" "$NAME" || true
             if [ -f "$LEAF_DIR/$NAME.ardour" ]; then
                 SESSION_DIR="$LEAF_DIR"
                 SESSION_FILE="$SESSION_DIR/$NAME.ardour"
@@ -852,6 +869,47 @@ if [ -f "$SESSION_FILE" ] && ! grep -q 'name="Foyer Studio Shim" active="1"' "$S
     fi
 fi
 
+# Sweep Ardour's crash-recovery breadcrumbs out of the session
+# dir so the "Recover from crash / Ignore" modal doesn't block
+# session load — we render to an Xvfb the user can't see, so a
+# blocking GUI dialog is fatal. Files are renamed (not deleted)
+# to .bak.<unix-timestamp> so a power user who actually wants to
+# recover can mv them back. Mirrors archive_crash_recovery_artifacts
+# in the Rust path. Opt-out: FOYER_KEEP_CRASH_RECOVERY=1.
+if [ -z "${{FOYER_KEEP_CRASH_RECOVERY:-}}" ]; then
+    STAMP=$(date +%s)
+    for FILE in "$SESSION_DIR"/*.pending "$SESSION_DIR"/*.history; do
+        if [ -e "$FILE" ]; then
+            BAK="$FILE.bak.$STAMP"
+            echo "foyer: archiving crash-recovery artifact $FILE → $BAK" >&2
+            mv "$FILE" "$BAK" 2>/dev/null || true
+        fi
+    done
+fi
+
+# FOYER_DEBUG_ARDOUR=1 wraps the Ardour spawn in `gdb --batch` so
+# SIGSEGV/SIGABRT dump a backtrace into stderr (which lands in
+# daw.log) instead of vanishing silently. Useful when chasing
+# "DAW dies on plugin add" bugs in container deploys where there's
+# no human to attach a debugger interactively. Off by default
+# because gdb adds startup overhead and rewrites stderr framing.
+# Requires `gdb` in the image (runtime Dockerfile installs it).
+if [ -n "${{FOYER_DEBUG_ARDOUR:-}}" ] && command -v gdb >/dev/null 2>&1; then
+    echo "foyer: FOYER_DEBUG_ARDOUR=$FOYER_DEBUG_ARDOUR — wrapping Ardour in gdb --batch" >&2
+    # `set pagination off` keeps gdb from blocking on the "press
+    # return to continue" prompt. `handle SIG33 nostop noprint pass`
+    # silences the JACK xrun signal noise. `thread apply all bt full`
+    # gives every thread's stack with locals — much more useful than
+    # a single-thread bt for a multi-threaded DAW.
+    exec gdb --batch \
+        -ex "set pagination off" \
+        -ex "handle SIG33 nostop noprint pass" \
+        -ex "handle SIGPIPE nostop noprint pass" \
+        -ex "run" \
+        -ex "thread apply all bt full" \
+        -ex "quit" \
+        --args {exec} "$@" "$SESSION_DIR" "$NAME"
+fi
 exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
             top = shell_escape(root.to_string_lossy().as_ref()),
             shim = shell_escape(shim.to_string_lossy().as_ref()),
@@ -953,11 +1011,47 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
         .with_context(|| format!("spawn {}", resolved_exec.display()))?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // Tracks adverts we've seen in a previous poll. We claim a socket
+    // only after it survives a second scan AND a quick connect-probe —
+    // both gates skip transient adverts that the bash launcher's
+    // `ardour*-new_empty_session` step writes during its brief shim
+    // activation. Without this gate we race new_empty_session: it
+    // activates the shim → advert appears → we claim it → new_empty_session
+    // exits and tears the shim down → real `ardour-9` exec'd on the
+    // exit-path advertises a DIFFERENT advert that we've already given
+    // up watching for. Symptom: HostBackend connects to a dead socket,
+    // gets EOF in 0.6 ms, foyer UI stuck on "Waiting for session".
+    // Cost: at most 1 extra 250 ms poll cycle on the happy path.
+    let mut seen_once: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     loop {
         for s in discovery::scan() {
-            if !before.contains(&s.socket) {
-                tracing::info!("shim advertised at {}", s.socket.display());
-                return Ok(s.socket);
+            if before.contains(&s.socket) {
+                continue;
+            }
+            if !seen_once.insert(s.socket.clone()) {
+                // Saw it on a previous poll AND it's still here — the
+                // advert outlived the new_empty_session window. Now
+                // verify the socket actually responds to a connect
+                // (catches the "advert still on disk but the shim
+                // already torn the listener down" tail end of the
+                // race, e.g. if our scan landed during the bash exec
+                // boundary between new_empty_session and ardour-9).
+                match std::os::unix::net::UnixStream::connect(&s.socket) {
+                    Ok(stream) => {
+                        drop(stream);
+                        tracing::info!("shim advertised at {}", s.socket.display());
+                        return Ok(s.socket);
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "advert {} present but connect failed ({e}); waiting for next advert",
+                            s.socket.display()
+                        );
+                        // Drop from seen_once so we'd re-confirm if it
+                        // reappears stable later.
+                        seen_once.remove(&s.socket);
+                    }
+                }
             }
         }
         if std::time::Instant::now() >= deadline {
@@ -1314,7 +1408,67 @@ fn preflight_session(
             );
         }
     }
+    // Sweep Ardour's crash-recovery breadcrumbs out of the session
+    // dir BEFORE Ardour opens it. Without this Ardour blocks at
+    // session load with a "Recover from crash / Ignore crash data"
+    // modal — fatal in container deploys (Cloud Run, headless Xvfb)
+    // where there's no human to dismiss it. Files are renamed (not
+    // deleted) so a power user who actually wants the recovery can
+    // mv them back. Opt-out: set `FOYER_KEEP_CRASH_RECOVERY=1`.
+    if std::env::var_os("FOYER_KEEP_CRASH_RECOVERY").map_or(true, |v| v.is_empty()) {
+        archive_crash_recovery_artifacts(&dir);
+    }
     (dir, name)
+}
+
+/// Rename `*.pending` and `*.history` next to a session file to
+/// timestamped `.bak.<stamp>` siblings. Ardour ignores files with
+/// non-`.pending`/`.history` extensions, so this is enough to skip
+/// the crash-recovery dialog without losing data — recover by
+/// removing the `.bak.<stamp>` suffix. Errors are logged and
+/// swallowed; this is a best-effort preflight.
+fn archive_crash_recovery_artifacts(session_dir: &Path) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entries = match std::fs::read_dir(session_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if ext != "pending" && ext != "history" {
+            continue;
+        }
+        let parent = match path.parent() {
+            Some(p) => p,
+            None => continue,
+        };
+        let original_name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let bak = parent.join(format!("{original_name}.bak.{stamp}"));
+        match std::fs::rename(&path, &bak) {
+            Ok(()) => {
+                tracing::info!(
+                    "foyer: archived crash-recovery artifact {} → {} (set FOYER_KEEP_CRASH_RECOVERY=1 to opt out)",
+                    path.display(),
+                    bak.display(),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "foyer: failed to archive {} for crash-recovery skip: {e}",
+                    path.display(),
+                );
+            }
+        }
+    }
 }
 
 /// Step 1 of `preflight_session`: if the session file is missing,

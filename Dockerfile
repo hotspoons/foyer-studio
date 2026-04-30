@@ -111,6 +111,23 @@ RUN git -c advice.detachedHead=false clone --depth 1 \
         --branch "${ARDOUR_TAG}" \
         https://github.com/Ardour/ardour.git /opt/ardour
 
+# Apply Foyer Studio patches against upstream Ardour. The patches
+# directory lives at `patches/ardour/` in this repo and is COPY'd
+# into the builder layer separately (the full repo COPY at
+# `WORKDIR /workspace` happens later, but we need patches earlier so
+# the Ardour build picks them up). Each patch is independently
+# applicable, so a future `git am --3way`-style recovery works if the
+# upstream tag drifts. See the patch headers for per-file rationale.
+COPY patches/ardour /tmp/ardour-patches
+RUN for p in /tmp/ardour-patches/*.patch; do \
+        echo "==> applying $p"; \
+        git -C /opt/ardour apply --whitespace=nowarn "$p" || { \
+            echo "==> patch $p failed against upstream tag ${ARDOUR_TAG}"; \
+            exit 1; \
+        }; \
+    done \
+ && rm -rf /tmp/ardour-patches
+
 WORKDIR /opt/ardour
 # `--optimize` enables -O3 and disables debug symbols; matches the
 # upstream "release" recipe. CXXFLAGS suppresses the deprecated-decls
@@ -162,9 +179,42 @@ RUN cargo build --release --manifest-path /workspace/Cargo.toml --bin foyer
 # ─────────────────────────────────────────────────────────────────
 # Stage 2 — runtime
 # ─────────────────────────────────────────────────────────────────
-FROM debian:trixie-slim AS runtime
+#
+# Base: full `debian:trixie` (NOT `-slim`). The image already weighs
+# ~5 GB once the LV2 plugin pack lands, so the ~30 MB you save by
+# starting from slim is rounding error — and slim drops procps,
+# psmisc, lsof, net-tools, less, file, etc., which makes
+# `docker exec` debugging genuinely painful (no `pgrep`, no `ps`,
+# no `netstat`). With full trixie + the diag pack below the user
+# can introspect the live container with the standard set.
+FROM debian:trixie AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Diagnostic / shell-comfort pack. Most of these would be in any
+# Debian "real install" — full trixie ships some, this RUN
+# guarantees the rest. Pulled in as a separate, early layer so
+# rebuilds during plugin-pack churn keep this layer cached.
+#
+#   procps    — pgrep, ps, top, kill, free, uptime
+#   psmisc    — pstree, killall, fuser
+#   iproute2  — ss, ip (already in full trixie, listed for clarity)
+#   lsof      — open-file/socket inspection ("who has :14500?")
+#   net-tools — netstat, ifconfig (legacy but still in some muscle memory)
+#   less      — pager (man-page reader, log scroll)
+#   file      — quick mime-type sniffing on session artifacts
+#   vim-tiny  — minimal editor for the inevitable in-container poke
+#   htop      — sometimes you just want to watch ardour's RSS climb
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      procps psmisc iproute2 lsof net-tools \
+      # gdb for crash forensics on the Ardour child. With
+      # FOYER_DEBUG_ARDOUR=1 the foyer-cli bash launcher wraps
+      # Ardour in `gdb --batch --ex run --ex "thread apply all bt full"`
+      # so a SIGSEGV / SIGABRT dumps a stack trace into the daw log
+      # instead of the silent exit Cloud Run / docker shows otherwise.
+      gdb \
+      less file vim-tiny htop \
+ && rm -rf /var/lib/apt/lists/*
 
 # ── Runtime deps: Ardour .so set + JACK + a stacked plugin pack ───
 #
@@ -234,6 +284,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # moony.lv2, …) that have no Debian counterpart.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates python3 tini \
+      # GTK/Pango/Cairo runtime support that the dev container gets
+      # transitively via its `-dev` packages (libgtkmm-2.4-dev pulls
+      # in libpango1.0-dev → fontconfig → fonts-dejavu-core; etc.).
+      # The runtime image only installs the bare runtime libs, so
+      # without these explicit additions Ardour's first dialog with
+      # any rendered text dies inside Pango — fontconfig has no
+      # actual font files to discover, Pango calls Cairo with a
+      # null font face, Cairo aborts. This was the cause of "DAW
+      # crashes on plugin add / MIDI region add" in container
+      # deploys (works fine in dev because the dev image gets the
+      # transitive set). Tested minimum:
+      #   fontconfig + fonts-dejavu-core    → text renders
+      #   adwaita-icon-theme hicolor-...    → toolbar icons render
+      #   gtk2-engines + librsvg2-common    → theme + SVG icons
+      #   shared-mime-info gsettings-...    → file-picker mime types
+      #   dbus-x11                          → session bus stub for
+      #                                        plugins that probe it
+      # (Note: libcanberra-gtk-module was dropped from trixie — only
+      # the GTK3 variant remains, and Ardour is GTK2. Its absence is
+      # cosmetic (no audible button-clicks); harmless unless someone
+      # runs with `G_DEBUG=fatal-warnings`, which we don't.)
+      fontconfig fonts-dejavu-core fonts-liberation \
+      adwaita-icon-theme hicolor-icon-theme gtk2-engines \
+      librsvg2-common shared-mime-info gsettings-desktop-schemas \
+      dbus-x11 \
       libgtkmm-2.4-1v5 libglibmm-2.4-1v5 libsigc++-2.0-0v5 \
       libxml2 libarchive13 libfftw3-double3 libfftw3-single3 libaubio5 \
       vamp-plugin-sdk liblrdf0 libtag2 liblo7 librubberband2 libreadline8 \
@@ -242,6 +317,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libwebsockets19t64 libcwiid1 libasound2t64 libsndfile1 libopus0 \
       \
       libjack-jackd2-0 jackd2 alsa-utils pulseaudio-utils \
+      \
+      # Xvfb for the GUI-Ardour-on-headless-X path. In non-privileged
+      # contexts (Cloud Run gen2, plain `docker run`) JACK can't acquire
+      # SCHED_FIFO and the headless `hardour` cascades into a fatal
+      # `failed_constructor`. Switching to GUI Ardour painting onto an
+      # in-container Xvfb sidesteps that — libardour's "None (Dummy)"
+      # backend has a non-RT fallback, and the entrypoint pre-seeds
+      # the AMS state so first-run dialogs never block boot. xpra is
+      # NOT installed here (it's a dev-only diagnostic for peeking at
+      # what the Xvfb is showing); the dev container Dockerfile pulls
+      # it from xpra.org's repo separately.
+      xvfb \
       \
       ardour-lv2-plugins \
       fluid-soundfont-gm fluid-soundfont-gs fluidr3mono-gm-soundfont \
@@ -262,9 +349,41 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       \
       aida-x airwindows-lv2 master-me \
       kxstudio-meta-audio-plugins-collection \
- && apt-get purge -y curl gpg dirmngr \
+ && apt-get purge -y gpg dirmngr \
  && apt-get autoremove -y --purge \
  && rm -rf /var/lib/apt/lists/*
+
+# ── xpra (HTML5 X11 server, for native plugin GUI projection) ────
+#
+# xpra was dropped from Debian trixie's main repos at release time
+# (RC bugs in the packaging — fixed upstream but didn't make the
+# freeze). xpra.org publishes their own apt repo with current builds
+# for trixie, signed by the project maintainer's key. Same source
+# the dev container Dockerfile uses; keeps prod and dev at parity.
+#
+# Without xpra installed: foyer-server's startup probe sets the
+# `native_plugin_gui` feature flag to false, which hides the
+# "Native GUI" toggle in the plugin panel. Image still boots
+# happily; users just lose the native-GUI-projection feature.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gpg ca-certificates curl \
+ && curl -fsSL https://xpra.org/xpra.asc \
+      | gpg --dearmor -o /usr/share/keyrings/xpra-keyring.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/xpra-keyring.gpg] https://xpra.org/ trixie main" \
+      > /etc/apt/sources.list.d/xpra.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      xpra xpra-x11 xpra-html5 \
+ && apt-get purge -y gpg \
+ && apt-get autoremove -y --purge \
+ && rm -rf /var/lib/apt/lists/*
+# `xpra-x11` is the load-bearing piece for the in-container `xpra
+# start :NN` path. Modern xpra (≥6) split the package: `xpra` is
+# the client + protocol core, and the X11 server modes (`seamless`,
+# `desktop`, `shadow`) live in `xpra-x11`. Without it, `xpra start`
+# aborts at boot with `you must install 'xpra-x11' to use 'seamless'`
+# and the container's xpra never comes up. `xpra-html5` ships the
+# JS dist served at /_xpra/.
 
 # A non-root user. Cloud Run rewrites uid/gid for us anyway, but
 # running as a real user keeps file ownership predictable when a
@@ -340,7 +459,8 @@ RUN mkdir -p /projects /home/foyer/.lv2 \
  && chown -R foyer:foyer /projects /home/foyer
 
 COPY scripts/runtime/entrypoint.sh /usr/local/bin/foyer-entrypoint
-RUN chmod +x /usr/local/bin/foyer-entrypoint
+COPY scripts/runtime/seed-ardour-config.sh /usr/local/bin/foyer-seed-ardour-config
+RUN chmod +x /usr/local/bin/foyer-entrypoint /usr/local/bin/foyer-seed-ardour-config
 
 USER foyer
 WORKDIR /home/foyer
@@ -363,7 +483,14 @@ ENV PORT=3838 \
     LV2_PATH=/usr/lib/lv2:/home/foyer/.lv2 \
     FOYER_ARDOUR_BUILD_ROOT=/opt/ardour \
     ASAN_COREDUMP=0
-EXPOSE 3838
+# 3838 = foyer sidecar (HTTP+WS, the user-facing port).
+# 14500 = xpra HTML5 / TCP socket. Foyer's own UI proxies this through
+# `/_xpra/*` + `/ws/plugin-gui` on 3838 so the typical `docker run` only
+# needs to publish 3838. Publish 14500 too when you want to view the
+# whole headless X session in your browser (full Ardour desktop, useful
+# for diagnosing stuck plugin GUIs that the foyer-window iframe filter
+# might be hiding) — see `docs/USAGE.md` for the troubleshooting recipe.
+EXPOSE 3838 14500
 
 # tini reaps zombies + forwards SIGTERM cleanly to the foyer + jackd
 # children, which matters when the orchestrator (Cloud Run, Docker

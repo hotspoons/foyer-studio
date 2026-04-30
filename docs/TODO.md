@@ -297,8 +297,15 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     `view_plugin_gui` RBAC permission.
   - **Phase 3 pending:** VST3 IPlugView + IComponentHandler bridge.
 
+# Cloud Run can't pull ghcr.io directly — the deploy goes through an
+# Artifact Registry remote-repo proxy. One-time setup:
+#   gcloud services enable artifactregistry.googleapis.com
+#   gcloud artifacts repositories create ghcr-remote --location=us-central1 \
+#     --repository-format=docker --mode=remote-repository \
+#     --remote-docker-repo=https://ghcr.io
+# Then deploy with the AR-prefixed URL (substitute your project id):
 gcloud run deploy foyer-studio \
-  --image=ghcr.io/hotspoons/foyer-studio:latest \
+  --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/ghcr-remote/hotspoons/foyer-studio:latest \
   --region=us-central1 \
   --port=3838 \
   --memory=2Gi --cpu=2 \
@@ -306,9 +313,12 @@ gcloud run deploy foyer-studio \
   --execution-environment=gen2 \
   --cpu-boost \
   --timeout=3600 \
-  --allow-unauthenticated \
-  --add-volume=name=shm,type=in-memory,size-limit=512Mi \
-  --add-volume-mount=volume=shm,mount-path=/dev/shm
+  --allow-unauthenticated
+# Don't add `--add-volume name=shm` / `--add-volume-mount` at /dev/shm —
+# Cloud Run rejects mounts under /dev /proc /sys. Gen2 already provides
+# /dev/shm sized at ~50% of --memory (so 2Gi memory → ~1 GiB shm).
+# For older snapshots without ASAN_COREDUMP=0 baked into ENV, also pass
+# `--set-env-vars=ASAN_COREDUMP=0`.
 
 ## Region edits — DAW timeline backlog
 

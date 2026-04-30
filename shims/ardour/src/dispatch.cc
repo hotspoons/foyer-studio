@@ -289,6 +289,8 @@ struct DecodedCmd
 		AddPlugin,
 		RemovePlugin,
 		MovePlugin,
+		OpenPluginGui,
+		ClosePluginGui,
 		SaveSession,
 		AddNote,
 		UpdateNote,
@@ -1206,6 +1208,8 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "add_plugin")         out.kind = DecodedCmd::Kind::AddPlugin;
 			else if (cmd_type == "remove_plugin")      out.kind = DecodedCmd::Kind::RemovePlugin;
 			else if (cmd_type == "move_plugin")        out.kind = DecodedCmd::Kind::MovePlugin;
+			else if (cmd_type == "open_plugin_gui")    out.kind = DecodedCmd::Kind::OpenPluginGui;
+			else if (cmd_type == "close_plugin_gui")   out.kind = DecodedCmd::Kind::ClosePluginGui;
 			else if (cmd_type == "save_session")       out.kind = DecodedCmd::Kind::SaveSession;
 			else if (cmd_type == "add_note")           out.kind = DecodedCmd::Kind::AddNote;
 			else if (cmd_type == "update_note")        out.kind = DecodedCmd::Kind::UpdateNote;
@@ -3170,6 +3174,49 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				auto bytes = msgpack_out::encode_track_updated (session, tid.str ());
 				if (!bytes.empty ()) {
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::OpenPluginGui:
+		case DecodedCmd::Kind::ClosePluginGui: {
+			// Plugin window open/close. `Processor` (libardour, line
+			// processor.h:158-160) declares three cross-thread signals
+			// — `ShowUI`, `HideUI`, `ToggleUI` — that gtk2_ardour's
+			// ProcessorBox auto-connects when a processor lands on a
+			// route. Emitting them from the shim is the canonical
+			// pattern (Mackie surface does the same in subview.cc:1198).
+			//
+			// The signal is delivered to the gtk2_ardour main loop, so
+			// when we're loaded into the GUI Ardour binary running
+			// against an X display (Xvfb in container deployments),
+			// the editor window appears on that display — captureable
+			// by xpra and embeddable in the Foyer web UI.
+			//
+			// In headless `hardour` mode there's no GUI thread to
+			// receive the signal, so this is a no-op there. The web
+			// UI's "Native GUI" toggle is gated client-side on the
+			// `has_native_gui` capability bit, which is only set when
+			// the plugin actually has an editor.
+			if (cmd.plugin_id.empty ()) break;
+			const bool show = (cmd.kind == DecodedCmd::Kind::OpenPluginGui);
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap, show] () {
+				auto& session = shim->session ();
+				auto pi = schema_map::find_plugin_insert_by_foyer_id (session, snap.plugin_id);
+				if (!pi) {
+					PBD::warning << "foyer_shim: " << (show ? "open" : "close")
+					             << "_plugin_gui: plugin not found: "
+					             << snap.plugin_id << endmsg;
+					return;
+				}
+				// Upcast to Processor — that's where the signal lives.
+				std::shared_ptr<ARDOUR::Processor> proc = pi;
+				if (show) {
+					proc->ShowUI (); /* EMIT SIGNAL */
+				} else {
+					proc->HideUI (); /* EMIT SIGNAL */
 				}
 			});
 			break;

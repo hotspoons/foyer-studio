@@ -180,9 +180,32 @@ export class AudioListener {
       numberOfOutputs: 1,
       outputChannelCount: [this.format.channels],
     });
+    // Track previously-logged underrun/overrun counts so we only spam
+    // the console when they CHANGE — otherwise we'd log every second
+    // even on a perfectly healthy stream. Mirrors the shim-side
+    // master-tap drop counter pattern. Also stash the latest stats on
+    // the instance + window so probes can read them without enabling
+    // VERBOSE: `window.__foyer.audioStats` from the browser console.
+    this._lastStats = { underruns: 0, overruns: 0 };
     this.workletNode.port.onmessage = (ev) => {
       const m = ev.data;
       if (m && m.kind === "stats") {
+        this._lastStats = m;
+        if (typeof window !== "undefined" && window.__foyer) {
+          window.__foyer.audioStats = m;
+        }
+        const dU = m.underruns - (this._loggedUnderruns ?? 0);
+        const dO = m.overruns - (this._loggedOverruns ?? 0);
+        if (dU > 0 || dO > 0) {
+          this._loggedUnderruns = m.underruns;
+          this._loggedOverruns = m.overruns;
+          console.warn(
+            `[audio-listener] jitter buffer: +${dU} underrun samples, ` +
+            `+${dO} overrun samples in last ~1 s ` +
+            `(buffered=${m.buffered}, total under=${m.underruns}, over=${m.overruns}). ` +
+            `Each underrun = audible pop on output.`,
+          );
+        }
         if (VERBOSE) {
           console.info(
             `[audio-listener] worklet stats — buffered=${m.buffered} ` +

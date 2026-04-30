@@ -24,6 +24,7 @@ mod files;
 mod ingress_ws;
 mod jail;
 pub mod orphans;
+mod plugin_gui_ws;
 mod ring;
 mod session_scrub;
 mod sessions;
@@ -270,6 +271,14 @@ pub(crate) struct AppState {
     /// `?ui=` URL override, localStorage preference, or its own
     /// heuristic match. Broadcast in `ClientGreeting.default_ui_variant`.
     pub(crate) default_ui_variant: Option<String>,
+    /// Whether the server has xpra installed for native plugin GUI
+    /// projection (`/ws/plugin-gui` proxy + `/_xpra/` static mount
+    /// both require it). Probed once at startup; if false the
+    /// `native_plugin_gui` feature flag is sent as `false` in
+    /// `ClientGreeting.features` so the UI hides the toggle. We
+    /// don't re-probe at runtime — installing xpra without
+    /// restarting the server is rare enough not to optimize for.
+    pub(crate) xpra_available: bool,
     /// Per-client-IP login attempt counter for the `/login` endpoint.
     /// Sliding-window rate limiter — without this, an attacker on the
     /// public tunnel can brute-force credentials at line speed.
@@ -491,6 +500,7 @@ impl Server {
             roles_policy: RwLock::new(foyer_config::RolesConfig::bundled_default()),
             peers: RwLock::new(HashMap::new()),
             default_ui_variant: None,
+            xpra_available: probe_xpra_available(),
             login_gate: tokio::sync::Mutex::new(HashMap::new()),
         });
         Self { state }
@@ -652,6 +662,15 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
         .route("/ws", get(ws::upgrade))
         .route("/ws/audio/:stream_id", get(audio_ws::upgrade))
         .route("/ws/ingress/:stream_id", get(ingress_ws::upgrade))
+        // One shared WS for ALL plugin GUIs — xpra's protocol
+        // already multiplexes N windows over a single connection,
+        // so even with multiple editors open we hold one slot.
+        // Bidirectional byte pump to local xpra TCP (default
+        // 127.0.0.1:14500, override via FOYER_XPRA_ADDR).
+        // Both with / without trailing slash because xpra-html5's
+        // path construction is idiosyncratic across versions.
+        .route("/ws/plugin-gui", get(plugin_gui_ws::upgrade))
+        .route("/ws/plugin-gui/", get(plugin_gui_ws::upgrade))
         .route("/files/*path", get(files::serve_file))
         // Project archive surface: upload accepts a zip or tar.gz body
         // and extracts under the jail; export tar.gz's a project
@@ -699,6 +718,29 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
         .with_state(state)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
+
+    // Mount xpra's HTML5 client at `/_xpra/*` so the plugin-native-
+    // ui-window's iframe can load it same-origin (no cross-origin
+    // block, no second exposed port). The path is configurable via
+    // FOYER_XPRA_HTML5_DIR — defaults to /usr/share/xpra/www where
+    // Debian's xpra package lands the dist. If the dir doesn't
+    // exist (e.g. running on a host without xpra), we skip the
+    // mount; the iframe will 404 and that's the correct signal.
+    let xpra_html_dir = std::env::var("FOYER_XPRA_HTML5_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/usr/share/xpra/www"));
+    if xpra_html_dir.is_dir() {
+        tracing::info!(
+            "mounting xpra HTML5 client at /_xpra/ from {}",
+            xpra_html_dir.display()
+        );
+        router = router.nest_service("/_xpra", ServeDir::new(&xpra_html_dir));
+    } else {
+        tracing::info!(
+            "xpra HTML5 dir {} not present — skipping /_xpra/ mount",
+            xpra_html_dir.display()
+        );
+    }
     // Static-asset fallback: overlays are tried first (in flag order),
     // then `web_root` as the last resort. Each overlay is composed
     // into the chain via `ServeDir::fallback`, so a miss in overlay[0]
@@ -968,6 +1010,47 @@ async fn login_post(
 /// the public side tried to inject, so it's the trustworthy header
 /// here. Only call this when we know the request came in via the
 /// tunnel listener.
+/// Probe `$PATH` (and a small set of common absolute paths) for an
+/// `xpra` executable. Native plugin GUI projection requires xpra:
+///   * `/ws/plugin-gui` proxy connects to a localhost xpra TCP
+///     socket xpra is expected to be running on
+///   * `/_xpra/` static mount serves xpra's HTML5 dist
+///
+/// If absent we still boot fine — we just hide the toggle in the UI
+/// via the `native_plugin_gui` feature flag. Logged once at startup
+/// with an install link so users on a fresh machine know what to do.
+fn probe_xpra_available() -> bool {
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':').filter(|d| !d.is_empty()) {
+            let candidate = std::path::Path::new(dir).join("xpra");
+            if candidate.is_file() {
+                tracing::info!(
+                    "native plugin GUI projection: xpra found at {}",
+                    candidate.display()
+                );
+                return true;
+            }
+        }
+    }
+    for p in &["/usr/bin/xpra", "/usr/local/bin/xpra", "/opt/xpra/bin/xpra"] {
+        if std::path::Path::new(p).is_file() {
+            tracing::info!("native plugin GUI projection: xpra found at {p}");
+            return true;
+        }
+    }
+    tracing::info!(
+        "native plugin GUI projection: xpra NOT found on PATH — \
+         the Native GUI toggle will be hidden in the UI. To enable, \
+         install xpra (https://xpra.org/install.html). \
+         Quick install:\n  \
+           Debian/Ubuntu:  sudo apt install xpra xpra-html5  (Debian trixie: see docs/USAGE.md for the xpra.org repo)\n  \
+           Fedora/RHEL:    sudo dnf install xpra\n  \
+           Arch:           sudo pacman -S xpra\n  \
+           macOS:          brew install --cask xpra"
+    );
+    false
+}
+
 fn client_ip_from_tunnel(headers: &axum::http::HeaderMap, peer: IpAddr) -> IpAddr {
     if let Some(v) = headers
         .get("cf-connecting-ip")

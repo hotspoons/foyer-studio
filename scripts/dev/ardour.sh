@@ -164,6 +164,34 @@ PY
     done
 }
 
+apply_foyer_patches() {
+    # Apply every patch under `patches/ardour/` against
+    # `$ARDOUR_DIR`. Each patch is checked for prior application via
+    # `git apply --check --reverse`: if it ALREADY applies in reverse,
+    # it's already in the tree and we skip. Otherwise apply forward.
+    # This is idempotent so a cached `ext/ardour` only patches once,
+    # mirroring `patch_for_darwin`'s sentinel approach.
+    local patches_dir="$REPO_ROOT/patches/ardour"
+    if [ ! -d "$patches_dir" ]; then
+        return 0
+    fi
+    for p in "$patches_dir"/*.patch; do
+        [ -e "$p" ] || continue
+        local name
+        name="$(basename "$p")"
+        if git -C "$ARDOUR_DIR" apply --check --reverse "$p" >/dev/null 2>&1; then
+            # Patch already applied in this tree — skip.
+            continue
+        fi
+        if git -C "$ARDOUR_DIR" apply --check "$p" >/dev/null 2>&1; then
+            git -C "$ARDOUR_DIR" apply --whitespace=nowarn "$p"
+            echo "ardour: applied $name"
+        else
+            echo "ardour: WARNING $name does not apply cleanly — leaving tree as-is" >&2
+        fi
+    done
+}
+
 do_configure() {
     local extra_args=()
     local cppflags="${CPPFLAGS:-}"
@@ -222,6 +250,11 @@ do_configure() {
         fi
         patch_for_darwin
     fi
+
+    # Apply Foyer-specific patches (e.g. Dummy backend absolute-time
+    # sleep) BEFORE configure / build. Idempotent — re-runs are
+    # cheap.
+    apply_foyer_patches
 
     (
         cd "$ARDOUR_DIR"

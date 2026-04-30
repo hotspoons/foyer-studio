@@ -60,6 +60,9 @@ import "./components/welcome-screen.js";
 // UI layer). Without this side-effect import the plugin float's
 // body shows up as an empty black rectangle.
 import "./components/plugin-panel.js";
+// Native plugin GUI window — registers the `plugin-native-ui` kind
+// so plugin-panel.js's toggle can open it via `openWindow`.
+import "./components/plugin-native-ui-window.js";
 import { bootAutomation } from "./components/automation-panel.js";
 import { installBindingsRuntime } from "foyer-ui-core/layout/layout-bindings.js";
 import { installSlotKeybinds } from "foyer-ui-core/layout/slot-keybinds.js";

@@ -409,18 +409,24 @@ export class FoyerWindow extends LitElement {
     ev.stopPropagation();
     const startX = ev.clientX, startY = ev.clientY;
     const ox = this._x, oy = this._y, ow = this._w, oh = this._h;
+    // Per-instance min overrides — hot-set by callers like the
+    // plugin panel's native-GUI mode where the contained iframe
+    // needs a floor (the plugin's own natural size). When unset
+    // we fall back to the global MIN_W / MIN_H constants.
+    const minW = Math.max(MIN_W, this._foyerMinW || 0);
+    const minH = Math.max(MIN_H, this._foyerMinH || 0);
     const move = (e) => {
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
       let nx = ox, ny = oy, nw = ow, nh = oh;
-      if (dirs.includes("e")) nw = Math.max(MIN_W, ow + dx);
-      if (dirs.includes("s")) nh = Math.max(MIN_H, oh + dy);
+      if (dirs.includes("e")) nw = Math.max(minW, ow + dx);
+      if (dirs.includes("s")) nh = Math.max(minH, oh + dy);
       if (dirs.includes("w")) {
-        nw = Math.max(MIN_W, ow - dx);
+        nw = Math.max(minW, ow - dx);
         nx = ox + (ow - nw);
       }
       if (dirs.includes("n")) {
-        nh = Math.max(MIN_H, oh - dy);
+        nh = Math.max(minH, oh - dy);
         ny = oy + (oh - nh);
       }
       this._x = nx; this._y = ny; this._w = nw; this._h = nh;
