@@ -826,7 +826,17 @@ if [ ! -f "$SESSION_FILE" ]; then
     for HELPER in "$TOP"/build/session_utils/ardour*-new_empty_session; do
         if [ -x "$HELPER" ]; then
             echo "foyer: bootstrapping new session $LEAF_DIR via $HELPER" >&2
-            "$HELPER" "$LEAF_DIR" "$NAME" || true
+            # FOYER_SHIM_NO_IPC=1 makes the foyer_shim surface skip its
+            # IPC bring-up for THIS invocation only — the helper still
+            # loads the .so (it's in ARDOUR_SURFACES_PATH) but the
+            # control protocol becomes a no-op. Without it, the helper
+            # spins up an advert + listener that races foyer-cli's
+            # discovery (250 ms poll) and gets claimed before the real
+            # ardour-9 below ever advertises. Symptom: "Waiting for
+            # session…" UI on every new project. The exec below
+            # inherits a clean env, so the real ardour-9 runs IPC
+            # normally.
+            FOYER_SHIM_NO_IPC=1 "$HELPER" "$LEAF_DIR" "$NAME" || true
             if [ -f "$LEAF_DIR/$NAME.ardour" ]; then
                 SESSION_DIR="$LEAF_DIR"
                 SESSION_FILE="$SESSION_DIR/$NAME.ardour"
