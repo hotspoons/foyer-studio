@@ -1001,11 +1001,47 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
         .with_context(|| format!("spawn {}", resolved_exec.display()))?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // Tracks adverts we've seen in a previous poll. We claim a socket
+    // only after it survives a second scan AND a quick connect-probe —
+    // both gates skip transient adverts that the bash launcher's
+    // `ardour*-new_empty_session` step writes during its brief shim
+    // activation. Without this gate we race new_empty_session: it
+    // activates the shim → advert appears → we claim it → new_empty_session
+    // exits and tears the shim down → real `ardour-9` exec'd on the
+    // exit-path advertises a DIFFERENT advert that we've already given
+    // up watching for. Symptom: HostBackend connects to a dead socket,
+    // gets EOF in 0.6 ms, foyer UI stuck on "Waiting for session".
+    // Cost: at most 1 extra 250 ms poll cycle on the happy path.
+    let mut seen_once: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     loop {
         for s in discovery::scan() {
-            if !before.contains(&s.socket) {
-                tracing::info!("shim advertised at {}", s.socket.display());
-                return Ok(s.socket);
+            if before.contains(&s.socket) {
+                continue;
+            }
+            if !seen_once.insert(s.socket.clone()) {
+                // Saw it on a previous poll AND it's still here — the
+                // advert outlived the new_empty_session window. Now
+                // verify the socket actually responds to a connect
+                // (catches the "advert still on disk but the shim
+                // already torn the listener down" tail end of the
+                // race, e.g. if our scan landed during the bash exec
+                // boundary between new_empty_session and ardour-9).
+                match std::os::unix::net::UnixStream::connect(&s.socket) {
+                    Ok(stream) => {
+                        drop(stream);
+                        tracing::info!("shim advertised at {}", s.socket.display());
+                        return Ok(s.socket);
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "advert {} present but connect failed ({e}); waiting for next advert",
+                            s.socket.display()
+                        );
+                        // Drop from seen_once so we'd re-confirm if it
+                        // reappears stable later.
+                        seen_once.remove(&s.socket);
+                    }
+                }
             }
         }
         if std::time::Instant::now() >= deadline {
