@@ -66,6 +66,50 @@ if [ ! -f "$cfg_dir/.a9" ]; then
     echo "seed-ardour-config: created $cfg_dir/.a9 (welcome wizard skip)"
 fi
 
+# Always seed the memlock-warning suppression. The GUI ardour shows a
+# "WARNING: Your system has a limit for maximum amount of locked
+# memory" modal at startup whenever `RLIMIT_MEMLOCK / RAM < 0.75`
+# (gtk2_ardour/ardour_ui_startup.cc:781). In a container that's
+# nearly always true — Linux defaults memlock to 64 KiB while the
+# container can see GBs of host RAM. The modal blocks session load
+# (Cloud Run + Xvfb deploys have nobody to click OK), so we pre-write
+# the dismissal state into `instant.xml` to mark "do not show again".
+# The gate is just the presence of a `<no-memory-warning>` element
+# inside `<instant>` (`add_instant_xml` writes nothing else when the
+# user ticks the box). Idempotent: if `instant.xml` already has the
+# node, we leave it alone; if it exists without the node, we add the
+# node to the existing root via a small in-place edit; otherwise we
+# create the file fresh.
+instant_xml="$cfg_dir/instant.xml"
+if [ -f "$instant_xml" ]; then
+    if grep -q '<no-memory-warning' "$instant_xml" 2>/dev/null; then
+        echo "seed-ardour-config: $instant_xml already has <no-memory-warning>"
+    else
+        # Insert the element before the closing </instant>. Falls back
+        # to a fresh write if the file is malformed.
+        if grep -q '</instant>' "$instant_xml" 2>/dev/null; then
+            sed -i 's|</instant>|  <no-memory-warning/>\n</instant>|' "$instant_xml"
+            echo "seed-ardour-config: added <no-memory-warning/> to existing $instant_xml"
+        else
+            cat > "$instant_xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<instant>
+  <no-memory-warning/>
+</instant>
+EOF
+            echo "seed-ardour-config: replaced malformed $instant_xml with memlock-warning suppression"
+        fi
+    fi
+else
+    cat > "$instant_xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<instant>
+  <no-memory-warning/>
+</instant>
+EOF
+    echo "seed-ardour-config: created $instant_xml (memlock-warning suppression)"
+fi
+
 # Optional: seed the Audio/MIDI Setup with the Dummy backend so
 # autostart bypasses the AMS dialog on first session load. Two
 # entry-point flavors:

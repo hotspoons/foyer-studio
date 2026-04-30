@@ -261,6 +261,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # moony.lv2, …) that have no Debian counterpart.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates python3 tini \
+      # GTK/Pango/Cairo runtime support that the dev container gets
+      # transitively via its `-dev` packages (libgtkmm-2.4-dev pulls
+      # in libpango1.0-dev → fontconfig → fonts-dejavu-core; etc.).
+      # The runtime image only installs the bare runtime libs, so
+      # without these explicit additions Ardour's first dialog with
+      # any rendered text dies inside Pango — fontconfig has no
+      # actual font files to discover, Pango calls Cairo with a
+      # null font face, Cairo aborts. This was the cause of "DAW
+      # crashes on plugin add / MIDI region add" in container
+      # deploys (works fine in dev because the dev image gets the
+      # transitive set). Tested minimum:
+      #   fontconfig + fonts-dejavu-core    → text renders
+      #   adwaita-icon-theme hicolor-...    → toolbar icons render
+      #   gtk2-engines + librsvg2-common    → theme + SVG icons
+      #   shared-mime-info gsettings-...    → file-picker mime types
+      #   libcanberra-gtk-module            → GTK event sounds (no-op
+      #                                        without pulse, but its
+      #                                        absence triggers a
+      #                                        warning that some
+      #                                        builds upgrade to
+      #                                        fatal under glib's
+      #                                        G_DEBUG=fatal-warnings)
+      #   dbus-x11                          → session bus stub for
+      #                                        plugins that probe it
+      fontconfig fonts-dejavu-core fonts-liberation \
+      adwaita-icon-theme hicolor-icon-theme gtk2-engines \
+      librsvg2-common shared-mime-info gsettings-desktop-schemas \
+      libcanberra-gtk-module dbus-x11 \
       libgtkmm-2.4-1v5 libglibmm-2.4-1v5 libsigc++-2.0-0v5 \
       libxml2 libarchive13 libfftw3-double3 libfftw3-single3 libaubio5 \
       vamp-plugin-sdk liblrdf0 libtag2 liblo7 librubberband2 libreadline8 \

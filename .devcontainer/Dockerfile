@@ -1,5 +1,13 @@
 # Debian trixie base. Rust toolchain installed via rustup below.
-FROM debian:trixie-slim
+#
+# Full `debian:trixie` (NOT `-slim`) — same call as the production
+# runtime image. The dev container already pulls in ~3 GB of audio
+# build deps + plugins; the ~30 MB difference between `trixie` and
+# `trixie-slim` is rounding error and slim drops procps, psmisc,
+# iproute2, etc., which makes inner-loop debugging painful (no `ss`,
+# no `pgrep`). Going full trixie + the explicit diagnostic-pack
+# below keeps the dev shell at parity with the runtime container.
+FROM debian:trixie
 
 ARG TARGETPLATFORM
 ARG TARGETARCH
@@ -35,6 +43,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sudo \
       vim \
       less \
+      # ---- diagnostic / process-introspection pack ----
+      # Mirror of the runtime image's diag pack (Dockerfile in repo
+      # root). Full trixie ships some of these by default; explicit
+      # install means a `docker exec` shell into either container
+      # gets the same set. procps = pgrep/ps/top, psmisc = pstree/
+      # killall/fuser, iproute2 = ss/ip, lsof = "who has :14500?",
+      # net-tools = legacy netstat/ifconfig.
+      procps \
+      psmisc \
+      iproute2 \
+      lsof \
+      net-tools \
+      htop \
       # bun's installer unpacks a zip into BUN_INSTALL.
       # `zip` is needed by `just release-bundle` to package the
       # platform-specific foyer-<os>-<arch>.zip artifacts.
@@ -120,8 +141,13 @@ RUN curl -fsSL https://xpra.org/xpra.asc \
       > /etc/apt/sources.list.d/xpra.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      xpra xpra-html5 \
+      xpra xpra-x11 xpra-html5 \
  && rm -rf /var/lib/apt/lists/*
+# `xpra-x11` is the load-bearing piece for `xpra start :NN`. xpra ≥6
+# split the X11 server modes (`seamless`/`desktop`/`shadow`) into a
+# separate package; without it `just run-dummy`'s xpra spawn aborts
+# with `you must install 'xpra-x11' to use 'seamless'` and the dev
+# loop's plugin GUI projection silently doesn't come up.
 
 # ── LV2 plugin + soundfont bundle (devcontainer = release parity) ──
 #

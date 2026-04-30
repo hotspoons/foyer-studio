@@ -168,14 +168,27 @@ start_x_session() {
         return 0
     fi
     if command -v xpra >/dev/null 2>&1; then
-        log "starting xpra on :99 (HTML5 client at http://127.0.0.1:14500)"
+        # Bind interface: default to `0.0.0.0` so that a host-side
+        # `docker run -p 14500:14500` actually reaches xpra. With
+        # `127.0.0.1` (container-loopback), docker-proxy can't
+        # forward into the container's net namespace and you get
+        # `ERR_EMPTY_RESPONSE` from the host browser. Binding to
+        # 0.0.0.0 INSIDE the container doesn't widen the attack
+        # surface — the container's network is already isolated;
+        # only ports the operator explicitly publishes via `-p` (or
+        # whatever Cloud Run does at the edge) reach the outside.
+        # Override via `FOYER_XPRA_BIND=127.0.0.1` if you're
+        # paranoid AND using `--network=host`.
+        xpra_bind="${FOYER_XPRA_BIND:-0.0.0.0:14500}"
+        log "starting xpra on :99 (HTML5 client at http://<host>:14500, bind=${xpra_bind})"
         # Flag rationale (mirrors `just run-dummy`):
         #   --auth=none --tcp-auth=none --ws-auth=none — xpra 19+
         #     defaults to credential prompts; the HTML5 client
         #     uses the WS path so --ws-auth is the load-bearing
-        #     one. We bind to 127.0.0.1; foyer-server's same-origin
-        #     /ws/plugin-gui proxy is the only intended client
-        #     and it's already authenticated upstream.
+        #     one. foyer-server's same-origin /ws/plugin-gui proxy
+        #     is the typical client; the publishing operator is
+        #     responsible for not exposing 14500 to the public
+        #     internet (or layering their own auth in front of it).
         #   --resize-display=no + fixed 1920x1280 Xvfb — keep the
         #     virtual screen large enough that Ardour's editor
         #     mixer "tall enough" check passes regardless of the
@@ -188,12 +201,12 @@ start_x_session() {
         #     the foyer iframe (which only shows one matched
         #     window). That's the troubleshooting peephole.
         xpra start :99 \
-            --bind-tcp=127.0.0.1:14500 --html=on \
+            --bind-tcp="${xpra_bind}" --html=on \
             --auth=none --tcp-auth=none --ws-auth=none \
             --start-via-proxy=no --no-pulseaudio --no-mdns \
             --no-daemon \
             --dpi=96 --resize-display=no \
-            --xvfb="Xvfb +extension Composite +extension DAMAGE +extension RANDR -screen 0 1920x1280x24+32 -nolisten tcp -noreset -dpi 96" \
+            --xvfb="Xvfb +extension Composite +extension DAMAGE +extension RANDR -extension MIT-SHM -screen 0 1920x1280x24+32 -nolisten tcp -noreset -dpi 96" \
             >/tmp/foyer-xpra.log 2>&1 &
         XPRA_PID=$!
         # Wait for the TCP socket — that's the binary readiness
