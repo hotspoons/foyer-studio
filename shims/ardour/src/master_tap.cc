@@ -133,6 +133,15 @@ MasterTap::run (BufferSet& bufs,
 		if (n <= space) {
 			_ring->write (scratch, n);
 			_samples_written.fetch_add (n, std::memory_order_relaxed);
+		} else {
+			// Drain thread fell behind — drop the block. Each drop is
+			// directly audible as a pop on the listener side. The
+			// counter bubbles up via the periodic stats log so a
+			// non-zero rate is the first thing to look for when
+			// chasing playback artifacts (especially on the Dummy
+			// backend in container deploys where the drain thread
+			// runs SCHED_OTHER).
+			_samples_dropped.fetch_add (n, std::memory_order_relaxed);
 		}
 		written += this_block;
 	}
@@ -222,6 +231,7 @@ MasterTap::drain_loop ()
 	scratch.reserve (RING_SAMPLES);
 
 	auto last_log = std::chrono::steady_clock::now ();
+	std::uint64_t _last_logged_dropped = 0;
 
 	while (!_drain_stop.load ()) {
 		{
@@ -245,13 +255,30 @@ MasterTap::drain_loop ()
 		const auto now = std::chrono::steady_clock::now ();
 		if (now - last_log >= std::chrono::seconds (2)) {
 			last_log = now;
+			const auto d = _samples_dropped.load ();
+			// Always surface dropped-samples even when the steady-state
+			// stats are off: the counter is the canonical signal for
+			// "user hears pops on playback". Only log when it grew, so
+			// a healthy session doesn't spam the log with zeros.
+			if (d > _last_logged_dropped) {
+				const auto delta = d - _last_logged_dropped;
+				_last_logged_dropped = d;
+				PBD::warning << "foyer_shim: [audio] stream_id=" << _stream_id
+				             << " ring overflow — dropped " << delta
+				             << " samples (" << d << " total) in last 2 s; "
+				             << "playback will have audible pops"
+				             << endmsg;
+			}
 			if constexpr (LOG_STEADY_STATE_STATS) {
 				const auto r = _run_calls.load ();
 				const auto s = _silence_calls.load ();
 				const auto w = _samples_written.load ();
 				const auto t = _samples_sent.load ();
 				PBD::warning << "foyer_shim: [audio] stream_id=" << _stream_id
-				             << " run=" << r << endmsg;
+				             << " run=" << r << " silence=" << s
+				             << " written=" << w << " sent=" << t
+				             << " dropped=" << d
+				             << endmsg;
 			}
 		}
 

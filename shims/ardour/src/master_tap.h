@@ -123,10 +123,24 @@ private:
 	const std::uint32_t  _stream_id;
 	const std::uint32_t  _channels;
 
-	// Ring sized for ~200 ms @ 48 kHz stereo (f32 interleaved).
-	// Chosen so a slow drain thread has plenty of headroom; a fast
-	// drain thread never sees the ring fill above ~10 ms.
-	static constexpr std::size_t RING_SAMPLES = 48000u * 2u /* ch */ * 1 /* sec */ / 5; // 200 ms
+	// Ring sized for ~1 s @ 48 kHz stereo (f32 interleaved). 1 s
+	// gives ~12 process cycles of slack at buffer-size=4096 / 48 k —
+	// well past any realistic non-RT scheduling burst.
+	//
+	// Previous sizing (200 ms = ~2.3 cycles) overflowed reliably
+	// enough to cause user-audible pops on playback in container
+	// deploys using the libardour Dummy backend, where the audio
+	// thread + drain thread both run SCHED_OTHER and the kernel can
+	// preempt either for hundreds of ms under load. JACK with RT
+	// scheduling never showed it because both threads wake on a
+	// deterministic clock there. If you ever hit overflow with this
+	// sizing the problem isn't the ring, it's that the drain thread
+	// is starved (check CPU contention or move the drain to a
+	// dedicated thread pool).
+	//
+	// Cost: 768 KB static for the ring (96 k floats × 8 B/sample × 1
+	// channel-pair). Trivial for a desktop-class allocation.
+	static constexpr std::size_t RING_SAMPLES = 48000u * 2u /* ch */ * 1 /* sec */;
 	std::unique_ptr<PBD::RingBuffer<float>> _ring;
 
 	std::thread         _drain_thread;
@@ -141,6 +155,11 @@ private:
 	std::atomic<std::uint64_t> _silence_calls  { 0 };
 	std::atomic<std::uint64_t> _samples_written { 0 };
 	std::atomic<std::uint64_t> _samples_sent    { 0 };
+	// Bumps every time run() / silence() can't fit a block into the
+	// ring (drain thread starved). Each drop = audible pop on the
+	// listener's output. Surfaces in the periodic stats line so
+	// "playback has pops" is reduced to a single number.
+	std::atomic<std::uint64_t> _samples_dropped { 0 };
 
 	void drain_loop ();
 };
