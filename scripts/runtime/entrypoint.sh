@@ -39,6 +39,32 @@ FOYER_PERIOD_FRAMES="${FOYER_PERIOD_FRAMES:-1024}"
 FOYER_LISTEN="${FOYER_LISTEN:-0.0.0.0:${PORT}}"
 FOYER_NETJACK_HOST="${FOYER_NETJACK_HOST:-}"
 FOYER_NETJACK_PORT="${FOYER_NETJACK_PORT:-19000}"
+# Realtime-scheduling probe. Cloud Run gen2 strips CAP_SYS_NICE
+# and zeroes the rtprio rlimit, so `jackd -R` makes Ardour's
+# `JackClient::AcquireSelfRealTime` fail with EPERM on thread
+# create — fatal `failed_constructor` at session load. The dummy
+# backend doesn't need RT (no hardware deadline to hit) so we
+# probe and only pass `-R -P 10` when the kernel will allow it.
+#
+# `auto`: probe `ulimit -r`. >0 → use RT; 0 → don't.
+# `on`: force RT (fails fast on Cloud Run; use only when you know
+#       the container is privileged).
+# `off`: never use RT.
+FOYER_JACK_REALTIME="${FOYER_JACK_REALTIME:-auto}"
+JACK_RT_ARGS=""
+case "${FOYER_JACK_REALTIME}" in
+    on)
+        JACK_RT_ARGS="-R -P 10"
+        ;;
+    off)
+        ;;
+    auto|*)
+        rtprio_max=$(ulimit -r 2>/dev/null || echo 0)
+        if [ "${rtprio_max}" -gt 0 ] 2>/dev/null; then
+            JACK_RT_ARGS="-R -P 10"
+        fi
+        ;;
+esac
 # Ardour build root — the binary lives at $FOYER_ARDOUR_BUILD_ROOT/build/headless/hardour-*.
 # Default matches the layout the Dockerfile installs.
 FOYER_ARDOUR_BUILD_ROOT="${FOYER_ARDOUR_BUILD_ROOT:-/opt/ardour}"
@@ -86,8 +112,9 @@ case "${FOYER_JACK_MODE}" in
         if pgrep -x jackd >/dev/null 2>&1; then
             log "jackd already running — reusing"
         else
-            log "starting embedded jackd dummy (sr=${FOYER_SAMPLE_RATE}, frames=${FOYER_PERIOD_FRAMES})"
-            jackd -R -P 10 -d dummy \
+            log "starting embedded jackd dummy (sr=${FOYER_SAMPLE_RATE}, frames=${FOYER_PERIOD_FRAMES}, rt=${JACK_RT_ARGS:-off})"
+            # shellcheck disable=SC2086 # JACK_RT_ARGS is "" or "-R -P 10" — must word-split
+            jackd ${JACK_RT_ARGS} -d dummy \
                   -r "${FOYER_SAMPLE_RATE}" -p "${FOYER_PERIOD_FRAMES}" \
                   >/tmp/jackd.log 2>&1 &
             JACKD_PID=$!
@@ -125,8 +152,9 @@ case "${FOYER_JACK_MODE}" in
             log "ERROR: FOYER_JACK_MODE=netjack requires FOYER_NETJACK_HOST=<host[:port]>"
             exit 1
         fi
-        log "starting netjack client → ${FOYER_NETJACK_HOST}:${FOYER_NETJACK_PORT}"
-        jackd -R -d net \
+        log "starting netjack client → ${FOYER_NETJACK_HOST}:${FOYER_NETJACK_PORT} (rt=${JACK_RT_ARGS:-off})"
+        # shellcheck disable=SC2086 # JACK_RT_ARGS is "" or "-R -P 10" — must word-split
+        jackd ${JACK_RT_ARGS} -d net \
               -h "${FOYER_NETJACK_HOST}" -p "${FOYER_NETJACK_PORT}" \
               >/tmp/jackd.log 2>&1 &
         JACKD_PID=$!

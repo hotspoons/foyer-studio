@@ -200,7 +200,30 @@ fixed in any image built after 2026-04-30.
 The full local `docker run` invocation above doesn't translate
 1:1 to Cloud Run. The gen2 (gVisor) sandbox strips the security-
 sensitive flags and routes shared memory through its own volume
-mechanism. Mapping table:
+mechanism.
+
+**Prerequisite — Artifact Registry remote repo proxying ghcr.io.**
+Cloud Run can ONLY pull from `gcr.io` / `*-docker.pkg.dev` / `docker.io`;
+`ghcr.io/...` URLs are rejected at deploy time. Set up a one-time
+remote repo that transparently proxies ghcr (preserves multi-arch
+manifests, caches layers after first pull):
+
+```bash
+gcloud services enable artifactregistry.googleapis.com
+
+gcloud artifacts repositories create ghcr-remote \
+  --location=us-central1 \
+  --repository-format=docker \
+  --mode=remote-repository \
+  --remote-docker-repo=https://ghcr.io \
+  --remote-repo-config-desc="ghcr.io passthrough"
+```
+
+Then any image at `ghcr.io/<owner>/<name>:<tag>` is reachable as
+`us-central1-docker.pkg.dev/<PROJECT>/ghcr-remote/<owner>/<name>:<tag>`.
+Use that URL in `--image=`.
+
+Mapping table:
 
 | Local docker flag        | Cloud Run equivalent                                                                                                       |
 |--------------------------|----------------------------------------------------------------------------------------------------------------------------|
@@ -208,14 +231,14 @@ mechanism. Mapping table:
 | `--network=host`         | **Not applicable.** Cloud Run terminates HTTPS at its edge; the container only sees its own NAT'd net namespace.          |
 | `--ulimit rtprio=95`     | **Not supported by gVisor.** Same fallback as `--privileged`.                                                              |
 | `--ulimit memlock=-1`    | **Not supported by gVisor.** JACK's `mlockall()` errors silently and continues without locking pages.                     |
-| `--shm-size=2g`          | Replace with `--add-volume=name=shm,type=in-memory,size-limit=512Mi --add-volume-mount=volume=shm,mount-path=/dev/shm`.    |
-| `-e ASAN_COREDUMP=0`     | Already baked into the image's `ENV` block — pass nothing.                                                                  |
+| `--shm-size=2g`          | **Don't pass.** Cloud Run gen2 provides `/dev/shm` automatically at ~50% of `--memory` (so `--memory=2Gi` → ~1 GiB shm). Mounts under `/dev`, `/proc`, `/sys` are rejected with "Mount paths [/dev/shm] are in one of disallowed mount points" — the older volume-mount workaround no longer works. |
+| `-e ASAN_COREDUMP=0`     | Already baked into the image's `ENV` block (any image after 2026-04-30) — pass nothing. For older snapshots, add `--set-env-vars=ASAN_COREDUMP=0`. |
 
-Reference deploy:
+Reference deploy (substitute your project ID):
 
 ```bash
 gcloud run deploy foyer-studio \
-  --image=ghcr.io/hotspoons/foyer-studio:latest \
+  --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/ghcr-remote/hotspoons/foyer-studio:latest \
   --region=us-central1 \
   --port=3838 \
   --memory=2Gi --cpu=2 \
@@ -223,9 +246,7 @@ gcloud run deploy foyer-studio \
   --execution-environment=gen2 \
   --cpu-boost \
   --timeout=3600 \
-  --allow-unauthenticated \
-  --add-volume=name=shm,type=in-memory,size-limit=512Mi \
-  --add-volume-mount=volume=shm,mount-path=/dev/shm
+  --allow-unauthenticated
 ```
 
 `--cpu-boost` matters because Ardour's session load reads thousands
@@ -267,6 +288,7 @@ these on every boot:
 | `FOYER_JACK_MODE`     | `embedded`    | One of `embedded` / `shm` / `netjack` / `none`. See **JACK passthrough** below.                              |
 | `FOYER_SAMPLE_RATE`   | `48000`       | Engine sample rate, Hz.                                                                                       |
 | `FOYER_PERIOD_FRAMES` | `1024`        | JACK period frames (latency vs. CPU tradeoff). Honored only by `embedded` and `netjack` modes.                |
+| `FOYER_JACK_REALTIME` | `auto`        | `auto` probes `ulimit -r` and uses jackd's `-R -P 10` only when the kernel allows realtime scheduling. `on` forces RT (fails fast in non-privileged containers). `off` always non-RT. Cloud Run / non-privileged docker auto-resolves to `off`. |
 | `FOYER_NETJACK_HOST`  | _unset_       | NetJack2 server hostname or `host:port`. Required when `FOYER_JACK_MODE=netjack`.                             |
 | `FOYER_NETJACK_PORT`  | `19000`       | NetJack2 server port; only used if `FOYER_NETJACK_HOST` doesn't already include a port.                       |
 | `FOYER_TLS_CERT`      | _unset_       | PEM cert path (for direct HTTPS without a fronting proxy). Pair with `FOYER_TLS_KEY`.                         |
