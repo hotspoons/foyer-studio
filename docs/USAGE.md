@@ -149,6 +149,92 @@ sound on day one. The image weighs in around 2 GB and the slow path
 is the Ardour build (~15 min on a modern CPU); subsequent builds
 benefit from BuildKit's layer cache.
 
+### Quickstart — run a published image
+
+CI publishes multi-arch images (linux/amd64 + linux/arm64) to GHCR
+on every push. Pulls auto-select the right arch — no
+`--platform linux/amd64` ceremony on Apple Silicon.
+
+```bash
+docker run \
+  --privileged \
+  --network=host \
+  --ulimit rtprio=95 \
+  --ulimit memlock=-1 \
+  --shm-size=2g \
+  --name foyer --rm -it \
+  ghcr.io/hotspoons/foyer-studio:latest
+```
+
+Open <http://127.0.0.1:3838>. (Or `:snapshot-latest` for the most
+recent feature-branch build, or pin to a SHA-suffixed tag like
+`:snapshot-abc1234` for an immutable reproducible run.)
+
+What each flag does (and why you can't just `-p 3838:3838` it):
+
+| Flag                        | Why it's needed                                                                                                                                                                                                                                       |
+|-----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--privileged`              | Lets the container's `jackd -R` request realtime scheduling. Without it JACK falls back to non-realtime, which works but spends more CPU and produces audible jitter at low buffer sizes.                                                            |
+| `--network=host`            | Container shares the host network namespace, so the bound port is reachable on Mac/Linux without a `-p` map. (You can replace with `-p 3838:3838` if you'd rather isolate.)                                                                            |
+| `--ulimit rtprio=95`        | Caps the realtime-priority value JACK is allowed to request. Without it the kernel's default `rtprio` ulimit (often 0) blocks `SCHED_FIFO`.                                                                                                            |
+| `--ulimit memlock=-1`       | Unlimited locked memory. JACK's RT threads `mlockall()` to keep their pages out of swap during processing. Without this, audio glitches under memory pressure.                                                                                          |
+| `--shm-size=2g`             | JACK's client/server registry lives in `/dev/shm`. Docker's default 64 MB cap is fine for two clients but cramped once Foyer's audio egress, ingress, and Ardour's own DSP all open shm segments.                                                       |
+| `--rm -it --name foyer`     | Hygiene — auto-cleanup on exit, named for `docker logs foyer` while running.                                                                                                                                                                            |
+
+Persist projects across runs by adding `-v foyer-projects:/projects`
+(named volume) or `-v ~/foyer-projects:/projects` (host bind mount).
+
+**macOS:** all flags above work under Docker Desktop and Colima.
+The image's CoreAudio passthrough story is documented further down
+under [Docker on macOS — about audio passthrough](#docker-on-macos--about-audio-passthrough);
+TL;DR for headless mixing/collab the defaults are fine, for real
+audio hardware use Path 1.
+
+**`ASAN_COREDUMP=0` is set inside the image now** — if you saw
+`ardev_common_waf.sh: line 62: ASAN_COREDUMP: unbound variable` on
+an earlier `:snapshot-*` tag, that was a missing default and is
+fixed in any image built after 2026-04-30.
+
+### Cloud Run notes (gen2 sandbox)
+
+The full local `docker run` invocation above doesn't translate
+1:1 to Cloud Run. The gen2 (gVisor) sandbox strips the security-
+sensitive flags and routes shared memory through its own volume
+mechanism. Mapping table:
+
+| Local docker flag        | Cloud Run equivalent                                                                                                       |
+|--------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| `--privileged`           | **Not supported.** JACK falls back to non-realtime scheduling. Acceptable for collab/mix work; not great for tracking.    |
+| `--network=host`         | **Not applicable.** Cloud Run terminates HTTPS at its edge; the container only sees its own NAT'd net namespace.          |
+| `--ulimit rtprio=95`     | **Not supported by gVisor.** Same fallback as `--privileged`.                                                              |
+| `--ulimit memlock=-1`    | **Not supported by gVisor.** JACK's `mlockall()` errors silently and continues without locking pages.                     |
+| `--shm-size=2g`          | Replace with `--add-volume=name=shm,type=in-memory,size-limit=512Mi --add-volume-mount=volume=shm,mount-path=/dev/shm`.    |
+| `-e ASAN_COREDUMP=0`     | Already baked into the image's `ENV` block — pass nothing.                                                                  |
+
+Reference deploy:
+
+```bash
+gcloud run deploy foyer-studio \
+  --image=ghcr.io/hotspoons/foyer-studio:latest \
+  --region=us-central1 \
+  --port=3838 \
+  --memory=2Gi --cpu=2 \
+  --min-instances=0 --max-instances=1 \
+  --execution-environment=gen2 \
+  --cpu-boost \
+  --timeout=3600 \
+  --allow-unauthenticated \
+  --add-volume=name=shm,type=in-memory,size-limit=512Mi \
+  --add-volume-mount=volume=shm,mount-path=/dev/shm
+```
+
+`--cpu-boost` matters because Ardour's session load reads thousands
+of small files; cold-start without boost is ~15s slower. The
+`--timeout=3600` covers a long-running collaborative session
+(default Cloud Run timeout is 60s).
+
+### Building the image locally
+
 ```bash
 just docker-build
 # or, for a custom tag / extra build args:
@@ -159,7 +245,9 @@ just docker-build image=ghcr.io/me/foyer:dev args="--build-arg ARDOUR_TAG=master
 
 ```bash
 just docker-run
-# = docker run --rm -it -p 3838:3838 -v foyer-projects:/projects foyer-studio:latest
+# Wraps `docker run` with the runtime flags listed above (privileged,
+# host net, rtprio + memlock ulimits, 2g shm). Override the image tag:
+#   just docker-run image=ghcr.io/me/foyer:dev
 ```
 
 Open <http://127.0.0.1:3838>. The first boot lights up an internal

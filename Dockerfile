@@ -144,6 +144,16 @@ RUN if ! git -c advice.detachedHead=false clone --depth 1 \
  && cd /opt/autovocoder \
  && INSTALL_DIR=/opt/lv2 ./scripts/install-lv2.sh
 
+# Tailwind CSS — must run BEFORE the Rust release build because
+# `cargo build --release` bakes the web tree into the binary via
+# `include_dir!` (see crates/foyer-cli/build.rs). The output file
+# `web/styles/tw.build.css` is gitignored and `.dockerignored`'s sibling
+# (rebuilt fresh per build), so without this step the production image
+# ships an unstyled UI. tw.sh auto-detects arch and downloads the
+# matching tailwindcss standalone binary; works under buildx for
+# linux/amd64 and linux/arm64.
+RUN /workspace/scripts/dev/tw.sh build
+
 # Build the foyer binary in release mode. `cargo build --release`
 # bakes the web tree into the binary via include_dir!, which is the
 # canonical ship path (see Justfile run-static).
@@ -337,13 +347,22 @@ WORKDIR /home/foyer
 
 # Cloud Run injects $PORT; the entrypoint honors it. 3838 is the
 # documented default.
+#
+# `ASAN_COREDUMP=0` is required because Ardour's
+# `ardev_common.sh` (which the entrypoint sources to populate
+# ARDOUR_DATA_PATH / DLL_PATH / etc.) uses `[ x$ASAN_COREDUMP != x ]`
+# with an unquoted expansion. The entrypoint runs under `set -u`, so
+# an unset var aborts boot with "ASAN_COREDUMP: unbound variable".
+# Defaulting it here means users don't have to pass `-e ASAN_COREDUMP=0`
+# on every `docker run`.
 ENV PORT=3838 \
     FOYER_JACK_MODE=embedded \
     FOYER_BACKEND=ardour \
     FOYER_JAIL=/projects \
     FOYER_SAMPLE_RATE=48000 \
     LV2_PATH=/usr/lib/lv2:/home/foyer/.lv2 \
-    FOYER_ARDOUR_BUILD_ROOT=/opt/ardour
+    FOYER_ARDOUR_BUILD_ROOT=/opt/ardour \
+    ASAN_COREDUMP=0
 EXPOSE 3838
 
 # tini reaps zombies + forwards SIGTERM cleanly to the foyer + jackd

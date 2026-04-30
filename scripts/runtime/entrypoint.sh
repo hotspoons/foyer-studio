@@ -49,8 +49,16 @@ FOYER_ARDOUR_BUILD_ROOT="${FOYER_ARDOUR_BUILD_ROOT:-/opt/ardour}"
 # releases. Skip in stub-only mode (no Ardour install present).
 if [ -f "${FOYER_ARDOUR_BUILD_ROOT}/build/gtk2_ardour/ardev_common_waf.sh" ]; then
     export TOP="${FOYER_ARDOUR_BUILD_ROOT}"
+    # ardev_common.sh.in:62 reads `[ x$ASAN_COREDUMP != x ]` with an
+    # unquoted expansion, and there are similar patterns later in the
+    # file for diagnostic-only vars (LIBJACK, MALLOC_CONF, …). Under
+    # the entrypoint's `set -u` they all abort boot. Drop -u for the
+    # source, restore it after — the script's job is just to populate
+    # path env vars, not to enforce strictness on us.
+    set +u
     # shellcheck disable=SC1091
     source "${FOYER_ARDOUR_BUILD_ROOT}/build/gtk2_ardour/ardev_common_waf.sh"
+    set -u
 fi
 
 # Make sure the foyer surface .so is reachable. The Dockerfile

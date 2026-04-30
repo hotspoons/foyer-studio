@@ -283,11 +283,26 @@ release-bundle:
 docker-build image='foyer-studio:latest' *args='':
     DOCKER_BUILDKIT=1 docker build -t {{image}} {{args}} .
 
-# Run the production image locally on port 3838 with a named volume
-# for /projects. Useful for one-off "does the container actually
-# boot?" checks before pushing to a registry.
+# Run the production image locally with the runtime flags JACK + the
+# Ardour shim need to behave correctly. See `docs/USAGE.md` "Quickstart
+# — run a published image" for the rationale on each flag.
+#
+# `--network=host` is used in place of `-p 3838:3838` so the container's
+# bound port is reachable at 127.0.0.1:3838 without a NAT hop. If you'd
+# rather isolate, swap `--network=host` for `-p 3838:3838`. JACK's
+# realtime path (`--privileged --ulimit rtprio=95 --ulimit memlock=-1`)
+# falls back gracefully if those flags get stripped (Cloud Run gen2
+# does this); it just costs CPU and adds jitter under load.
+#
+# Override the image:
+#   just docker-run image=ghcr.io/hotspoons/foyer-studio:snapshot-latest
 docker-run image='foyer-studio:latest' *args='':
-    docker run --rm -it -p 3838:3838 \
+    docker run --rm -it \
+        --privileged \
+        --network=host \
+        --ulimit rtprio=95 \
+        --ulimit memlock=-1 \
+        --shm-size=2g \
         -v foyer-projects:/projects \
         -e PORT=3838 \
         {{args}} \
