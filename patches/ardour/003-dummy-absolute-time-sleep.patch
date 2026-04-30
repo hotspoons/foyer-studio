@@ -28,11 +28,8 @@ Linux-only — other platforms keep the original drift-accumulating
 behavior.
 
 ---
- libs/backends/dummy/dummy_audiobackend.cc | 60 ++++++++++++++++++++++-
- libs/backends/dummy/dummy_audiobackend.h  |  9 ++++
- 2 files changed, 67 insertions(+), 2 deletions(-)
-
 diff --git a/libs/backends/dummy/dummy_audiobackend.cc b/libs/backends/dummy/dummy_audiobackend.cc
+index d753681870..4271ed4980 100644
 --- a/libs/backends/dummy/dummy_audiobackend.cc
 +++ b/libs/backends/dummy/dummy_audiobackend.cc
 @@ -22,6 +22,10 @@
@@ -43,13 +40,13 @@ diff --git a/libs/backends/dummy/dummy_audiobackend.cc b/libs/backends/dummy/dum
 +#include <time.h>   /* Foyer Studio: clock_nanosleep + struct timespec */
 +#include <errno.h>  /* Foyer Studio: EINTR retry on clock_nanosleep */
 +#endif
-
+ 
  #include <glibmm.h>
-
-@@ -968,15 +972,67 @@ DummyAudioBackend::main_process_thread ()
+ 
+@@ -966,14 +970,60 @@ DummyAudioBackend::main_process_thread ()
  			_dsp_load_calc.set_stop_timestamp_us (_x_get_monotonic_usec());
  			_dsp_load = _dsp_load_calc.get_dsp_load_unbound ();
-
+ 
 -			const int64_t elapsed_time = _dsp_load_calc.elapsed_time_us ();
  			const int64_t nominal_time = _dsp_load_calc.get_max_time_us ();
 +#ifdef __linux__
@@ -109,12 +106,13 @@ diff --git a/libs/backends/dummy/dummy_audiobackend.cc b/libs/backends/dummy/dum
  			_dsp_load = 1.0f;
  			Glib::usleep (10); // don't hog cpu
 diff --git a/libs/backends/dummy/dummy_audiobackend.h b/libs/backends/dummy/dummy_audiobackend.h
+index 610f05ef3d..89a50d873d 100644
 --- a/libs/backends/dummy/dummy_audiobackend.h
 +++ b/libs/backends/dummy/dummy_audiobackend.h
 @@ -384,6 +384,15 @@ class DummyAudioBackend : public AudioBackend, public PortEngineSharedImpl
-
+ 
  		samplecnt_t _processed_samples;
-
+ 
 +		// Foyer Studio: absolute-time cycle deadline (µs since some
 +		// arbitrary monotonic epoch). Advances by nominal_time per
 +		// cycle; the audio thread sleeps to this deadline using
@@ -125,5 +123,5 @@ diff --git a/libs/backends/dummy/dummy_audiobackend.h b/libs/backends/dummy/dumm
 +		int64_t _target_cycle_us = 0;
 +
  		pthread_t _main_thread;
-
+ 
  		/* process threads */
