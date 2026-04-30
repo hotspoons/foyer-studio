@@ -114,15 +114,26 @@ async fn snapshot_then_control_set_round_trip() {
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            _ = &mut deadline => panic!("no ControlUpdate received"),
+            _ = &mut deadline => panic!("no alice-tagged ControlUpdate received"),
             msg = ws.next() => {
                 let env = envelope_of(msg);
                 if let Event::ControlUpdate { update } = &env.body {
                     if update.id.as_str() == "transport.tempo" {
                         assert_eq!(update.value, ControlValue::Float(144.0));
-                        // The origin-tagged echo lets alice distinguish her own write.
-                        assert_eq!(env.origin.as_deref(), Some("alice"));
-                        return;
+                        // Two ControlUpdates legitimately fire here — the
+                        // server's synthetic echo (origin=alice, from the
+                        // request handler in ws.rs) and the backend's own
+                        // event-stream emission picked up by the pump task
+                        // (origin=backend, via broadcast_event). Order is
+                        // tokio-scheduling-dependent: locally aarch64
+                        // almost always sees alice first; CI x86_64 with
+                        // 2 worker threads can race the other way. Skip
+                        // any backend-tagged updates for this control and
+                        // wait for the alice-tagged echo — that's what the
+                        // test actually validates.
+                        if env.origin.as_deref() == Some("alice") {
+                            return;
+                        }
                     }
                 }
             }
