@@ -9,6 +9,8 @@ static constexpr bool LOG_STEADY_STATE_STATS = false;
 #include "master_tap.h"
 
 #include <chrono>
+#include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -89,6 +91,37 @@ MasterTap::run (BufferSet& bufs,
 		             << " FIRST run() fire — nframes=" << nframes
 		             << " bufs.audio=" << bufs.count ().n_audio ()
 		             << endmsg;
+	}
+	// Cycle-timing instrumentation. RT-safe: just an atomic timestamp
+	// load + store + a few atomic counter updates per call. The drain
+	// loop (non-RT) reads the running stats every 2 s and logs them
+	// when the spread suggests timer drift. Critical for diagnosing
+	// pops on the Dummy backend where the audio thread runs
+	// SCHED_OTHER and can drift cycle-to-cycle under CPU contention.
+	{
+		using clock = std::chrono::steady_clock;
+		const auto now_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds> (
+		        clock::now ().time_since_epoch ()).count ();
+		const std::int64_t prev = _last_run_ns.exchange (
+		    now_ns, std::memory_order_relaxed);
+		if (prev != 0) {
+			const std::int64_t delta_ns = now_ns - prev;
+			_cycle_count.fetch_add (1, std::memory_order_relaxed);
+			_cycle_delta_sum_ns.fetch_add (delta_ns, std::memory_order_relaxed);
+			// Track running min/max via CAS — typical contention is
+			// zero (single-writer per audio thread) so the loops
+			// usually go around once.
+			std::int64_t cur_min = _cycle_delta_min_ns.load (std::memory_order_relaxed);
+			while (delta_ns < cur_min &&
+			       !_cycle_delta_min_ns.compare_exchange_weak (cur_min, delta_ns,
+			                                                  std::memory_order_relaxed)) {}
+			std::int64_t cur_max = _cycle_delta_max_ns.load (std::memory_order_relaxed);
+			while (delta_ns > cur_max &&
+			       !_cycle_delta_max_ns.compare_exchange_weak (cur_max, delta_ns,
+			                                                  std::memory_order_relaxed)) {}
+		}
+		_cycle_nframes_last.store (nframes, std::memory_order_relaxed);
 	}
 	if (!_ring || nframes == 0) return;
 
@@ -268,6 +301,47 @@ MasterTap::drain_loop ()
 				             << " samples (" << d << " total) in last 2 s; "
 				             << "playback will have audible pops"
 				             << endmsg;
+			}
+
+			// Cycle-timing report. Reads + RESETS the counters so each
+			// 2 s window is independent. We log when:
+			//   * jitter window (max - min) > 5 ms — a healthy RT
+			//     audio loop is sub-millisecond; even non-RT JACK is
+			//     usually <1 ms. >5 ms means cycles are bursting,
+			//     which IS the audible pop on the Dummy backend.
+			//   * average cycle delta deviates >10 % from expected
+			//     (nframes / sample_rate) — means the timer is
+			//     systematically slow/fast, separate from jitter.
+			// Always logs the steady-state numbers when LOG_STEADY_STATE_STATS
+			// is on; loud-warns only when the spread is bad.
+			const auto cycles = _cycle_count.exchange (0, std::memory_order_relaxed);
+			if (cycles > 0) {
+				const auto sum_ns = _cycle_delta_sum_ns.exchange (0, std::memory_order_relaxed);
+				const auto min_ns = _cycle_delta_min_ns.exchange (INT64_MAX, std::memory_order_relaxed);
+				const auto max_ns = _cycle_delta_max_ns.exchange (0, std::memory_order_relaxed);
+				const auto nfr    = _cycle_nframes_last.load (std::memory_order_relaxed);
+				const double avg_ms = (sum_ns / static_cast<double> (cycles)) / 1.0e6;
+				const double min_ms = min_ns / 1.0e6;
+				const double max_ms = max_ns / 1.0e6;
+				const double jitter_ms = max_ms - min_ms;
+				const double expected_ms = (nfr > 0)
+				    ? (static_cast<double> (nfr) * 1000.0 / 48000.0)  // 48k assumption
+				    : 0.0;
+				const double dev_pct = (expected_ms > 0.0)
+				    ? std::abs (avg_ms - expected_ms) / expected_ms * 100.0
+				    : 0.0;
+				if (jitter_ms > 5.0 || dev_pct > 10.0) {
+					PBD::warning << "foyer_shim: [audio] cycle timing JITTER — "
+					             << "avg=" << avg_ms << " ms "
+					             << "min=" << min_ms << " ms "
+					             << "max=" << max_ms << " ms "
+					             << "spread=" << jitter_ms << " ms "
+					             << "expected=" << expected_ms << " ms "
+					             << "dev=" << dev_pct << " % "
+					             << "nframes=" << nfr << " "
+					             << "cycles=" << cycles
+					             << endmsg;
+				}
 			}
 			if constexpr (LOG_STEADY_STATE_STATS) {
 				const auto r = _run_calls.load ();

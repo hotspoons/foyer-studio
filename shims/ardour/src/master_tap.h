@@ -23,6 +23,7 @@
 #define foyer_shim_master_tap_h
 
 #include <atomic>
+#include <cstdint>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -160,6 +161,19 @@ private:
 	// listener's output. Surfaces in the periodic stats line so
 	// "playback has pops" is reduced to a single number.
 	std::atomic<std::uint64_t> _samples_dropped { 0 };
+
+	// Cycle-timing instrumentation — measures the wall-clock interval
+	// between consecutive run() calls. With JACK + RT scheduling these
+	// are tight (jitter < 1 ms typically). With Dummy on a SCHED_OTHER
+	// thread, drift can be tens of ms. The drain loop reads + resets
+	// these every 2 s and logs when min↔max spread suggests a problem.
+	// All atomic so the RT thread stays lock-free.
+	std::atomic<std::int64_t>  _last_run_ns       { 0 };
+	std::atomic<std::uint64_t> _cycle_count       { 0 };
+	std::atomic<std::int64_t>  _cycle_delta_sum_ns { 0 };
+	std::atomic<std::int64_t>  _cycle_delta_min_ns { INT64_MAX };
+	std::atomic<std::int64_t>  _cycle_delta_max_ns { 0 };
+	std::atomic<std::uint32_t> _cycle_nframes_last { 0 };
 
 	void drain_loop ();
 };
