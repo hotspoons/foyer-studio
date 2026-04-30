@@ -37,6 +37,18 @@ pub struct PluginInstance {
     /// reload without the user re-applying.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub current_preset: Option<String>,
+    /// True when the backend can host a native UI for this plugin
+    /// (LV2 has a `ui:`, VST3 reports an IPlugView, etc.). Phase 1
+    /// only advertises the capability — actual streaming arrives in
+    /// a later phase. Absent / `None` is the same as `Some(false)`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub has_native_gui: Option<bool>,
+    /// Format hint used as a UI label only (`"lv2"`, `"vst3"`,
+    /// `"vst2"`, `"au"`, …). Routing of the framebuffer stream is
+    /// keyed off `id`; this is purely so the toggle can read
+    /// "Show native VST3 GUI" instead of a generic label.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub native_gui_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

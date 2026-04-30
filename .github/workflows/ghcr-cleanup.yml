@@ -1,0 +1,176 @@
+name: ghcr-cleanup
+
+# Prune old container image versions from GHCR so a year of feature-
+# branch pushes doesn't accumulate into thousands of dangling
+# `snapshot-<sha>` tags. Runs daily via cron and on manual dispatch.
+#
+# Retention policy:
+#   * Untagged versions older than 7 days  → delete (orphaned by
+#     mutable-tag overwrites — when a fresh push to a branch
+#     re-points `snapshot-latest`, the previous version's other
+#     tag-handles drop, leaving an untagged digest behind).
+#   * Versions whose tags are EXCLUSIVELY snapshot-<sha> (no
+#     `latest`, no `snapshot-latest`, no `main-*`, no `v*`)
+#     older than 14 days → delete.
+#   * Versions tagged `latest`, `snapshot-latest`, `main-<sha>`,
+#     or any tag starting with `v` (release tags) → keep forever.
+#
+# The 14-day retention is deliberately loose: a developer
+# previewing a feature branch on a Cloud Run side-deploy can pin
+# `snapshot-<sha>` and have a couple of weeks before it gets
+# garbage-collected. Bump the cutoff if 14 days bites.
+
+on:
+  schedule:
+    # 06:17 UTC daily — off-peak for both US + EU runners; keeps
+    # the cleanup out of the way of human-triggered builds. Picked
+    # an off-pattern minute (`:17`) rather than `:00` to dodge the
+    # synchronized-cron-stampede problem GitHub Actions has at
+    # round-hour cron triggers.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print what would be deleted without deleting."
+        required: false
+        type: boolean
+        default: false
+      snapshot_max_age_days:
+        description: "Delete snapshot-* versions older than N days (default 14)."
+        required: false
+        default: "14"
+      untagged_max_age_days:
+        description: "Delete untagged versions older than N days (default 7)."
+        required: false
+        default: "7"
+
+permissions:
+  # `packages: write` is the GHCR delete permission. The job runs
+  # against `${{ github.repository }}`'s package — never crosses
+  # to other repos because the API endpoints we hit are scoped to
+  # the calling repo's owner.
+  packages: write
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prune old GHCR image versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE: foyer-studio
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SNAPSHOT_MAX_AGE_DAYS: ${{ github.event.inputs.snapshot_max_age_days || '14' }}
+          UNTAGGED_MAX_AGE_DAYS: ${{ github.event.inputs.untagged_max_age_days || '7' }}
+        run: |
+          set -eo pipefail
+
+          # GHCR's API path differs for user-owned vs. org-owned
+          # packages. Try the org endpoint first; on 404, fall
+          # through to the user endpoint. The owner login string
+          # is the same on both sides.
+          api_base() {
+            if gh api "/orgs/$OWNER" >/dev/null 2>&1; then
+              echo "/orgs/$OWNER/packages/container/$PACKAGE"
+            else
+              echo "/users/$OWNER/packages/container/$PACKAGE"
+            fi
+          }
+          BASE=$(api_base)
+          echo "::notice::api base: $BASE"
+
+          # Cutoffs in unix seconds.
+          NOW=$(date -u +%s)
+          SNAPSHOT_CUTOFF=$((NOW - SNAPSHOT_MAX_AGE_DAYS * 86400))
+          UNTAGGED_CUTOFF=$((NOW - UNTAGGED_MAX_AGE_DAYS * 86400))
+          echo "::notice::snapshot cutoff: $(date -u -d @$SNAPSHOT_CUTOFF '+%Y-%m-%d %H:%M UTC')"
+          echo "::notice::untagged cutoff: $(date -u -d @$UNTAGGED_CUTOFF '+%Y-%m-%d %H:%M UTC')"
+
+          delete_count=0
+          keep_count=0
+
+          # `--paginate` iterates 100 versions per page until exhausted.
+          # `--jq` flattens to one JSON object per line so the bash
+          # while-loop can split fields without parsing JSON itself.
+          gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "$BASE/versions" \
+            --jq '.[] | {id, updated_at, tags: .metadata.container.tags}' \
+            > /tmp/versions.ndjson
+
+          total=$(wc -l < /tmp/versions.ndjson)
+          echo "::notice::scanning $total package versions"
+
+          while read -r line; do
+            id=$(echo "$line" | jq -r .id)
+            updated_at=$(echo "$line" | jq -r .updated_at)
+            tags=$(echo "$line" | jq -r '.tags | join(",")')
+            updated_unix=$(date -u -d "$updated_at" +%s)
+
+            # Bucket the version by tag composition.
+            keep_reason=""
+            delete_reason=""
+
+            if [ -z "$tags" ]; then
+              # Untagged digest — orphan from a mutable-tag overwrite.
+              if [ "$updated_unix" -lt "$UNTAGGED_CUTOFF" ]; then
+                delete_reason="untagged orphan, age=$(((NOW-updated_unix)/86400))d"
+              else
+                keep_reason="untagged but recent"
+              fi
+            else
+              # Tagged. Protect anything carrying a non-snapshot tag.
+              IFS=',' read -ra tag_array <<< "$tags"
+              has_protected=0
+              for t in "${tag_array[@]}"; do
+                case "$t" in
+                  latest|snapshot-latest|main-*|v[0-9]*)
+                    has_protected=1
+                    ;;
+                esac
+              done
+              if [ "$has_protected" = "1" ]; then
+                keep_reason="protected tag(s): $tags"
+              else
+                # Every tag is a snapshot-<sha> or other transient.
+                if [ "$updated_unix" -lt "$SNAPSHOT_CUTOFF" ]; then
+                  delete_reason="snapshot-only, age=$(((NOW-updated_unix)/86400))d, tags=$tags"
+                else
+                  keep_reason="snapshot-only but recent, tags=$tags"
+                fi
+              fi
+            fi
+
+            if [ -n "$delete_reason" ]; then
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "DRY  delete id=$id ($delete_reason)"
+              else
+                echo "DEL  id=$id ($delete_reason)"
+                gh api -X DELETE "$BASE/versions/$id" >/dev/null \
+                  || echo "::warning::delete failed for id=$id"
+              fi
+              delete_count=$((delete_count + 1))
+            else
+              keep_count=$((keep_count + 1))
+            fi
+          done < /tmp/versions.ndjson
+
+          {
+            echo "## GHCR cleanup summary"
+            echo ""
+            echo "| Action | Count |"
+            echo "|---|---|"
+            echo "| Versions kept | $keep_count |"
+            echo "| Versions deleted${DRY_RUN:+ (dry run — none actually removed)} | $delete_count |"
+            echo ""
+            echo "Cutoffs:"
+            echo "- snapshot tags: ${SNAPSHOT_MAX_AGE_DAYS} days"
+            echo "- untagged: ${UNTAGGED_MAX_AGE_DAYS} days"
+          } >> "$GITHUB_STEP_SUMMARY"

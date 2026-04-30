@@ -272,6 +272,42 @@ release-bundle:
     FOYER_BIN="$(pwd)/target/$arch_triple/release/foyer" \
         ./scripts/release/bundle.sh
 
+# Build the production container image. Two-stage build (Ardour from
+# source + Foyer release binary in stage 1; slim runtime in stage 2).
+# Slow path is the Ardour compile (~15 min on a modern CPU); rebuilds
+# benefit from the BuildKit cache.
+#
+# Pass `image=foo:tag` to override the tag, or `args="--build-arg X=Y"`
+# to forward extra build args. Example:
+#   just docker-build image=ghcr.io/me/foyer:dev args="--build-arg ARDOUR_TAG=master"
+docker-build image='foyer-studio:latest' *args='':
+    DOCKER_BUILDKIT=1 docker build -t {{image}} {{args}} .
+
+# Run the production image locally with the runtime flags JACK + the
+# Ardour shim need to behave correctly. See `docs/USAGE.md` "Quickstart
+# — run a published image" for the rationale on each flag.
+#
+# `--network=host` is used in place of `-p 3838:3838` so the container's
+# bound port is reachable at 127.0.0.1:3838 without a NAT hop. If you'd
+# rather isolate, swap `--network=host` for `-p 3838:3838`. JACK's
+# realtime path (`--privileged --ulimit rtprio=95 --ulimit memlock=-1`)
+# falls back gracefully if those flags get stripped (Cloud Run gen2
+# does this); it just costs CPU and adds jitter under load.
+#
+# Override the image:
+#   just docker-run image=ghcr.io/hotspoons/foyer-studio:snapshot-latest
+docker-run image='foyer-studio:latest' *args='':
+    docker run --rm -it \
+        --privileged \
+        --network=host \
+        --ulimit rtprio=95 \
+        --ulimit memlock=-1 \
+        --shm-size=2g \
+        -v foyer-projects:/projects \
+        -e PORT=3838 \
+        {{args}} \
+        {{image}}
+
 ardour cmd='help' *args='':
     ./scripts/dev/ardour.sh {{cmd}} {{args}}
 

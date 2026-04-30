@@ -95,9 +95,18 @@ pub fn default_daw_actions() -> Vec<Action> {
         ),
         mk(
             "session.export",
-            "Export…",
+            "Export Project…",
             ActionCategory::Session,
             Some("arrow-down-tray"),
+            None,
+        ),
+        // Client-orchestrated upload. The browser POSTs the archive to
+        // `/sessions/upload`; the action item is just the menu hook.
+        mk(
+            "session.upload",
+            "Upload Project…",
+            ActionCategory::Session,
+            Some("arrow-up-tray"),
             None,
         ),
         // ── Edit ────────────────────────────────────────────────

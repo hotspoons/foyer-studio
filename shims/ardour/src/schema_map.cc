@@ -263,6 +263,22 @@ unit_from_descriptor (const ParameterDescriptor& d)
 	}
 }
 
+const char*
+plugin_format_label (ARDOUR::PluginType t)
+{
+	switch (t) {
+		case ARDOUR::AudioUnit:   return "au";
+		case ARDOUR::LADSPA:      return "ladspa";
+		case ARDOUR::LV2:         return "lv2";
+		case ARDOUR::Windows_VST: return "vst2";
+		case ARDOUR::LXVST:       return "vst2";
+		case ARDOUR::MacVST:      return "vst2";
+		case ARDOUR::Lua:         return "lua";
+		case ARDOUR::VST3:        return "vst3";
+	}
+	return "internal";
+}
+
 } // namespace
 
 std::vector<PluginDesc>
@@ -290,6 +306,18 @@ enumerate_plugins (std::shared_ptr<Route> route)
 		// "no preset active" — left as "" on the wire so the UI shows
 		// the placeholder.
 		pd.current_preset = plug->last_preset ().uri;
+
+		// Native-GUI capability probe. `Plugin::has_editor()` is the
+		// uniform virtual every backend overrides (LV2Plugin checks the
+		// lilv UI list, VST3Plugin asks for IEditController, etc.) so
+		// we don't need format-specific lilv walks here. Pair it with
+		// the format label so the UI can render "Show native VST3 GUI"
+		// without re-deriving the format from the URI.
+		if (plug->has_editor ()) {
+			pd.has_native_gui   = true;
+			auto info = plug->get_info ();
+			pd.native_gui_kind  = info ? plugin_format_label (info->type) : "";
+		}
 
 		// Synthetic bypass parameter — matches the stub's shape so the web
 		// plugin panel can render the same switch regardless of backend.
@@ -733,22 +761,6 @@ clear_sequencer_layout (Session& session, const std::string& region_id)
 	hit.region->add_extra_xml (*empty);
 	session.set_dirty ();
 	return true;
-}
-
-static const char*
-plugin_format_label (ARDOUR::PluginType t)
-{
-	switch (t) {
-		case ARDOUR::AudioUnit:   return "au";
-		case ARDOUR::LADSPA:      return "ladspa";
-		case ARDOUR::LV2:         return "lv2";
-		case ARDOUR::Windows_VST: return "vst2";
-		case ARDOUR::LXVST:       return "vst2";
-		case ARDOUR::MacVST:      return "vst2";
-		case ARDOUR::Lua:         return "lua";
-		case ARDOUR::VST3:        return "vst3";
-	}
-	return "internal";
 }
 
 std::vector<PluginCatalogDesc>

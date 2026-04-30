@@ -71,9 +71,16 @@ pub(crate) fn catalog() -> Vec<Action> {
         ),
         mk(
             "session.export",
-            "Export…",
+            "Export Project…",
             ActionCategory::Session,
             Some("arrow-down-tray"),
+            None,
+        ),
+        mk(
+            "session.upload",
+            "Upload Project…",
+            ActionCategory::Session,
+            Some("arrow-up-tray"),
             None,
         ),
         // Edit

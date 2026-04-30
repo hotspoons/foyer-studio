@@ -91,119 +91,89 @@ version.
 
 ## Running it
 
-Two paths: install a prebuilt binary on a host that already has
-Ardour, or run the whole stack inside the dev container. There's
-no tagged release yet, so today the prebuilt path pulls the most
-recent passing CI build from `main`.
+Three deployment shapes, in increasing order of "how much do you
+want to do yourself" — full setup recipes for each live in
+[docs/USAGE.md](docs/USAGE.md).
 
-### Install via the script (CI builds)
+### 1. Host install — drives your own Ardour 9.2
 
-Targets Linux + Apple Silicon macOS hosts that already have Ardour
-9 installed. The installer drops the `foyer` sidecar in
-`$XDG_DATA_HOME/foyer/bin` (or `$HOME/.foyer/bin` if XDG isn't set)
-and copies the `libfoyer_shim.so` / `.dylib` into Ardour's
-control-surface directory so the next time you launch Ardour the
-"Foyer Studio" surface shows up under **Preferences → Control
-Surfaces**.
+Best for laptops / studio machines: lowest latency, real audio
+hardware, your existing plugin collection. Linux + macOS (Apple
+Silicon and Intel).
 
 ```bash
-# Latest passing CI build, no GitHub auth required (proxied
-# through nightly.link).
+# Pulls the most recent passing CI build (no GitHub auth needed).
 curl -fsSL https://raw.githubusercontent.com/hotspoons/foyer-studio/main/install.sh \
   | bash -s -- --latest-ci
-```
 
-If the install adds a new directory to your `PATH`, the script
-prints the line you'd source — restart your shell or `source` the
-rc file it edited, then:
-
-```bash
 foyer serve --backend ardour
 ```
 
-…and open <http://127.0.0.1:3838>. With Ardour already running and
-the Foyer surface enabled, the sidecar attaches over the shim's
-Unix socket; otherwise pick a project from the launcher and
-`foyer` will spawn a headless Ardour for you.
+Open <http://127.0.0.1:3838>. The installer also drops the C++
+shim into Ardour's surfaces directory; tick **Preferences →
+Control Surfaces → Foyer Studio Shim** in Ardour once and the
+sidecar attaches automatically on every Ardour launch from there
+on.
 
-Other useful flags:
+Full walkthrough (LAN access, TLS, uninstall) in
+[docs/USAGE.md#path-1--host-install-against-your-own-ardour-92](docs/USAGE.md#path-1--host-install-against-your-own-ardour-92).
 
-- `--version vX.Y.Z` — install a specific tagged release (none yet)
-- `--from-bundle DIR` — install from a local directory of artifacts
-- `uninstall [--purge]` — remove the installed binary + shim;
-  `--purge` also wipes the install root
+### 2. Docker — Foyer + Ardour + plugins, all in one image
 
-Intel Mac hosts aren't supported by the prebuilt release (GitHub
-retired the Intel runners) — build from source via the dev
-container instead.
+Best for one-shot deploys (Cloud Run, fly.io, a home server) or
+when you don't have Ardour locally. The image bundles Ardour 9.2,
+the shim, the autovocoder LV2, and ~200 LV2 plugins.
 
-### From source — the dev container
+```bash
+just docker-build                     # ~15 min for the Ardour compile
+just docker-run                       # serves on http://127.0.0.1:3838
+```
 
-The dev container handles the C++ toolchain, Ardour's deps, JACK,
-and the sidecar build, so you don't have to install any of that on
-the host. Windows, Mac, and Linux hosts all work; only native
-Linux hosts can currently pass real audio hardware through.
+JACK passthrough has four modes via `FOYER_JACK_MODE`: `embedded`
+(self-contained `jackd dummy`), `shm` (share the host's running
+JACK over `/dev/shm` — Linux only), `netjack` (connect to a remote
+NetJack2 server), and `none` (skip JACK; stub backend only).
 
-Prerequisites:
+```bash
+# Cloud Run / off-site demo — no host audio:
+docker run --rm -p 3838:3838 \
+  -v foyer-projects:/projects \
+  foyer-studio:latest
 
-- Docker Desktop (Mac/Windows) or Docker Engine (Linux), running
-- VS Code (or any IDE that reads `.devcontainer/devcontainer.json`)
-- The **Dev Containers** VS Code extension
+# Linux host with running jackd — share its audio devices:
+docker run --rm -p 3838:3838 \
+  --ipc=host -v /dev/shm:/dev/shm -v /tmp:/tmp \
+  -e FOYER_JACK_MODE=shm \
+  -v foyer-projects:/projects \
+  foyer-studio:latest
+```
 
-Steps:
+Each mode (and Cloud Run deployment specifics) is documented in
+[docs/USAGE.md#path-2--docker](docs/USAGE.md#path-2--docker).
+
+### 3. From source — the dev container
+
+For hacking on Foyer itself: the C++ toolchain, Ardour's deps,
+JACK, Bun + Playwright, and every script the Justfile relies on
+land in a VS Code dev container.
 
 ```bash
 git clone https://github.com/hotspoons/foyer-studio.git
 cd foyer-studio
-code .
+code .   # VS Code → "Reopen in Container"
+# then, in the container terminal:
+just run
 ```
 
-In VS Code: when the notification appears, click **Reopen in
-Container** (or run **Dev Containers: Rebuild and Reopen in
-Container** from the command palette, `Ctrl+Shift+P` /
-`Cmd+Shift+P`).
-
-The first build takes ~5–10 minutes. Subsequent opens are
-instant.
-
-Then open a terminal inside the container (**Terminal → New
-Terminal**) and:
-
-```bash
-just run                  # default
-# or
-just run-tls              # HTTPS; required if you'll reach it from another device on the LAN
-```
-
-The first `just run` clones and builds Ardour (~20 minutes on an
-Apple Silicon MBP, longer on slower hosts), compiles the shim and
-sidecar, then starts serving on port `3838`. It also launches a
-`jackd` daemon with a dummy backend for the headless Ardour
-session to connect to.
-
-Open <http://127.0.0.1:3838> (or <https://127.0.0.1:3838> if you
-used `run-tls`). To share the session off-host, use **Session →
-Remote Access...** to open a Cloudflare tunnel, then invite
-collaborators via the role picker.
-
-For the full development workflow — overlaying your own UI
-variants, running the test suite, the CI gate, the Justfile recipe
-catalog — see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-
-#### Linux hosts — passing real hardware
-
-Native Linux hosts can expose ALSA devices to the container so the
-container-owned `jackd` drives real hardware. Uncomment the
-`--device=/dev/snd` and `--group-add=audio` lines in
-[.devcontainer/devcontainer.json](.devcontainer/devcontainer.json)
-(around line 75) and rebuild the container. Mac/Windows Docker VMs
-don't expose audio devices, so on those hosts you're limited to
-the browser's `getUserMedia` / `AudioContext` paths — fine for
-remote collaboration but not for driving studio gear directly
-from the container.
+First boot clones and builds Ardour (~20 min on Apple Silicon).
+Subsequent runs are instant. See
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full workflow —
+UI overlays, the CI gate, the Justfile catalog.
 
 ## Reading further
 
+- [**docs/USAGE.md**](docs/USAGE.md) — full host-install and
+  Docker recipes; JACK passthrough modes; Cloud Run deployment.
 - [**docs/ARCHITECTURE.md**](docs/ARCHITECTURE.md) — three-layer
   walkthrough, wire contract, conventions baked into the codebase.
 - [**docs/DEVELOPMENT.md**](docs/DEVELOPMENT.md) — running the

@@ -1,0 +1,41 @@
+# Keep the docker build context small — every byte here is sent to the
+# daemon on `docker build` even when subsequent stages don't need it.
+# Mirrors .gitignore for the bulky entries plus a few tooling dirs.
+
+# Rust build outputs — the builder stage rebuilds in --release anyway.
+/target
+
+# External dependency clones — the Dockerfile fetches Ardour and
+# autovocoder from upstream itself so a bind-mounted checkout doesn't
+# get baked into the layer.
+/ext
+
+# UI test artifacts.
+/tests-ui/node_modules
+/tests-ui/report
+/tests-ui/test-results
+/test-results
+
+# Local sessions / recordings (also gitignored). The image seeds
+# /projects from /opt/foyer/sample-sessions instead.
+/sessions
+
+# Shim CMake build trees — rebuilt fresh in the builder stage.
+/shims/*/cmake-build
+/shims/*/build
+
+/tmp
+/dist
+/.bin
+
+# IDE / editor / OS noise.
+.DS_Store
+*.swp
+
+# devcontainer + git metadata aren't useful in the runtime build.
+.devcontainer
+.git
+.github
+
+# Local-only env overrides.
+.env.local

@@ -124,6 +124,16 @@ struct PluginDesc {
 	/// display the active preset name after a session reload without
 	/// the user re-applying.
 	std::string current_preset;
+	/// True when the plugin advertises a native GUI (LV2 has any
+	/// `ui:` extension, VST/VST3/AU report `has_editor()`).
+	/// Phase 1: surface the bit through the wire so the web UI can
+	/// show a "native GUI available" affordance. Hosting / projection
+	/// arrives in a later phase.
+	bool        has_native_gui = false;
+	/// Plugin format string used as a UI label only — `"lv2"`, `"vst3"`,
+	/// `"vst2"`, `"au"`, `"ladspa"`, `"lua"`, or `"internal"`. Empty
+	/// when `has_native_gui` is false.
+	std::string native_gui_kind;
 };
 
 /// Build Foyer-schema plugin descriptions for every `PluginInsert` on `route`.

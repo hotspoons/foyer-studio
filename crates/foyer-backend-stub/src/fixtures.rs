@@ -502,6 +502,8 @@ pub(crate) fn default_inserts_for(slug: &str) -> Vec<PluginInstance> {
             bypassed: false,
             params: params_for(uri, &full),
             current_preset: None,
+            has_native_gui: None,
+            native_gui_kind: None,
         }
     };
     match slug {

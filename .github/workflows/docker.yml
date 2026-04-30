@@ -1,0 +1,300 @@
+name: docker
+
+# Build and publish the production container image to GitHub Container
+# Registry. Two tagging schemes:
+#
+#   * Branch CI (any push that's NOT main):
+#       ghcr.io/<repo>:snapshot-<short-sha>   (immutable per-commit pin)
+#       ghcr.io/<repo>:snapshot-latest        (mutable — tracks the
+#                                              latest branch push)
+#
+#   * Main CI (push to refs/heads/main, i.e. after merge):
+#       ghcr.io/<repo>:main-<short-sha>       (immutable per-commit pin)
+#       ghcr.io/<repo>:latest                 (mutable — what
+#                                              `docker pull` defaults to)
+#
+# Why two pipelines, not one: the snapshot-* tags let a developer
+# preview an arbitrary feature-branch deploy ("docker run
+# ghcr.io/.../foyer-studio:snapshot-abc1234") without polluting the
+# `:latest` mutable tag that downstream Cloud Run / fly.io / k8s
+# deployments pin to. Merging to main is the explicit "this is the
+# new latest" promotion event.
+#
+# Multi-arch shape:
+#   * `build` matrix runs on a NATIVE runner per arch — `ubuntu-24.04`
+#     for amd64, `ubuntu-24.04-arm` for arm64 (free for public repos
+#     as of 2025). Each pushes the image by digest only (no tags) so
+#     parallel jobs can't race on a shared tag.
+#   * `merge` job combines the two digests into a single multi-arch
+#     manifest carrying the user-facing tags. Result: `docker pull
+#     ghcr.io/.../foyer-studio:latest` on an arm64 Mac auto-selects
+#     the arm64 image; the same pull on amd64 Linux selects amd64.
+#     No `--platform linux/amd64` ceremony needed downstream.
+#
+# This is the official multi-platform pattern documented at
+# https://docs.docker.com/build/ci/github-actions/multi-platform/.
+# QEMU-emulated single-runner builds are simpler but ~3-4× slower
+# for arm64 (Ardour compile balloons from ~15 min to ~45-60 min);
+# the matrix approach keeps both arches at native speed in parallel.
+#
+# Performance: the slow path is the Ardour compile inside the
+# Dockerfile builder stage (~15-30 min from cold cache, ~30s warm).
+# We use BuildKit's GHA cache backend so subsequent pushes on the
+# same branch reuse the Ardour build layer; cache is scoped per
+# (branch, arch) with main as fallback (GHA cache's default
+# behavior), so a fresh feature branch inherits main's warm cache
+# automatically.
+#
+# Permissions: `packages: write` is the new perm that GITHUB_TOKEN
+# needs to push to GHCR. We don't grant it across the whole
+# workflow file — only on the publish job that needs it.
+
+on:
+  push:
+    branches: ['**']
+  # Manual dispatch lets ops re-cut an image without a code push
+  # (e.g. base-image security update day, where a rebuild against
+  # the same source brings in upstream OS patches).
+  workflow_dispatch:
+    inputs:
+      ardour_tag:
+        description: "Ardour ref the image's shim builds against. Empty = use .env."
+        required: false
+        default: ""
+
+# Cancel an in-flight build when a fresh push lands on the same
+# branch. Main is excluded so every merge produces a complete record
+# in GHCR with its sha-pinned tag — never racing a successor for
+# the `:latest` mutable update.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ── Per-arch builders ─────────────────────────────────────────────
+  build:
+    name: build (${{ matrix.platform }})
+    strategy:
+      # One arch failing shouldn't cancel the other — partial-success
+      # data is more useful than nothing when a flaky apt mirror or
+      # transient KXStudio fetch trips one runner.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runs-on: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            # GitHub-hosted arm64 runner. Free for public repos as of
+            # 2025; private repos pay $0.04/min last we checked.
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      # Per-arch image base (lowercase repo name) — needed by the
+      # merge job so it doesn't have to recompute.
+      image: ${{ steps.tags.outputs.image }}
+      # Tags the merge job will create on the multi-arch manifest.
+      # Identical between matrix runs (same SHA, same branch), so
+      # whichever arch finishes second's value wins — fine, they
+      # match.
+      tags: ${{ steps.tags.outputs.tags }}
+      scope: ${{ steps.tags.outputs.scope }}
+      short_sha: ${{ steps.tags.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve ARDOUR_TAG
+        id: ardour
+        run: |
+          if [ -n "${{ github.event.inputs.ardour_tag }}" ]; then
+            tag="${{ github.event.inputs.ardour_tag }}"
+            echo "::notice::ARDOUR_TAG=$tag (workflow_dispatch override)"
+          elif [ -f .env ]; then
+            tag=$(grep -E '^ARDOUR_TAG=' .env | head -n1 | cut -d= -f2)
+            echo "::notice::ARDOUR_TAG=$tag (from .env)"
+          else
+            echo "::error::No ARDOUR_TAG set and no .env file present"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          image="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            tags="$image:main-$short_sha,$image:latest"
+            scope="main"
+          else
+            tags="$image:snapshot-$short_sha,$image:snapshot-latest"
+            scope="snapshot"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "::notice::will publish $tags as multi-arch manifest"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Push by DIGEST only — no tags. The merge job picks up the
+      # digests from each matrix run and creates a manifest list
+      # carrying the user-facing tags. This is the canonical pattern
+      # because tags can't be safely pushed in parallel — racing
+      # tag-writes on the same name would have one arch overwrite
+      # the other.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          # `push-by-digest=true` + `name-canonical=true` together
+          # write only an immutable digest reference; no tag is
+          # pushed. The output digest is exposed at
+          # ${{ steps.build.outputs.digest }}.
+          outputs: type=image,name=${{ steps.tags.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            ARDOUR_TAG=${{ steps.ardour.outputs.tag }}
+          # Per-(arch, scope) cache. arm64 and amd64 have wholly
+          # different layer hashes once the toolchain selection
+          # diverges, so sharing a cache key would just thrash. Both
+          # fall back to main's cache on a fresh branch.
+          cache-from: |
+            type=gha,scope=foyer-${{ matrix.arch }}-${{ steps.tags.outputs.scope }}
+            type=gha,scope=foyer-${{ matrix.arch }}-main
+          cache-to: type=gha,scope=foyer-${{ matrix.arch }}-${{ steps.tags.outputs.scope }},mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.ref.name=${{ github.ref_name }}
+            org.opencontainers.image.title=foyer-studio
+            org.opencontainers.image.description=Web-native control surface for Ardour — sidecar + UI + bundled Ardour build
+
+      # Stash the digest so the merge job can pick it up. Filename
+      # is the arch so the merge job knows which is which without
+      # parsing matrix outputs.
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          echo "$digest" > "/tmp/digests/${{ matrix.arch }}"
+          echo "::notice::pushed ${{ matrix.platform }} as $digest"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Merge per-arch digests into a multi-arch manifest ─────────────
+  merge:
+    name: merge multi-arch manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `imagetools create` builds a manifest list referencing the
+      # per-arch digests, then publishes it under each user-facing
+      # tag. Result: `docker pull image:latest` returns the manifest
+      # list, and the docker daemon picks the entry matching the
+      # client's arch automatically.
+      - name: Create multi-arch manifest
+        run: |
+          set -euo pipefail
+          image='${{ needs.build.outputs.image }}'
+          tags='${{ needs.build.outputs.tags }}'
+
+          # Build the `-t tag1 -t tag2 …` list.
+          tag_args=""
+          IFS=',' read -ra _tags <<< "$tags"
+          for t in "${_tags[@]}"; do
+            tag_args="$tag_args -t $t"
+          done
+
+          # Build the `image@digest` source list. Both arches must
+          # be present; the matrix's fail-fast=false means a half-
+          # failed run could leave only one digest behind. Detect
+          # and refuse — a half-arch manifest is worse than no
+          # manifest.
+          src_args=""
+          for arch in amd64 arm64; do
+            if [ ! -f "/tmp/digests/$arch" ]; then
+              echo "::error::missing digest for $arch — refusing to publish a partial manifest"
+              exit 1
+            fi
+            digest=$(cat "/tmp/digests/$arch")
+            src_args="$src_args $image@$digest"
+          done
+
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tag_args $src_args
+
+      - name: Inspect published manifest
+        run: |
+          set -euo pipefail
+          image='${{ needs.build.outputs.image }}'
+          scope='${{ needs.build.outputs.scope }}'
+          short_sha='${{ needs.build.outputs.short_sha }}'
+          docker buildx imagetools inspect "$image:$scope-$short_sha"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Multi-arch container image published"
+            echo ""
+            echo "| Tag | Arches | Mutability |"
+            echo "|---|---|---|"
+            for tag in $(echo '${{ needs.build.outputs.tags }}' | tr ',' '\n'); do
+              case "$tag" in
+                *":latest"|*":snapshot-latest") mut="mutable" ;;
+                *) mut="immutable" ;;
+              esac
+              echo "| \`$tag\` | linux/amd64, linux/arm64 | $mut |"
+            done
+            echo ""
+            echo "Pull (auto-selects local arch):"
+            echo ""
+            echo "\`\`\`bash"
+            echo "docker pull ${{ needs.build.outputs.image }}:${{ needs.build.outputs.scope }}-${{ needs.build.outputs.short_sha }}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"

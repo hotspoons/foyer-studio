@@ -93,38 +93,61 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libayatana-appindicator3-dev \
       librsvg2-dev \
       libsoup-3.0-dev \
-      # ---- LV2 plugin + soundfont bundle ----
-      # Gives Ardour something real to load in the devcontainer so feature
-      # work (plugin-panel rendering, MIDI piano roll, instrument tracks,
-      # record-arm testing) has actual audio / MIDI targets instead of an
-      # empty plugin list. ardour-lv2-plugins pulls in fluidsynth so
-      # a-Fluid Synth works as a GM synth backed by fluid-soundfont-gm.
-      # AVL drums + soundfont gives us a ready drum instrument; synthv1
-      # / samplv1 / drumkv1 / padthv1 cover the old-school synth shapes;
-      # calf / lsp / swh / mda / dpf / x42 / zam / dragonfly are the
-      # standard Linux-audio effects suites. Total install: ~200 LV2
-      # plugins under /usr/lib/lv2/ + GM soundfont under
-      # /usr/share/sounds/sf2/.
-      ardour-lv2-plugins \
-      avldrums.lv2 \
-      avldrums.lv2-soundfont \
-      calf-plugins \
-      dpf-plugins-lv2 \
-      dragonfly-reverb-lv2 \
-      drumkv1-lv2 \
-      fluid-soundfont-gm \
-      fluidsynth \
-      lsp-plugins-lv2 \
-      mda-lv2 \
-      padthv1-lv2 \
-      samplv1-lv2 \
-      setbfree \
-      swh-lv2 \
-      synthv1-lv2 \
-      timgm6mb-soundfont \
-      x42-plugins \
-      zam-plugins \
     && rm -rf /var/lib/apt/lists/*
+
+# ── LV2 plugin + soundfont bundle (devcontainer = release parity) ──
+#
+# Same plugin pack the production runtime image ships (Dockerfile
+# at the repo root). Keeping the dev container at parity means
+# UI/UX work, plugin-panel testing, and record-arm workflows
+# exercise the same plugin surface a deployed Foyer instance has.
+# Total install: ~91 packages, ~378 MB on disk.
+#
+# Plugin sourcing strategy + KXStudio gotchas are documented in
+# the runtime Dockerfile. tl;dr: KXStudio's PPA fills the gaps
+# Debian doesn't ship (Dexed, OB-Xd, Geonkick, TAL, MOD pedalboard,
+# Cardinal, AIDA-X, Master-Me, …); pinning at priority 100 keeps
+# Debian winning on any name collision.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gpg dirmngr ca-certificates curl \
+ && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x89195BA21C5CE3C72BAC1C0A0C955638F15F1FDC" \
+      | gpg --dearmor -o /usr/share/keyrings/kxstudio-archive-keyring.gpg \
+ && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xDF1BC724E4ED8A947FF0B0A1F8599E482BD84BD9" \
+      | gpg --dearmor >> /usr/share/keyrings/kxstudio-archive-keyring.gpg \
+ && for suite in bionic focal; do \
+      for repo in plugins libs apps kxstudio; do \
+        echo "deb [signed-by=/usr/share/keyrings/kxstudio-archive-keyring.gpg] http://ppa.launchpad.net/kxstudio-debian/$repo/ubuntu $suite main" \
+          >> /etc/apt/sources.list.d/kxstudio.list ; \
+      done ; \
+    done \
+ && printf '%s\n' \
+      'Package: *' 'Pin: release o=LP-PPA-kxstudio-debian-libs' 'Pin-Priority: 100' '' \
+      'Package: *' 'Pin: release o=LP-PPA-kxstudio-debian-plugins' 'Pin-Priority: 100' '' \
+      'Package: *' 'Pin: release o=LP-PPA-kxstudio-debian-apps' 'Pin-Priority: 100' '' \
+      'Package: *' 'Pin: release o=LP-PPA-kxstudio-debian-kxstudio' 'Pin-Priority: 100' \
+      > /etc/apt/preferences.d/kxstudio.pref \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ardour-lv2-plugins \
+      fluid-soundfont-gm fluid-soundfont-gs fluidr3mono-gm-soundfont \
+      timgm6mb-soundfont fluidsynth qsynth \
+      \
+      calf-plugins dpf-plugins-lv2 dragonfly-reverb-lv2 \
+      lsp-plugins-lv2 mda-lv2 swh-lv2 x42-plugins zam-plugins \
+      tap-plugins caps fil-plugins cmt fomp abgate \
+      blop-lv2 invada-studio-plugins-lv2 eq10q bankstown-lv2 lv2vocoder \
+      mcp-plugins vco-plugins wah-plugins ir.lv2 rubberband-lv2 \
+      zita-rev1 zita-at1 zita-bls1 zita-mu1 \
+      \
+      avldrums.lv2 avldrums.lv2-soundfont \
+      drumkv1-lv2 padthv1-lv2 samplv1-lv2 synthv1-lv2 \
+      so-synth-lv2 xsynth-dssi setbfree \
+      yoshimi yoshimi-data amsynth whysynth \
+      hydrogen hydrogen-data drumgizmo guitarix-lv2 \
+      \
+      aida-x airwindows-lv2 master-me \
+      kxstudio-meta-audio-plugins-collection \
+ && rm -rf /var/lib/apt/lists/*
 
 # Create vscode user (UID 1000) with passwordless sudo, mirroring the devcontainer convention.
 # Also add vscode to `audio` so `/dev/snd/*` nodes are readable when the
