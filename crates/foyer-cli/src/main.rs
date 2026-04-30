@@ -1346,7 +1346,7 @@ fn preflight_session(
     // where there's no human to dismiss it. Files are renamed (not
     // deleted) so a power user who actually wants the recovery can
     // mv them back. Opt-out: set `FOYER_KEEP_CRASH_RECOVERY=1`.
-    if std::env::var_os("FOYER_KEEP_CRASH_RECOVERY").is_none_or(|v| v.is_empty()) {
+    if std::env::var_os("FOYER_KEEP_CRASH_RECOVERY").map_or(true, |v| v.is_empty()) {
         archive_crash_recovery_artifacts(&dir);
     }
     (dir, name)

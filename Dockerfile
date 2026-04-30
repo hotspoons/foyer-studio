@@ -325,10 +325,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       > /etc/apt/sources.list.d/xpra.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      xpra xpra-html5 \
+      xpra xpra-x11 xpra-html5 \
  && apt-get purge -y gpg \
  && apt-get autoremove -y --purge \
  && rm -rf /var/lib/apt/lists/*
+# `xpra-x11` is the load-bearing piece for the in-container `xpra
+# start :NN` path. Modern xpra (≥6) split the package: `xpra` is
+# the client + protocol core, and the X11 server modes (`seamless`,
+# `desktop`, `shadow`) live in `xpra-x11`. Without it, `xpra start`
+# aborts at boot with `you must install 'xpra-x11' to use 'seamless'`
+# and the container's xpra never comes up. `xpra-html5` ships the
+# JS dist served at /_xpra/.
 
 # A non-root user. Cloud Run rewrites uid/gid for us anyway, but
 # running as a real user keeps file ownership predictable when a

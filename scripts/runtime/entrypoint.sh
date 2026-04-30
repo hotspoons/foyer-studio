@@ -129,6 +129,31 @@ log "runtime mode: ${FOYER_RUNTIME_MODE} (rtprio_max=${rtprio_max})"
 # only if `$DISPLAY` was already set externally (escape hatch:
 # bind-mount the host's /tmp/.X11-unix and pass `-e DISPLAY=:0`
 # for development against a host X server).
+# xpra (and a handful of other XDG-respecting tools) wants a writable
+# per-user runtime dir. The Cloud Run / `docker run` defaults don't
+# create `/run/user/<uid>` and don't set `XDG_RUNTIME_DIR`, which makes
+# xpra log a `using '/tmp'` warning and dump its sockets next to
+# whatever else is in /tmp. Set it up explicitly so xpra's per-display
+# state lives in a deterministic, owned spot — and so anything else
+# that asks for `XDG_RUNTIME_DIR` (dbus session bus, gtk's settings
+# daemon, etc.) gets a sane answer.
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    uid=$(id -u)
+    xdg_runtime="/run/user/${uid}"
+    if mkdir -p "$xdg_runtime" 2>/dev/null && chmod 700 "$xdg_runtime" 2>/dev/null; then
+        export XDG_RUNTIME_DIR="$xdg_runtime"
+    else
+        # `/run` not writable for our uid (gen2 sandbox sometimes
+        # mounts it ro). Fall back to a per-uid dir under /tmp;
+        # xpra accepts it and at least the path is namespaced so
+        # multi-tenant containers don't collide.
+        xdg_runtime="/tmp/xdg-runtime-${uid}"
+        mkdir -p "$xdg_runtime" && chmod 700 "$xdg_runtime"
+        export XDG_RUNTIME_DIR="$xdg_runtime"
+    fi
+fi
+log "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
+
 XPRA_PID=""
 XVFB_PID=""
 start_x_session() {
