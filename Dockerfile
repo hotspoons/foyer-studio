@@ -162,9 +162,36 @@ RUN cargo build --release --manifest-path /workspace/Cargo.toml --bin foyer
 # ─────────────────────────────────────────────────────────────────
 # Stage 2 — runtime
 # ─────────────────────────────────────────────────────────────────
-FROM debian:trixie-slim AS runtime
+#
+# Base: full `debian:trixie` (NOT `-slim`). The image already weighs
+# ~5 GB once the LV2 plugin pack lands, so the ~30 MB you save by
+# starting from slim is rounding error — and slim drops procps,
+# psmisc, lsof, net-tools, less, file, etc., which makes
+# `docker exec` debugging genuinely painful (no `pgrep`, no `ps`,
+# no `netstat`). With full trixie + the diag pack below the user
+# can introspect the live container with the standard set.
+FROM debian:trixie AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Diagnostic / shell-comfort pack. Most of these would be in any
+# Debian "real install" — full trixie ships some, this RUN
+# guarantees the rest. Pulled in as a separate, early layer so
+# rebuilds during plugin-pack churn keep this layer cached.
+#
+#   procps    — pgrep, ps, top, kill, free, uptime
+#   psmisc    — pstree, killall, fuser
+#   iproute2  — ss, ip (already in full trixie, listed for clarity)
+#   lsof      — open-file/socket inspection ("who has :14500?")
+#   net-tools — netstat, ifconfig (legacy but still in some muscle memory)
+#   less      — pager (man-page reader, log scroll)
+#   file      — quick mime-type sniffing on session artifacts
+#   vim-tiny  — minimal editor for the inevitable in-container poke
+#   htop      — sometimes you just want to watch ardour's RSS climb
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      procps psmisc iproute2 lsof net-tools \
+      less file vim-tiny htop \
+ && rm -rf /var/lib/apt/lists/*
 
 # ── Runtime deps: Ardour .so set + JACK + a stacked plugin pack ───
 #
@@ -274,7 +301,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       \
       aida-x airwindows-lv2 master-me \
       kxstudio-meta-audio-plugins-collection \
- && apt-get purge -y curl gpg dirmngr \
+ && apt-get purge -y gpg dirmngr \
  && apt-get autoremove -y --purge \
  && rm -rf /var/lib/apt/lists/*
 
@@ -299,7 +326,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
       xpra xpra-html5 \
- && apt-get purge -y curl gpg \
+ && apt-get purge -y gpg \
  && apt-get autoremove -y --purge \
  && rm -rf /var/lib/apt/lists/*
 
