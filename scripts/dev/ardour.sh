@@ -179,23 +179,6 @@ apply_foyer_patches() {
         [ -e "$p" ] || continue
         local name
         name="$(basename "$p")"
-        # Skip patches we know are not applicable here:
-        #   001-register-foyer-shim — we load the shim via
-        #     ARDOUR_SURFACES_PATH instead of registering it inside
-        #     Ardour's wscript. The patch is documentation-only.
-        #   002-hardour-backend-env — only relevant when building
-        #     `hardour` (the headless variant). The dev path uses GUI
-        #     ardour-9, so the patch is dead weight here. The runtime
-        #     image build (Dockerfile) DOES want it though, which is
-        #     handled by the docker-side patch loop. The shape used
-        #     here mirrors that loop's skip semantics; if you ever
-        #     need to land 001 or 002 against the local ardour tree,
-        #     just remove the entry from this skip list.
-        case "$name" in
-            001-register-foyer-shim*|002-hardour-backend-env*)
-                continue
-                ;;
-        esac
         if git -C "$ARDOUR_DIR" apply --check --reverse "$p" >/dev/null 2>&1; then
             # Patch already applied in this tree — skip.
             continue
