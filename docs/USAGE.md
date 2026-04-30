@@ -156,13 +156,9 @@ on every push. Pulls auto-select the right arch — no
 `--platform linux/amd64` ceremony on Apple Silicon.
 
 ```bash
-docker run \
-  --privileged \
-  --network=host \
-  --ulimit rtprio=95 \
-  --ulimit memlock=-1 \
-  --shm-size=2g \
-  --name foyer --rm -it \
+docker run --rm -it -p 3838:3838 \
+  --shm-size=1g \
+  --name foyer \
   ghcr.io/hotspoons/foyer-studio:latest
 ```
 
@@ -170,25 +166,61 @@ Open <http://127.0.0.1:3838>. (Or `:snapshot-latest` for the most
 recent feature-branch build, or pin to a SHA-suffixed tag like
 `:snapshot-abc1234` for an immutable reproducible run.)
 
-What each flag does (and why you can't just `-p 3838:3838` it):
+This is the **gui-dummy** runtime mode (default since the
+2026-04-30 build): GUI Ardour painting onto an in-container Xvfb,
+using libardour's "None (Dummy)" backend. No JACK, no realtime
+scheduling, no privileged flags. Works the same on Cloud Run,
+Colima, Docker Desktop, plain Linux. Foyer renders audio through
+its own browser-side egress — the DAW doesn't need a soundcard.
 
-| Flag                        | Why it's needed                                                                                                                                                                                                                                       |
-|-----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--privileged`              | Lets the container's `jackd -R` request realtime scheduling. Without it JACK falls back to non-realtime, which works but spends more CPU and produces audible jitter at low buffer sizes.                                                            |
-| `--network=host`            | Container shares the host network namespace, so the bound port is reachable on Mac/Linux without a `-p` map. (You can replace with `-p 3838:3838` if you'd rather isolate.)                                                                            |
-| `--ulimit rtprio=95`        | Caps the realtime-priority value JACK is allowed to request. Without it the kernel's default `rtprio` ulimit (often 0) blocks `SCHED_FIFO`.                                                                                                            |
-| `--ulimit memlock=-1`       | Unlimited locked memory. JACK's RT threads `mlockall()` to keep their pages out of swap during processing. Without this, audio glitches under memory pressure.                                                                                          |
-| `--shm-size=2g`             | JACK's client/server registry lives in `/dev/shm`. Docker's default 64 MB cap is fine for two clients but cramped once Foyer's audio egress, ingress, and Ardour's own DSP all open shm segments.                                                       |
-| `--rm -it --name foyer`     | Hygiene — auto-cleanup on exit, named for `docker logs foyer` while running.                                                                                                                                                                            |
+`--shm-size=1g` matters: libardour reserves ~107 MB of POSIX shm
+for its audio graph during session load, and Docker's default
+64 MB tmpfs would ENOMEM the open. (Cloud Run sizes `/dev/shm` by
+memory allocation automatically — ~50% of `--memory` — so the
+gcloud command in the Cloud Run section below doesn't need an
+explicit shm flag.)
 
 Persist projects across runs by adding `-v foyer-projects:/projects`
 (named volume) or `-v ~/foyer-projects:/projects` (host bind mount).
 
-**macOS:** all flags above work under Docker Desktop and Colima.
-The image's CoreAudio passthrough story is documented further down
-under [Docker on macOS — about audio passthrough](#docker-on-macos--about-audio-passthrough);
-TL;DR for headless mixing/collab the defaults are fine, for real
-audio hardware use Path 1.
+### Power-user mode — real JACK + RT scheduling (`jack-headless`)
+
+For real-audio paths (driving host hardware, consuming a host-
+mounted jackd registry, low-latency tracking) flip into
+`jack-headless` mode. This needs `CAP_SYS_NICE` and the rtprio /
+memlock rlimits — gVisor-based hosts (Cloud Run gen2) strip
+those, so this mode only runs on plain docker / Colima /
+GKE-with-privileged-pods / fly.io with experimental privileged.
+
+```bash
+docker run --rm -it \
+  --privileged \
+  --ulimit rtprio=95 \
+  --ulimit memlock=-1 \
+  --shm-size=2g \
+  -p 3838:3838 \
+  -e FOYER_RUNTIME_MODE=jack-headless \
+  --name foyer \
+  ghcr.io/hotspoons/foyer-studio:latest
+```
+
+What each flag does:
+
+| Flag                                  | Why it's needed                                                                                                                                                                       |
+|---------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--privileged`                        | Lets `jackd -R` and libjack client threads request realtime scheduling. Without it `pthread_create(SCHED_FIFO)` returns EPERM and Ardour's `AudioEngine` constructor fatals.            |
+| `--ulimit rtprio=95`                  | Caps the realtime-priority value `pthread_setschedparam` may request. Without it the kernel's default rtprio rlimit (usually 0) blocks `SCHED_FIFO`.                                    |
+| `--ulimit memlock=-1`                 | Unlimited locked memory. JACK's RT threads `mlockall()` to keep their pages out of swap during processing. Without this, audio glitches under memory pressure.                          |
+| `--shm-size=2g`                       | JACK's client/server registry lives in `/dev/shm`. Default 64 MB is fine for two clients but cramped once Foyer's audio egress, ingress, and Ardour's DSP all open shm segments.        |
+| `-e FOYER_RUNTIME_MODE=jack-headless` | Tells the entrypoint to spin up jackd, run `hardour` against it, skip the Xvfb. Default is `gui-dummy`.                                                                                  |
+
+(`just docker-run` runs the gui-dummy form;
+`just docker-run-jack` runs this form with the same flags.)
+
+To consume a **host-running** jackd instead of an embedded one
+(Linux hosts only — JACK shm doesn't exist on macOS Docker
+Desktop's VM), add `-e FOYER_JACK_MODE=shm` plus the bind mounts
+detailed in the **JACK passthrough** section below.
 
 **`ASAN_COREDUMP=0` is set inside the image now** — if you saw
 `ardev_common_waf.sh: line 62: ASAN_COREDUMP: unbound variable` on
@@ -197,10 +229,10 @@ fixed in any image built after 2026-04-30.
 
 ### Cloud Run notes (gen2 sandbox)
 
-The full local `docker run` invocation above doesn't translate
-1:1 to Cloud Run. The gen2 (gVisor) sandbox strips the security-
-sensitive flags and routes shared memory through its own volume
-mechanism.
+The Quickstart `docker run` above already matches what Cloud Run
+gen2 supports — gui-dummy mode needs no privileged flags, no
+ulimits, and no shm sizing (gen2 auto-sizes `/dev/shm`). The only
+local-only flags that don't translate are listed for reference:
 
 **Prerequisite — Artifact Registry remote repo proxying ghcr.io.**
 Cloud Run can ONLY pull from `gcr.io` / `*-docker.pkg.dev` / `docker.io`;
@@ -285,7 +317,8 @@ these on every boot:
 | `PORT`                | `3838`        | Port to bind. Cloud Run injects this; we honor it.                                                            |
 | `FOYER_BACKEND`       | `ardour`      | Initial backend id. `stub` skips Ardour entirely.                                                             |
 | `FOYER_JAIL`          | `/projects`   | Directory the file picker is confined to. Bind-mount a host volume here for persistent projects.              |
-| `FOYER_JACK_MODE`     | `embedded`    | One of `embedded` / `shm` / `netjack` / `none`. See **JACK passthrough** below.                              |
+| `FOYER_RUNTIME_MODE`  | `gui-dummy`   | `gui-dummy` (default) — GUI Ardour + Xvfb + libardour Dummy backend, works everywhere. `jack-headless` — `hardour` + `jackd` + RT scheduling, requires `--privileged` + rtprio/memlock ulimits. `auto` — probes rtprio at boot and picks `jack-headless` if available, else `gui-dummy`.                       |
+| `FOYER_JACK_MODE`     | `embedded`    | Only honored when `FOYER_RUNTIME_MODE=jack-headless`. One of `embedded` / `shm` / `netjack` / `none`. See **JACK passthrough** below.                              |
 | `FOYER_SAMPLE_RATE`   | `48000`       | Engine sample rate, Hz.                                                                                       |
 | `FOYER_PERIOD_FRAMES` | `1024`        | JACK period frames (latency vs. CPU tradeoff). Honored only by `embedded` and `netjack` modes.                |
 | `FOYER_JACK_REALTIME` | `auto`        | `auto` probes `ulimit -r` and uses jackd's `-R -P 10` only when the kernel allows realtime scheduling. `on` forces RT (fails fast in non-privileged containers). `off` always non-RT. Cloud Run / non-privileged docker auto-resolves to `off`. |

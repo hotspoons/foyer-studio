@@ -243,6 +243,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       \
       libjack-jackd2-0 jackd2 alsa-utils pulseaudio-utils \
       \
+      # Xvfb for the GUI-Ardour-on-headless-X path. In non-privileged
+      # contexts (Cloud Run gen2, plain `docker run`) JACK can't acquire
+      # SCHED_FIFO and the headless `hardour` cascades into a fatal
+      # `failed_constructor`. Switching to GUI Ardour painting onto an
+      # in-container Xvfb sidesteps that — libardour's "None (Dummy)"
+      # backend has a non-RT fallback, and the entrypoint pre-seeds
+      # the AMS state so first-run dialogs never block boot. xpra is
+      # NOT installed here (it's a dev-only diagnostic for peeking at
+      # what the Xvfb is showing); the dev container Dockerfile pulls
+      # it from xpra.org's repo separately.
+      xvfb \
+      \
       ardour-lv2-plugins \
       fluid-soundfont-gm fluid-soundfont-gs fluidr3mono-gm-soundfont \
       timgm6mb-soundfont fluidsynth qsynth \
@@ -340,7 +352,8 @@ RUN mkdir -p /projects /home/foyer/.lv2 \
  && chown -R foyer:foyer /projects /home/foyer
 
 COPY scripts/runtime/entrypoint.sh /usr/local/bin/foyer-entrypoint
-RUN chmod +x /usr/local/bin/foyer-entrypoint
+COPY scripts/runtime/seed-ardour-config.sh /usr/local/bin/foyer-seed-ardour-config
+RUN chmod +x /usr/local/bin/foyer-entrypoint /usr/local/bin/foyer-seed-ardour-config
 
 USER foyer
 WORKDIR /home/foyer

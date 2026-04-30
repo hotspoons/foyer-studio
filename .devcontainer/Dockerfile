@@ -86,6 +86,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       jackd2 \
       alsa-utils \
       pulseaudio-utils \
+      # ---- headless X for GUI Ardour + plugin window projection ----
+      # Foyer prefers GUI Ardour when $DISPLAY is set (see
+      # foyer-config::scan_ardour_build_tree). On Mac/Colima the dev
+      # container has no native X, so we run Xvfb in-container as a
+      # no-op display Ardour can paint into. xpra is added in a
+      # separate RUN block below — it isn't packaged in trixie's
+      # main repos, so we pull it from xpra.org's apt repo.
+      xvfb \
       # ---- foyer native deps ----
       libopus-dev \
       # ---- tauri/wry desktop shell (M4.5) ----
@@ -94,6 +102,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       librsvg2-dev \
       libsoup-3.0-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# ── xpra (HTML5 X11 server, for peeking at GUI Ardour + plugin GUIs) ──
+#
+# xpra was dropped from Debian trixie's main repos at release time
+# (RC bugs in the packaging — fixed upstream but didn't make the
+# freeze). xpra.org publishes their own apt repo with current builds
+# for trixie, signed by the project maintainer's key.
+#
+# Used by the in-container peek workflow: `xpra start :99 --bind-tcp=
+# 127.0.0.1:14500 --html=on` runs an Xvfb under xpra's control and
+# serves a JS canvas viewer at :14500. VS Code's port forwarding
+# brings that to the host browser without any X forwarding.
+RUN curl -fsSL https://xpra.org/xpra.asc \
+      | gpg --dearmor -o /usr/share/keyrings/xpra-keyring.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/xpra-keyring.gpg] https://xpra.org/ trixie main" \
+      > /etc/apt/sources.list.d/xpra.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      xpra xpra-html5 \
+ && rm -rf /var/lib/apt/lists/*
 
 # ── LV2 plugin + soundfont bundle (devcontainer = release parity) ──
 #

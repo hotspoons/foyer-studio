@@ -71,6 +71,68 @@ run-static *args='': prep
     FOYER_BUNDLE_WATCH_DEBUG=1 cargo build --bin foyer
     ./target/debug/foyer serve --listen 0.0.0.0:3838 {{args}}
 
+# Run with the libardour Dummy backend instead of JACK. Mirrors the
+# Cloud Run / non-privileged-container audio path locally — no jackd,
+# no realtime scheduling, GUI Ardour painting onto an in-container
+# Xvfb that nobody's watching. Useful for:
+#   * replicating Cloud Run boot end-to-end before pushing
+#   * quick-iteration UI work where you don't need real audio
+#   * showing the project to someone without configuring JACK
+#
+# Differences from `just run`:
+#   * does NOT start jackd (`scripts/dev/jack.sh stop` if it's up)
+#   * starts an Xvfb on :99 if no $DISPLAY is set
+#   * seeds ~/.config/ardour9/{.a9,config} so Ardour autostarts the
+#     Dummy backend with the Silence device — no welcome wizard,
+#     no AMS dialog. Existing config files are NEVER overwritten.
+run-dummy *args='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Same prep work as `prep` but without `scripts/dev/jack.sh start`.
+    # If jackd is already running from a prior `just run`, stop it so
+    # there's no JACK socket on /dev/shm tempting Ardour to pick the
+    # JACK backend instead of Dummy.
+    ./scripts/dev/tw.sh check
+    ./scripts/dev/ardour.sh ensure
+    ./scripts/dev/autovocoder.sh ensure
+    ./scripts/dev/shim.sh check
+    ./scripts/dev/nuke-web-install.sh
+    ./scripts/dev/jack.sh stop 2>/dev/null || true
+
+    # Bring up an Xvfb if there's no display yet. The X11 socket file
+    # tells us whether :99 is already up — bare bash, no procps needed.
+    if [ -z "${DISPLAY:-}" ]; then
+        if [ ! -e /tmp/.X11-unix/X99 ]; then
+            Xvfb :99 -screen 0 1280x720x24 -nolisten tcp \
+                >/tmp/foyer-xvfb.log 2>&1 &
+            # Wait for the socket — Ardour will fail-fast if Xvfb hasn't
+            # opened the display by the time it tries to connect.
+            for _ in $(seq 1 20); do
+                [ -e /tmp/.X11-unix/X99 ] && break
+                sleep 0.1
+            done
+        fi
+        export DISPLAY=:99
+    fi
+
+    # Seed Ardour config (idempotent — won't clobber existing files).
+    ./scripts/runtime/seed-ardour-config.sh --ams-dummy
+
+    # Force foyer-config to re-detect the right binary now that
+    # DISPLAY is set — without this, a previous `just run` cached
+    # `headless/hardour-9.x.x` and we'd skip past GUI Ardour.
+    cfg="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/config.yaml"
+    if [ -f "$cfg" ] && ! grep -q "gtk2_ardour" "$cfg"; then
+        rm -f "$cfg"
+        cargo run --bin foyer -- configure --force >/dev/null
+    fi
+
+    cargo run --bin foyer -- serve \
+        --listen 0.0.0.0:3838 \
+        --web-root web \
+        --backend ardour \
+        {{args}}
+
 run-tls *args='': prep
     #!/usr/bin/env bash
     tls_dir="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/tls"
@@ -283,20 +345,31 @@ release-bundle:
 docker-build image='foyer-studio:latest' *args='':
     DOCKER_BUILDKIT=1 docker build -t {{image}} {{args}} .
 
-# Run the production image locally with the runtime flags JACK + the
-# Ardour shim need to behave correctly. See `docs/USAGE.md` "Quickstart
-# — run a published image" for the rationale on each flag.
-#
-# `--network=host` is used in place of `-p 3838:3838` so the container's
-# bound port is reachable at 127.0.0.1:3838 without a NAT hop. If you'd
-# rather isolate, swap `--network=host` for `-p 3838:3838`. JACK's
-# realtime path (`--privileged --ulimit rtprio=95 --ulimit memlock=-1`)
-# falls back gracefully if those flags get stripped (Cloud Run gen2
-# does this); it just costs CPU and adds jitter under load.
+# Run the production image locally — the easy default. Matches the
+# Cloud Run shape: GUI Ardour painting onto an in-container Xvfb,
+# libardour's "None (Dummy)" backend, no JACK, no realtime
+# scheduling, no privileged flags. Just works.
 #
 # Override the image:
 #   just docker-run image=ghcr.io/hotspoons/foyer-studio:snapshot-latest
 docker-run image='foyer-studio:latest' *args='':
+    docker run --rm -it \
+        -p 3838:3838 \
+        --shm-size=1g \
+        -v foyer-projects:/projects \
+        -e PORT=3838 \
+        {{args}} \
+        {{image}}
+
+# Run the production image in the JACK + RT path. Matches the dev-
+# container shape: real `jackd` (or a host-mounted one via
+# `FOYER_JACK_MODE=shm`), `hardour` instead of GUI Ardour, libjack
+# clients allowed to acquire SCHED_FIFO. Needs --privileged + the
+# rtprio/memlock ulimits or libjack fatals at thread-create.
+#
+# When you want to use the host's jackd instead of an in-container one:
+#   just docker-run-jack image=... args="--ipc=host -v /dev/shm:/dev/shm -v /tmp:/tmp:rw -e FOYER_JACK_MODE=shm"
+docker-run-jack image='foyer-studio:latest' *args='':
     docker run --rm -it \
         --privileged \
         --network=host \
@@ -305,6 +378,7 @@ docker-run image='foyer-studio:latest' *args='':
         --shm-size=2g \
         -v foyer-projects:/projects \
         -e PORT=3838 \
+        -e FOYER_RUNTIME_MODE=jack-headless \
         {{args}} \
         {{image}}
 

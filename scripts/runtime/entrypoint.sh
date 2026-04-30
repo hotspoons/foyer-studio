@@ -52,6 +52,7 @@ FOYER_NETJACK_PORT="${FOYER_NETJACK_PORT:-19000}"
 # `off`: never use RT.
 FOYER_JACK_REALTIME="${FOYER_JACK_REALTIME:-auto}"
 JACK_RT_ARGS=""
+rtprio_max=$(ulimit -r 2>/dev/null || echo 0)
 case "${FOYER_JACK_REALTIME}" in
     on)
         JACK_RT_ARGS="-R -P 10"
@@ -59,14 +60,87 @@ case "${FOYER_JACK_REALTIME}" in
     off)
         ;;
     auto|*)
-        rtprio_max=$(ulimit -r 2>/dev/null || echo 0)
         if [ "${rtprio_max}" -gt 0 ] 2>/dev/null; then
             JACK_RT_ARGS="-R -P 10"
         fi
         ;;
 esac
-# Ardour build root — the binary lives at $FOYER_ARDOUR_BUILD_ROOT/build/headless/hardour-*.
-# Default matches the layout the Dockerfile installs.
+
+# Runtime mode resolution. Two paths:
+#
+#   gui-dummy      (DEFAULT): GUI Ardour painting onto an in-container
+#                  Xvfb, using libardour's "None (Dummy)" backend.
+#                  Works everywhere — Cloud Run gen2, plain
+#                  `docker run`, no special flags. The shipping
+#                  default because (a) most deploys are headless
+#                  / non-privileged, (b) the alternative needs
+#                  CAP_SYS_NICE which most container hosts strip.
+#
+#   jack-headless  (opt-in): hardour + jackd + RT scheduling. Real
+#                  audio path. Requires the container to have
+#                  CAP_SYS_NICE and a non-zero rtprio rlimit — i.e.
+#                  `docker run --privileged --ulimit rtprio=95
+#                  --ulimit memlock=-1 ...`. Set
+#                  `FOYER_RUNTIME_MODE=jack-headless` (and optionally
+#                  `FOYER_JACK_MODE=shm` to consume a host-mounted
+#                  jackd registry).
+#
+# `auto` keeps the legacy probe behavior (rtprio>0 → jack-headless,
+# else gui-dummy) and is available for users who want their image to
+# adapt without env var pinning. Default is now `gui-dummy` so
+# fresh `docker run` and Cloud Run deploys just work.
+FOYER_RUNTIME_MODE="${FOYER_RUNTIME_MODE:-gui-dummy}"
+case "${FOYER_RUNTIME_MODE}" in
+    jack-headless|gui-dummy)
+        ;;
+    auto)
+        if [ "${rtprio_max}" -gt 0 ] 2>/dev/null && \
+           [ "${FOYER_JACK_MODE}" != "none" ]; then
+            FOYER_RUNTIME_MODE=jack-headless
+        else
+            FOYER_RUNTIME_MODE=gui-dummy
+        fi
+        ;;
+    *)
+        log "WARNING: unknown FOYER_RUNTIME_MODE='${FOYER_RUNTIME_MODE}', falling back to gui-dummy"
+        FOYER_RUNTIME_MODE=gui-dummy
+        ;;
+esac
+log "runtime mode: ${FOYER_RUNTIME_MODE} (rtprio_max=${rtprio_max})"
+
+# In gui-dummy mode: spin up an Xvfb, seed Ardour's config so the
+# first-run wizard + AMS dialogs don't block boot, and skip the
+# jackd boot below (libardour's Dummy backend doesn't need it).
+XVFB_PID=""
+if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
+    FOYER_JACK_MODE=none
+    if [ -z "${DISPLAY:-}" ]; then
+        if [ ! -e /tmp/.X11-unix/X99 ]; then
+            log "starting Xvfb on :99 (no \$DISPLAY set)"
+            Xvfb :99 -screen 0 1280x720x24 -nolisten tcp \
+                >/tmp/xvfb.log 2>&1 &
+            XVFB_PID=$!
+            for _ in $(seq 1 30); do
+                [ -e /tmp/.X11-unix/X99 ] && break
+                sleep 0.1
+            done
+        fi
+        export DISPLAY=:99
+    fi
+    log "DISPLAY=${DISPLAY}"
+    # Seed ~/.config/ardour9/{.a9,config} so first-run wizard and
+    # AMS dialogs are skipped. Idempotent — leaves an existing
+    # `config` file alone.
+    if [ -x /usr/local/bin/foyer-seed-ardour-config ]; then
+        /usr/local/bin/foyer-seed-ardour-config --ams-dummy || true
+    elif [ -x /workspace/scripts/runtime/seed-ardour-config.sh ]; then
+        /workspace/scripts/runtime/seed-ardour-config.sh --ams-dummy || true
+    fi
+fi
+
+# Ardour build root — the binary lives at $FOYER_ARDOUR_BUILD_ROOT/build/headless/hardour-*
+# (hardour) or $FOYER_ARDOUR_BUILD_ROOT/build/gtk2_ardour/ardour-* (gui).
+# foyer-config picks based on $DISPLAY automatically.
 FOYER_ARDOUR_BUILD_ROOT="${FOYER_ARDOUR_BUILD_ROOT:-/opt/ardour}"
 
 # Ardour's runtime needs ARDOUR_DATA_PATH, ARDOUR_DLL_PATH, etc. The
