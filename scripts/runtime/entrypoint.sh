@@ -167,6 +167,12 @@ fi
 # surfaces discoverable.
 export ARDOUR_SURFACES_PATH="/opt/foyer/surfaces:${ARDOUR_SURFACES_PATH:-}"
 
+# Suppress Ardour's "this screen is not tall enough to display
+# the editor mixer" modal — fatal in container deploys where
+# nobody can click OK. The env var is Ardour's own escape hatch
+# for exactly this case (gtk2_ardour/editor_mixer.cc:91).
+export ARDOUR_LOVES_STUPID_TINY_SCREENS=1
+
 # Initial seed: if the jail is empty, copy any sample sessions in so
 # new visitors land on something useful instead of a blank picker.
 mkdir -p "${FOYER_JAIL}"

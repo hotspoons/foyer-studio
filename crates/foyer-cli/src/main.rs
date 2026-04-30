@@ -793,6 +793,13 @@ export TOP={top}
 source "$TOP/build/gtk2_ardour/ardev_common_waf.sh"
 : "${{ARDOUR_BACKEND:=None (Dummy)}}"
 export ARDOUR_BACKEND
+# Suppress Ardour's "this screen is not tall enough" dialog. The
+# check at editor_mixer.cc:91 fires when screen height < 700 — true
+# whenever the iframe (or xpra-html5 reported screen) is short.
+# This env var is Ardour's own escape hatch, designed exactly for
+# headless / virtual-screen deploys. Without it, the modal blocks
+# session load with no human there to dismiss it.
+export ARDOUR_LOVES_STUPID_TINY_SCREENS=1
 FOYER_SHIM_DIR={shim}
 export ARDOUR_SURFACES_PATH="$FOYER_SHIM_DIR${{ARDOUR_SURFACES_PATH:+:$ARDOUR_SURFACES_PATH}}"
 
@@ -850,6 +857,24 @@ if [ -f "$SESSION_FILE" ] && ! grep -q 'name="Foyer Studio Shim" active="1"' "$S
     else
         echo "foyer: WARNING no <ControlProtocols> block found in $SESSION_FILE — add Foyer Studio Shim by hand" >&2
     fi
+fi
+
+# Sweep Ardour's crash-recovery breadcrumbs out of the session
+# dir so the "Recover from crash / Ignore" modal doesn't block
+# session load — we render to an Xvfb the user can't see, so a
+# blocking GUI dialog is fatal. Files are renamed (not deleted)
+# to .bak.<unix-timestamp> so a power user who actually wants to
+# recover can mv them back. Mirrors archive_crash_recovery_artifacts
+# in the Rust path. Opt-out: FOYER_KEEP_CRASH_RECOVERY=1.
+if [ -z "${{FOYER_KEEP_CRASH_RECOVERY:-}}" ]; then
+    STAMP=$(date +%s)
+    for FILE in "$SESSION_DIR"/*.pending "$SESSION_DIR"/*.history; do
+        if [ -e "$FILE" ]; then
+            BAK="$FILE.bak.$STAMP"
+            echo "foyer: archiving crash-recovery artifact $FILE → $BAK" >&2
+            mv "$FILE" "$BAK" 2>/dev/null || true
+        fi
+    done
 fi
 
 exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
@@ -1314,7 +1339,67 @@ fn preflight_session(
             );
         }
     }
+    // Sweep Ardour's crash-recovery breadcrumbs out of the session
+    // dir BEFORE Ardour opens it. Without this Ardour blocks at
+    // session load with a "Recover from crash / Ignore crash data"
+    // modal — fatal in container deploys (Cloud Run, headless Xvfb)
+    // where there's no human to dismiss it. Files are renamed (not
+    // deleted) so a power user who actually wants the recovery can
+    // mv them back. Opt-out: set `FOYER_KEEP_CRASH_RECOVERY=1`.
+    if std::env::var_os("FOYER_KEEP_CRASH_RECOVERY").is_none_or(|v| v.is_empty()) {
+        archive_crash_recovery_artifacts(&dir);
+    }
     (dir, name)
+}
+
+/// Rename `*.pending` and `*.history` next to a session file to
+/// timestamped `.bak.<stamp>` siblings. Ardour ignores files with
+/// non-`.pending`/`.history` extensions, so this is enough to skip
+/// the crash-recovery dialog without losing data — recover by
+/// removing the `.bak.<stamp>` suffix. Errors are logged and
+/// swallowed; this is a best-effort preflight.
+fn archive_crash_recovery_artifacts(session_dir: &Path) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entries = match std::fs::read_dir(session_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if ext != "pending" && ext != "history" {
+            continue;
+        }
+        let parent = match path.parent() {
+            Some(p) => p,
+            None => continue,
+        };
+        let original_name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let bak = parent.join(format!("{original_name}.bak.{stamp}"));
+        match std::fs::rename(&path, &bak) {
+            Ok(()) => {
+                tracing::info!(
+                    "foyer: archived crash-recovery artifact {} → {} (set FOYER_KEEP_CRASH_RECOVERY=1 to opt out)",
+                    path.display(),
+                    bak.display(),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "foyer: failed to archive {} for crash-recovery skip: {e}",
+                    path.display(),
+                );
+            }
+        }
+    }
 }
 
 /// Step 1 of `preflight_session`: if the session file is missing,

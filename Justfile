@@ -99,21 +99,109 @@ run-dummy *args='':
     ./scripts/dev/nuke-web-install.sh
     ./scripts/dev/jack.sh stop 2>/dev/null || true
 
-    # Bring up an Xvfb if there's no display yet. The X11 socket file
-    # tells us whether :99 is already up — bare bash, no procps needed.
-    if [ -z "${DISPLAY:-}" ]; then
-        if [ ! -e /tmp/.X11-unix/X99 ]; then
+    # Bring up xpra (which manages its own Xvfb) so you can peek at
+    # Ardour's display via http://127.0.0.1:14500 — useful when
+    # debugging plugin window placement, etc. If xpra is already on
+    # :99 (e.g. you started it manually), leave it alone. The X11
+    # socket file is the cheap idempotency check; bare bash, no
+    # procps needed.
+    #
+    # Readiness signal: xpra's bind-tcp port on 14500. xpra 6+ runs
+    # Xvfb with abstract sockets (kernel namespace, no file under
+    # /tmp/.X11-unix/), so the older "is the X11 socket file there"
+    # check is unreliable. The TCP listen socket is what we actually
+    # need (proxy + html5 client both go through it) AND it's a
+    # binary signal — either listening or not.
+    if (echo > /dev/tcp/127.0.0.1/14500) 2>/dev/null; then
+        echo "xpra already listening on :14500 — reusing"
+    else
+        # Belt + braces: kill any half-alive xpra processes that
+        # stopped serving but didn't fully exit. Without this the
+        # next `xpra start` hits "Address already in use" if the
+        # listener is gone but the X server child is hung.
+        for p in /proc/[0-9]*; do
+            [ -r "$p/cmdline" ] || continue
+            cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+            case "$cmd" in
+                *"/usr/bin/xpra start :99"*)
+                    pid=$(basename "$p")
+                    echo "killing zombie xpra pid=$pid"
+                    kill -TERM "$pid" 2>/dev/null || true
+                    ;;
+            esac
+        done
+        sleep 1
+        for p in /proc/[0-9]*; do
+            [ -r "$p/cmdline" ] || continue
+            cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+            case "$cmd" in
+                *"/usr/bin/xpra start :99"*)
+                    kill -KILL "$(basename "$p")" 2>/dev/null || true
+                    ;;
+            esac
+        done
+        # Clean state files in case any are stale.
+        rm -rf /tmp/.X11-unix/X99 /tmp/xpra/99 \
+               "$HOME/.xpra/$(hostname)-99" 2>/dev/null || true
+
+        if command -v xpra >/dev/null 2>&1; then
+            echo "starting xpra on :99 (peek at http://127.0.0.1:14500)"
+            # `--auth=none --tcp-auth=none --ws-auth=none` matter:
+            # newer xpra (19+) defaults to demanding credentials on
+            # all socket types. The HTML5 client connects via
+            # WebSocket (NOT raw TCP), so `--ws-auth=none` is the
+            # load-bearing flag — without it the client cycles
+            # through "loading → login → disconnect" forever even
+            # when --tcp-auth is permissive. We're binding to
+            # localhost only, and the only client is foyer's
+            # same-origin /ws/plugin-gui proxy, so anonymous-allow
+            # is the correct posture here.
+            # `--resize-display=no` is load-bearing here. Defaults
+            # let the client shrink the Xvfb to whatever the iframe
+            # canvas size is — when the user resizes the Foyer
+            # panel small, Xvfb shrinks, then Ardour's editor pops
+            # "this screen is not tall enough to display the
+            # editor mixer". Locking Xvfb at 1920x1280 means
+            # Ardour always has room; the iframe just shows a
+            # downscaled view of whatever's in that area, and
+            # our title-filter only paints the matched plugin
+            # window full-bleed so the visual stays clean.
+            xpra start :99 \
+                --bind-tcp=127.0.0.1:14500 --html=on \
+                --auth=none --tcp-auth=none --ws-auth=none \
+                --start-via-proxy=no --no-pulseaudio --no-mdns \
+                --no-daemon \
+                --dpi=96 --resize-display=no \
+                --xvfb="Xvfb +extension Composite +extension DAMAGE +extension RANDR -screen 0 1920x1280x24+32 -nolisten tcp -noreset -dpi 96" \
+                >/tmp/foyer-xpra.log 2>&1 &
+        else
+            # Fallback: bare Xvfb. Ardour's display works, but no
+            # browser peek. Install xpra to get the HTML5 client:
+            #   sudo apt install -y xpra xpra-html5
+            echo "xpra not on PATH — falling back to bare Xvfb (no browser peek)"
             Xvfb :99 -screen 0 1280x720x24 -nolisten tcp \
                 >/tmp/foyer-xvfb.log 2>&1 &
-            # Wait for the socket — Ardour will fail-fast if Xvfb hasn't
-            # opened the display by the time it tries to connect.
-            for _ in $(seq 1 20); do
-                [ -e /tmp/.X11-unix/X99 ] && break
-                sleep 0.1
-            done
         fi
-        export DISPLAY=:99
+        # Wait for the readiness signal. xpra: TCP 14500 listening
+        # (works whether Xvfb uses abstract sockets or file-based —
+        # xpra 6+ uses abstract). Bare Xvfb fallback: the X11 socket
+        # file is the only signal we have. Up to 5s.
+        ready=0
+        for _ in $(seq 1 50); do
+            if (echo > /dev/tcp/127.0.0.1/14500) 2>/dev/null; then
+                ready=1; break
+            fi
+            if [ -e /tmp/.X11-unix/X99 ]; then
+                ready=1; break
+            fi
+            sleep 0.1
+        done
+        if [ "$ready" -eq 0 ]; then
+            echo "ERROR: X server didn't bind :99 within 5s — check /tmp/foyer-xpra.log or /tmp/foyer-xvfb.log" >&2
+            exit 1
+        fi
     fi
+    export DISPLAY=:99
 
     # Seed Ardour config (idempotent — won't clobber existing files).
     ./scripts/runtime/seed-ardour-config.sh --ams-dummy
@@ -153,6 +241,111 @@ run-tls *args='': prep
         echo "SAN: $san_joined"
     fi
     cargo run --bin foyer -- serve         --listen 0.0.0.0:3838         --tls-cert "$cert" --tls-key "$key"         --web-root web         {{args}}
+
+# Kill any stray Ardour / hardour processes plus the auxiliary
+# session_utils binaries (ardour9-new_empty_session, etc.). Useful
+# when:
+#   * `just run` left orphans behind after a Ctrl-C → next launch
+#     can't bind shim's discovery socket because the old shim is
+#     still holding it
+#   * the Audio/MIDI Setup dialog stuffed an ardour-9.x.x and the
+#     X11 session won't take a new one until it's gone
+#   * you want to restart cleanly without restarting the whole
+#     dev container
+#
+# Matches on `/proc/<pid>/comm` (executable basename), NOT cmdline,
+# so it won't accidentally nuke a shell whose `bash -c` argument
+# mentioned the word "ardour". TERM first, then KILL anything that
+# survived a 2s grace period.
+kill-daws:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    matched=0
+    for p in /proc/[0-9]*; do
+        [ -r "$p/comm" ] || continue
+        comm=$(cat "$p/comm" 2>/dev/null)
+        case "$comm" in
+            ardour-9*|hardour-9*|ardour9|hardour9|ardour9-new_empty*)
+                pid=$(basename "$p")
+                echo "TERM $pid ($comm)"
+                kill -TERM "$pid" 2>/dev/null || true
+                matched=1
+                ;;
+        esac
+    done
+    if [ "$matched" -eq 0 ]; then
+        echo "no ardour / hardour processes running"
+        exit 0
+    fi
+    sleep 2
+    for p in /proc/[0-9]*; do
+        [ -r "$p/comm" ] || continue
+        comm=$(cat "$p/comm" 2>/dev/null)
+        case "$comm" in
+            ardour-9*|hardour-9*|ardour9|hardour9|ardour9-new_empty*)
+                pid=$(basename "$p")
+                echo "KILL $pid ($comm) — survived TERM"
+                kill -KILL "$pid" 2>/dev/null || true
+                ;;
+        esac
+    done
+    # Stale shim discovery sockets in $XDG_RUNTIME_DIR / /tmp/foyer.
+    # Foyer-cli's `discovery::scan` ignores broken sockets but
+    # cleans them up only on the next successful spawn — pre-emptive
+    # rm here so a fresh `just run` doesn't trip over yesterday's
+    # entries.
+    rm -f /tmp/foyer/ardour-*.{json,sock} 2>/dev/null || true
+    rm -f "${XDG_RUNTIME_DIR:-/tmp}/foyer/ardour-*.{json,sock}" 2>/dev/null || true
+    echo "kill-daws: done"
+
+# Sweep Ardour's crash-recovery breadcrumbs (`*.pending`, `*.history`)
+# out of every session under the configured FOYER_JAIL plus the
+# `sessions/` dev tree. Without this Ardour blocks at session load
+# with a "This session appears to have been modified without save…
+# Recover from crash / Ignore" dialog — fatal in container deploys
+# where there's no human to click. Files are archived to
+# /tmp/foyer-crash-recovery-<stamp>.tar.gz before removal so you can
+# extract them later if the recovery state was actually wanted.
+#
+# Usage: just clear-crash
+#
+# Pair with kill-daws when un-sticking a frozen launch:
+#   just kill-daws clear-crash
+clear-crash:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    stamp=$(date +%Y%m%d-%H%M%S)
+    archive="/tmp/foyer-crash-recovery-$stamp.tar.gz"
+    # Search the dev sessions tree + the configured jail + the
+    # docker default `/projects`. Skip dirs that don't exist.
+    roots=()
+    for r in "$(pwd)/sessions" /projects "${FOYER_JAIL:-}" /workspaces; do
+        [ -n "$r" ] && [ -d "$r" ] && roots+=("$r")
+    done
+    if [ "${#roots[@]}" -eq 0 ]; then
+        echo "no session roots found — nothing to do"
+        exit 0
+    fi
+    # NUL-delimited so spaces in session names don't break us
+    # (`xargs -r` whitespace-splits otherwise).
+    mapfile -d '' -t files < <(
+        find "${roots[@]}" -maxdepth 5 \
+             \( -name '*.pending' -o -name '*.history' \) \
+             -print0 2>/dev/null
+    )
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "no crash-recovery files found"
+        exit 0
+    fi
+    echo "archiving ${#files[@]} files → $archive"
+    printf '%s\n' "${files[@]}" | sed 's/^/  /'
+    printf '%s\0' "${files[@]}" | tar czf "$archive" --null --files-from=- 2>&1 \
+        | grep -v "Removing leading" || true
+    for f in "${files[@]}"; do
+        rm -v "$f"
+    done
+    echo "---"
+    echo "archive: $archive"
 
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings

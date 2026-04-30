@@ -140,6 +140,30 @@ foyer-studio-uninstall            # if it's still on $PATH
 Pass `--purge` to also wipe `~/.local/share/foyer/` (the install
 root, plus your config, recents, and saved layouts).
 
+### Optional: xpra for native plugin GUI projection
+
+Some plugins (sample-based drums, complex synths, custom-painted
+EQs) ship their own GUI that the schema-driven plugin panel can't
+reproduce. With **xpra** installed on the host, Foyer projects those
+GUIs into the plugin panel via an embedded HTML5 viewer — toggle
+between the schema knobs and the native GUI per plugin.
+
+If xpra isn't installed, the "Native GUI" toggle is hidden in the
+UI and foyer-server logs an info line at startup pointing here.
+Foyer otherwise runs identically.
+
+| Distro | Install command |
+|---|---|
+| **Debian trixie** (13)        | `sudo apt install xpra xpra-html5` after adding the [xpra.org](https://xpra.org/install.html) apt repo (the trixie debs were dropped from Debian's main archive at release time — see `.devcontainer/Dockerfile` for the apt source snippet). |
+| **Debian bookworm** (12) / Ubuntu 24.04+ | `sudo apt install xpra xpra-html5` |
+| **Fedora / RHEL**             | `sudo dnf install xpra xpra-html5` |
+| **Arch**                      | `sudo pacman -S xpra` (xpra-html5 is an AUR package) |
+| **macOS**                     | `brew install --cask xpra` (or [download](https://xpra.org/install.html#macos) and install the .dmg) |
+
+On Linux servers without a graphical environment, xpra brings its
+own Xvfb internally — no other X dependencies. Restart `foyer
+serve` after installing and the toggle appears.
+
 ## Path 2 — Docker
 
 The `Dockerfile` at the repo root produces a self-contained image:

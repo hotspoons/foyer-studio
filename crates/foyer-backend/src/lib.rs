@@ -222,6 +222,28 @@ pub trait Backend: Send + Sync + 'static {
     async fn move_plugin(&self, _plugin_id: EntityId, _new_index: u32) -> Result<(), BackendError> {
         Err(BackendError::Other("move_plugin not supported".into()))
     }
+    /// Ask the host to open the plugin's native GUI window. Ardour
+    /// emits `Processor::ShowUI` and gtk2_ardour's existing window
+    /// proxy opens the editor. The window appears on whatever X
+    /// display the GUI Ardour binary is bound to (in container
+    /// deployments this is an in-container Xvfb captured by xpra
+    /// for projection to the browser).
+    async fn show_plugin_gui(&self, _plugin_id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("show_plugin_gui not supported".into()))
+    }
+    /// Companion to `show_plugin_gui` — closes the window if open.
+    async fn hide_plugin_gui(&self, _plugin_id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("hide_plugin_gui not supported".into()))
+    }
+    /// Toggle convenience — opens if closed, closes if open. The
+    /// underlying Ardour signal `Processor::ToggleUI` already does
+    /// this in one round-trip, so backends with that primitive
+    /// should override directly.
+    async fn toggle_plugin_gui(&self, _plugin_id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other(
+            "toggle_plugin_gui not supported".into(),
+        ))
+    }
     async fn browse_path(
         &self,
         _path: &str,

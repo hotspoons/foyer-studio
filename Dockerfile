@@ -278,6 +278,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get autoremove -y --purge \
  && rm -rf /var/lib/apt/lists/*
 
+# ── xpra (HTML5 X11 server, for native plugin GUI projection) ────
+#
+# xpra was dropped from Debian trixie's main repos at release time
+# (RC bugs in the packaging — fixed upstream but didn't make the
+# freeze). xpra.org publishes their own apt repo with current builds
+# for trixie, signed by the project maintainer's key. Same source
+# the dev container Dockerfile uses; keeps prod and dev at parity.
+#
+# Without xpra installed: foyer-server's startup probe sets the
+# `native_plugin_gui` feature flag to false, which hides the
+# "Native GUI" toggle in the plugin panel. Image still boots
+# happily; users just lose the native-GUI-projection feature.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gpg ca-certificates curl \
+ && curl -fsSL https://xpra.org/xpra.asc \
+      | gpg --dearmor -o /usr/share/keyrings/xpra-keyring.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/xpra-keyring.gpg] https://xpra.org/ trixie main" \
+      > /etc/apt/sources.list.d/xpra.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      xpra xpra-html5 \
+ && apt-get purge -y curl gpg \
+ && apt-get autoremove -y --purge \
+ && rm -rf /var/lib/apt/lists/*
+
 # A non-root user. Cloud Run rewrites uid/gid for us anyway, but
 # running as a real user keeps file ownership predictable when a
 # host volume is mounted at `/projects`. Member of `audio` so any

@@ -127,6 +127,33 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn show_plugin_gui(&self, plugin_id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::OpenPluginGui { plugin_id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn hide_plugin_gui(&self, plugin_id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::ClosePluginGui { plugin_id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn toggle_plugin_gui(&self, plugin_id: EntityId) -> Result<(), BackendError> {
+        // Schema doesn't carry a Toggle command yet — synthesize one
+        // by always sending Open. The shim's Processor::ShowUI signal
+        // is mapped onto gtk2_ardour's window proxy which already
+        // toggles open/close on its own when re-invoked. If a future
+        // refactor demands explicit open vs close semantics, add
+        // Command::TogglePluginGui to the schema and wire it here.
+        self.client
+            .send_command(Command::OpenPluginGui { plugin_id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn save_session(&self, as_path: Option<&str>) -> Result<(), BackendError> {
         // Empty `as_path` means save-in-place (matches the shim's
         // `session.save_state("")` convention).
