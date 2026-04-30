@@ -1,0 +1,129 @@
+From: Foyer Studio <noreply@foyer-studio.dev>
+Subject: [PATCH] dummy backend: absolute-time sleep on Linux
+
+Lock the audio clock to wall clock when the audio thread runs SCHED_OTHER
+(containers without CAP_SYS_NICE — Cloud Run gen2, plain `docker run`).
+
+The original timing loop calls `Glib::usleep(N)` which sleeps AT LEAST
+N µs; on a non-RT thread under CPU contention the actual sleep can be
+5–20 ms longer than asked. Each cycle's sleep target is computed from
+when the previous cycle ENDED (not from a fixed grid), so over-sleep
+accumulates. Result: the engine's wall-clock cycle rate falls below
+`samplerate / period`, the sample stream is produced ~7-10 % slower
+than realtime, and any downstream consumer that plays at fixed sample
+rate (e.g. a browser AudioContext at 48 kHz, or hardware via PulseAudio
+resampling) underruns continuously, producing audible pops on every
+period boundary that runs dry.
+
+Fix: maintain `_target_cycle_us` as a monotonically-advancing absolute
+deadline (one nominal_time per cycle), and use
+`clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` to wake at that
+absolute time. Scheduling delay in cycle N doesn't push cycle N+1's
+deadline forward; the kernel just wakes us closer to (or right at) the
+target. If we fall more than a handful of cycles behind we reset the
+deadline rather than burst-process to catch up (which would itself be
+audible).
+
+Linux-only — other platforms keep the original drift-accumulating
+behavior.
+
+---
+ libs/backends/dummy/dummy_audiobackend.cc | 60 ++++++++++++++++++++++-
+ libs/backends/dummy/dummy_audiobackend.h  |  9 ++++
+ 2 files changed, 67 insertions(+), 2 deletions(-)
+
+diff --git a/libs/backends/dummy/dummy_audiobackend.cc b/libs/backends/dummy/dummy_audiobackend.cc
+--- a/libs/backends/dummy/dummy_audiobackend.cc
++++ b/libs/backends/dummy/dummy_audiobackend.cc
+@@ -22,6 +22,10 @@
+ #include <math.h>
+ #include <sys/time.h>
+ #include <stdlib.h>
++#ifdef __linux__
++#include <time.h>   /* Foyer Studio: clock_nanosleep + struct timespec */
++#include <errno.h>  /* Foyer Studio: EINTR retry on clock_nanosleep */
++#endif
+
+ #include <glibmm.h>
+
+@@ -968,15 +972,67 @@ DummyAudioBackend::main_process_thread ()
+ 			_dsp_load_calc.set_stop_timestamp_us (_x_get_monotonic_usec());
+ 			_dsp_load = _dsp_load_calc.get_dsp_load_unbound ();
+
+-			const int64_t elapsed_time = _dsp_load_calc.elapsed_time_us ();
+ 			const int64_t nominal_time = _dsp_load_calc.get_max_time_us ();
++#ifdef __linux__
++			/* Foyer Studio: absolute-time sleep on Linux to keep the audio
++			 * clock locked to wall clock on non-RT threads (containers
++			 * without CAP_SYS_NICE — Cloud Run gen2, plain `docker run`).
++			 *
++			 * The original implementation calls `Glib::usleep(N)` which
++			 * sleeps AT LEAST N µs; on a SCHED_OTHER thread under CPU
++			 * contention the actual sleep can be 5–20 ms longer than
++			 * asked. Since each cycle's sleep target is computed from
++			 * the time the previous cycle ENDED (not from a fixed grid),
++			 * over-sleep accumulates. Result: the engine's wall-clock
++			 * cycle rate falls below `samplerate / period`, the sample
++			 * stream is produced ~7-10 % slower than realtime, and any
++			 * downstream consumer that plays at fixed sample rate (e.g.
++			 * a browser AudioContext at 48 kHz, or hardware via PulseAudio
++			 * resampling) underruns continuously, producing audible
++			 * pops on every period boundary that runs dry.
++			 *
++			 * Fix: maintain `_target_cycle_us` as a monotonically-advancing
++			 * absolute deadline (one nominal_time per cycle), and use
++			 * `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` to wake
++			 * at that absolute time. Scheduling delay in cycle N
++			 * doesn't push cycle N+1's deadline forward; the kernel
++			 * just wakes us closer to (or right at) the target. If we
++			 * fall more than a handful of cycles behind we reset the
++			 * deadline rather than burst-process to catch up (which
++			 * would itself be audible).
++			 */
++			if (_target_cycle_us == 0) {
++				_target_cycle_us = _x_get_monotonic_usec();
++			}
++			_target_cycle_us += static_cast<int64_t> (_speedup * nominal_time);
++			const int64_t now_us = _x_get_monotonic_usec();
++			if (_target_cycle_us > now_us + 10) {
++				struct timespec ts;
++				ts.tv_sec  =  _target_cycle_us / 1000000;
++				ts.tv_nsec = (_target_cycle_us % 1000000) * 1000;
++				while (clock_nanosleep (CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
++			} else if (now_us - _target_cycle_us > nominal_time * 5) {
++				/* > 5 cycles behind — give up catching up, re-anchor. */
++				_target_cycle_us = now_us;
++				Glib::usleep (10);
++			}
++			/* else: slightly behind, run next cycle immediately. */
++#else
++			const int64_t elapsed_time = _dsp_load_calc.elapsed_time_us ();
+ 			if (elapsed_time < nominal_time) {
+ 				const int64_t sleepy = _speedup * (nominal_time - elapsed_time);
+ 				Glib::usleep (std::max ((int64_t) 10, sleepy));
+ 			} else {
+ 				Glib::usleep (10); // don't hog cpu
+ 			}
++#endif
+ 		} else {
+ 			_dsp_load = 1.0f;
+ 			Glib::usleep (10); // don't hog cpu
+diff --git a/libs/backends/dummy/dummy_audiobackend.h b/libs/backends/dummy/dummy_audiobackend.h
+--- a/libs/backends/dummy/dummy_audiobackend.h
++++ b/libs/backends/dummy/dummy_audiobackend.h
+@@ -384,6 +384,15 @@ class DummyAudioBackend : public AudioBackend, public PortEngineSharedImpl
+
+ 		samplecnt_t _processed_samples;
+
++		// Foyer Studio: absolute-time cycle deadline (µs since some
++		// arbitrary monotonic epoch). Advances by nominal_time per
++		// cycle; the audio thread sleeps to this deadline using
++		// clock_nanosleep(TIMER_ABSTIME) to lock the audio clock to
++		// wall clock without needing RT scheduling. See the
++		// implementation note in main_process_thread() for the full
++		// rationale.
++		int64_t _target_cycle_us = 0;
++
+ 		pthread_t _main_thread;
+
+ 		/* process threads */

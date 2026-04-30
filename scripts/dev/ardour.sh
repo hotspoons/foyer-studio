@@ -164,6 +164,51 @@ PY
     done
 }
 
+apply_foyer_patches() {
+    # Apply every patch under `ext/docs/ardour-patches/` against
+    # `$ARDOUR_DIR`. Each patch is checked for prior application via
+    # `git apply --check --reverse`: if it ALREADY applies in reverse,
+    # it's already in the tree and we skip. Otherwise apply forward.
+    # This is idempotent so a cached `ext/ardour` only patches once,
+    # mirroring `patch_for_darwin`'s sentinel approach.
+    local patches_dir="$REPO_ROOT/ext/docs/ardour-patches"
+    if [ ! -d "$patches_dir" ]; then
+        return 0
+    fi
+    for p in "$patches_dir"/*.patch; do
+        [ -e "$p" ] || continue
+        local name
+        name="$(basename "$p")"
+        # Skip patches we know are not applicable here:
+        #   001-register-foyer-shim — we load the shim via
+        #     ARDOUR_SURFACES_PATH instead of registering it inside
+        #     Ardour's wscript. The patch is documentation-only.
+        #   002-hardour-backend-env — only relevant when building
+        #     `hardour` (the headless variant). The dev path uses GUI
+        #     ardour-9, so the patch is dead weight here. The runtime
+        #     image build (Dockerfile) DOES want it though, which is
+        #     handled by the docker-side patch loop. The shape used
+        #     here mirrors that loop's skip semantics; if you ever
+        #     need to land 001 or 002 against the local ardour tree,
+        #     just remove the entry from this skip list.
+        case "$name" in
+            001-register-foyer-shim*|002-hardour-backend-env*)
+                continue
+                ;;
+        esac
+        if git -C "$ARDOUR_DIR" apply --check --reverse "$p" >/dev/null 2>&1; then
+            # Patch already applied in this tree — skip.
+            continue
+        fi
+        if git -C "$ARDOUR_DIR" apply --check "$p" >/dev/null 2>&1; then
+            git -C "$ARDOUR_DIR" apply --whitespace=nowarn "$p"
+            echo "ardour: applied $name"
+        else
+            echo "ardour: WARNING $name does not apply cleanly — leaving tree as-is" >&2
+        fi
+    done
+}
+
 do_configure() {
     local extra_args=()
     local cppflags="${CPPFLAGS:-}"
@@ -222,6 +267,11 @@ do_configure() {
         fi
         patch_for_darwin
     fi
+
+    # Apply Foyer-specific patches (e.g. Dummy backend absolute-time
+    # sleep) BEFORE configure / build. Idempotent — re-runs are
+    # cheap.
+    apply_foyer_patches
 
     (
         cd "$ARDOUR_DIR"
