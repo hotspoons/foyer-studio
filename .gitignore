@@ -37,21 +37,7 @@ vgcore.*
 # External dependencies cloned into the repo for a one-checkout
 # workflow (Ardour, future DAW source trees). `ext/` replaces the
 # old sibling-workspace layout — see `just ardour clone`.
-# Use `/ext/*` (per-entry glob) instead of `/ext/` (recursive) so we
-# can re-include sibling subdirs below. With `/ext/`, a parent-dir
-# match makes `!ext/foo` ineffective (git doesn't recurse into
-# excluded dirs). `/ext/*` lists each entry individually, leaving
-# un-ignores intact.
-/ext/*
-# Re-include `ext/docs/` itself, but only the `ardour-patches/`
-# subdir within. The other contents of `ext/docs/` are upstream
-# Ardour documentation (DECISIONS.md, PLAN.md, etc. that ship with
-# the Ardour repo) and shouldn't be vendored in. The patches DO ship
-# in this repo because Dockerfile + ardour.sh both read them from
-# `ext/docs/ardour-patches/`.
-!/ext/docs/
-/ext/docs/*
-!/ext/docs/ardour-patches/
+/ext/
 
 .claude/*
 

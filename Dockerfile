@@ -112,13 +112,13 @@ RUN git -c advice.detachedHead=false clone --depth 1 \
         https://github.com/Ardour/ardour.git /opt/ardour
 
 # Apply Foyer Studio patches against upstream Ardour. The patches
-# directory lives under `ext/docs/ardour-patches/` in this repo and
-# is COPY'd into the builder layer separately (the full repo COPY at
+# directory lives at `patches/ardour/` in this repo and is COPY'd
+# into the builder layer separately (the full repo COPY at
 # `WORKDIR /workspace` happens later, but we need patches earlier so
 # the Ardour build picks them up). Each patch is independently
 # applicable, so a future `git am --3way`-style recovery works if the
 # upstream tag drifts. See the patch headers for per-file rationale.
-COPY ext/docs/ardour-patches /tmp/ardour-patches
+COPY patches/ardour /tmp/ardour-patches
 RUN for p in /tmp/ardour-patches/*.patch; do \
         echo "==> applying $p"; \
         git -C /opt/ardour apply --whitespace=nowarn "$p" || { \

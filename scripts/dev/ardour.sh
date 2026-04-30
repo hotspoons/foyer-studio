@@ -165,13 +165,13 @@ PY
 }
 
 apply_foyer_patches() {
-    # Apply every patch under `ext/docs/ardour-patches/` against
+    # Apply every patch under `patches/ardour/` against
     # `$ARDOUR_DIR`. Each patch is checked for prior application via
     # `git apply --check --reverse`: if it ALREADY applies in reverse,
     # it's already in the tree and we skip. Otherwise apply forward.
     # This is idempotent so a cached `ext/ardour` only patches once,
     # mirroring `patch_for_darwin`'s sentinel approach.
-    local patches_dir="$REPO_ROOT/ext/docs/ardour-patches"
+    local patches_dir="$REPO_ROOT/patches/ardour"
     if [ ! -d "$patches_dir" ]; then
         return 0
     fi
