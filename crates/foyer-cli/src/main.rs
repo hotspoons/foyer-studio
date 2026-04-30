@@ -877,6 +877,29 @@ if [ -z "${{FOYER_KEEP_CRASH_RECOVERY:-}}" ]; then
     done
 fi
 
+# FOYER_DEBUG_ARDOUR=1 wraps the Ardour spawn in `gdb --batch` so
+# SIGSEGV/SIGABRT dump a backtrace into stderr (which lands in
+# daw.log) instead of vanishing silently. Useful when chasing
+# "DAW dies on plugin add" bugs in container deploys where there's
+# no human to attach a debugger interactively. Off by default
+# because gdb adds startup overhead and rewrites stderr framing.
+# Requires `gdb` in the image (runtime Dockerfile installs it).
+if [ -n "${{FOYER_DEBUG_ARDOUR:-}}" ] && command -v gdb >/dev/null 2>&1; then
+    echo "foyer: FOYER_DEBUG_ARDOUR=$FOYER_DEBUG_ARDOUR — wrapping Ardour in gdb --batch" >&2
+    # `set pagination off` keeps gdb from blocking on the "press
+    # return to continue" prompt. `handle SIG33 nostop noprint pass`
+    # silences the JACK xrun signal noise. `thread apply all bt full`
+    # gives every thread's stack with locals — much more useful than
+    # a single-thread bt for a multi-threaded DAW.
+    exec gdb --batch \
+        -ex "set pagination off" \
+        -ex "handle SIG33 nostop noprint pass" \
+        -ex "handle SIGPIPE nostop noprint pass" \
+        -ex "run" \
+        -ex "thread apply all bt full" \
+        -ex "quit" \
+        --args {exec} "$@" "$SESSION_DIR" "$NAME"
+fi
 exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
             top = shell_escape(root.to_string_lossy().as_ref()),
             shim = shell_escape(shim.to_string_lossy().as_ref()),

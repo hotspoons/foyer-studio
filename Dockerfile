@@ -190,6 +190,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 #   htop      — sometimes you just want to watch ardour's RSS climb
 RUN apt-get update && apt-get install -y --no-install-recommends \
       procps psmisc iproute2 lsof net-tools \
+      # gdb for crash forensics on the Ardour child. With
+      # FOYER_DEBUG_ARDOUR=1 the foyer-cli bash launcher wraps
+      # Ardour in `gdb --batch --ex run --ex "thread apply all bt full"`
+      # so a SIGSEGV / SIGABRT dumps a stack trace into the daw log
+      # instead of the silent exit Cloud Run / docker shows otherwise.
+      gdb \
       less file vim-tiny htop \
  && rm -rf /var/lib/apt/lists/*
 
