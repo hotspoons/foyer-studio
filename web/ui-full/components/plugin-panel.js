@@ -272,15 +272,14 @@ export class PluginPanel extends LitElement {
    */
   _applyNativeNaturalSize(w, h) {
     if (!this._nativeGuiOpen) return;
-    // Walk up to the enclosing `<foyer-window>` (we're rendered
-    // inside the plugin panel which lives in a foyer-window). The
-    // shadow-root walk is necessary because the panel is in
-    // ui-full's shadow and the foyer-window is in ui-core's.
-    let host = this;
+    // Walk up via parentElement (light DOM) — plugin-panel is
+    // appended as a light child of foyer-window via `openWindow`,
+    // not into its shadow tree. getRootNode() would return the
+    // document and miss the foyer-window entirely.
+    let host = this.parentElement;
     while (host) {
-      const root = host.getRootNode();
-      host = root.host || (root === document ? null : root);
-      if (host && host.tagName?.toLowerCase() === "foyer-window") break;
+      if (host.tagName?.toLowerCase() === "foyer-window") break;
+      host = host.parentElement;
     }
     if (!host) return;
     // Stash the schema-view size on the host BEFORE we mutate it,
@@ -580,11 +579,10 @@ export class PluginPanel extends LitElement {
     // Releasing back to schema view: drop the foyer-window size
     // lock so the user can resize freely again.
     if (!opening) {
-      let host = this;
+      let host = this.parentElement;
       while (host) {
-        const root = host.getRootNode();
-        host = root.host || (root === document ? null : root);
-        if (host && host.tagName?.toLowerCase() === "foyer-window") break;
+        if (host.tagName?.toLowerCase() === "foyer-window") break;
+        host = host.parentElement;
       }
       if (host) {
         // Restore the schema-view size we stashed when first

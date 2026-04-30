@@ -227,12 +227,22 @@ export class PluginNativeUiWindow extends LitElement {
     // all — exactly what we want to filter.
     const wins = doc.querySelectorAll(".window");
     let matchedWin = null;
+    let preStyleNatW = 0, preStyleNatH = 0;
     for (const winDiv of wins) {
       const titleEl = winDiv.querySelector(".windowtitle");
       const title = (titleEl?.textContent || "").trim();
       const isMatch = title && title.toLowerCase().includes(needle);
       if (isMatch) {
         matchedWin = winDiv;
+        // Measure natural size BEFORE styling — _stylePluginWindow
+        // stretches the div to 100vw/100vh which would mask the
+        // X11 native dimensions in the bounding rect.
+        const canvas = winDiv.querySelector("canvas");
+        const bbox = winDiv.getBoundingClientRect?.();
+        preStyleNatW = (canvas && canvas.width > 0 ? canvas.width : 0)
+                    || (bbox && bbox.width > 0 ? Math.round(bbox.width) : 0);
+        preStyleNatH = (canvas && canvas.height > 0 ? canvas.height : 0)
+                    || (bbox && bbox.height > 0 ? Math.round(bbox.height) : 0);
         this._stylePluginWindow(winDiv);
       } else {
         // Hide everything else.
@@ -245,16 +255,15 @@ export class PluginNativeUiWindow extends LitElement {
     // computed dimensions of the canvas (which is sized to the
     // X11 window) before our CSS stretches it.
     if (matchedWin && !this._sentNaturalSize) {
-      const canvas = matchedWin.querySelector("canvas");
-      if (canvas && canvas.width > 0 && canvas.height > 0) {
+      if (preStyleNatW > 0 && preStyleNatH > 0) {
         this._sentNaturalSize = true;
         try {
           window.postMessage(
             {
               type: "foyer.plugin-gui.size",
               pluginName: this.pluginName,
-              w: canvas.width,
-              h: canvas.height,
+              w: preStyleNatW,
+              h: preStyleNatH,
             },
             window.location.origin,
           );

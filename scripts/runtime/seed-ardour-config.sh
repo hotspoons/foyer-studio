@@ -51,6 +51,23 @@ if [ "${1:-}" = "--ams-dummy" ]; then
     if [ -f "$cfg_dir/config" ]; then
         echo "seed-ardour-config: $cfg_dir/config already present — leaving as-is"
     else
+        # Buffer + period sizing. The Dummy backend's process loop is
+        # timer-driven (no hardware clock to lock against), so under
+        # CPU pressure / non-RT scheduling the timer drifts and the
+        # process thread misses its deadline → xruns → audible
+        # drops/pops on recordings. Larger buffer + more periods buys
+        # headroom at the cost of latency, and the Dummy backend has
+        # no monitoring path that cares about latency anyway.
+        #
+        #   buffer-size: 1024 = ~21 ms (default for hardware tracking)
+        #                4096 = ~85 ms (recommended for dummy/container)
+        #                8192 = ~170 ms (very safe under heavy load)
+        #   n-periods:   2 = tight; 3-4 = generous
+        #
+        # Override via env vars before invoking this script.
+        sample_rate="${FOYER_SAMPLE_RATE:-48000}"
+        buffer_size="${FOYER_BUFFER_SIZE:-4096}"
+        n_periods="${FOYER_N_PERIODS:-3}"
         cat > "$cfg_dir/config" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <Ardour version="9.0.0">
@@ -65,9 +82,9 @@ if [ "${1:-}" = "--ams-dummy" ]; then
                device="Silence"
                input-device=""
                output-device=""
-               sample-rate="48000"
-               buffer-size="1024"
-               n-periods="2"
+               sample-rate="${sample_rate}"
+               buffer-size="${buffer_size}"
+               n-periods="${n_periods}"
                input-latency="0"
                output-latency="0"
                lm-input="0"
@@ -83,6 +100,6 @@ if [ "${1:-}" = "--ams-dummy" ]; then
   </Extra>
 </Ardour>
 EOF
-        echo "seed-ardour-config: created $cfg_dir/config (Dummy backend / Silence device)"
+        echo "seed-ardour-config: created $cfg_dir/config (Dummy / Silence, sr=${sample_rate}, buf=${buffer_size}, periods=${n_periods})"
     fi
 fi

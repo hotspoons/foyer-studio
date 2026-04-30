@@ -260,18 +260,30 @@ run-tls *args='': prep
 kill-daws:
     #!/usr/bin/env bash
     set -uo pipefail
+    # Match patterns:
+    #   * ardour-9.x.x / hardour-9.x.x / ardour9 / hardour9 — original
+    #     filenames before exec
+    #   * ArdourGUI — Ardour calls prctl(PR_SET_NAME, "ArdourGUI") after
+    #     launch, so /proc/<pid>/comm reads that. Same for any
+    #     "Ardour*" prctl variant a future build might set.
+    #   * ardour9-new_empty_session — the bootstrap helper
+    is_daw() {
+        case "$1" in
+            ardour-9*|hardour-9*|ardour9|hardour9|ardour9-new_empty*) return 0 ;;
+            Ardour*) return 0 ;;
+        esac
+        return 1
+    }
     matched=0
     for p in /proc/[0-9]*; do
         [ -r "$p/comm" ] || continue
         comm=$(cat "$p/comm" 2>/dev/null)
-        case "$comm" in
-            ardour-9*|hardour-9*|ardour9|hardour9|ardour9-new_empty*)
-                pid=$(basename "$p")
-                echo "TERM $pid ($comm)"
-                kill -TERM "$pid" 2>/dev/null || true
-                matched=1
-                ;;
-        esac
+        if is_daw "$comm"; then
+            pid=$(basename "$p")
+            echo "TERM $pid ($comm)"
+            kill -TERM "$pid" 2>/dev/null || true
+            matched=1
+        fi
     done
     if [ "$matched" -eq 0 ]; then
         echo "no ardour / hardour processes running"
@@ -281,13 +293,11 @@ kill-daws:
     for p in /proc/[0-9]*; do
         [ -r "$p/comm" ] || continue
         comm=$(cat "$p/comm" 2>/dev/null)
-        case "$comm" in
-            ardour-9*|hardour-9*|ardour9|hardour9|ardour9-new_empty*)
-                pid=$(basename "$p")
-                echo "KILL $pid ($comm) — survived TERM"
-                kill -KILL "$pid" 2>/dev/null || true
-                ;;
-        esac
+        if is_daw "$comm"; then
+            pid=$(basename "$p")
+            echo "KILL $pid ($comm) — survived TERM"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
     done
     # Stale shim discovery sockets in $XDG_RUNTIME_DIR / /tmp/foyer.
     # Foyer-cli's `discovery::scan` ignores broken sockets but
