@@ -129,12 +129,44 @@ if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
     fi
     log "DISPLAY=${DISPLAY}"
     # Seed ~/.config/ardour9/{.a9,config} so first-run wizard and
-    # AMS dialogs are skipped. Idempotent — leaves an existing
-    # `config` file alone.
+    # AMS dialogs are skipped. We use `--force-ams-dummy` here (not
+    # `--ams-dummy`) because in gui-dummy mode WE own the config —
+    # any pre-existing config file is either:
+    #   (a) a stale leftover from a prior `jack-headless` run on a
+    #       reused volume, in which case it pins JACK and ardour-9
+    #       tries to acquire RT scheduling and dies with
+    #       `failed_constructor`; or
+    #   (b) something Ardour itself wrote during a prior session
+    #       save/load that doesn't carry a usable `<EngineStates>`
+    #       block, so `EngineControl::set_state` falls through to
+    #       `set_default_state` which picks the first backend from
+    #       `ARDOUR_BACKEND_PATH` — and that's JACK. Same death.
+    # The GUI binary IGNORES the `ARDOUR_BACKEND` env var (only
+    # `hardour` honors it via our patches/002 — search_paths.cc
+    # only knows `ARDOUR_BACKEND_PATH`), so a seeded
+    # `<EngineStates>` block is the only knob that actually pins
+    # the GUI to Dummy. Force-overwrite is the safe move.
+    cfg_dir="${ARDOUR_CONFIG_DIR:-$HOME/.config/ardour9}"
     if [ -x /usr/local/bin/foyer-seed-ardour-config ]; then
-        /usr/local/bin/foyer-seed-ardour-config --ams-dummy || true
+        /usr/local/bin/foyer-seed-ardour-config --force-ams-dummy || \
+            log "WARNING: foyer-seed-ardour-config exited non-zero — Ardour will likely fall back to JACK and die"
     elif [ -x /workspace/scripts/runtime/seed-ardour-config.sh ]; then
-        /workspace/scripts/runtime/seed-ardour-config.sh --ams-dummy || true
+        /workspace/scripts/runtime/seed-ardour-config.sh --force-ams-dummy || \
+            log "WARNING: seed-ardour-config.sh exited non-zero — Ardour will likely fall back to JACK and die"
+    else
+        log "WARNING: no seed-ardour-config script found — Ardour will fall back to JACK and die under non-privileged container runtimes"
+    fi
+    # Post-seed verification — surface this in `docker logs` so a
+    # JACK fallback is unambiguous to debug. Looks for both the
+    # file and the `backend="None (Dummy)"` line that EngineControl
+    # parses (line 2081 of engine_dialog.cc — backend property is
+    # the load-bearing field).
+    if [ -f "$cfg_dir/config" ] && grep -q 'backend="None (Dummy)"' "$cfg_dir/config" 2>/dev/null; then
+        log "Ardour config seed verified: $cfg_dir/config has Dummy backend pinned"
+    else
+        log "WARNING: $cfg_dir/config missing or lacks Dummy AMS state — GUI ardour-9 will pick JACK at startup"
+        log "WARNING: contents of $cfg_dir (if any):"
+        ls -la "$cfg_dir" 2>&1 | sed 's/^/[entrypoint]   /' >&2 || true
     fi
 fi
 

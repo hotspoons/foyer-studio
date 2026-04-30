@@ -298,10 +298,7 @@ async fn handle(
                     // backend can run on a host with xpra and one
                     // without. Probed once at AppState construction.
                     let mut feat = state.backend.read().await.features();
-                    feat.insert(
-                        "native_plugin_gui".into(),
-                        state.xpra_available,
-                    );
+                    feat.insert("native_plugin_gui".into(), state.xpra_available);
                     feat
                 },
                 // No host-level pin by default. An operator can set

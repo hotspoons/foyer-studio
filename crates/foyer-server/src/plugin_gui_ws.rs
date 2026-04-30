@@ -61,20 +61,28 @@ async fn handle(socket: WebSocket, _state: Arc<AppState>) {
     // Connect to the local xpra TCP socket. Retry briefly — xpra
     // may still be coming up if the user fired this WS before the
     // entrypoint's spawn completed (cold-start race window).
-    let xpra_addr = std::env::var("FOYER_XPRA_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:14500".to_string());
+    let xpra_addr =
+        std::env::var("FOYER_XPRA_ADDR").unwrap_or_else(|_| "127.0.0.1:14500".to_string());
     let mut tcp = None;
     for attempt in 0..10 {
         match TcpStream::connect(&xpra_addr).await {
             Ok(s) => {
                 if attempt > 0 {
-                    tracing::info!("/ws/plugin-gui connected to xpra at {} on attempt {}", xpra_addr, attempt + 1);
+                    tracing::info!(
+                        "/ws/plugin-gui connected to xpra at {} on attempt {}",
+                        xpra_addr,
+                        attempt + 1
+                    );
                 }
                 tcp = Some(s);
                 break;
             }
             Err(e) if attempt < 9 => {
-                tracing::warn!("/ws/plugin-gui xpra connect attempt {} failed: {} — retry in 500ms", attempt + 1, e);
+                tracing::warn!(
+                    "/ws/plugin-gui xpra connect attempt {} failed: {} — retry in 500ms",
+                    attempt + 1,
+                    e
+                );
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(e) => {

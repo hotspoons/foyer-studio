@@ -16,27 +16,49 @@
 #      child nodes at the root of `<Ardour>` are silently ignored).
 #
 # Usage:
-#   seed-ardour-config.sh                  # always seeds .a9 only
-#   seed-ardour-config.sh --ams-dummy      # also seeds AMS for the
-#                                          # libardour "None (Dummy)"
-#                                          # backend with Silence
-#                                          # device — what we want in
-#                                          # non-privileged contexts
-#                                          # (Cloud Run gen2) where
-#                                          # JACK can't acquire
-#                                          # SCHED_FIFO and the
-#                                          # `failed_constructor`
-#                                          # cascade kills hardour.
+#   seed-ardour-config.sh                       # always seeds .a9 only
+#   seed-ardour-config.sh --ams-dummy           # ALSO seeds AMS for the
+#                                               # libardour "None (Dummy)"
+#                                               # backend, but skips if
+#                                               # `<cfg>/config` already
+#                                               # exists (respects a
+#                                               # user's manual config).
+#   seed-ardour-config.sh --force-ams-dummy     # overwrites any existing
+#                                               # `<cfg>/config` with the
+#                                               # Dummy AMS preset. Used
+#                                               # by the container entrypoint
+#                                               # in gui-dummy mode where we
+#                                               # OWN the config and need
+#                                               # to enforce the dummy backend
+#                                               # — a stale JACK preference
+#                                               # (e.g. left over from an
+#                                               # earlier `jack-headless`
+#                                               # boot, or written by Ardour
+#                                               # itself across a session
+#                                               # save/load) cascades into
+#                                               # `failed_constructor` on
+#                                               # the next launch under
+#                                               # gVisor / unprivileged
+#                                               # docker because the GUI
+#                                               # binary picks the first
+#                                               # available backend (JACK)
+#                                               # when the AMS state is
+#                                               # unreadable, and the GUI
+#                                               # IGNORES `ARDOUR_BACKEND`
+#                                               # — only the seeded
+#                                               # `<EngineStates>` block
+#                                               # actually pins it to Dummy.
 #
 # Override the config dir via `ARDOUR_CONFIG_DIR=...`. Default is
-# `$HOME/.config/ardour9` (Linux). Re-running is safe — existing
-# files are NEVER overwritten so a user who configured Ardour
-# manually keeps their settings.
+# `$HOME/.config/ardour9` (Linux). Without `--force-*`, existing files
+# are never overwritten so a user who configured Ardour manually keeps
+# their settings.
 
 set -euo pipefail
 
 cfg_dir="${ARDOUR_CONFIG_DIR:-$HOME/.config/ardour9}"
 mkdir -p "$cfg_dir"
+echo "seed-ardour-config: HOME=${HOME:-<unset>} cfg_dir=$cfg_dir uid=$(id -u) gid=$(id -g)"
 
 # Wizard-skip sentinel — always seed. Empty file is the marker.
 if [ ! -f "$cfg_dir/.a9" ]; then
@@ -45,11 +67,16 @@ if [ ! -f "$cfg_dir/.a9" ]; then
 fi
 
 # Optional: seed the Audio/MIDI Setup with the Dummy backend so
-# autostart bypasses the AMS dialog on first session load. Only
-# applied when explicitly asked AND no existing config is present.
-if [ "${1:-}" = "--ams-dummy" ]; then
-    if [ -f "$cfg_dir/config" ]; then
-        echo "seed-ardour-config: $cfg_dir/config already present — leaving as-is"
+# autostart bypasses the AMS dialog on first session load. Two
+# entry-point flavors:
+#   --ams-dummy        idempotent — skip if a config file already
+#                      exists (respects manual config).
+#   --force-ams-dummy  authoritative — overwrite any existing config
+#                      (container deploys where we own the config).
+mode="${1:-}"
+if [ "$mode" = "--ams-dummy" ] || [ "$mode" = "--force-ams-dummy" ]; then
+    if [ "$mode" = "--ams-dummy" ] && [ -f "$cfg_dir/config" ]; then
+        echo "seed-ardour-config: $cfg_dir/config already present — leaving as-is (use --force-ams-dummy to overwrite)"
     else
         # Buffer + period sizing. The Dummy backend's process loop is
         # timer-driven (no hardware clock to lock against), so under
@@ -68,6 +95,11 @@ if [ "${1:-}" = "--ams-dummy" ]; then
         sample_rate="${FOYER_SAMPLE_RATE:-48000}"
         buffer_size="${FOYER_BUFFER_SIZE:-4096}"
         n_periods="${FOYER_N_PERIODS:-3}"
+        # Capture pre-state for the action-verb log line below.
+        pre_existed="no"
+        if [ -f "$cfg_dir/config" ]; then
+            pre_existed="yes"
+        fi
         cat > "$cfg_dir/config" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <Ardour version="9.0.0">
@@ -100,6 +132,10 @@ if [ "${1:-}" = "--ams-dummy" ]; then
   </Extra>
 </Ardour>
 EOF
-        echo "seed-ardour-config: created $cfg_dir/config (Dummy / Silence, sr=${sample_rate}, buf=${buffer_size}, periods=${n_periods})"
+        action="created"
+        if [ "$pre_existed" = "yes" ]; then
+            action="overwrote"
+        fi
+        echo "seed-ardour-config: $action $cfg_dir/config (Dummy / Silence, sr=${sample_rate}, buf=${buffer_size}, periods=${n_periods})"
     fi
 fi

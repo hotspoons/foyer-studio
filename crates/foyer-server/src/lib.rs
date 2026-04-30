@@ -23,8 +23,8 @@ mod dev;
 mod files;
 mod ingress_ws;
 mod jail;
-mod plugin_gui_ws;
 pub mod orphans;
+mod plugin_gui_ws;
 mod ring;
 mod session_scrub;
 mod sessions;
@@ -1015,6 +1015,7 @@ async fn login_post(
 ///   * `/ws/plugin-gui` proxy connects to a localhost xpra TCP
 ///     socket xpra is expected to be running on
 ///   * `/_xpra/` static mount serves xpra's HTML5 dist
+///
 /// If absent we still boot fine — we just hide the toggle in the UI
 /// via the `native_plugin_gui` feature flag. Logged once at startup
 /// with an install link so users on a fresh machine know what to do.
