@@ -180,12 +180,15 @@ export class AudioListener {
       numberOfOutputs: 1,
       outputChannelCount: [this.format.channels],
     });
-    // Track previously-logged underrun/overrun counts so we only spam
-    // the console when they CHANGE — otherwise we'd log every second
-    // even on a perfectly healthy stream. Mirrors the shim-side
-    // master-tap drop counter pattern. Also stash the latest stats on
-    // the instance + window so probes can read them without enabling
-    // VERBOSE: `window.__foyer.audioStats` from the browser console.
+    // Stash the latest stats on the instance + window so probes can
+    // read them via `window.__foyer.audioStats` from the browser
+    // console. The verbose console line is gated on VERBOSE — flip it
+    // to true at the top of this file when re-investigating jitter
+    // issues. (Earlier always-on warning was useful for the initial
+    // diagnosis of the Dummy-backend drift bug fixed in 003-dummy-
+    // absolute-time-sleep.patch; with that fix in place, healthy
+    // streams stay quiet but idle/stopped streams still naturally
+    // underrun, which spammed the console.)
     this._lastStats = { underruns: 0, overruns: 0 };
     this.workletNode.port.onmessage = (ev) => {
       const m = ev.data;
@@ -193,18 +196,6 @@ export class AudioListener {
         this._lastStats = m;
         if (typeof window !== "undefined" && window.__foyer) {
           window.__foyer.audioStats = m;
-        }
-        const dU = m.underruns - (this._loggedUnderruns ?? 0);
-        const dO = m.overruns - (this._loggedOverruns ?? 0);
-        if (dU > 0 || dO > 0) {
-          this._loggedUnderruns = m.underruns;
-          this._loggedOverruns = m.overruns;
-          console.warn(
-            `[audio-listener] jitter buffer: +${dU} underrun samples, ` +
-            `+${dO} overrun samples in last ~1 s ` +
-            `(buffered=${m.buffered}, total under=${m.underruns}, over=${m.overruns}). ` +
-            `Each underrun = audible pop on output.`,
-          );
         }
         if (VERBOSE) {
           console.info(
