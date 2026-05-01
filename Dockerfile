@@ -141,7 +141,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+RUN curl --proto '=https' --tlsv1.2 -sSf \
+        --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
 
 # ── Ardour source headers ────────────────────────────────────────
@@ -277,9 +279,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the highest version available across both.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gpg dirmngr ca-certificates curl \
- && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x89195BA21C5CE3C72BAC1C0A0C955638F15F1FDC" \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x89195BA21C5CE3C72BAC1C0A0C955638F15F1FDC" \
       | gpg --dearmor -o /usr/share/keyrings/kxstudio-archive-keyring.gpg \
- && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xDF1BC724E4ED8A947FF0B0A1F8599E482BD84BD9" \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xDF1BC724E4ED8A947FF0B0A1F8599E482BD84BD9" \
       | gpg --dearmor >> /usr/share/keyrings/kxstudio-archive-keyring.gpg \
  && for suite in bionic focal; do \
       for repo in plugins libs apps kxstudio; do \
@@ -395,7 +399,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # happily; users just lose the native-GUI-projection feature.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gpg ca-certificates curl \
- && curl -fsSL https://xpra.org/xpra.asc \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        https://xpra.org/xpra.asc \
       | gpg --dearmor -o /usr/share/keyrings/xpra-keyring.gpg \
  && echo "deb [signed-by=/usr/share/keyrings/xpra-keyring.gpg] https://xpra.org/ trixie main" \
       > /etc/apt/sources.list.d/xpra.list \

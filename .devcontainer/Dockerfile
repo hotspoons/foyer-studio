@@ -135,7 +135,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 127.0.0.1:14500 --html=on` runs an Xvfb under xpra's control and
 # serves a JS canvas viewer at :14500. VS Code's port forwarding
 # brings that to the host browser without any X forwarding.
-RUN curl -fsSL https://xpra.org/xpra.asc \
+RUN curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        https://xpra.org/xpra.asc \
       | gpg --dearmor -o /usr/share/keyrings/xpra-keyring.gpg \
  && echo "deb [signed-by=/usr/share/keyrings/xpra-keyring.gpg] https://xpra.org/ trixie main" \
       > /etc/apt/sources.list.d/xpra.list \
@@ -164,9 +165,11 @@ RUN curl -fsSL https://xpra.org/xpra.asc \
 # Debian winning on any name collision.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gpg dirmngr ca-certificates curl \
- && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x89195BA21C5CE3C72BAC1C0A0C955638F15F1FDC" \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x89195BA21C5CE3C72BAC1C0A0C955638F15F1FDC" \
       | gpg --dearmor -o /usr/share/keyrings/kxstudio-archive-keyring.gpg \
- && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xDF1BC724E4ED8A947FF0B0A1F8599E482BD84BD9" \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xDF1BC724E4ED8A947FF0B0A1F8599E482BD84BD9" \
       | gpg --dearmor >> /usr/share/keyrings/kxstudio-archive-keyring.gpg \
  && for suite in bionic focal; do \
       for repo in plugins libs apps kxstudio; do \
@@ -215,7 +218,9 @@ RUN groupadd --gid 1000 vscode \
     && chmod 0440 /etc/sudoers.d/vscode
 
 # Install `just` task runner
-RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+RUN curl --proto '=https' --tlsv1.2 -sSf \
+        --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        https://just.systems/install.sh \
       | bash -s -- --to /usr/local/bin \
     && just --version
 
@@ -225,7 +230,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
 # sourcing ~/.bashrc. The per-user install path (see
 # `.user-post-install.sh`) skips if `bun` is already on PATH, so this
 # is the single source of truth in a fresh container.
-RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
+RUN curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        https://bun.sh/install \
+      | BUN_INSTALL=/usr/local bash \
     && bun --version
 
 # Install fastfetch (arch-aware)
@@ -235,7 +242,8 @@ RUN ARCH=$(uname -m) \
          aarch64) FF_ARCH="aarch64" ;; \
          *) echo "Unknown architecture: $ARCH" && exit 1 ;; \
        esac \
-    && curl -fsSL -o /tmp/fastfetch.deb \
+    && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+         -o /tmp/fastfetch.deb \
          "https://github.com/fastfetch-cli/fastfetch/releases/download/2.54.0/fastfetch-linux-${FF_ARCH}.deb" \
     && dpkg -i /tmp/fastfetch.deb \
     && rm /tmp/fastfetch.deb
@@ -260,7 +268,9 @@ RUN mkdir -p \
 ENV RUSTUP_HOME=/home/vscode/.rustup \
     CARGO_HOME=/home/vscode/.cargo \
     PATH=/home/vscode/.cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+RUN curl --proto '=https' --tlsv1.2 -sSf \
+        --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --profile minimal \
     && rustup component add rustfmt clippy rust-src rust-analyzer
 
