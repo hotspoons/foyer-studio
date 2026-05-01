@@ -86,7 +86,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       python3 \
       python3-pip \
-      libssl-dev \
       libboost-dev \
       libgtkmm-2.4-dev \
       libglibmm-2.4-dev \
@@ -119,10 +118,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libopus-dev \
       libudev-dev \
       libltc-dev \
-      libssl3 \
  && apt-get install -y --no-install-recommends -t sid \
       ardour \
  && rm -rf /var/lib/apt/lists/*
+# libssl-dev / libssl3 intentionally omitted:
+#   * The Rust sidecar uses rustls (pure-Rust TLS via axum-server's
+#     `tls-rustls` feature) — no openssl-sys link.
+#   * The shim doesn't touch TLS.
+#   * Ardour's apt install pulls in whatever runtime libssl version
+#     it needs automatically.
+# Earlier versions had `libssl-dev` here as a defensive include; with
+# trixie-security carrying libssl3t64=u2 and trixie/main's libssl-dev
+# strict-pinning to u1, that pulls a versioned-conflict apt failure
+# at build time. Removing the unneeded packages avoids it entirely.
 
 # Rust toolchain — minimal profile keeps the builder lean.
 ENV RUSTUP_HOME=/usr/local/rustup \
