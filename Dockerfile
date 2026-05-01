@@ -62,10 +62,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/sid.list \
  && printf '%s\n' \
       'Package: *' \
-      'Pin: release a=stable' \
-      'Pin-Priority: 990' \
-      '' \
-      'Package: *' \
       'Pin: release a=unstable' \
       'Pin-Priority: 100' \
       > /etc/apt/preferences.d/sid-pin
@@ -110,7 +106,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsamplerate0-dev \
       libpulse-dev \
       libdbus-1-dev \
-      libwebsockets-dev \
       libcwiid-dev \
       libasound2-dev \
       libjack-jackd2-dev \
@@ -121,20 +116,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get install -y --no-install-recommends -t sid \
       ardour \
  && rm -rf /var/lib/apt/lists/*
-# libssl-dev / libssl3 intentionally omitted, and libcurl4-dev is
-# the GnuTLS flavor (not the OpenSSL one):
-#   * The Rust sidecar uses rustls (pure-Rust TLS via axum-server's
-#     `tls-rustls` feature) — no openssl-sys link.
-#   * The shim doesn't touch TLS.
-#   * Ardour's apt install pulls in whatever runtime libssl version
-#     it needs automatically.
-# Why this matters: trixie-security carries libssl3t64=u2 (already in
-# the base image), but trixie/main's libssl-dev strict-pins to
-# libssl3t64=u1. That mismatch (point-release skew between security
-# and main) makes apt fail when ANYTHING transitive forces
-# libssl-dev — `libcurl4-openssl-dev` was the surprising puller.
-# Switching to `libcurl4-gnutls-dev` provides the same `<curl/curl.h>`
-# headers + pkg-config entry without the libssl-dev cascade.
+# Two omissions worth noting:
+#
+# 1. `libwebsockets-dev` intentionally omitted — the Rust sidecar
+#    uses pure-Rust tokio-tungstenite for its WS surface; the shim
+#    doesn't touch websockets. The package was a defensive include
+#    for an Ardour build path we no longer take. Removing it also
+#    drops a transitive `libssl-dev` puller, but the pin fix above
+#    is the load-bearing thing — the `Pin: a=unstable Pin-Priority:
+#    100` on sid (and absence of an explicit `a=stable` boost)
+#    leaves trixie/main and trixie-security tied at the default 500
+#    so apt naturally picks the security-updated `libssl-dev=u2`
+#    over `=u1` from main. Earlier revisions of this Dockerfile
+#    boosted `a=stable` to 990, which (because trixie-security is
+#    `a=stable-security`, not `a=stable`) demoted security to 500
+#    while main went to 990, flipping the version preference.
+#
+# 2. `libcurl4-dev` is the GnuTLS flavor (not the OpenSSL one).
+#    Functionally identical for our build path (waf configure picks
+#    libcurl via pkg-config), and avoids transitively pulling
+#    libssl-dev — belt-and-braces against any future puller.
 
 # Rust toolchain — minimal profile keeps the builder lean.
 ENV RUSTUP_HOME=/usr/local/rustup \
@@ -445,10 +446,6 @@ RUN groupadd --gid 1000 foyer \
 # manual paths to maintain.
 RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/sid.list \
  && printf '%s\n' \
-      'Package: *' \
-      'Pin: release a=stable' \
-      'Pin-Priority: 990' \
-      '' \
       'Package: *' \
       'Pin: release a=unstable' \
       'Pin-Priority: 100' \
