@@ -100,7 +100,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       liblo-dev \
       librubberband-dev \
       libreadline-dev \
-      libcurl4-openssl-dev \
+      libcurl4-gnutls-dev \
       libusb-1.0-0-dev \
       libserd-dev \
       libsord-dev \
@@ -121,16 +121,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get install -y --no-install-recommends -t sid \
       ardour \
  && rm -rf /var/lib/apt/lists/*
-# libssl-dev / libssl3 intentionally omitted:
+# libssl-dev / libssl3 intentionally omitted, and libcurl4-dev is
+# the GnuTLS flavor (not the OpenSSL one):
 #   * The Rust sidecar uses rustls (pure-Rust TLS via axum-server's
 #     `tls-rustls` feature) — no openssl-sys link.
 #   * The shim doesn't touch TLS.
 #   * Ardour's apt install pulls in whatever runtime libssl version
 #     it needs automatically.
-# Earlier versions had `libssl-dev` here as a defensive include; with
-# trixie-security carrying libssl3t64=u2 and trixie/main's libssl-dev
-# strict-pinning to u1, that pulls a versioned-conflict apt failure
-# at build time. Removing the unneeded packages avoids it entirely.
+# Why this matters: trixie-security carries libssl3t64=u2 (already in
+# the base image), but trixie/main's libssl-dev strict-pins to
+# libssl3t64=u1. That mismatch (point-release skew between security
+# and main) makes apt fail when ANYTHING transitive forces
+# libssl-dev — `libcurl4-openssl-dev` was the surprising puller.
+# Switching to `libcurl4-gnutls-dev` provides the same `<curl/curl.h>`
+# headers + pkg-config entry without the libssl-dev cascade.
 
 # Rust toolchain — minimal profile keeps the builder lean.
 ENV RUSTUP_HOME=/usr/local/rustup \
