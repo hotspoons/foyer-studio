@@ -178,14 +178,30 @@ endif()
 
 # ── Ardour library search ──────────────────────────────────────
 #
-# Find each shared library the shim links against. The locations come
-# from Ardour 9.2's waf layout (`build/libs/<project>/lib<name>.so`).
-# If the layout changes upstream, update the HINTS below.
+# We link against Ardour's shared libraries WITHOUT requiring a full
+# Ardour source build. Two locations are checked, in order:
+#
+#   1. `<source>/build/libs/<reldir>/lib<name>.so` — the in-tree
+#      build path. Used when the user has run `python3 waf build` in
+#      the Ardour source tree (the historic dev workflow).
+#   2. System install paths under `/usr/lib/ardour9/` and
+#      `/usr/lib/<arch>/ardour9/` — used when Ardour was apt-installed
+#      from Debian (sid's `ardour` package, version 9.2.0+ds, lays its
+#      private libs out at `/usr/lib/ardour9/lib<name>.so.X.Y.Z` with
+#      SONAME-style symlinks). This is what the runtime image uses
+#      now: ~30s `waf configure` for headers, no full Ardour build.
+#
+# The `<source>/build/libs/<reldir>/lib<name>.so.0` SONAME files are
+# preferred when present so an in-tree build always wins (you may have
+# made local changes). Apt fallback kicks in for the dev-container's
+# minimum-build path and the runtime image build.
 function(foyer_find_ardour_lib var libname reldir)
   find_library(${var}
     NAMES ${libname}
-    HINTS "${ARDOUR_BUILD_DIR}/libs/${reldir}"
-    NO_DEFAULT_PATH
+    HINTS
+      "${ARDOUR_BUILD_DIR}/libs/${reldir}"
+      "/usr/lib/ardour9"
+    PATH_SUFFIXES ardour9
     REQUIRED)
   message(STATUS "Foyer shim: ${libname} → ${${var}}")
 endfunction()
@@ -322,12 +338,21 @@ target_include_directories(foyer_audiobackend PRIVATE
 if(FOYER_BREW_INCLUDES)
   target_include_directories(foyer_audiobackend PRIVATE ${FOYER_BREW_INCLUDES})
 endif()
-# libltc is a Foyer-shipped static archive (liblibltc.a — the
-# doubled name comes from upstream Ardour's wscript naming the
-# directory `libltc` and the lib `libltc` so the resulting file
-# is `liblibltc.a`). The Dummy backend uses it for the LTC
-# timecode test-tone generator option in its "device" list.
-foyer_find_ardour_lib(LTC_LIB libltc libltc)
+# libltc: prefer apt's `libltc-dev` (libltc.so on system path) when
+# present; fall back to the in-tree static archive `liblibltc.a` from
+# a full Ardour source build. The Dummy backend uses libltc for the
+# LTC timecode test-tone generator option.
+find_library(LTC_LIB
+  NAMES ltc libltc
+  HINTS
+    "${ARDOUR_BUILD_DIR}/libs/libltc"
+    /usr/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu)
+if(NOT LTC_LIB)
+  message(FATAL_ERROR
+    "libltc not found. Either run a full Ardour source build, or "
+    "`apt install libltc-dev` for the system-installed version.")
+endif()
+message(STATUS "Foyer shim: libltc → ${LTC_LIB}")
 target_link_libraries(foyer_audiobackend PRIVATE
   ${ARDOUR_LIB}
   ${PBD_LIB}

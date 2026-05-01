@@ -281,28 +281,20 @@ if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
     fi
 fi
 
-# Ardour build root — the binary lives at $FOYER_ARDOUR_BUILD_ROOT/build/headless/hardour-*
-# (hardour) or $FOYER_ARDOUR_BUILD_ROOT/build/gtk2_ardour/ardour-* (gui).
-# foyer-config picks based on $DISPLAY automatically.
-FOYER_ARDOUR_BUILD_ROOT="${FOYER_ARDOUR_BUILD_ROOT:-/opt/ardour}"
-
-# Ardour's runtime needs ARDOUR_DATA_PATH, ARDOUR_DLL_PATH, etc. The
-# upstream waf build emits a script that sets all of them — sourcing
-# it is the easiest way to keep up with new vars Ardour adds across
-# releases. Skip in stub-only mode (no Ardour install present).
-if [ -f "${FOYER_ARDOUR_BUILD_ROOT}/build/gtk2_ardour/ardev_common_waf.sh" ]; then
-    export TOP="${FOYER_ARDOUR_BUILD_ROOT}"
-    # ardev_common.sh.in:62 reads `[ x$ASAN_COREDUMP != x ]` with an
-    # unquoted expansion, and there are similar patterns later in the
-    # file for diagnostic-only vars (LIBJACK, MALLOC_CONF, …). Under
-    # the entrypoint's `set -u` they all abort boot. Drop -u for the
-    # source, restore it after — the script's job is just to populate
-    # path env vars, not to enforce strictness on us.
-    set +u
-    # shellcheck disable=SC1091
-    source "${FOYER_ARDOUR_BUILD_ROOT}/build/gtk2_ardour/ardev_common_waf.sh"
-    set -u
-fi
+# Ardour env setup: apt's `/usr/bin/ardour` is a wrapper script that
+# sets `LD_LIBRARY_PATH`, `GTK_PATH`, `ARDOUR_DATA_PATH`, etc. itself
+# before exec'ing the real binary at `/usr/lib/ardour9/ardour-9.X.Y~ds`.
+# We don't need to source anything here — every Ardour invocation
+# routes through that wrapper.
+#
+# (Older revisions of this file sourced `ardev_common_waf.sh` from a
+# from-source Ardour build at /opt/ardour. We've since switched to
+# Debian sid's `ardour` package; that file no longer ships and
+# isn't needed.)
+#
+# `FOYER_ARDOUR_BUILD_ROOT` is still honored as an override for dev
+# environments that prefer a sibling source build — see
+# foyer-config::detect_ardour_executable for the resolution order.
 
 # Make sure the foyer surface .so is reachable. The Dockerfile
 # installs it under /opt/foyer/surfaces; ARDOUR_SURFACES_PATH is
