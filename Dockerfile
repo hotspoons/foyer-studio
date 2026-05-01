@@ -111,22 +111,13 @@ RUN git -c advice.detachedHead=false clone --depth 1 \
         --branch "${ARDOUR_TAG}" \
         https://github.com/Ardour/ardour.git /opt/ardour
 
-# Apply Foyer Studio patches against upstream Ardour. The patches
-# directory lives at `patches/ardour/` in this repo and is COPY'd
-# into the builder layer separately (the full repo COPY at
-# `WORKDIR /workspace` happens later, but we need patches earlier so
-# the Ardour build picks them up). Each patch is independently
-# applicable, so a future `git am --3way`-style recovery works if the
-# upstream tag drifts. See the patch headers for per-file rationale.
-COPY patches/ardour /tmp/ardour-patches
-RUN for p in /tmp/ardour-patches/*.patch; do \
-        echo "==> applying $p"; \
-        git -C /opt/ardour apply --whitespace=nowarn "$p" || { \
-            echo "==> patch $p failed against upstream tag ${ARDOUR_TAG}"; \
-            exit 1; \
-        }; \
-    done \
- && rm -rf /tmp/ardour-patches
+# No upstream-Ardour source patches needed: the only piece of Ardour
+# we actively modified — its Dummy backend — now ships as a vendored
+# fork in `shims/ardour/backends/dummy/` (built into
+# `libfoyer_audiobackend.so`, advertised as the "Foyer Dummy"
+# backend). Ardour itself stays pristine; this image builds against
+# stock 9.x, just with our backend dropped into ARDOUR_BACKEND_PATH
+# at runtime via the entrypoint.
 
 WORKDIR /opt/ardour
 # `--optimize` enables -O3 and disables debug symbols; matches the
@@ -429,6 +420,8 @@ RUN test -f /opt/ardour/build/gtk2_ardour/ardev_common_waf.sh
 # ── Foyer shim + autovocoder + sidecar binary ────────────────────
 COPY --from=builder /workspace/shims/ardour/cmake-build/libfoyer_shim.so \
      /opt/foyer/shim/libfoyer_shim.so
+COPY --from=builder /workspace/shims/ardour/cmake-build/libfoyer_audiobackend.so \
+     /opt/foyer/backends/libfoyer_audiobackend.so
 COPY --from=builder /opt/lv2 /opt/lv2
 COPY --from=builder /workspace/target/release/foyer /usr/local/bin/foyer
 

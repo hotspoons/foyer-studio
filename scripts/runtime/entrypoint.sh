@@ -269,11 +269,11 @@ if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
     fi
     # Post-seed verification — surface this in `docker logs` so a
     # JACK fallback is unambiguous to debug. Looks for both the
-    # file and the `backend="None (Dummy)"` line that EngineControl
+    # file and the `backend="Foyer Dummy"` line that EngineControl
     # parses (line 2081 of engine_dialog.cc — backend property is
     # the load-bearing field).
-    if [ -f "$cfg_dir/config" ] && grep -q 'backend="None (Dummy)"' "$cfg_dir/config" 2>/dev/null; then
-        log "Ardour config seed verified: $cfg_dir/config has Dummy backend pinned"
+    if [ -f "$cfg_dir/config" ] && grep -q 'backend="Foyer Dummy"' "$cfg_dir/config" 2>/dev/null; then
+        log "Ardour config seed verified: $cfg_dir/config has Foyer Dummy backend pinned"
     else
         log "WARNING: $cfg_dir/config missing or lacks Dummy AMS state — GUI ardour-9 will pick JACK at startup"
         log "WARNING: contents of $cfg_dir (if any):"
@@ -309,6 +309,14 @@ fi
 # additive, so layering `/opt/foyer/surfaces` keeps Ardour's stock
 # surfaces discoverable.
 export ARDOUR_SURFACES_PATH="/opt/foyer/surfaces:${ARDOUR_SURFACES_PATH:-}"
+
+# Same shape for the audio-backend path: Foyer ships its own
+# patched "Foyer Dummy" backend (libfoyer_audiobackend.so —
+# absolute-time-sleep timing fix vs. the upstream "None (Dummy)")
+# that we install at /opt/foyer/backends. Layering it here lets
+# Ardour discover it alongside the stock backends; the seeded
+# AMS state asks for it by name so autostart picks it.
+export ARDOUR_BACKEND_PATH="/opt/foyer/backends:${ARDOUR_BACKEND_PATH:-}"
 
 # Suppress Ardour's "this screen is not tall enough to display
 # the editor mixer" modal — fatal in container deploys where

@@ -47,9 +47,18 @@ do_build() {
 
 do_install() {
     do_build
+    # Surface (control protocol):
     mkdir -p "$INSTALL_DEST/surfaces"
     cp "$SHIM_BUILD_DIR/libfoyer_shim.so" "$INSTALL_DEST/surfaces/"
     echo "shim: installed libfoyer_shim.so -> $INSTALL_DEST/surfaces/"
+    # Audio backend (Foyer-patched Dummy with absolute-time sleep —
+    # see backends/dummy/dummy_audiobackend.cc for the why).
+    # Ardour's default backend search path includes
+    # `<user_config_dir>/backends/` (libs/ardour/search_paths.cc), so
+    # the .so is auto-discovered without env-var manipulation.
+    mkdir -p "$INSTALL_DEST/backends"
+    cp "$SHIM_BUILD_DIR/libfoyer_audiobackend.so" "$INSTALL_DEST/backends/"
+    echo "shim: installed libfoyer_audiobackend.so -> $INSTALL_DEST/backends/"
 }
 
 do_check() {
@@ -62,12 +71,19 @@ do_check() {
         return 0
     fi
     installed="$INSTALL_DEST/surfaces/libfoyer_shim.so"
-    if [ ! -e "$installed" ]; then
+    backend_installed="$INSTALL_DEST/backends/libfoyer_audiobackend.so"
+    if [ ! -e "$installed" ] || [ ! -e "$backend_installed" ]; then
         echo "shim: not installed, building + installing"
         do_install
         return
     fi
-    newer="$(find "$SHIM_DIR/src" "$SHIM_DIR/CMakeLists.txt" "$SHIM_BUILD_DIR/libfoyer_shim.so" -newer "$installed" 2>/dev/null | awk 'NR==1 {print}')"
+    # Stale check covers BOTH artifacts: any source touched, or
+    # either compiled .so newer than the installed copies.
+    newer="$(find \
+        "$SHIM_DIR/src" "$SHIM_DIR/backends" "$SHIM_DIR/CMakeLists.txt" \
+        "$SHIM_BUILD_DIR/libfoyer_shim.so" \
+        "$SHIM_BUILD_DIR/libfoyer_audiobackend.so" \
+        -newer "$installed" 2>/dev/null | awk 'NR==1 {print}')"
     if [ -n "$newer" ]; then
         echo "shim: stale ($newer), rebuilding"
         do_install

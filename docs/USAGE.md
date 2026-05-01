@@ -183,11 +183,14 @@ and the toggle appears.
 
 ## Path 2 — Docker
 
-The published image bundles Ardour 9.2 (compiled from source with
-our [Dummy-backend timing patch](../patches/ardour/003-dummy-absolute-time-sleep.patch)
-so audio doesn't drift on non-RT threads), the C++ shim, the Rust
-sidecar, and a curated ~200-LV2-plugin pack. Multi-arch (amd64 +
-arm64) on GHCR; `docker pull` auto-selects the right arch.
+The published image bundles unmodified upstream Ardour 9.2, our
+C++ shim, our [vendored "Foyer Dummy" audio backend](../shims/ardour/backends/dummy/)
+(a fork of Ardour's "None (Dummy)" with an absolute-time-sleep
+timing fix that keeps the audio clock locked to wall clock on
+non-RT threads — what makes pop-free playback possible on Cloud
+Run), the Rust sidecar, and a curated ~200-LV2-plugin pack.
+Multi-arch (amd64 + arm64) on GHCR; `docker pull` auto-selects
+the right arch.
 
 ### Standalone — works everywhere
 
