@@ -265,10 +265,15 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 ## Plugin and instrument features
 
-- [ ] Update percussive vs sustain for note mode
-- [ ] Show UI warning on missing plugins (just silent now)
-- [ ] Functioning patch editor and bank picker and channel editor (not really working now)
-- [/] Investigate a headless X server to render guis to for gui plugins, and see if we can forward it over the control socket so we can do guis using some remote projection system. Performance isn't paramount, it will be second class, just so we can provide it. It should be an option in the web-based dialog to show the native GUI for plugins and instruments that provide one, and it should be remembered per plugin if this was toggled
+- [ ] Bundle the LV2 General MIDI Synth in the dev container + the shipped runtime image. Dev container + Cloud Run image both lack it, so any session whose default instrument is "General MIDI Synth (LV2)" loads with an inactive stub and the "Missing Plugins" dialog (`gmsynth.lv2` is the upstream package — Debian's name to be confirmed; if it's not packaged, vendor the source build into the Dockerfile alongside the autovocoder block). Without this, freshly-created MIDI tracks have no instrument until the user picks one.
+- [x] Update percussive vs sustain for note mode
+  - **Shipped:** drum-mode cells emit short percussive notes; pitched-mode honors `length_steps` for sustain (length 1 → full step). See [crates/foyer-schema/src/midi.rs](../crates/foyer-schema/src/midi.rs) `expand_sequencer_layout`.
+- [x] Show UI warning on missing plugins (just silent now)
+  - **Shipped:** schema gains `PluginInstance.missing`; shim emits the flag when `pi->plugin(0)` is null with a placeholder + synthetic bypass param. UI shows dashed warning border + banner across plugin-strip, plugin-panel, and the midi-manager instrument card.
+- [x] Functioning patch editor and bank picker and channel editor (not really working now)
+  - **Shipped — patches/banks:** `<foyer-param-control>` replaces the read-only `_fmtValue` text in the midi-manager's instrument-parameters card, so program/bank values are editable inline.
+  - **Shipped — channel editor:** new `Track.{capture,playback}_channel_{mode,mask}` fields + `Command::SetTrackMidiChannelMode` end-to-end (schema → server → stub → host backend → shim). New MIDI tracks default to `ForceChannel @ ch 1` so the picker stays buried; the midi-manager toolbar now has a `chan-chip` that shows the current routing summary and only surfaces (highlights + expands the full mode/channel grid section) when the track is in non-default state. Shim sets the default in `track.add_midi`, emits the four fields in both `session_snapshot` and `track_updated` paths via `MidiTrack::get_*_channel_{mode,mask}()`.
+- [x] Investigate a headless X server to render guis to for gui plugins, and see if we can forward it over the control socket so we can do guis using some remote projection system. Performance isn't paramount, it will be second class, just so we can provide it. It should be an option in the web-based dialog to show the native GUI for plugins and instruments that provide one, and it should be remembered per plugin if this was toggled
   - **Plan:** in-shim Suil + IPlugView hosting (param sync from day one),
     xpra as the projection layer, sidecar proxies xpra's TCP socket
     through `/ws/plugin-gui/<plugin-id>`, browser mounts xpra-html5

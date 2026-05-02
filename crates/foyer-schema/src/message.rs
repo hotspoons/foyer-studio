@@ -377,6 +377,17 @@ pub enum Event {
     SessionClosed {
         session_id: EntityId,
     },
+    /// The sidecar's focus has shifted to a different open session
+    /// (`Command::SelectSession`, or post-close fallback to the next
+    /// session in the list). Carries the new focused session's id, or
+    /// `None` if focus was cleared (last session closed). Distinct from
+    /// `SessionSnapshot` so clients can tear down session-bound
+    /// resources (audio listener stream, region caches, etc.) without
+    /// having to track session_id transitions across every snapshot.
+    SessionFocusChanged {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        session_id: Option<EntityId>,
+    },
     /// Sidecar found orphan session registry entries on startup — shim
     /// processes still running but not attached, or crashed shims
     /// with leftover registry/crash data. The UI offers reattach or
@@ -830,6 +841,12 @@ pub enum Command {
     CloseSession {
         session_id: EntityId,
     },
+    /// Ask the shim to quit its host process. The Ardour shim raises
+    /// `SIGTERM` on its own pid so Ardour's stock signal handler runs
+    /// the normal save-and-exit path. Sent by the sidecar as the first
+    /// rung of the close-session escalation (graceful → SIGTERM →
+    /// SIGKILL); fire-and-forget. Stub backends ignore it.
+    ShimQuit,
     /// Reattach to an orphaned running shim. Sidecar builds a fresh
     /// backend against the orphan's socket and promotes it to a full
     /// session (as if it had been opened normally). Emits
@@ -860,6 +877,20 @@ pub enum Command {
     /// Any track id omitted should keep relative order at the tail.
     ReorderTracks {
         ordered_ids: Vec<EntityId>,
+    },
+    /// Set a MIDI track's channel-filter mode + mask. `direction` is
+    /// `"capture"` (inbound recording) or `"playback"` (outbound to
+    /// the instrument). `mode` is `"all"` | `"filter"` | `"force"`.
+    /// `mask` is a 16-bit channel bitmask (bit 0 = ch 1); in `"force"`
+    /// mode the lowest set bit is the target channel. New MIDI tracks
+    /// default to `mode="force", mask=0x0001` so a viewing app's
+    /// channel selector stays hidden unless the user has explicitly
+    /// opted into a multi-channel setup.
+    SetTrackMidiChannelMode {
+        track_id: EntityId,
+        direction: String,
+        mode: String,
+        mask: u16,
     },
     /// Create a new group / submix. Answered with `Event::GroupUpdated`.
     CreateGroup {
@@ -1245,6 +1276,10 @@ mod tests {
             inputs: vec![],
             outputs: vec![],
             automation_lanes: vec![],
+            capture_channel_mode: None,
+            capture_channel_mask: None,
+            playback_channel_mode: None,
+            playback_channel_mask: None,
         };
         let patch = Patch::TrackAdded { track: Box::new(t) };
         let j = serde_json::to_string(&patch).unwrap();

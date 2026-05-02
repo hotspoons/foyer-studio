@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use foyer_backend::BackendError;
 use foyer_schema::{
     AutomationLane, AutomationMode, AutomationPoint, ControlUpdate, ControlValue, EntityId,
-    Parameter, Session, Track, TrackPatch,
+    Parameter, Session, Track, TrackKind, TrackPatch,
 };
 
 use crate::fixtures;
@@ -165,6 +165,35 @@ impl StubState {
         // bus_assign is intentionally not modeled in the stub — the real
         // shim does the routing; this backend is only about making the
         // UI repaint.
+        Some(t.clone())
+    }
+
+    /// Apply a MIDI channel-mode change. Sets the chosen direction's
+    /// `mode` + `mask`. Returns the updated track or `None` if no track
+    /// matches `id`. Silently no-ops on non-MIDI tracks (the field set
+    /// stays `None`) — clients should gate the command on `kind` first.
+    pub(crate) fn set_track_midi_channel_mode(
+        &mut self,
+        id: &EntityId,
+        direction: &str,
+        mode: &str,
+        mask: u16,
+    ) -> Option<Track> {
+        let t = self.session.tracks.iter_mut().find(|t| &t.id == id)?;
+        if !matches!(t.kind, TrackKind::Midi) {
+            return Some(t.clone());
+        }
+        match direction {
+            "capture" => {
+                t.capture_channel_mode = Some(mode.to_string());
+                t.capture_channel_mask = Some(mask);
+            }
+            "playback" => {
+                t.playback_channel_mode = Some(mode.to_string());
+                t.playback_channel_mask = Some(mask);
+            }
+            _ => return Some(t.clone()),
+        }
         Some(t.clone())
     }
 

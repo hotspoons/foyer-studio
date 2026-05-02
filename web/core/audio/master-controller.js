@@ -59,10 +59,18 @@ class AudioController extends EventTarget {
     if (!body) return;
     if (body.type === "client_greeting") {
       this._applyPref(!!body.is_local);
-    } else if (body.type === "backend_swapped" || body.type === "session_opened") {
+    } else if (
+      body.type === "backend_swapped" ||
+      body.type === "session_opened" ||
+      body.type === "session_focus_changed"
+    ) {
       // Backend changed under us — the old listener's stream is
       // dead. Tear it down; pref re-application below will start a
-      // fresh one if appropriate.
+      // fresh one if appropriate. `session_focus_changed` covers the
+      // "switch between two already-open sessions" case where no
+      // backend swap or session_opened fires but the audio stream
+      // the listener was reading from is no longer the focused
+      // session's stream.
       if (this._on) {
         this._teardown();
         this._on = false;

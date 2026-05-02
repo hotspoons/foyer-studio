@@ -749,6 +749,31 @@ impl HostClient {
         .await?;
         timeout(rx, "update_track").await
     }
+
+    pub async fn set_track_midi_channel_mode(
+        &self,
+        track_id: EntityId,
+        direction: String,
+        mode: String,
+        mask: u16,
+    ) -> Result<Track, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_update_track
+            .lock()
+            .await
+            .entry(track_id.clone())
+            .or_default()
+            .push(tx);
+        self.send_command(Command::SetTrackMidiChannelMode {
+            track_id: track_id.clone(),
+            direction,
+            mode,
+            mask,
+        })
+        .await?;
+        timeout(rx, "set_track_midi_channel_mode").await
+    }
 }
 
 async fn timeout<T>(rx: oneshot::Receiver<T>, label: &'static str) -> Result<T, ClientError> {

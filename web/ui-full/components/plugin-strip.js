@@ -52,6 +52,14 @@ export class PluginStrip extends LitElement {
       color: var(--color-accent-3);
     }
     .row.bypassed { opacity: 0.45; }
+    .row.missing {
+      border-style: dashed;
+      border-color: var(--color-warning, #f59e0b);
+      color: color-mix(in oklab, var(--color-warning, #f59e0b) 80%, var(--color-text));
+      background: color-mix(in oklab, var(--color-warning, #f59e0b) 8%, var(--color-surface-elevated));
+    }
+    .row.missing .name { color: var(--color-warning, #f59e0b); }
+    .row .warn { flex: 0 0 auto; color: var(--color-warning, #f59e0b); }
     /* Drop indicator during drag-to-reorder: a bright top border
      * marks the row the dragged plugin would slot in front of.
      * Matches the rest of the editor's accent styling. */
@@ -201,8 +209,8 @@ export class PluginStrip extends LitElement {
       ${shown.map(
         (p, i) => html`
           <div
-            class="row ${this._isBypassed(p) ? "bypassed" : ""} ${this._dropIdx === i ? "drop-before" : ""}"
-            title="Click to open ${p.name} · drag to reorder"
+            class="row ${this._isBypassed(p) ? "bypassed" : ""} ${p.missing ? "missing" : ""} ${this._dropIdx === i ? "drop-before" : ""}"
+            title="${p.missing ? "Plugin binary missing! " : ""}Click to open ${p.name} · drag to reorder"
             draggable="true"
             data-idx=${i}
             @click=${() => this._openPanel(p)}
@@ -214,10 +222,12 @@ export class PluginStrip extends LitElement {
             @drop=${(ev) => this._onDrop(ev, i)}
             @dragend=${(ev) => this._onDragEnd(ev)}
           >
+            ${p.missing ? html`<span class="warn">${icon("exclamation-triangle", 10)}</span>` : null}
             <span class="name">${p.name}</span>
             <button
               class="by"
               title=${this._isBypassed(p) ? "Enable" : "Bypass"}
+              ?disabled=${p.missing}
               @click=${(ev) => this._toggleBypass(ev, p)}
             >
               by

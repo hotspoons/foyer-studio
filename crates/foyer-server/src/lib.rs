@@ -74,7 +74,50 @@ pub trait BackendSpawner: Send + Sync + 'static {
         &self,
         backend_id: &str,
         project_path: Option<&Path>,
-    ) -> anyhow::Result<Arc<dyn Backend>>;
+    ) -> anyhow::Result<LaunchedBackend>;
+}
+
+/// Result of `BackendSpawner::launch`. `process` is `Some` when the
+/// spawner forked a child whose lifetime is tied to this session —
+/// the registry holds it and runs the graceful-quit / SIGTERM /
+/// SIGKILL escalation on close. `None` for in-process backends (stub).
+pub struct LaunchedBackend {
+    pub backend: Arc<dyn Backend>,
+    pub process: Option<Box<dyn ProcessHandle>>,
+}
+
+impl LaunchedBackend {
+    pub fn new(backend: Arc<dyn Backend>) -> Self {
+        Self {
+            backend,
+            process: None,
+        }
+    }
+
+    pub fn with_process(backend: Arc<dyn Backend>, p: Box<dyn ProcessHandle>) -> Self {
+        Self {
+            backend,
+            process: Some(p),
+        }
+    }
+}
+
+/// Handle to a spawned host process so the registry can wait on it
+/// and signal it during the close-session escalation. Defined here
+/// (not in `tokio::process` directly) so foyer-server stays
+/// process-runtime-agnostic; the CLI's `CliSpawner` provides the
+/// concrete impl.
+#[async_trait::async_trait]
+pub trait ProcessHandle: Send + Sync {
+    /// Wait up to `timeout` for the process to exit on its own.
+    /// Returns `true` if it exited within the window, `false` on
+    /// timeout. Implementations must be idempotent on repeated calls
+    /// after exit.
+    async fn wait(&mut self, timeout: std::time::Duration) -> bool;
+    /// Send SIGTERM (or platform equivalent). No-op if already exited.
+    async fn sigterm(&mut self);
+    /// Send SIGKILL. No-op if already exited.
+    async fn sigkill(&mut self);
 }
 
 /// Capacity of the server-wide broadcast channel. Bounds how far a slow client can lag
@@ -357,6 +400,7 @@ impl AppState {
         next: Arc<dyn Backend>,
         session_id: Option<EntityId>,
         session_name: Option<String>,
+        process: Option<Box<dyn ProcessHandle>>,
     ) {
         *self.backend.write().await = next.clone();
         *self.active_backend_id.write().await = Some(backend_id.clone());
@@ -406,7 +450,7 @@ impl AppState {
             .unwrap_or_default();
         self.sessions
             .clone()
-            .add(sid.clone(), backend_id.clone(), next, path, name)
+            .add(sid.clone(), backend_id.clone(), next, path, name, process)
             .await;
         // Newly-opened session automatically becomes the focus
         // target so untagged commands flow to it. User can switch

@@ -49,6 +49,11 @@ pub struct PluginInstance {
     /// "Show native VST3 GUI" instead of a generic label.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub native_gui_kind: Option<String>,
+    /// True when the plugin insert exists but the underlying binary
+    /// is missing / unloadable. The UI should show a warning instead
+    /// of an empty parameter panel.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub missing: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,6 +116,27 @@ pub struct Track {
     /// via dedicated commands in Phase B.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub automation_lanes: Vec<crate::AutomationLane>,
+    /// MIDI inbound channel handling: how the track filters incoming
+    /// channel data. `"all"` = pass everything through, `"filter"` =
+    /// keep only channels set in `capture_channel_mask`, `"force"` =
+    /// rewrite every event onto the single channel encoded in
+    /// `capture_channel_mask`. `None` for non-MIDI tracks. New MIDI
+    /// tracks default to `"force"` at channel 1 (mask = `0x0001`) so
+    /// the channel selector stays hidden unless the user opts into a
+    /// multi-channel setup. Mirrors Ardour's `ChannelMode` enum.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub capture_channel_mode: Option<String>,
+    /// 16-bit bitmask, bit 0 = MIDI channel 1. In `"force"` mode the
+    /// lowest set bit is the target channel; in `"filter"` mode every
+    /// set bit is an enabled channel. `None` for non-MIDI tracks.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub capture_channel_mask: Option<u16>,
+    /// MIDI playback channel handling, same shape as
+    /// `capture_channel_mode` but applied on the playback side.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub playback_channel_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub playback_channel_mask: Option<u16>,
 }
 
 /// Group / submix metadata. Purely a display + drag-affinity hint for
@@ -366,6 +392,10 @@ mod tests {
                 inputs: vec![],
                 outputs: vec![],
                 automation_lanes: vec![],
+                capture_channel_mode: None,
+                capture_channel_mask: None,
+                playback_channel_mode: None,
+                playback_channel_mask: None,
             }],
             groups: vec![],
             dirty: false,

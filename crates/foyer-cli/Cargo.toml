@@ -29,3 +29,10 @@ tracing-subscriber.workspace = true
 # edit in place to hack (see web/HACKING.md). `--web-root <path>`
 # overrides; `./web` takes precedence when it exists (dev mode).
 include_dir = "0.7"
+
+# `libc::kill` for SIGTERM-vs-SIGKILL distinction in `ChildProcess`.
+# `tokio::process::Child::kill()` always sends SIGKILL, which bypasses
+# Ardour's save-and-exit handler — we need SIGTERM for the gentle
+# stage of the close-session shutdown.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

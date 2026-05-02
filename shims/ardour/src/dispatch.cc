@@ -13,6 +13,7 @@
 #include "signal_bridge.h"
 
 #include <algorithm>
+#include <csignal>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -27,6 +28,8 @@
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
 #include "ardour/midi_source.h"
+#include "ardour/midi_track.h"
+#include "ardour/types.h"
 #include "ardour/monitor_control.h"
 #include "ardour/location.h"
 #include "ardour/playlist.h"
@@ -323,6 +326,8 @@ struct DecodedCmd
 		SetSendLevel,
 		DeleteTrack,
 		ReorderTracks,
+		SetTrackMidiChannelMode,
+		ShimQuit,
 		SetLoopRange,
 		CreateGroup,
 		UpdateGroup,
@@ -466,6 +471,13 @@ struct DecodedCmd
 	std::string   group_patch_color;
 	bool          has_group_patch_members = false;
 	std::vector<std::string> group_patch_members;
+
+	// SetTrackMidiChannelMode { track_id, direction, mode, mask }.
+	// `direction` is "capture" | "playback" (reuses `ports_direction`);
+	// `mode` is "all" | "filter" | "force" (reuses `auto_mode`); `mask`
+	// is a 16-bit channel bitmask (bit 0 = ch 1) — its own field since
+	// no other command carries a u16 mask.
+	std::uint16_t midi_chan_mask = 0;
 
 	// Automation lane edit payloads (Phase B).
 	std::string   lane_id;
@@ -1140,6 +1152,12 @@ decode (const std::vector<std::uint8_t>& buf)
 					out.id = p;
 				} else if (k == "lane_id") {
 					if (!in.read_str (out.lane_id)) return out;
+				} else if (k == "mask") {
+					// SetTrackMidiChannelMode { ..., mask: u16 } — msgpack
+					// encodes small u16s as positive fixints / u8 / u16.
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.midi_chan_mask = static_cast<std::uint16_t> (v & 0xffff);
 				} else if (k == "mode") {
 					if (!in.read_str (out.auto_mode)) return out;
 				} else if (k == "point") {
@@ -1242,6 +1260,8 @@ decode (const std::vector<std::uint8_t>& buf)
             else if (cmd_type == "set_send_level")       out.kind = DecodedCmd::Kind::SetSendLevel;
             else if (cmd_type == "delete_track")         out.kind = DecodedCmd::Kind::DeleteTrack;
             else if (cmd_type == "reorder_tracks")       out.kind = DecodedCmd::Kind::ReorderTracks;
+            else if (cmd_type == "set_track_midi_channel_mode") out.kind = DecodedCmd::Kind::SetTrackMidiChannelMode;
+            else if (cmd_type == "shim_quit")            out.kind = DecodedCmd::Kind::ShimQuit;
             else if (cmd_type == "set_loop_range")       out.kind = DecodedCmd::Kind::SetLoopRange;
             else if (cmd_type == "create_group")         out.kind = DecodedCmd::Kind::CreateGroup;
             else if (cmd_type == "update_group")         out.kind = DecodedCmd::Kind::UpdateGroup;
@@ -2272,6 +2292,67 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			});
 			break;
 		}
+		case DecodedCmd::Kind::SetTrackMidiChannelMode: {
+			if (cmd.track_id.empty () || cmd.ports_direction.empty ()
+			    || cmd.auto_mode.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				if (snap.track_id.rfind ("track.", 0) != 0) return;
+				const std::string sid = snap.track_id.substr (6);
+				std::shared_ptr<Route> route;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp;
+					tmp << r->id ();
+					if (tmp.str () == sid) { route = r; break; }
+				}
+				auto mt = std::dynamic_pointer_cast<ARDOUR::MidiTrack> (route);
+				if (!mt) {
+					PBD::warning << "foyer_shim: set_track_midi_channel_mode: not a MIDI track: "
+					             << snap.track_id << endmsg;
+					return;
+				}
+				ARDOUR::ChannelMode m;
+				if      (snap.auto_mode == "all")    m = ARDOUR::AllChannels;
+				else if (snap.auto_mode == "filter") m = ARDOUR::FilterChannels;
+				else if (snap.auto_mode == "force")  m = ARDOUR::ForceChannel;
+				else {
+					PBD::warning << "foyer_shim: set_track_midi_channel_mode: bad mode: "
+					             << snap.auto_mode << endmsg;
+					return;
+				}
+				if (snap.ports_direction == "capture") {
+					mt->set_capture_channel_mode (m, snap.midi_chan_mask);
+				} else if (snap.ports_direction == "playback") {
+					mt->set_playback_channel_mode (m, snap.midi_chan_mask);
+				} else {
+					PBD::warning << "foyer_shim: set_track_midi_channel_mode: bad direction: "
+					             << snap.ports_direction << endmsg;
+					return;
+				}
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ShimQuit: {
+			// Sidecar asked us to exit. Raise SIGTERM on our own pid
+			// so Ardour's own signal handler runs the normal save-
+			// and-exit path (with the user's "save before quit"
+			// preferences honored). The sidecar follows up with a
+			// SIGTERM/SIGKILL escalation against the child PID if we
+			// don't exit within ~5s, so we don't need a wait loop
+			// here. Raised from the dispatcher thread; Ardour's
+			// signal handlers are async-signal-safe and route the
+			// shutdown through the GUI mainloop.
+			PBD::warning << "foyer_shim: shim_quit received — raising SIGTERM" << endmsg;
+			std::raise (SIGTERM);
+			break;
+		}
 		case DecodedCmd::Kind::ListPorts: {
 			// Port enumeration hits the AudioEngine directly; it's safe
 			// off the event loop, but keep it on the slot for consistency
@@ -2892,7 +2973,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					// 1-channel MIDI track, no instrument plugin yet
 					// (user picks one via the MIDI manager). strict_io
 					// off so the user can chain effects post-instrument.
-					session.new_midi_track (
+					auto added = session.new_midi_track (
 					    ARDOUR::ChanCount (ARDOUR::DataType::MIDI, 1),
 					    ARDOUR::ChanCount (ARDOUR::DataType::AUDIO, 2),
 					    false /* strict_io */,
@@ -2903,6 +2984,20 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					    ARDOUR::PresentationInfo::max_order,
 					    ARDOUR::Normal,
 					    true  /* input_auto_connect */);
+					// Default to ForceChannel @ ch 1 on both capture and
+					// playback. Ardour's stock default is AllChannels,
+					// which makes the channel selector permanently
+					// relevant; the Foyer UX is "single-channel by
+					// default, surface the selector only when the user
+					// has opted into multi-channel" — see TODO #270 +
+					// Decision: defaulting to ForceChannel keeps new
+					// tracks compatible with single-channel synths and
+					// hides the selector unless the user changes it.
+					for (auto const& mt : added) {
+						if (!mt) continue;
+						mt->set_capture_channel_mode  (ARDOUR::ForceChannel, 0x0001);
+						mt->set_playback_channel_mode (ARDOUR::ForceChannel, 0x0001);
+					}
 				}
 				else if (id == "track.freeze") {
 					PBD::warning << "foyer_shim: track.freeze not yet wired" << endmsg;

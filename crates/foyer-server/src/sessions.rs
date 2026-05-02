@@ -35,10 +35,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use foyer_backend::Backend;
 use foyer_schema::{EntityId, Envelope, Event, SessionInfo, SCHEMA_VERSION};
 use futures::StreamExt;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::ring::DeltaRing;
+use crate::ProcessHandle;
 
 pub(crate) struct SessionEntry {
     pub id: EntityId,
@@ -49,6 +50,12 @@ pub(crate) struct SessionEntry {
     pub opened_at: u64,
     pub dirty: Arc<AtomicBool>,
     pump: JoinHandle<()>,
+    /// Handle to the host shim's child process, when the spawner
+    /// forked one (Ardour). `None` for in-process backends. Held in
+    /// a Mutex because `close()` takes ownership to drive the
+    /// SIGTERM/SIGKILL escalation on a detached task — we don't want
+    /// to block close() on the wait window.
+    pub process: Mutex<Option<Box<dyn ProcessHandle>>>,
 }
 
 impl SessionEntry {
@@ -122,6 +129,7 @@ impl SessionRegistry {
         backend: Arc<dyn Backend>,
         path: String,
         name: String,
+        process: Option<Box<dyn ProcessHandle>>,
     ) -> EntityId {
         let opened_at = now_secs();
         let dirty = Arc::new(AtomicBool::new(false));
@@ -145,6 +153,7 @@ impl SessionRegistry {
             opened_at,
             dirty,
             pump,
+            process: Mutex::new(process),
         };
         // Strip the jail prefix before we broadcast — UI-facing paths
         // never include the jail root (PLAN 162). Internal lookups
@@ -165,17 +174,38 @@ impl SessionRegistry {
         id
     }
 
-    /// Remove a session. Aborts its pump and drops its backend.
-    /// Emits `Event::SessionClosed` + an updated `Event::SessionList`.
+    /// Remove a session. Aborts its pump, asks the backend to quit
+    /// (graceful IPC), drops its backend, and runs a SIGTERM/SIGKILL
+    /// escalation on the spawner's child PID in a detached task so
+    /// the close() call returns promptly. Emits `Event::SessionClosed`
+    /// + an updated `Event::SessionList`.
     pub(crate) async fn close(&self, id: &EntityId) -> Option<SessionInfo> {
         let removed = self.sessions.write().await.remove(id);
         match removed {
             Some(entry) => {
                 entry.pump.abort();
                 let info = entry.to_info();
+                // Politely ask the host process to exit before we
+                // tear down its IPC channel. The Ardour shim raises
+                // SIGTERM on its own pid; the stub no-ops.
+                let _ = entry.backend.request_quit().await;
                 // Drop the backend (last Arc release closes the shim
-                // socket when the backend's own Drop runs).
+                // socket when the backend's own Drop runs). The
+                // graceful-quit IPC was sent BEFORE this drop so the
+                // shim got a chance to read it; closing the socket
+                // afterwards just cleans up our end.
                 drop(entry.backend);
+                // Hand the terminator (if any) to a detached task so
+                // we don't block close() on the up-to-~8s escalation
+                // window. Safe because the entry's already removed
+                // from the map — nothing else can race on the child.
+                let mut proc_slot = entry.process.into_inner();
+                if let Some(proc) = proc_slot.take() {
+                    let session_id_for_log = id.clone();
+                    tokio::spawn(async move {
+                        shutdown_child(session_id_for_log, proc).await;
+                    });
+                }
                 self.broadcast_event(Event::SessionClosed {
                     session_id: id.clone(),
                 })
@@ -345,4 +375,36 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Three-stage shutdown of a host child process after
+/// `Backend::request_quit()` has already fired. Stages:
+///   1. Wait up to 5s for the process to exit on its own (graceful
+///      IPC + Ardour's SIGTERM handler doing the save-and-exit).
+///   2. SIGTERM, wait 3s. Catches Ardour builds whose graceful path
+///      hangs on a save dialog or a stuck plugin.
+///   3. SIGKILL. Last resort — forces the kernel to reap.
+async fn shutdown_child(session_id: EntityId, mut proc: Box<dyn ProcessHandle>) {
+    use std::time::Duration;
+    if proc.wait(Duration::from_secs(5)).await {
+        tracing::info!("session {session_id} child exited gracefully after request_quit");
+        return;
+    }
+    tracing::warn!("session {session_id} child still alive 5s after request_quit; sending SIGTERM");
+    proc.sigterm().await;
+    if proc.wait(Duration::from_secs(3)).await {
+        tracing::info!("session {session_id} child exited after SIGTERM");
+        return;
+    }
+    tracing::warn!("session {session_id} child still alive 3s after SIGTERM; sending SIGKILL");
+    proc.sigkill().await;
+    // SIGKILL can take a beat to land + reap; one more short wait so
+    // the log has the final outcome. Don't fail the task on timeout —
+    // the kernel will reap eventually and the spawner side has the
+    // child handle dropped after this returns.
+    if proc.wait(Duration::from_secs(2)).await {
+        tracing::info!("session {session_id} child reaped after SIGKILL");
+    } else {
+        tracing::warn!("session {session_id} child unreaped after SIGKILL — leaking handle");
+    }
 }

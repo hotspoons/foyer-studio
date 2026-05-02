@@ -24,7 +24,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Extension, Query, State};
 use axum::response::IntoResponse;
 use foyer_schema::{
-    Command, ControlUpdate, Envelope, Event, TunnelProviderConfig, TunnelProviderKind,
+    Command, ControlUpdate, EntityId, Envelope, Event, TunnelProviderConfig, TunnelProviderKind,
     SCHEMA_VERSION,
 };
 use futures::{SinkExt, StreamExt};
@@ -667,11 +667,13 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::ListSessions => "list_sessions",
         Command::SelectSession { .. } => "select_session",
         Command::CloseSession { .. } => "close_session",
+        Command::ShimQuit => "shim_quit",
         Command::ReattachOrphan { .. } => "reattach_orphan",
         Command::DismissOrphan { .. } => "dismiss_orphan",
         Command::UpdateTrack { .. } => "update_track",
         Command::DeleteTrack { .. } => "delete_track",
         Command::ReorderTracks { .. } => "reorder_tracks",
+        Command::SetTrackMidiChannelMode { .. } => "set_track_midi_channel_mode",
         Command::CreateGroup { .. } => "create_group",
         Command::UpdateGroup { .. } => "update_group",
         Command::DeleteGroup { .. } => "delete_group",
@@ -1187,7 +1189,7 @@ async fn dispatch_command(
                 }
             }
             match spawner.launch(&backend_id, path).await {
-                Ok(new_backend) => {
+                Ok(launched) => {
                     // swap_backend synthesizes a session UUID when
                     // the caller doesn't supply one. Once the
                     // shim-side UUID plumbing lands (reading from
@@ -1195,7 +1197,14 @@ async fn dispatch_command(
                     // CLI spawner will set it on the backend before
                     // returning and we can pass it through here.
                     state
-                        .swap_backend(backend_id, project_path, new_backend, None, None)
+                        .swap_backend(
+                            backend_id,
+                            project_path,
+                            launched.backend,
+                            None,
+                            None,
+                            launched.process,
+                        )
                         .await;
                 }
                 Err(e) => {
@@ -1261,6 +1270,39 @@ async fn dispatch_command(
                     },
                 )
                 .await;
+            }
+        }
+        Command::SetTrackMidiChannelMode {
+            track_id,
+            direction,
+            mode,
+            mask,
+        } => {
+            match state
+                .backend()
+                .await
+                .set_track_midi_channel_mode(track_id, direction, mode, mask)
+                .await
+            {
+                Ok(track) => {
+                    broadcast_event(
+                        state,
+                        Event::TrackUpdated {
+                            track: Box::new(track),
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "set_midi_channel_mode_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
             }
         }
         Command::SetTrackInput {
@@ -2075,7 +2117,46 @@ async fn dispatch_command(
             // so subsequent commands without explicit session_id route
             // to this one's backend. A per-connection override could
             // layer on later for multi-browser-window scenarios.
-            *state.focus_session_id.write().await = Some(session_id.clone());
+            let prev = state
+                .focus_session_id
+                .write()
+                .await
+                .replace(session_id.clone());
+            // Mirror `state.backend` to match the new focus so plain
+            // (untagged) commands route to the right backend. Without
+            // this, the focus pointer says "session B" but
+            // `state.backend()` still resolves to A's backend until a
+            // new launch / swap touches it.
+            if let Some(be) = state.sessions.backend(&session_id).await {
+                *state.backend.write().await = be;
+            }
+            // Audio streams opened against the prior session's
+            // backend are now stale — their `pcm_rx` reads from a
+            // backend the user is no longer watching. Tear them all
+            // down so the client's listener gets `AudioEgressStopped`,
+            // resets, and re-opens against the new focus. (Without
+            // this, the listener kept playing audio from the old
+            // session until the user toggled Listen off+on.)
+            if prev.as_ref() != Some(&session_id) {
+                let stream_ids: Vec<u32> = state
+                    .audio_hub
+                    .list()
+                    .await
+                    .into_iter()
+                    .map(|(id, _, _)| id)
+                    .collect();
+                for stream_id in stream_ids {
+                    state.audio_hub.close_stream(stream_id).await;
+                    broadcast_event(state, Event::AudioEgressStopped { stream_id }).await;
+                }
+            }
+            broadcast_event(
+                state,
+                Event::SessionFocusChanged {
+                    session_id: Some(session_id.clone()),
+                },
+            )
+            .await;
             // Immediately re-snapshot against the newly-focused
             // backend so the browser sees the switched-to session's
             // tracks/regions.
@@ -2102,17 +2183,48 @@ async fn dispatch_command(
                     // focus when there's nothing left). Also mirror
                     // the backend pointer so plain commands still
                     // land on a live backend.
-                    {
+                    let was_focused = {
                         let mut focus = state.focus_session_id.write().await;
                         if focus.as_ref() == Some(&session_id) {
                             *focus = None;
+                            true
+                        } else {
+                            false
                         }
-                    }
+                    };
+                    let mut new_focus: Option<EntityId> = None;
                     if let Some(fallback_id) = state.sessions.most_recent_id().await {
                         if let Some(be) = state.sessions.backend(&fallback_id).await {
                             *state.backend.write().await = be;
-                            *state.focus_session_id.write().await = Some(fallback_id);
+                            *state.focus_session_id.write().await = Some(fallback_id.clone());
+                            new_focus = Some(fallback_id);
                         }
+                    }
+                    if was_focused {
+                        // Same teardown as Command::SelectSession —
+                        // open audio streams were tied to the closed
+                        // session's PCM rx and won't deliver more
+                        // samples. Drop them so the client listener
+                        // resets against the new focus (or sits silent
+                        // if there's no fallback).
+                        let stream_ids: Vec<u32> = state
+                            .audio_hub
+                            .list()
+                            .await
+                            .into_iter()
+                            .map(|(id, _, _)| id)
+                            .collect();
+                        for stream_id in stream_ids {
+                            state.audio_hub.close_stream(stream_id).await;
+                            broadcast_event(state, Event::AudioEgressStopped { stream_id }).await;
+                        }
+                        broadcast_event(
+                            state,
+                            Event::SessionFocusChanged {
+                                session_id: new_focus,
+                            },
+                        )
+                        .await;
                     }
                 }
                 None => {
@@ -2404,6 +2516,16 @@ async fn dispatch_command(
             }
         }
 
+        Command::ShimQuit => {
+            // Direct sidecar-side dispatch is rare (we usually invoke
+            // request_quit via the registry close path), but expose it
+            // to the WS so a debugging client can trigger a graceful
+            // shim shutdown without going through CloseSession. The
+            // backend dispatches it to the active focus.
+            if let Err(e) = state.backend().await.request_quit().await {
+                tracing::warn!("shim_quit forwarded but backend errored: {e}");
+            }
+        }
         Command::SavePluginPreset { .. }
         | Command::AudioSdpAnswer { .. }
         | Command::AudioIceCandidate { .. } => {

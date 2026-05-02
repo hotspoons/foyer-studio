@@ -1055,6 +1055,7 @@ dependencies = [
  "foyer-schema",
  "foyer-server",
  "include_dir",
+ "libc",
  "tokio",
  "tracing",
  "tracing-subscriber",

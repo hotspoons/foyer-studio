@@ -259,6 +259,15 @@ pub trait Backend: Send + Sync + 'static {
     async fn save_session(&self, _as_path: Option<&str>) -> Result<(), BackendError> {
         Err(BackendError::Other("save_session not supported".into()))
     }
+    /// Ask the backend's host process to quit. The Ardour shim
+    /// translates this to `kill(getpid(), SIGTERM)` so Ardour's stock
+    /// signal handler runs the normal save-and-exit path. Stub /
+    /// in-process backends are expected to no-op (default impl).
+    /// Fire-and-forget: the sidecar follows up with SIGTERM/SIGKILL
+    /// escalation against the child PID if the host doesn't exit.
+    async fn request_quit(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
     async fn update_region(
         &self,
         _id: EntityId,
@@ -279,6 +288,22 @@ pub trait Backend: Send + Sync + 'static {
     }
     async fn reorder_tracks(&self, _ordered_ids: Vec<EntityId>) -> Result<(), BackendError> {
         Err(BackendError::Other("reorder_tracks not supported".into()))
+    }
+    /// Set the channel-filter mode + mask on a MIDI track. `direction`
+    /// is `"capture"` or `"playback"`; `mode` is `"all"` | `"filter"` |
+    /// `"force"`. Mask is a 16-bit channel bitmask (bit 0 = ch 1).
+    /// On success returns the updated `Track` so the server rebroadcasts
+    /// the new channel state to peers.
+    async fn set_track_midi_channel_mode(
+        &self,
+        _track_id: EntityId,
+        _direction: String,
+        _mode: String,
+        _mask: u16,
+    ) -> Result<Track, BackendError> {
+        Err(BackendError::Other(
+            "set_track_midi_channel_mode not supported".into(),
+        ))
     }
 
     /// Open a named undo group. Mutations received between this call

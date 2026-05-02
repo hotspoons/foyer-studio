@@ -134,6 +134,11 @@ struct PluginDesc {
 	/// `"vst2"`, `"au"`, `"ladspa"`, `"lua"`, or `"internal"`. Empty
 	/// when `has_native_gui` is false.
 	std::string native_gui_kind;
+	/// True when the plugin insert exists but the underlying plugin
+	/// binary/library could not be loaded (missing, wrong architecture,
+	/// unlicensed, etc.). Web UI should show a warning instead of an
+	/// empty parameter panel.
+	bool        missing = false;
 };
 
 /// Build Foyer-schema plugin descriptions for every `PluginInsert` on `route`.

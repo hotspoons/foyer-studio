@@ -537,6 +537,25 @@ impl Backend for StubBackend {
         Ok(updated)
     }
 
+    async fn set_track_midi_channel_mode(
+        &self,
+        track_id: EntityId,
+        direction: String,
+        mode: String,
+        mask: u16,
+    ) -> Result<Track, BackendError> {
+        let updated = self
+            .state
+            .lock()
+            .await
+            .set_track_midi_channel_mode(&track_id, &direction, &mode, mask)
+            .ok_or_else(|| BackendError::Other(format!("unknown track {track_id}")))?;
+        let _ = self.tx.send(Event::TrackUpdated {
+            track: Box::new(updated.clone()),
+        });
+        Ok(updated)
+    }
+
     async fn set_automation_mode(
         &self,
         lane_id: EntityId,

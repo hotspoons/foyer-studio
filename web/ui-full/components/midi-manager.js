@@ -30,11 +30,55 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
+import "foyer-ui-core/widgets/param-control.js";
 
 // Parameter kinds the shim emits where "discrete or enumerated" is
 // true — these are the ones most likely to be the synth's patch /
 // program / bank selector, which we promote to the summary view.
 const PROGRAM_KINDS = new Set(["discrete", "enum"]);
+
+// MIDI channel-mode constants. The schema serializes the mode as a
+// lowercase string; the mask is a 16-bit bitmask with bit 0 = ch 1.
+// New MIDI tracks default to ("force", 0x0001) so the picker stays
+// hidden — the rationale lives in shims/ardour/src/dispatch.cc and
+// crates/foyer-schema/src/session.rs alongside the field doc.
+const CHANNEL_MODE_LABELS = {
+  all:    "Pass through all channels",
+  filter: "Record only selected channels",
+  force:  "Force to a single channel",
+};
+const CHANNEL_DIRECTIONS = [
+  { key: "capture",  label: "Inbound (record)" },
+  { key: "playback", label: "Playback" },
+];
+function channelMaskToList(mask) {
+  const out = [];
+  for (let i = 0; i < 16; ++i) if (mask & (1 << i)) out.push(i + 1);
+  return out;
+}
+function isDefaultChannelState(track) {
+  const dir = (m, k) => (track[`${k}_channel_mode`] === m);
+  const mask = (k) => track[`${k}_channel_mask`] ?? 0;
+  return (
+    dir("force", "capture")  && mask("capture")  === 0x0001 &&
+    dir("force", "playback") && mask("playback") === 0x0001
+  );
+}
+function channelSummary(track) {
+  const cm = track.capture_channel_mode  || "all";
+  const pm = track.playback_channel_mode || "all";
+  const cmask = track.capture_channel_mask  ?? 0;
+  const pmask = track.playback_channel_mask ?? 0;
+  if (cm === "force" && pm === "force" && cmask === pmask) {
+    return `ch ${channelMaskToList(cmask)[0] ?? "?"}`;
+  }
+  if (cm === pm && cmask === pmask) {
+    if (cm === "all") return "all channels";
+    const list = channelMaskToList(cmask);
+    return `${cm} · ${list.length === 1 ? `ch ${list[0]}` : `${list.length} ch`}`;
+  }
+  return "split routing";
+}
 
 export class MidiManager extends LitElement {
   static properties = {
@@ -43,6 +87,10 @@ export class MidiManager extends LitElement {
     _tick:     { state: true, type: Number },
     _regions:  { state: true, type: Array },
     _presets:  { state: true, type: Array },
+    /// User-clicked the channel chip — surface the controls even if
+    /// the track is in the default ForceChannel + 0x0001 state.
+    /// Otherwise the section auto-hides.
+    _channelExpanded: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -86,10 +134,85 @@ export class MidiManager extends LitElement {
       padding: 10px 12px;
       display: flex; flex-direction: column; gap: 6px;
     }
+    .card.missing {
+      border-style: dashed;
+      border-color: var(--color-warning, #f59e0b);
+      background: color-mix(in oklab, var(--color-warning, #f59e0b) 6%, var(--color-surface-muted));
+    }
     .card.muted {
       color: var(--color-text-muted);
       background: transparent;
       border-style: dashed;
+    }
+    .card.missing .name { color: var(--color-warning, #f59e0b); }
+    .warn { color: var(--color-warning, #f59e0b); display: flex; align-items: center; gap: 4px; }
+    /* Channel chip in the toolbar — buried-but-discoverable button
+     * for accessing the channel-routing controls when the track is
+     * in the default single-channel state. Shows a tinted/borderless
+     * pill in the default state ("bury") and a more prominent border
+     * in non-default state ("surface"). */
+    .chan-chip {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--color-text-muted);
+      padding: 2px 8px;
+      border-radius: 999px;
+      cursor: pointer;
+      font: inherit; font-size: 10px;
+      letter-spacing: 0.04em;
+    }
+    .chan-chip:hover {
+      background: var(--color-surface);
+      color: var(--color-text);
+    }
+    .chan-chip.surfaced {
+      border-color: var(--color-accent-2, #38bdf8);
+      color: var(--color-accent-2, #38bdf8);
+    }
+    .chan-block {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 8px 14px;
+      align-items: center;
+    }
+    .chan-block .dir-label {
+      font-size: 11px;
+      color: var(--color-text-muted);
+      letter-spacing: 0.04em;
+    }
+    .chan-block select {
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      padding: 3px 6px;
+      border-radius: var(--radius-sm, 4px);
+      font: inherit; font-size: 11px;
+    }
+    .chan-block .ch-grid {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 3px;
+      max-width: 360px;
+    }
+    .chan-block .ch-cell {
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      padding: 3px 0;
+      border-radius: var(--radius-sm, 4px);
+      cursor: pointer;
+      font: inherit; font-size: 11px;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+    .chan-block .ch-cell.on {
+      background: var(--color-accent, #7c5cff);
+      color: #fff;
+      border-color: transparent;
+    }
+    .chan-block .ch-cell:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
     .row {
       display: grid;
@@ -470,19 +593,70 @@ export class MidiManager extends LitElement {
     return s?.tracks?.find((t) => t.id === this.trackId) || null;
   }
 
-  _fmtValue(p) {
-    const v = window.__foyer?.store?.get(p.id);
-    if (v == null) return "—";
-    if (typeof v === "boolean") return v ? "on" : "off";
-    if (Array.isArray(p.enum_labels) && p.enum_labels.length) {
-      const i = Math.round(Number(v));
-      const lbl = p.enum_labels[i];
-      if (lbl) return `${lbl} (${i})`;
+  _currentValue(param) {
+    if (!param) return undefined;
+    const store = window.__foyer?.store;
+    const live = store?.get(param.id);
+    if (live !== undefined) {
+      return typeof live === "object" && live !== null && "Float" in live
+        ? live.Float
+        : live;
     }
-    if (typeof v === "number") {
-      return Number.isInteger(v) ? String(v) : v.toFixed(3);
+    const raw = param.value;
+    if (raw && typeof raw === "object" && "Float" in raw) return raw.Float;
+    return raw;
+  }
+  _setParam(param, value) {
+    if (!param?.id) return;
+    window.__foyer?.ws?.controlSet(param.id, value);
+  }
+
+  _setChannelMode(direction, mode, mask) {
+    if (!this.trackId) return;
+    window.__foyer?.ws?.send({
+      type: "set_track_midi_channel_mode",
+      track_id: this.trackId,
+      direction,
+      mode,
+      mask: mask & 0xffff,
+    });
+  }
+  _onModeChange(direction, ev) {
+    const t = this._track();
+    const mode = ev.target.value;
+    const cur = t?.[`${direction}_channel_mask`] ?? 0x0001;
+    // Force-mode collapses the mask to a single channel — preserve
+    // the current channel if it was a force selection, otherwise pick
+    // the lowest set bit, defaulting to ch 1.
+    let mask = cur;
+    if (mode === "force") {
+      const bit = cur ? Math.log2(cur & -cur) | 0 : 0;
+      mask = 1 << bit;
+    } else if (mode === "all") {
+      mask = 0xffff;
+    } else if (mode === "filter" && cur === 0) {
+      mask = 0x0001;
     }
-    return String(v);
+    this._setChannelMode(direction, mode, mask);
+  }
+  _onChannelClick(direction, channelIdx) {
+    const t = this._track();
+    const mode = t?.[`${direction}_channel_mode`] || "all";
+    const cur = t?.[`${direction}_channel_mask`] ?? 0x0001;
+    const bit = 1 << channelIdx;
+    let next = cur;
+    if (mode === "force") {
+      next = bit;
+    } else if (mode === "filter") {
+      next = cur ^ bit;
+      if (!next) next = bit; // refuse to disable every channel
+    } else {
+      // mode === "all" — clicking a channel switches us to filter
+      // semantics with just that channel enabled.
+      this._setChannelMode(direction, "filter", bit);
+      return;
+    }
+    this._setChannelMode(direction, mode, next);
   }
 
   _openInstrumentPicker({ replace = false } = {}) {
@@ -507,6 +681,57 @@ export class MidiManager extends LitElement {
     window.__foyer?.ws?.send({ type: "control_set", id, value: bypassed ? 0 : 1 });
   }
 
+  _renderChannelSection(track) {
+    // Rendered above "Instrument" and only when the track is in a
+    // non-default state OR the user explicitly opened the chip. Keeps
+    // multi-channel routing out of the way for the 95% of MIDI tracks
+    // that don't need it (TODO #270).
+    return html`
+      <section>
+        <h3>MIDI channel</h3>
+        <div class="card">
+          ${CHANNEL_DIRECTIONS.map(({ key, label }) => {
+            const mode = track[`${key}_channel_mode`] || "all";
+            const mask = track[`${key}_channel_mask`] ?? 0x0001;
+            const channelDisabled = mode === "all";
+            const cells = [];
+            for (let i = 0; i < 16; ++i) {
+              const on = !!(mask & (1 << i));
+              cells.push(html`
+                <button
+                  class="ch-cell ${on ? "on" : ""}"
+                  ?disabled=${channelDisabled}
+                  @click=${() => this._onChannelClick(key, i)}
+                >${i + 1}</button>
+              `);
+            }
+            return html`
+              <div class="chan-block">
+                <span class="dir-label">${label}</span>
+                <select
+                  .value=${mode}
+                  @change=${(e) => this._onModeChange(key, e)}
+                >
+                  ${Object.entries(CHANNEL_MODE_LABELS).map(([m, lbl]) => html`
+                    <option value=${m} ?selected=${m === mode}>${lbl}</option>
+                  `)}
+                </select>
+                <span></span>
+                <div class="ch-grid">${cells}</div>
+              </div>
+            `;
+          })}
+        </div>
+        <div class="hint">
+          New MIDI tracks are forced to channel 1 by default. Switch a
+          direction off "force" to record from or play to multiple
+          channels — most synths only listen on one, so the default
+          stays out of the way.
+        </div>
+      </section>
+    `;
+  }
+
   render() {
     const t = this._track();
     if (!t) {
@@ -526,31 +751,56 @@ export class MidiManager extends LitElement {
       (p) => PROGRAM_KINDS.has(p.kind) && !p.id?.endsWith(".bypass"),
     );
 
+    const inDefault = isDefaultChannelState(t);
+    // Surface the channel controls when the track has been switched
+    // off the default single-channel routing, OR when the user has
+    // explicitly clicked the toolbar chip to expand them. In the
+    // default state with no manual override, render only the chip —
+    // the controls themselves stay hidden so the picker doesn't add
+    // noise to the 95% case.
+    const channelOpen = !inDefault || this._channelExpanded;
+    const channelLabel = channelSummary(t);
+
     return html`
       <div class="tb">
         <span class="title">${this.trackName || t.name}</span>
         <span>· MIDI</span>
         <span style="flex:1"></span>
-        <span>channel 1 · ${t.plugins?.length || 0} plugin${(t.plugins?.length === 1) ? "" : "s"}</span>
+        <button
+          class="chan-chip ${inDefault ? "" : "surfaced"}"
+          title=${inDefault
+            ? "Click to expose multi-channel routing controls"
+            : "Track is using non-default MIDI channel routing"}
+          @click=${() => { this._channelExpanded = !this._channelExpanded; }}
+        >${channelLabel}</button>
+        <span>· ${t.plugins?.length || 0} plugin${(t.plugins?.length === 1) ? "" : "s"}</span>
       </div>
 
       <div class="body">
         <section>
           <h3>Instrument</h3>
           ${instrument ? html`
-            <div class="card">
+            <div class="card ${instrument.missing ? "missing" : ""}">
               <div class="plugin-head">
                 <div>
                   <div class="name">${instrument.name}</div>
                   <div class="uri">${instrument.uri || ""}</div>
                 </div>
-                <div class="kind">${instrument.bypassed ? "bypassed" : "active"}</div>
+                <div class="kind">${instrument.missing ? "missing" : (instrument.bypassed ? "bypassed" : "active")}</div>
               </div>
+              ${instrument.missing ? html`
+                <div class="warn">
+                  ${icon("exclamation-triangle", 12)}
+                  Plugin binary is missing or unloadable.
+                </div>` : null}
               <div class="actions">
                 <button @click=${() => this._openInstrumentPicker({ replace: true })}>
                   Change…
                 </button>
-                <button @click=${() => this._toggleBypass(instrument.id, instrument.bypassed)}>
+                <button
+                  ?disabled=${instrument.missing}
+                  @click=${() => this._toggleBypass(instrument.id, instrument.bypassed)}
+                >
                   ${instrument.bypassed ? "Unbypass" : "Bypass"}
                 </button>
                 <button class="danger" @click=${() => this._removeInstrument()}>
@@ -573,26 +823,31 @@ export class MidiManager extends LitElement {
           `}
         </section>
 
+        ${channelOpen ? this._renderChannelSection(t) : null}
+
         ${this._renderPatchChanges()}
 
         <section>
           <h3>Instrument parameters</h3>
           ${programLike.length > 0 ? html`
-            <div class="card">
+            <div class="card" style="gap:8px">
               ${programLike.map((p) => html`
-                <div class="row">
-                  <span class="label">${p.label || p.id}</span>
-                  <span class="kind">${p.kind}</span>
-                  <span class="value">${this._fmtValue(p)}</span>
-                </div>
+                <foyer-param-control
+                  .param=${p}
+                  .value=${this._currentValue(p)}
+                  .size=${36}
+                  widget="auto"
+                  @input=${(e) => this._setParam(p, e.detail)}
+                  @change=${(e) => this._setParam(p, e.detail)}
+                ></foyer-param-control>
               `)}
             </div>
             <div class="hint">
               Discrete / enum parameters on the instrument. Synths
-              route program / bank selection through these, so the
-              values reflect whatever patch the instrument is
-              currently on (including anything a region patch-change
-              event has just selected).
+              route program / bank selection through these — change
+              a value and the patch updates immediately. (If the synth
+              doesn't expose a parameter for program, use the
+              "Patches &amp; banks" section above instead.)
             </div>
           ` : html`
             <div class="card muted">

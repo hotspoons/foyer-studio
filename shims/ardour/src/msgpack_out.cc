@@ -39,6 +39,7 @@
 #include "ardour/port_manager.h"
 #include "ardour/processor.h"
 #include "ardour/region.h"
+#include "ardour/midi_track.h"
 #include "ardour/route.h"
 #include "ardour/route_group.h"
 #include "ardour/send.h"
@@ -176,6 +177,18 @@ const char* automation_mode_str (ARDOUR::AutoState s)
 		case ARDOUR::Latch:  return "latch";
 		case ARDOUR::Off:
 		default:             return "off";
+	}
+}
+
+// Convert Ardour's ChannelMode enum to the lowercase strings the Rust
+// schema serializes for `Track.{capture,playback}_channel_mode`.
+const char* channel_mode_str (ARDOUR::ChannelMode m)
+{
+	switch (m) {
+		case ARDOUR::AllChannels:    return "all";
+		case ARDOUR::FilterChannels: return "filter";
+		case ARDOUR::ForceChannel:   return "force";
+		default:                     return "all";
 	}
 }
 
@@ -396,6 +409,7 @@ emit_plugin_desc (Out& o, const schema_map::PluginDesc& pd)
 	if (emit_preset)        ++n;
 	if (pd.has_native_gui)  ++n;
 	if (emit_gui_kind)      ++n;
+	if (pd.missing)         ++n;
 	o.map (n);
 	o.str ("id");       o.str (pd.id);
 	o.str ("name");     o.str (pd.name);
@@ -412,6 +426,10 @@ emit_plugin_desc (Out& o, const schema_map::PluginDesc& pd)
 	if (emit_gui_kind) {
 		o.str ("native_gui_kind");
 		o.str (pd.native_gui_kind);
+	}
+	if (pd.missing) {
+		o.str ("missing");
+		o.b (true);
 	}
 	o.str ("params");
 	o.array (pd.params.size ());
@@ -687,6 +705,15 @@ encode_session_snapshot (Session& session,
 				if (l.ac && l.ac->alist ()) ++lane_count;
 			}
 
+			// MIDI channel mode/mask — only emitted for MidiTracks. A
+			// non-MidiTrack route has no concept of these so the
+			// fields stay absent (the schema serde-skips `None`).
+			std::shared_ptr<ARDOUR::MidiTrack> mt_self;
+			if (it != route_by_id.end ()) {
+				mt_self = std::dynamic_pointer_cast<ARDOUR::MidiTrack> (it->second);
+			}
+			const bool emit_midi_channels = static_cast<bool> (mt_self);
+
 			// Base track shape is 9 fields (id, name, kind, color,
 			// gain, pan, mute, solo, peak_meter). `record_arm` and
 			// `plugins` are both skip-when-missing in the schema,
@@ -701,6 +728,7 @@ encode_session_snapshot (Session& session,
 			if (!sends.empty ()) ++track_fields;
 			if (!bus_assign.empty ()) ++track_fields;
 			if (!group_id.empty ()) ++track_fields;
+			if (emit_midi_channels) track_fields += 4;
 
 			o.map (track_fields);
 			o.str ("id");   o.str (s.self_id);
@@ -803,6 +831,17 @@ encode_session_snapshot (Session& session,
 				for (auto const& pd : plugins) {
 					emit_plugin_desc (o, pd);
 				}
+			}
+
+			if (emit_midi_channels) {
+				o.str ("capture_channel_mode");
+				o.str (channel_mode_str (mt_self->get_capture_channel_mode ()));
+				o.str ("capture_channel_mask");
+				o.u (static_cast<std::uint32_t> (mt_self->get_capture_channel_mask ()));
+				o.str ("playback_channel_mode");
+				o.str (channel_mode_str (mt_self->get_playback_channel_mode ()));
+				o.str ("playback_channel_mask");
+				o.u (static_cast<std::uint32_t> (mt_self->get_playback_channel_mask ()));
 			}
 
 			// Automation lanes for the well-known track controls. Each
@@ -1411,6 +1450,9 @@ encode_track_updated (Session& session, const std::string& track_id)
 		o.str ("type");  o.str ("track_updated");
 		o.str ("track");
 
+		auto mt_self = std::dynamic_pointer_cast<ARDOUR::MidiTrack> (route);
+		const bool emit_midi_channels = static_cast<bool> (mt_self);
+
 		std::size_t track_fields = 9; // +1 for peak_meter
 		if (rec_ctl) ++track_fields;
 		if (mon_ctl) ++track_fields;
@@ -1420,6 +1462,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 		if (!sends.empty ()) ++track_fields;
 		if (!bus_assign.empty ()) ++track_fields;
 		if (!group_id.empty ()) ++track_fields;
+		if (emit_midi_channels) track_fields += 4;
 
 		o.map (track_fields);
 		o.str ("id");   o.str (matched.self_id);
@@ -1456,6 +1499,17 @@ encode_track_updated (Session& session, const std::string& track_id)
 			for (auto const& pd : plugins) {
 				emit_plugin_desc (o, pd);
 			}
+		}
+
+		if (emit_midi_channels) {
+			o.str ("capture_channel_mode");
+			o.str (channel_mode_str (mt_self->get_capture_channel_mode ()));
+			o.str ("capture_channel_mask");
+			o.u (static_cast<std::uint32_t> (mt_self->get_capture_channel_mask ()));
+			o.str ("playback_channel_mode");
+			o.str (channel_mode_str (mt_self->get_playback_channel_mode ()));
+			o.str ("playback_channel_mask");
+			o.u (static_cast<std::uint32_t> (mt_self->get_playback_channel_mask ()));
 		}
 
 		if (!input_ports.empty ()) {

@@ -198,6 +198,16 @@ export class PluginPanel extends LitElement {
       align-items: flex-end;
     }
 
+  .warning-banner {
+      background: color-mix(in oklab, var(--color-warning, #f59e0b) 16%, var(--color-surface-elevated));
+      border-bottom: 1px solid color-mix(in oklab, var(--color-warning, #f59e0b) 50%, var(--color-border));
+      color: color-mix(in oklab, var(--color-warning, #f59e0b) 85%, #000);
+      padding: 8px 12px;
+      font-size: 11px;
+      display: flex; align-items: center; gap: 8px;
+      font-weight: 500;
+    }
+
     .empty {
       padding: 20px;
       color: var(--color-text-muted);
@@ -494,7 +504,12 @@ export class PluginPanel extends LitElement {
           ${bypassOn ? "Bypassed" : "Active"}
         </button>
       </header>
-
+      ${p.missing ? html`
+        <div class="warning-banner">
+          ${icon("exclamation-triangle", 14)}
+          Plugin binary is missing or unloadable. The insert is preserved in the session, but the plugin's library could not be found.
+        </div>
+      ` : null}
       ${this.minimized
         ? null
         : (this._nativeGuiOpen && p.has_native_gui && featureEnabled("native_plugin_gui"))

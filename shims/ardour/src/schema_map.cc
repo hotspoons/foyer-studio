@@ -23,6 +23,7 @@
 #include "ardour/source.h"
 #include "ardour/stripable.h"
 #include "ardour/track.h"
+#include "ardour/unknown_processor.h"
 #include "pbd/controllable.h"
 #include "pbd/xml++.h"
 
@@ -243,6 +244,14 @@ plugin_insert_id_string (const PluginInsert& pi)
 }
 
 std::string
+processor_id_string (const Processor& p)
+{
+	std::ostringstream o;
+	o << p.id ();
+	return o.str ();
+}
+
+std::string
 scale_from_descriptor (const ParameterDescriptor& d)
 {
 	if (d.unit == ParameterDescriptor::DB)    return "decibels";
@@ -287,20 +296,76 @@ enumerate_plugins (std::shared_ptr<Route> route)
 	std::vector<PluginDesc> out;
 	if (!route) return out;
 
-	for (uint32_t i = 0; ; ++i) {
-		std::shared_ptr<Processor> proc = route->nth_plugin (i);
-		if (!proc) break;
+	// Walk every processor on the route — NOT `route->nth_plugin()`,
+	// which only yields PluginInserts. Ardour replaces missing
+	// plugins with `UnknownProcessor` stubs at session-load time
+	// (see libardour/route.cc::set_state), and those need to surface
+	// to the client so the missing-plugin banner shows up. The
+	// nth_plugin path silently skips them, which was the cause of
+	// "Ardour shows the missing-plugin dialog but Foyer's mixer
+	// strip looks empty."
+	route->foreach_processor ([&out] (std::weak_ptr<Processor> wp) {
+		std::shared_ptr<Processor> proc = wp.lock ();
+		if (!proc) return;
+
+		// Missing-plugin stub. Ardour preserves the original
+		// processor's name+state on the UnknownProcessor so we can
+		// at least show "{plugin name} — missing" in the strip.
+		auto unk = std::dynamic_pointer_cast<UnknownProcessor> (proc);
+		if (unk) {
+			PluginDesc pd;
+			pd.id       = "plugin." + processor_id_string (*proc);
+			pd.name     = proc->name ();
+			pd.missing  = true;
+			pd.bypassed = !proc->active ();
+			// Synthetic bypass param so the client-side panel doesn't
+			// crash on empty params (matches the Plugin::null branch
+			// below).
+			ParamDesc bypass;
+			bypass.id        = pd.id + ".bypass";
+			bypass.label     = "Bypass";
+			bypass.kind      = "trigger";
+			bypass.scale     = "linear";
+			bypass.has_range = false;
+			bypass.lower     = 0.0f;
+			bypass.upper     = 0.0f;
+			bypass.value     = pd.bypassed ? 1.0 : 0.0;
+			pd.params.push_back (std::move (bypass));
+			out.push_back (std::move (pd));
+			return;
+		}
+
 		std::shared_ptr<PluginInsert> pi = std::dynamic_pointer_cast<PluginInsert> (proc);
-		if (!pi) continue;
+		if (!pi) return;
 		std::shared_ptr<Plugin> plug = pi->plugin (0);
-		if (!plug) continue;
 
 		PluginDesc pd;
 		pd.id       = "plugin." + plugin_insert_id_string (*pi);
+		pd.bypassed = !pi->active ();
+
+		if (!plug) {
+			// Plugin insert exists but the binary/library is missing or
+			// unloadable. In practice Ardour converts these to
+			// `UnknownProcessor` (handled above), so this branch is
+			// the rare "PluginInsert constructed but plugin slot
+			// never got populated" case — keep it as a safety net.
+			pd.name    = pi->name ();
+			pd.missing = true;
+			ParamDesc bypass;
+			bypass.id        = pd.id + ".bypass";
+			bypass.label     = "Bypass";
+			bypass.kind      = "trigger";
+			bypass.scale     = "linear";
+			bypass.has_range = false;
+			bypass.lower     = 0.0f;
+			bypass.upper     = 0.0f;
+			bypass.value     = pd.bypassed ? 1.0 : 0.0;
+			pd.params.push_back (std::move (bypass));
+			out.push_back (std::move (pd));
+			return;
+		}
 		pd.name     = plug->name ();
 		pd.uri      = plug->unique_id ();
-		// Ardour treats "active" as "not bypassed"; invert for schema.
-		pd.bypassed = !pi->active ();
 		// `last_preset()` carries the most recently applied preset (or
 		// the saved preset if loaded from a session). Empty `uri` means
 		// "no preset active" — left as "" on the wire so the UI shows
@@ -379,7 +444,7 @@ enumerate_plugins (std::shared_ptr<Route> route)
 		}
 
 		out.push_back (std::move (pd));
-	}
+	});
 	return out;
 }
 

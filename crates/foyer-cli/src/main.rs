@@ -582,10 +582,18 @@ async fn serve(
                 }
             }
         }
-        _ => spawner
-            .launch(&backend.id, project.as_deref())
-            .await
-            .with_context(|| format!("launch backend `{}`", backend.id))?,
+        _ => {
+            // Bootstrap-time launch. The terminator (if any) is
+            // dropped here — the initial backend lives outside the
+            // SessionRegistry, so close-session escalation doesn't
+            // apply. Subsequent `LaunchProject` commands go through
+            // the swap path and DO register a terminator.
+            spawner
+                .launch(&backend.id, project.as_deref())
+                .await
+                .with_context(|| format!("launch backend `{}`", backend.id))?
+                .backend
+        }
     };
 
     let server = Server::with_spawner(initial_backend, Some(spawner.clone()));
@@ -655,7 +663,7 @@ impl BackendSpawner for CliSpawner {
         &self,
         backend_id: &str,
         project_path: Option<&Path>,
-    ) -> anyhow::Result<Arc<dyn Backend>> {
+    ) -> anyhow::Result<foyer_server::LaunchedBackend> {
         let cfg_backend = self
             .config
             .backend(backend_id)
@@ -679,7 +687,7 @@ impl BackendSpawner for CliSpawner {
                 if let Some(p) = project_path {
                     let _ = b.open_session(&p.display().to_string()).await;
                 }
-                Ok(Arc::new(b))
+                Ok(foyer_server::LaunchedBackend::new(Arc::new(b)))
             }
             BackendKind::Ardour => {
                 let project = project_path
@@ -697,13 +705,16 @@ impl BackendSpawner for CliSpawner {
                 } else {
                     project.to_path_buf()
                 };
-                let socket =
+                let (socket, child) =
                     launch_and_wait_for_shim(&exec, &cfg_backend.args, &cfg_backend.env, &abs)
                         .await?;
                 let host = HostBackend::connect(socket.clone())
                     .await
                     .with_context(|| format!("connect to shim at {}", socket.display()))?;
-                Ok(Arc::new(host))
+                Ok(foyer_server::LaunchedBackend::with_process(
+                    Arc::new(host),
+                    Box::new(ChildProcess::new(child)),
+                ))
             }
         }
     }
@@ -711,9 +722,12 @@ impl BackendSpawner for CliSpawner {
 
 /// Spawn the configured DAW with the project as argv and poll the
 /// discovery directory until its shim advertises. Returns the shim's
-/// UDS path. Times out after ~30 seconds. We intentionally DON'T kill
-/// the child on drop — the user may want Ardour to outlive the
-/// sidecar if they reconnect later.
+/// UDS path along with the spawned `Child` so the registry can later
+/// drive a graceful → SIGTERM → SIGKILL escalation on session close.
+/// Times out after ~30 seconds. The child is kept with
+/// `kill_on_drop(false)` — sidecar shutdown does NOT kill the DAW
+/// (preserves the orphan-reattach feature); explicit `CloseSession`
+/// is what triggers the escalation.
 ///
 /// Dev-build awareness: when `exec` lives inside an Ardour source
 /// checkout (`<root>/build/gtk2_ardour/`), we wrap the spawn in a bash
@@ -728,7 +742,7 @@ async fn launch_and_wait_for_shim(
     extra_args: &[String],
     env: &std::collections::BTreeMap<String, String>,
     project: &std::path::Path,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, tokio::process::Child)> {
     use std::time::Duration;
 
     let before: std::collections::HashSet<PathBuf> =
@@ -1006,7 +1020,7 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
     tracing::info!("DAW stdout/stderr → {}", log_path.display());
 
     cmd.kill_on_drop(false);
-    let _child = cmd
+    let child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", resolved_exec.display()))?;
 
@@ -1040,7 +1054,7 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
                     Ok(stream) => {
                         drop(stream);
                         tracing::info!("shim advertised at {}", s.socket.display());
-                        return Ok(s.socket);
+                        return Ok((s.socket, child));
                     }
                     Err(e) => {
                         tracing::debug!(
@@ -1060,6 +1074,108 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
             ));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// `ProcessHandle` impl wrapping a `tokio::process::Child` for an
+/// Ardour child spawned by `launch_and_wait_for_shim`. The shutdown
+/// orchestration (graceful → SIGTERM → SIGKILL) lives in
+/// `foyer_server::sessions::shutdown_child`; this struct only
+/// provides the per-stage primitives.
+///
+/// `wait()` polls `Child::try_wait()` on a timer instead of a single
+/// long `Child::wait()` so a SIGTERM landing mid-wait advances the
+/// state machine without losing the prior wait window. Internal
+/// `exited` flag short-circuits subsequent calls so the kernel only
+/// reaps once.
+struct ChildProcess {
+    child: tokio::process::Child,
+    exited: bool,
+}
+
+impl ChildProcess {
+    fn new(child: tokio::process::Child) -> Self {
+        Self {
+            child,
+            exited: false,
+        }
+    }
+
+    /// `Child::id()` only returns `Some` until the child has been
+    /// reaped (a `wait`/`try_wait` that resolved to `Exited`). We
+    /// capture the pid here and signal it directly so the SIGTERM /
+    /// SIGKILL primitives keep working even after a successful reap
+    /// from a prior `wait()` call (idempotent no-op in that case via
+    /// the `exited` flag).
+    fn pid(&self) -> Option<i32> {
+        self.child.id().map(|p| p as i32)
+    }
+}
+
+#[async_trait::async_trait]
+impl foyer_server::ProcessHandle for ChildProcess {
+    async fn wait(&mut self, timeout: std::time::Duration) -> bool {
+        if self.exited {
+            return true;
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_status)) => {
+                    self.exited = true;
+                    return true;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("ChildProcess::wait try_wait error: {e}");
+                    return false;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn sigterm(&mut self) {
+        if self.exited {
+            return;
+        }
+        if let Some(pid) = self.pid() {
+            // Use libc::kill rather than `Child::kill()` (which sends
+            // SIGKILL on Unix). SIGTERM is what triggers Ardour's
+            // own save-and-exit handler.
+            #[cfg(unix)]
+            {
+                let rv = unsafe { libc::kill(pid, libc::SIGTERM) };
+                if rv != 0 {
+                    tracing::warn!(
+                        "ChildProcess::sigterm kill({pid}, SIGTERM) failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                // Windows / non-Unix: tokio's start_kill is the
+                // closest analog (TerminateProcess). No SIGTERM
+                // distinction so the escalation effectively skips
+                // the gentle stage.
+                let _ = self.child.start_kill();
+                let _ = pid; // silence unused-warning on non-unix
+            }
+        }
+    }
+
+    async fn sigkill(&mut self) {
+        if self.exited {
+            return;
+        }
+        // start_kill is non-blocking; the eventual reap happens via
+        // a follow-up wait() call. SIGKILL bypasses Ardour's signal
+        // handlers — last-resort only.
+        let _ = self.child.start_kill();
     }
 }
 

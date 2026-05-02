@@ -68,6 +68,7 @@ pub(crate) fn meter(id: &str) -> Parameter {
 }
 
 pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>) -> Track {
+    let is_midi = matches!(kind, TrackKind::Midi);
     Track {
         id: EntityId::new(format!("track.{slug}")),
         name: name.into(),
@@ -87,6 +88,10 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
         inputs: vec![],
         outputs: vec![],
         automation_lanes: vec![],
+        capture_channel_mode: is_midi.then(|| "force".into()),
+        capture_channel_mask: is_midi.then_some(0x0001),
+        playback_channel_mode: is_midi.then(|| "force".into()),
+        playback_channel_mask: is_midi.then_some(0x0001),
     }
 }
 
@@ -504,6 +509,7 @@ pub(crate) fn default_inserts_for(slug: &str) -> Vec<PluginInstance> {
             current_preset: None,
             has_native_gui: None,
             native_gui_kind: None,
+            missing: None,
         }
     };
     match slug {

@@ -86,6 +86,13 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn request_quit(&self) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::ShimQuit)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn add_plugin(
         &self,
         track_id: EntityId,
@@ -309,6 +316,18 @@ impl Backend for HostBackend {
     async fn reorder_tracks(&self, ordered_ids: Vec<EntityId>) -> Result<(), BackendError> {
         self.client
             .send_command(Command::ReorderTracks { ordered_ids })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn set_track_midi_channel_mode(
+        &self,
+        track_id: EntityId,
+        direction: String,
+        mode: String,
+        mask: u16,
+    ) -> Result<Track, BackendError> {
+        self.client
+            .set_track_midi_channel_mode(track_id, direction, mode, mask)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
