@@ -12,6 +12,7 @@ default:
     @./scripts/dev/jack.sh help
 
 prep:
+    mkdir -p sessions/
     ./scripts/dev/tw.sh check
     ./scripts/dev/ardour.sh ensure
     ./scripts/dev/autovocoder.sh ensure
@@ -88,6 +89,7 @@ run-static *args='': prep
 run-dummy *args='':
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p sessions/
     # Same prep work as `prep` but without `scripts/dev/jack.sh start`.
     # If jackd is already running from a prior `just run`, stop it so
     # there's no JACK socket on /dev/shm tempting Ardour to pick the
@@ -210,9 +212,19 @@ run-dummy *args='':
     # DISPLAY is set — without this, a previous `just run` cached
     # `headless/hardour-9.x.x` and we'd skip past GUI Ardour.
     cfg="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/config.yaml"
+    # Resolve ARDOUR_DIR with the same priority as scripts/dev/ardour.sh
+    REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -n "${FOYER_ARDOUR_DIR:-}" ]; then
+        ARDOUR_DIR="$FOYER_ARDOUR_DIR"
+    elif [ -d "$REPO_ROOT/ext/ardour" ]; then
+        ARDOUR_DIR="$REPO_ROOT/ext/ardour"
+    else
+        ARDOUR_DIR="/workspaces/ardour"
+    fi
     if [ -f "$cfg" ] && ! grep -q "gtk2_ardour" "$cfg"; then
         rm -f "$cfg"
-        cargo run --bin foyer -- configure --force >/dev/null
+        FOYER_ARDOUR_BUILD_ROOT="$ARDOUR_DIR" \
+            cargo run --bin foyer -- configure --force >/dev/null
     fi
 
     cargo run --bin foyer -- serve \

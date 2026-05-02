@@ -75,7 +75,7 @@ do_install() {
 do_check() {
     if [ ! -d "$BUNDLE" ]; then
         echo "autovocoder: bundle missing at $BUNDLE"
-        exit 1
+        return 1
     fi
     case "$(uname)" in
         Linux)  lib="libautovocoder_lv2.so" ;;
@@ -84,11 +84,11 @@ do_check() {
     esac
     if [ ! -f "$BUNDLE/$lib" ]; then
         echo "autovocoder: $BUNDLE/$lib missing — install incomplete"
-        exit 1
+        return 1
     fi
     if [ ! -f "$BUNDLE/manifest.ttl" ]; then
         echo "autovocoder: $BUNDLE/manifest.ttl missing — install incomplete"
-        exit 1
+        return 1
     fi
     echo "autovocoder: ok ($BUNDLE)"
 }
