@@ -153,7 +153,7 @@ if [ "$mode" = "--ams-dummy" ] || [ "$mode" = "--force-ams-dummy" ]; then
   <Extra>
     <AudioMIDISetup>
       <EngineStates>
-        <State backend="None (Dummy)"
+        <State backend="Foyer Dummy"
                driver=""
                device="Silence"
                input-device=""

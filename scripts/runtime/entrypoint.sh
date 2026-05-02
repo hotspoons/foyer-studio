@@ -269,11 +269,11 @@ if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
     fi
     # Post-seed verification — surface this in `docker logs` so a
     # JACK fallback is unambiguous to debug. Looks for both the
-    # file and the `backend="None (Dummy)"` line that EngineControl
+    # file and the `backend="Foyer Dummy"` line that EngineControl
     # parses (line 2081 of engine_dialog.cc — backend property is
     # the load-bearing field).
-    if [ -f "$cfg_dir/config" ] && grep -q 'backend="None (Dummy)"' "$cfg_dir/config" 2>/dev/null; then
-        log "Ardour config seed verified: $cfg_dir/config has Dummy backend pinned"
+    if [ -f "$cfg_dir/config" ] && grep -q 'backend="Foyer Dummy"' "$cfg_dir/config" 2>/dev/null; then
+        log "Ardour config seed verified: $cfg_dir/config has Foyer Dummy backend pinned"
     else
         log "WARNING: $cfg_dir/config missing or lacks Dummy AMS state — GUI ardour-9 will pick JACK at startup"
         log "WARNING: contents of $cfg_dir (if any):"
@@ -281,34 +281,34 @@ if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
     fi
 fi
 
-# Ardour build root — the binary lives at $FOYER_ARDOUR_BUILD_ROOT/build/headless/hardour-*
-# (hardour) or $FOYER_ARDOUR_BUILD_ROOT/build/gtk2_ardour/ardour-* (gui).
-# foyer-config picks based on $DISPLAY automatically.
-FOYER_ARDOUR_BUILD_ROOT="${FOYER_ARDOUR_BUILD_ROOT:-/opt/ardour}"
-
-# Ardour's runtime needs ARDOUR_DATA_PATH, ARDOUR_DLL_PATH, etc. The
-# upstream waf build emits a script that sets all of them — sourcing
-# it is the easiest way to keep up with new vars Ardour adds across
-# releases. Skip in stub-only mode (no Ardour install present).
-if [ -f "${FOYER_ARDOUR_BUILD_ROOT}/build/gtk2_ardour/ardev_common_waf.sh" ]; then
-    export TOP="${FOYER_ARDOUR_BUILD_ROOT}"
-    # ardev_common.sh.in:62 reads `[ x$ASAN_COREDUMP != x ]` with an
-    # unquoted expansion, and there are similar patterns later in the
-    # file for diagnostic-only vars (LIBJACK, MALLOC_CONF, …). Under
-    # the entrypoint's `set -u` they all abort boot. Drop -u for the
-    # source, restore it after — the script's job is just to populate
-    # path env vars, not to enforce strictness on us.
-    set +u
-    # shellcheck disable=SC1091
-    source "${FOYER_ARDOUR_BUILD_ROOT}/build/gtk2_ardour/ardev_common_waf.sh"
-    set -u
-fi
+# Ardour env setup: apt's `/usr/bin/ardour` is a wrapper script that
+# sets `LD_LIBRARY_PATH`, `GTK_PATH`, `ARDOUR_DATA_PATH`, etc. itself
+# before exec'ing the real binary at `/usr/lib/ardour9/ardour-9.X.Y~ds`.
+# We don't need to source anything here — every Ardour invocation
+# routes through that wrapper.
+#
+# (Older revisions of this file sourced `ardev_common_waf.sh` from a
+# from-source Ardour build at /opt/ardour. We've since switched to
+# Debian sid's `ardour` package; that file no longer ships and
+# isn't needed.)
+#
+# `FOYER_ARDOUR_BUILD_ROOT` is still honored as an override for dev
+# environments that prefer a sibling source build — see
+# foyer-config::detect_ardour_executable for the resolution order.
 
 # Make sure the foyer surface .so is reachable. The Dockerfile
 # installs it under /opt/foyer/surfaces; ARDOUR_SURFACES_PATH is
 # additive, so layering `/opt/foyer/surfaces` keeps Ardour's stock
 # surfaces discoverable.
 export ARDOUR_SURFACES_PATH="/opt/foyer/surfaces:${ARDOUR_SURFACES_PATH:-}"
+
+# Same shape for the audio-backend path: Foyer ships its own
+# patched "Foyer Dummy" backend (libfoyer_audiobackend.so —
+# absolute-time-sleep timing fix vs. the upstream "None (Dummy)")
+# that we install at /opt/foyer/backends. Layering it here lets
+# Ardour discover it alongside the stock backends; the seeded
+# AMS state asks for it by name so autostart picks it.
+export ARDOUR_BACKEND_PATH="/opt/foyer/backends:${ARDOUR_BACKEND_PATH:-}"
 
 # Suppress Ardour's "this screen is not tall enough to display
 # the editor mixer" modal — fatal in container deploys where

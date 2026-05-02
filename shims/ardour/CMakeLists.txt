@@ -178,14 +178,30 @@ endif()
 
 # ── Ardour library search ──────────────────────────────────────
 #
-# Find each shared library the shim links against. The locations come
-# from Ardour 9.2's waf layout (`build/libs/<project>/lib<name>.so`).
-# If the layout changes upstream, update the HINTS below.
+# We link against Ardour's shared libraries WITHOUT requiring a full
+# Ardour source build. Two locations are checked, in order:
+#
+#   1. `<source>/build/libs/<reldir>/lib<name>.so` — the in-tree
+#      build path. Used when the user has run `python3 waf build` in
+#      the Ardour source tree (the historic dev workflow).
+#   2. System install paths under `/usr/lib/ardour9/` and
+#      `/usr/lib/<arch>/ardour9/` — used when Ardour was apt-installed
+#      from Debian (sid's `ardour` package, version 9.2.0+ds, lays its
+#      private libs out at `/usr/lib/ardour9/lib<name>.so.X.Y.Z` with
+#      SONAME-style symlinks). This is what the runtime image uses
+#      now: ~30s `waf configure` for headers, no full Ardour build.
+#
+# The `<source>/build/libs/<reldir>/lib<name>.so.0` SONAME files are
+# preferred when present so an in-tree build always wins (you may have
+# made local changes). Apt fallback kicks in for the dev-container's
+# minimum-build path and the runtime image build.
 function(foyer_find_ardour_lib var libname reldir)
   find_library(${var}
     NAMES ${libname}
-    HINTS "${ARDOUR_BUILD_DIR}/libs/${reldir}"
-    NO_DEFAULT_PATH
+    HINTS
+      "${ARDOUR_BUILD_DIR}/libs/${reldir}"
+      "/usr/lib/ardour9"
+    PATH_SUFFIXES ardour9
     REQUIRED)
   message(STATUS "Foyer shim: ${libname} → ${${var}}")
 endfunction()
@@ -288,22 +304,93 @@ set_target_properties(foyer_shim PROPERTIES
   BUILD_WITH_INSTALL_RPATH TRUE
 )
 
+# ── The Foyer Dummy audio backend ──────────────────────────────
+#
+# A vendored fork of Ardour's `None (Dummy)` backend with the
+# absolute-time-sleep timing fix baked in (search
+# `_target_cycle_us` in backends/dummy/dummy_audiobackend.cc for
+# the rationale). Lives here so Foyer can run against an
+# UNMODIFIED Ardour 9.x build — Debian package, AppImage, official
+# .deb — instead of needing the upstream source patched.
+#
+# Ardour discovers it the same way it discovers stock backends:
+# scans `ARDOUR_BACKEND_PATH` for `lib*_audiobackend.so`, calls
+# `descriptor()` on each, registers the AudioBackendInfo with
+# AudioEngine. The runtime entrypoint prepends Foyer's install
+# dir to `ARDOUR_BACKEND_PATH` so Ardour finds OUR backend
+# alongside the stock ones; the seeded AMS state asks for
+# "Foyer Dummy" by name so the autostart picks it.
+add_library(foyer_audiobackend SHARED
+  backends/dummy/dummy_audiobackend.cc
+)
+target_compile_definitions(foyer_audiobackend PRIVATE
+  PACKAGE="foyer_audiobackend"
+  ARDOURBACKEND_DLL_EXPORTS
+  WAF_BUILD
+)
+target_compile_options(foyer_audiobackend PRIVATE -Wno-deprecated-declarations)
+target_include_directories(foyer_audiobackend PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/backends/dummy
+  ${ARDOUR_INCLUDES}
+  "${ARDOUR_BUILD_DIR}/libs/ardour"
+  "${ARDOUR_BUILD_DIR}/libs/pbd"
+)
+if(FOYER_BREW_INCLUDES)
+  target_include_directories(foyer_audiobackend PRIVATE ${FOYER_BREW_INCLUDES})
+endif()
+# libltc: prefer apt's `libltc-dev` (libltc.so on system path) when
+# present; fall back to the in-tree static archive `liblibltc.a` from
+# a full Ardour source build. The Dummy backend uses libltc for the
+# LTC timecode test-tone generator option.
+find_library(LTC_LIB
+  NAMES ltc libltc
+  HINTS
+    "${ARDOUR_BUILD_DIR}/libs/libltc"
+    /usr/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu)
+if(NOT LTC_LIB)
+  message(FATAL_ERROR
+    "libltc not found. Either run a full Ardour source build, or "
+    "`apt install libltc-dev` for the system-installed version.")
+endif()
+message(STATUS "Foyer shim: libltc → ${LTC_LIB}")
+target_link_libraries(foyer_audiobackend PRIVATE
+  ${ARDOUR_LIB}
+  ${PBD_LIB}
+  ${TEMPORAL_LIB}
+  ${EVORAL_LIB}
+  ${LTC_LIB}
+  PkgConfig::GLIBMM
+  PkgConfig::SIGCPP
+  PkgConfig::LIBXML2
+)
+set_target_properties(foyer_audiobackend PROPERTIES
+  OUTPUT_NAME foyer_audiobackend
+  PREFIX "lib"
+  INSTALL_RPATH "${ARDOUR_BUILD_DIR}/libs/ardour;${ARDOUR_BUILD_DIR}/libs/pbd;${ARDOUR_BUILD_DIR}/libs/temporal;${ARDOUR_BUILD_DIR}/libs/evoral;${ARDOUR_BUILD_DIR}/libs/libltc"
+  BUILD_WITH_INSTALL_RPATH TRUE
+)
+
 # ── Install ────────────────────────────────────────────────────
 #
-# Install prefix convention: ${CMAKE_INSTALL_PREFIX}/surfaces/.
-# Users typically point Ardour at `~/.config/ardour9` so passing
-# `--prefix=$HOME/.config/ardour9` lands the shim at
-# `~/.config/ardour9/surfaces/libfoyer_shim.so` — scanned by Ardour's
-# default `ARDOUR_SURFACES_PATH`.
+# Install prefix convention: ${CMAKE_INSTALL_PREFIX}/surfaces/ for
+# the shim, ${CMAKE_INSTALL_PREFIX}/backends/ for the audio
+# backend. Users typically point Ardour at `~/.config/ardour9` so
+# passing `--prefix=$HOME/.config/ardour9` lands files at the
+# right places under that root — scanned by Ardour's default
+# `ARDOUR_SURFACES_PATH` / `ARDOUR_BACKEND_PATH`.
 install(TARGETS foyer_shim
   LIBRARY DESTINATION surfaces)
+install(TARGETS foyer_audiobackend
+  LIBRARY DESTINATION backends)
 
 message(STATUS "")
-message(STATUS "Foyer shim build configured.")
-message(STATUS "  Source:  ${CMAKE_CURRENT_SOURCE_DIR}/src")
-message(STATUS "  Output:  ${CMAKE_BINARY_DIR}/libfoyer_shim.so")
+message(STATUS "Foyer shim + backend build configured.")
+message(STATUS "  Source:  ${CMAKE_CURRENT_SOURCE_DIR}/src + ${CMAKE_CURRENT_SOURCE_DIR}/backends")
+message(STATUS "  Outputs: ${CMAKE_BINARY_DIR}/libfoyer_shim.so")
+message(STATUS "           ${CMAKE_BINARY_DIR}/libfoyer_audiobackend.so")
 message(STATUS "  Ardour:  ${FOYER_ARDOUR_SOURCE}")
 message(STATUS "")
-message(STATUS "After building, point Ardour at the shim:")
-message(STATUS "  ARDOUR_SURFACES_PATH=${CMAKE_BINARY_DIR}:\$ARDOUR_SURFACES_PATH ardour")
+message(STATUS "After building, point Ardour at both:")
+message(STATUS "  ARDOUR_SURFACES_PATH=${CMAKE_BINARY_DIR}:\$ARDOUR_SURFACES_PATH \\")
+message(STATUS "  ARDOUR_BACKEND_PATH=${CMAKE_BINARY_DIR}:\$ARDOUR_BACKEND_PATH ardour")
 message(STATUS "")

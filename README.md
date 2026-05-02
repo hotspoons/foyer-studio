@@ -125,30 +125,22 @@ when you don't have Ardour locally. The image bundles Ardour 9.2,
 the shim, the autovocoder LV2, and ~200 LV2 plugins.
 
 ```bash
-just docker-build                     # ~15 min for the Ardour compile
-just docker-run                       # serves on http://127.0.0.1:3838
+docker run --rm -it --name foyer-studio \
+  -p 3838:3838 --shm-size=1g \
+  -v foyer-projects:/projects \
+  ghcr.io/hotspoons/foyer-studio:latest
 ```
 
-JACK passthrough has four modes via `FOYER_JACK_MODE`: `embedded`
-(self-contained `jackd dummy`), `shm` (share the host's running
-JACK over `/dev/shm` — Linux only), `netjack` (connect to a remote
-NetJack2 server), and `none` (skip JACK; stub backend only).
+Open <http://localhost:3838>. This runs the **gui-dummy** mode —
+GUI Ardour painting onto an in-container Xvfb against libardour's
+"None (Dummy)" backend. No JACK, no realtime scheduling, no
+privileged flags. Works identically on Cloud Run, Docker Desktop,
+Colima, plain Linux. Audio leaves the container only via Foyer's
+WebSocket egress.
 
-```bash
-# Cloud Run / off-site demo — no host audio:
-docker run --rm -p 3838:3838 \
-  -v foyer-projects:/projects \
-  foyer-studio:latest
-
-# Linux host with running jackd — share its audio devices:
-docker run --rm -p 3838:3838 \
-  --ipc=host -v /dev/shm:/dev/shm -v /tmp:/tmp \
-  -e FOYER_JACK_MODE=shm \
-  -v foyer-projects:/projects \
-  foyer-studio:latest
-```
-
-Each mode (and Cloud Run deployment specifics) is documented in
+For real audio hardware via a host-running jackd (Linux only),
+flip into `jack-headless` mode with the privileged flags + JACK
+shm passthrough — full recipe in
 [docs/USAGE.md#path-2--docker](docs/USAGE.md#path-2--docker).
 
 ### 3. From source — the dev container

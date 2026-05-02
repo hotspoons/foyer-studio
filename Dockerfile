@@ -46,22 +46,42 @@ ARG AUTOVOCODER_REF=master
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# `--mount=type=cache` keeps apt + cargo + waf incremental builds
-# fast across rebuilds while still giving us a clean final image.
-# Only the compile artifacts that get COPY'd into stage 2 matter for
-# image size.
+# Add Debian sid as a low-priority apt source so we can pull
+# Ardour 9.2.0+ds from there (trixie's main archive carries
+# Ardour 8.12 which is ABI-incompatible with the shim's 9.x build
+# expectations). Pin sid Pin-Priority=100 / trixie=990 so apt
+# default-pulls from trixie EXCEPT for the explicit `-t sid`
+# requests below — minimizes drift onto a sid stack.
+#
+# What sid's `ardour` package transitively pulls in (also onto
+# trixie): gcc-16-base, libgcc-s1, libstdc++6, libxml2-16,
+# librubberband3, libqm-dsp0t64, libblas3, libgfortran5, liblapack3.
+# These are leaf-end runtime libs; pulling them from sid widens
+# the libstdc++ ABI to gcc-16's, which is forward-compatible with
+# trixie's gcc-14 system libs (newer libstdc++ runs older code).
+RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/sid.list \
+ && printf '%s\n' \
+      'Package: *' \
+      'Pin: release a=unstable' \
+      'Pin-Priority: 100' \
+      > /etc/apt/preferences.d/sid-pin
+
+# Build-time deps. Most of these are -dev packages for libs
+# transitively used by Ardour's headers (the shim includes them).
+# The Ardour BINARIES + LIBRARIES come from `apt -t sid ardour`
+# below, so we no longer need the toolchain to compile Ardour
+# itself — just the shim + backend + sidecar against Ardour's
+# already-installed shared libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
       pkg-config \
       cmake \
       ninja-build \
-      clang \
       git \
       curl \
       ca-certificates \
       python3 \
       python3-pip \
-      libssl-dev \
       libboost-dev \
       libgtkmm-2.4-dev \
       libglibmm-2.4-dev \
@@ -76,7 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       liblo-dev \
       librubberband-dev \
       libreadline-dev \
-      libcurl4-openssl-dev \
+      libcurl4-gnutls-dev \
       libusb-1.0-0-dev \
       libserd-dev \
       libsord-dev \
@@ -86,56 +106,66 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsamplerate0-dev \
       libpulse-dev \
       libdbus-1-dev \
-      libwebsockets-dev \
       libcwiid-dev \
       libasound2-dev \
       libjack-jackd2-dev \
       libsndfile1-dev \
       libopus-dev \
       libudev-dev \
-      libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+      libltc-dev \
+ && apt-get install -y --no-install-recommends -t sid \
+      ardour \
+ && rm -rf /var/lib/apt/lists/*
+# Two omissions worth noting:
+#
+# 1. `libwebsockets-dev` intentionally omitted — the Rust sidecar
+#    uses pure-Rust tokio-tungstenite for its WS surface; the shim
+#    doesn't touch websockets. The package was a defensive include
+#    for an Ardour build path we no longer take. Removing it also
+#    drops a transitive `libssl-dev` puller, but the pin fix above
+#    is the load-bearing thing — the `Pin: a=unstable Pin-Priority:
+#    100` on sid (and absence of an explicit `a=stable` boost)
+#    leaves trixie/main and trixie-security tied at the default 500
+#    so apt naturally picks the security-updated `libssl-dev=u2`
+#    over `=u1` from main. Earlier revisions of this Dockerfile
+#    boosted `a=stable` to 990, which (because trixie-security is
+#    `a=stable-security`, not `a=stable`) demoted security to 500
+#    while main went to 990, flipping the version preference.
+#
+# 2. `libcurl4-dev` is the GnuTLS flavor (not the OpenSSL one).
+#    Functionally identical for our build path (waf configure picks
+#    libcurl via pkg-config), and avoids transitively pulling
+#    libssl-dev — belt-and-braces against any future puller.
 
 # Rust toolchain — minimal profile keeps the builder lean.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+RUN curl --proto '=https' --tlsv1.2 -sSf \
+        --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
 
-# ── Ardour ────────────────────────────────────────────────────────
-# Shallow clone of the requested tag — the .git dir is the bulk of a
-# full clone, and we don't need history for a one-shot build. The
-# build itself is the slow path (~15 min on a modern CPU).
+# ── Ardour source headers ────────────────────────────────────────
+# Even though we apt-installed Ardour binaries above, Debian (like
+# upstream Ardour) doesn't ship a `-dev` package — Ardour isn't
+# designed as a library. We still need the SOURCE TREE for headers
+# the shim + backend include (`ardour/session.h` etc.), and we need
+# `waf configure` to generate a handful of config headers
+# (`libardour-config.h` etc. — these encode CMake-flag-equivalent
+# build-time switches that the headers `#ifdef`-guard on).
+#
+# Critically we DON'T run `waf build` — that's the 15-min hot
+# path. Configure-only takes ~30 s and produces every header we
+# need; the actual .so files come from the apt install.
 RUN git -c advice.detachedHead=false clone --depth 1 \
         --branch "${ARDOUR_TAG}" \
         https://github.com/Ardour/ardour.git /opt/ardour
 
-# Apply Foyer Studio patches against upstream Ardour. The patches
-# directory lives at `patches/ardour/` in this repo and is COPY'd
-# into the builder layer separately (the full repo COPY at
-# `WORKDIR /workspace` happens later, but we need patches earlier so
-# the Ardour build picks them up). Each patch is independently
-# applicable, so a future `git am --3way`-style recovery works if the
-# upstream tag drifts. See the patch headers for per-file rationale.
-COPY patches/ardour /tmp/ardour-patches
-RUN for p in /tmp/ardour-patches/*.patch; do \
-        echo "==> applying $p"; \
-        git -C /opt/ardour apply --whitespace=nowarn "$p" || { \
-            echo "==> patch $p failed against upstream tag ${ARDOUR_TAG}"; \
-            exit 1; \
-        }; \
-    done \
- && rm -rf /tmp/ardour-patches
-
 WORKDIR /opt/ardour
-# `--optimize` enables -O3 and disables debug symbols; matches the
-# upstream "release" recipe. CXXFLAGS suppresses the deprecated-decls
-# noise from vendored ydk/ytk so the build log stays scannable.
 RUN CXXFLAGS="-Wno-deprecated-declarations" \
     CFLAGS="-Wno-deprecated-declarations" \
-    python3 waf configure --optimize --noconfirm \
- && python3 waf build -j"$(nproc)"
+    python3 waf configure --optimize --noconfirm
 
 # ── Foyer shim + sidecar + autovocoder ────────────────────────────
 WORKDIR /workspace
@@ -188,6 +218,15 @@ RUN cargo build --release --manifest-path /workspace/Cargo.toml --bin foyer
 # no `netstat`). With full trixie + the diag pack below the user
 # can introspect the live container with the standard set.
 FROM debian:trixie AS runtime
+
+# Toggle for the KXStudio PPA + the four packages only it carries
+# (aida-x, airwindows-lv2, master-me, kxstudio-meta-audio-plugins-
+# collection). Default `1` keeps the full plugin set. Set to `0`
+# (CI: `--build-arg WITH_KXSTUDIO=0`) to skip when launchpad is
+# unreachable — the resulting image loses ~16 KXStudio-exclusive
+# plugins (Dexed, OB-Xd, Geonkick, TAL, AIDA-X, Airwindows,
+# Master-Me, …) but everything in Debian trixie still installs.
+ARG WITH_KXSTUDIO=1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -247,11 +286,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # klangfalter); focal has ~40 *newer* packages (Cardinal, AIDA-X,
 # Master-Me, Odin2, Airwindows, fresher LSP/DPF builds). apt picks
 # the highest version available across both.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN if [ "$WITH_KXSTUDIO" = "0" ]; then \
+      echo "[Dockerfile] WITH_KXSTUDIO=0 — skipping KXStudio PPA setup"; \
+      exit 0; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
       gpg dirmngr ca-certificates curl \
- && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x89195BA21C5CE3C72BAC1C0A0C955638F15F1FDC" \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x89195BA21C5CE3C72BAC1C0A0C955638F15F1FDC" \
       | gpg --dearmor -o /usr/share/keyrings/kxstudio-archive-keyring.gpg \
- && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xDF1BC724E4ED8A947FF0B0A1F8599E482BD84BD9" \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xDF1BC724E4ED8A947FF0B0A1F8599E482BD84BD9" \
       | gpg --dearmor >> /usr/share/keyrings/kxstudio-archive-keyring.gpg \
  && for suite in bionic focal; do \
       for repo in plugins libs apps kxstudio; do \
@@ -282,7 +327,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # plugins (Dexed/DX7, OB-Xd, Geonkick, TAL, Infamous, MOD
 # pedalboard, Klangfalter, Sorcer, Fabla, ArtyFX, sherlock.lv2,
 # moony.lv2, …) that have no Debian counterpart.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN KXSTUDIO_PKGS=""; \
+    if [ "$WITH_KXSTUDIO" = "1" ]; then \
+      KXSTUDIO_PKGS="aida-x airwindows-lv2 master-me kxstudio-meta-audio-plugins-collection"; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates python3 tini \
       # GTK/Pango/Cairo runtime support that the dev container gets
       # transitively via its `-dev` packages (libgtkmm-2.4-dev pulls
@@ -347,9 +396,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       yoshimi yoshimi-data amsynth whysynth \
       hydrogen hydrogen-data drumgizmo guitarix-lv2 \
       \
-      aida-x airwindows-lv2 master-me \
-      kxstudio-meta-audio-plugins-collection \
- && apt-get purge -y gpg dirmngr \
+      $KXSTUDIO_PKGS \
+ && if [ "$WITH_KXSTUDIO" = "1" ]; then apt-get purge -y gpg dirmngr; fi \
  && apt-get autoremove -y --purge \
  && rm -rf /var/lib/apt/lists/*
 
@@ -367,7 +415,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # happily; users just lose the native-GUI-projection feature.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gpg ca-certificates curl \
- && curl -fsSL https://xpra.org/xpra.asc \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+        https://xpra.org/xpra.asc \
       | gpg --dearmor -o /usr/share/keyrings/xpra-keyring.gpg \
  && echo "deb [signed-by=/usr/share/keyrings/xpra-keyring.gpg] https://xpra.org/ trixie main" \
       > /etc/apt/sources.list.d/xpra.list \
@@ -393,42 +442,52 @@ RUN groupadd --gid 1000 foyer \
  && useradd --uid 1000 --gid foyer --shell /bin/bash --create-home foyer \
  && usermod -aG audio foyer
 
-# ── Ardour binaries + libs from the builder stage ────────────────
-# Ardour's `ardev_common_waf.sh` env script computes paths off
-# `$TOP` (which the entrypoint sets to /opt/ardour), so we keep the
-# build-tree layout intact rather than try to install-relocate it.
-# Copy:
-#   build/    — libardour .so files, headless binary, panners,
-#               surfaces, vamp plugins, backends.
-#   share/    — themes, midi_maps, patchfiles, export formats; all
-#               referenced via ARDOUR_DATA_PATH / friends.
-#   gtk2_ardour/ — UI assets + the icon set the headless binary
-#               still pulls from for plugin badges.
-#   libs/ardour/test/data, libs/pbd/test, libs/evoral/test/testdata
-#               are referenced by ARDOUR_TEST_PATH/PBD_TEST_PATH —
-#               not strictly required for runtime but tiny enough
-#               that copying the whole libs/ tree is simpler than
-#               selecting subdirs and breaking on a future schema move.
-COPY --from=builder /opt/ardour/build /opt/ardour/build
-COPY --from=builder /opt/ardour/libs /opt/ardour/libs
-COPY --from=builder /opt/ardour/gtk2_ardour /opt/ardour/gtk2_ardour
-COPY --from=builder /opt/ardour/share /opt/ardour/share
-# The waf-generated env script sets every var Ardour needs at
-# runtime (LD_LIBRARY_PATH, ARDOUR_DATA_PATH, …); the entrypoint
-# sources it.
-RUN test -f /opt/ardour/build/gtk2_ardour/ardev_common_waf.sh
+# ── Ardour 9.2 from sid ──────────────────────────────────────────
+# Same trick as the builder stage: trixie's archive carries Ardour
+# 8.12 only; we want 9.2. Pin sid at low priority so its packages
+# only get used for what we explicitly request, and pull just
+# `ardour` (which Depends on `ardour-data` and `ardour-lv2-plugins`
+# by version, so apt cascades both transitively from sid too).
+#
+# What this gives us:
+#   /usr/bin/ardour          — wrapper script (sets LD_LIBRARY_PATH,
+#                              GTK_PATH, ARDOUR_DATA_PATH, …) then
+#                              exec's the real binary.
+#   /usr/lib/ardour9/        — private libs + helper bins +
+#                              backends/ + surfaces/ + engines/.
+#   /usr/bin/ardour9-*       — session_utils helpers (incl.
+#                              ardour9-new_empty_session that
+#                              foyer-cli's bash launcher invokes
+#                              for new-session bootstrapping).
+#
+# foyer-cli's executable detection (foyer-config::detect_ardour_executable)
+# uses $PATH first, so `/usr/bin/ardour` is picked up automatically.
+# `find_new_empty_session_helper` looks for `ardour*-new_empty_session`
+# in the same dir as the resolved exec — `/usr/bin/` matches, no
+# manual paths to maintain.
+RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/sid.list \
+ && printf '%s\n' \
+      'Package: *' \
+      'Pin: release a=unstable' \
+      'Pin-Priority: 100' \
+      > /etc/apt/preferences.d/sid-pin \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends -t sid \
+      ardour \
+ && rm -rf /var/lib/apt/lists/*
 
-# Detection in `foyer-config::detect_ardour_executable` walks
-# `$FOYER_ARDOUR_BUILD_ROOT/build/headless/` for `hardour-<ver>` —
-# the Dockerfile's ENV pins that to `/opt/ardour`, so the Rust side
-# resolves the binary without us having to install it onto $PATH.
-# Earlier versions copied the binary into /usr/local/bin/hardour and
-# that broke the dev-build wrapping (`ardour_dev_root` checks the
-# binary lives in `*/build/headless/`).
+# `foyer-config::detect_ardour_executable` searches $PATH first, so
+# `/usr/bin/ardour` (apt's wrapper script that sets env vars + execs
+# the real binary at /usr/lib/ardour9/ardour-9.2.0~ds) is found
+# automatically. `find_new_empty_session_helper` scans the same dir
+# as the resolved exec for `ardour*-new_empty_session` — apt installs
+# `/usr/bin/ardour9-new_empty_session` so that picker hits cleanly.
 
 # ── Foyer shim + autovocoder + sidecar binary ────────────────────
 COPY --from=builder /workspace/shims/ardour/cmake-build/libfoyer_shim.so \
      /opt/foyer/shim/libfoyer_shim.so
+COPY --from=builder /workspace/shims/ardour/cmake-build/libfoyer_audiobackend.so \
+     /opt/foyer/backends/libfoyer_audiobackend.so
 COPY --from=builder /opt/lv2 /opt/lv2
 COPY --from=builder /workspace/target/release/foyer /usr/local/bin/foyer
 
@@ -438,15 +497,12 @@ COPY --from=builder /workspace/target/release/foyer /usr/local/bin/foyer
 # bundles into `/opt/foyer/sample-sessions/` via a separate COPY (or
 # `--build-arg`) when you want preloaded content for visitors.
 
-# Wire the shim into every place Ardour might look for it. The
-# spawner used by `launch_project` runs in dev-build mode (because
-# it detects ardour at `*/build/headless/`), and that mode looks for
-# the shim at `<root>/build/libs/surfaces/foyer_shim/`. Mirror to
-# the legacy `~/.config/ardour9/surfaces/` and `/opt/foyer/surfaces/`
-# paths too so a directly-launched hardour also picks it up.
+# Wire the shim into the search paths Ardour scans on startup.
+# `~/.config/ardour9/surfaces/` is the per-user default;
+# `/opt/foyer/surfaces/` is what the entrypoint prepends to
+# `ARDOUR_SURFACES_PATH` so `ardour-9` picks it up regardless of
+# $HOME (matters for Cloud Run which rewrites uid/gid).
 RUN install -D /opt/foyer/shim/libfoyer_shim.so \
-      /opt/ardour/build/libs/surfaces/foyer_shim/libfoyer_shim.so \
- && install -D /opt/foyer/shim/libfoyer_shim.so \
       /home/foyer/.config/ardour9/surfaces/libfoyer_shim.so \
  && install -D /opt/foyer/shim/libfoyer_shim.so \
       /opt/foyer/surfaces/libfoyer_shim.so
@@ -468,21 +524,16 @@ WORKDIR /home/foyer
 # Cloud Run injects $PORT; the entrypoint honors it. 3838 is the
 # documented default.
 #
-# `ASAN_COREDUMP=0` is required because Ardour's
-# `ardev_common.sh` (which the entrypoint sources to populate
-# ARDOUR_DATA_PATH / DLL_PATH / etc.) uses `[ x$ASAN_COREDUMP != x ]`
-# with an unquoted expansion. The entrypoint runs under `set -u`, so
-# an unset var aborts boot with "ASAN_COREDUMP: unbound variable".
-# Defaulting it here means users don't have to pass `-e ASAN_COREDUMP=0`
-# on every `docker run`.
+# `FOYER_ARDOUR_BUILD_ROOT` no longer set — the apt-installed Ardour
+# is found via $PATH (foyer-config's detect path #1), so there's no
+# build root to point at. The variable still works as an override
+# for dev contexts where someone has a sibling source build.
 ENV PORT=3838 \
     FOYER_JACK_MODE=embedded \
     FOYER_BACKEND=ardour \
     FOYER_JAIL=/projects \
     FOYER_SAMPLE_RATE=48000 \
-    LV2_PATH=/usr/lib/lv2:/home/foyer/.lv2 \
-    FOYER_ARDOUR_BUILD_ROOT=/opt/ardour \
-    ASAN_COREDUMP=0
+    LV2_PATH=/usr/lib/lv2:/home/foyer/.lv2
 # 3838 = foyer sidecar (HTTP+WS, the user-facing port).
 # 14500 = xpra HTML5 / TCP socket. Foyer's own UI proxies this through
 # `/_xpra/*` + `/ws/plugin-gui` on 3838 so the typical `docker run` only

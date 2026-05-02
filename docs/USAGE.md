@@ -31,11 +31,13 @@ Studio Shim** is the box you tick.
   9.2 ABI; 8.x and 10.x do not. Get it from
   <https://community.ardour.org/download> — paying their suggested
   donation is the right call.
-- **JACK 2** — Ardour's preferred audio backend. macOS: Homebrew's
-  `jack` package, or the JACK installer at <https://jackaudio.org>.
-  Linux: your distro's `jackd2` package. (Ardour can also run
-  against ALSA / CoreAudio directly if you don't want JACK; the
-  shim is agnostic.)
+- **An audio backend Ardour can drive.** The shim is backend-agnostic;
+  pick whichever you'd already use with stand-alone Ardour:
+  - **macOS** — CoreAudio works out of the box (Ardour's default
+    on macOS). JACK via Homebrew's `jack` package or the
+    [jackaudio.org](https://jackaudio.org) installer is also fine.
+  - **Linux** — JACK 2 (`jackd2`) for the typical low-latency path,
+    or ALSA / PipeWire for a JACK-less setup.
 - A browser. Chrome/Edge/Safari/Firefox all work. Mobile Safari
   too — the UI is responsive.
 
@@ -117,11 +119,23 @@ foyer serve --backend ardour --listen 0.0.0.0:3838 \
   --tls-cert ~/.config/foyer/dev.pem --tls-key ~/.config/foyer/dev-key.pem
 ```
 
-If you don't have a cert pair, the dev container's `just run-tls`
-recipe shows the openssl one-liner to generate a self-signed pair.
-Mobile browsers will surface a one-time warning that you accept;
-after that the origin is trusted enough for `getUserMedia` and the
-worklets.
+If you don't have a cert pair, generate a self-signed one. Replace
+`192.168.1.42` with this machine's LAN IP so the cert is valid when
+the phone connects:
+
+```bash
+mkdir -p ~/.config/foyer
+openssl req -x509 -newkey rsa:2048 -nodes -days 1825 \
+  -keyout ~/.config/foyer/dev-key.pem \
+  -out    ~/.config/foyer/dev.pem \
+  -subj   "/CN=foyer-dev" \
+  -addext "subjectAltName = IP:192.168.1.42, DNS:localhost"
+```
+
+Find your LAN IP with `ipconfig getifaddr en0` (macOS) or
+`ip -4 addr show | grep inet` (Linux). Mobile browsers will
+surface a one-time warning that you accept; after that the
+origin is trusted enough for `getUserMedia` and the worklets.
 
 For sharing off-network — to a collaborator over the public
 internet — open **Session → Remote Access…** in the UI. That spins
@@ -154,434 +168,236 @@ Foyer otherwise runs identically.
 
 | Distro | Install command |
 |---|---|
-| **Debian trixie** (13)        | `sudo apt install xpra xpra-html5` after adding the [xpra.org](https://xpra.org/install.html) apt repo (the trixie debs were dropped from Debian's main archive at release time — see `.devcontainer/Dockerfile` for the apt source snippet). |
-| **Debian bookworm** (12) / Ubuntu 24.04+ | `sudo apt install xpra xpra-html5` |
+| **Debian trixie** (13)        | `sudo apt install xpra xpra-x11 xpra-html5` after adding the [xpra.org](https://xpra.org/install.html) apt repo (the trixie debs were dropped from Debian's main archive at release time). |
+| **Debian bookworm** (12) / Ubuntu 24.04+ | `sudo apt install xpra xpra-x11 xpra-html5` |
 | **Fedora / RHEL**             | `sudo dnf install xpra xpra-html5` |
 | **Arch**                      | `sudo pacman -S xpra` (xpra-html5 is an AUR package) |
 | **macOS**                     | `brew install --cask xpra` (or [download](https://xpra.org/install.html#macos) and install the .dmg) |
 
-On Linux servers without a graphical environment, xpra brings its
-own Xvfb internally — no other X dependencies. Restart `foyer
-serve` after installing and the toggle appears.
+`xpra-x11` is the X11-server side (modern xpra split it out from
+the `xpra` meta-package); without it `xpra start :NN` aborts with
+"you must install 'xpra-x11' to use 'seamless'". On Linux servers
+without a graphical environment, xpra brings its own Xvfb internally
+— no other X dependencies. Restart `foyer serve` after installing
+and the toggle appears.
 
 ## Path 2 — Docker
 
-The `Dockerfile` at the repo root produces a self-contained image:
-Ardour 9.2 compiled from source, the C++ shim, the autovocoder LV2
-plugin, the Rust sidecar, and ~200 LV2 plugins for tracks-with-
-sound on day one. The image weighs in around 2 GB and the slow path
-is the Ardour build (~15 min on a modern CPU); subsequent builds
-benefit from BuildKit's layer cache.
+The published image bundles unmodified upstream Ardour 9.2, our
+C++ shim, our [vendored "Foyer Dummy" audio backend](../shims/ardour/backends/dummy/)
+(a fork of Ardour's "None (Dummy)" with an absolute-time-sleep
+timing fix that keeps the audio clock locked to wall clock on
+non-RT threads — what makes pop-free playback possible on Cloud
+Run), the Rust sidecar, and a curated ~200-LV2-plugin pack.
+Multi-arch (amd64 + arm64) on GHCR; `docker pull` auto-selects
+the right arch.
 
-### Quickstart — run a published image
-
-CI publishes multi-arch images (linux/amd64 + linux/arm64) to GHCR
-on every push. Pulls auto-select the right arch — no
-`--platform linux/amd64` ceremony on Apple Silicon.
+### Standalone — works everywhere
 
 ```bash
-docker run --rm -it -p 3838:3838 \
-  --shm-size=1g \
-  --name foyer \
+docker run --rm -it --name foyer-studio \
+  -p 3838:3838 --shm-size=1g \
+  -v foyer-projects:/projects \
   ghcr.io/hotspoons/foyer-studio:latest
 ```
 
-Open <http://127.0.0.1:3838>. (Or `:snapshot-latest` for the most
-recent feature-branch build, or pin to a SHA-suffixed tag like
-`:snapshot-abc1234` for an immutable reproducible run.)
+Open <http://localhost:3838>. That's it.
 
-This is the **gui-dummy** runtime mode (default since the
-2026-04-30 build): GUI Ardour painting onto an in-container Xvfb,
-using libardour's "None (Dummy)" backend. No JACK, no realtime
-scheduling, no privileged flags. Works the same on Cloud Run,
-Colima, Docker Desktop, plain Linux. Foyer renders audio through
-its own browser-side egress — the DAW doesn't need a soundcard.
+This is the **gui-dummy** runtime mode (default): GUI Ardour
+painting onto an in-container Xvfb, using libardour's "None
+(Dummy)" backend. No JACK, no realtime scheduling, no privileged
+flags. Audio leaves the container only via Foyer's WebSocket
+egress — the DAW doesn't need a soundcard. Identical behavior on
+Cloud Run, Docker Desktop, Colima, plain Linux.
 
-`--shm-size=1g` matters: libardour reserves ~107 MB of POSIX shm
-for its audio graph during session load, and Docker's default
-64 MB tmpfs would ENOMEM the open. (Cloud Run sizes `/dev/shm` by
-memory allocation automatically — ~50% of `--memory` — so the
-gcloud command in the Cloud Run section below doesn't need an
-explicit shm flag.)
+Three flags worth understanding:
 
-Persist projects across runs by adding `-v foyer-projects:/projects`
-(named volume) or `-v ~/foyer-projects:/projects` (host bind mount).
+- **`-p 3838:3838`** — the only port Foyer needs to expose. The
+  xpra endpoint at 14500 (used for native-plugin-GUI projection)
+  is proxied through 3838 internally; you only publish 14500
+  separately if you want raw access for debugging.
+- **`--shm-size=1g`** — libardour reserves ~107 MB of POSIX shm
+  during session load. Docker's default 64 MB tmpfs ENOMEMs the
+  open. Cloud Run gen2 auto-sizes `/dev/shm` to ~50% of `--memory`,
+  so this flag isn't needed there.
+- **`-v foyer-projects:/projects`** — see **Volumes** below. Without
+  it, every project upload vanishes on container stop.
 
-### Power-user mode — real JACK + RT scheduling (`jack-headless`)
+### Volumes
 
-For real-audio paths (driving host hardware, consuming a host-
-mounted jackd registry, low-latency tracking) flip into
-`jack-headless` mode. This needs `CAP_SYS_NICE` and the rtprio /
-memlock rlimits — gVisor-based hosts (Cloud Run gen2) strip
-those, so this mode only runs on plain docker / Colima /
-GKE-with-privileged-pods / fly.io with experimental privileged.
+| Mount | What's there | When you need it |
+|---|---|---|
+| `/projects` | Ardour session dirs uploaded via the UI, plus anything copied in directly. | Always — without persistence, container restart loses everything. Named volume (`foyer-projects`) for "I just want it to stick around"; bind mount (`-v ~/foyer-projects:/projects`) for "I want to inspect / version-control sessions from the host". |
+| `/dev/shm` | POSIX shm registry for the host's jackd. | Only when running in `jack-headless` mode against a host-running jackd (next section). |
+| `/tmp` | JACK's filesystem socket files. | Same — only for host-jackd passthrough. |
+
+For host-bind mounts, add `--user "$(id -u):$(id -g)"` so files
+written from inside the container land owned by your host user
+instead of the image's default uid 1000.
+
+### Advanced — host JACK passthrough (real audio, Linux only)
+
+For driving real audio hardware, flip into `jack-headless` mode and
+share the host's running jackd:
 
 ```bash
-docker run --rm -it \
-  --privileged \
-  --ulimit rtprio=95 \
-  --ulimit memlock=-1 \
-  --shm-size=2g \
-  -p 3838:3838 \
+# 1. Start jackd on the host (if not already running):
+jackd -R -d alsa -d hw:0 -r 48000 -p 1024 &
+
+# 2. Run the container against that jackd:
+docker run --rm -it --name foyer-studio \
+  -p 3838:3838 --shm-size=1g \
+  --privileged --ulimit rtprio=95 --ulimit memlock=-1 \
+  --ipc=host \
+  -v /dev/shm:/dev/shm -v /tmp:/tmp:rw \
+  -v foyer-projects:/projects \
+  --user "$(id -u):$(id -g)" --group-add audio \
   -e FOYER_RUNTIME_MODE=jack-headless \
-  --name foyer \
+  -e FOYER_JACK_MODE=shm \
   ghcr.io/hotspoons/foyer-studio:latest
 ```
 
-What each flag does:
+What's different vs. standalone:
 
-| Flag                                  | Why it's needed                                                                                                                                                                       |
-|---------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--privileged`                        | Lets `jackd -R` and libjack client threads request realtime scheduling. Without it `pthread_create(SCHED_FIFO)` returns EPERM and Ardour's `AudioEngine` constructor fatals.            |
-| `--ulimit rtprio=95`                  | Caps the realtime-priority value `pthread_setschedparam` may request. Without it the kernel's default rtprio rlimit (usually 0) blocks `SCHED_FIFO`.                                    |
-| `--ulimit memlock=-1`                 | Unlimited locked memory. JACK's RT threads `mlockall()` to keep their pages out of swap during processing. Without this, audio glitches under memory pressure.                          |
-| `--shm-size=2g`                       | JACK's client/server registry lives in `/dev/shm`. Default 64 MB is fine for two clients but cramped once Foyer's audio egress, ingress, and Ardour's DSP all open shm segments.        |
-| `-e FOYER_RUNTIME_MODE=jack-headless` | Tells the entrypoint to spin up jackd, run `hardour` against it, skip the Xvfb. Default is `gui-dummy`.                                                                                  |
+- **`FOYER_RUNTIME_MODE=jack-headless`** runs the headless `hardour`
+  binary against jackd with realtime scheduling — same low-latency
+  path Ardour uses normally on a desktop.
+- **`--privileged --ulimit rtprio=95 --ulimit memlock=-1`** are
+  non-negotiable for RT scheduling. Without them
+  `pthread_setschedparam(SCHED_FIFO)` returns EPERM and Ardour's
+  AudioEngine fatals at startup.
+- **`FOYER_JACK_MODE=shm` + `--ipc=host` + the `/dev/shm` and
+  `/tmp` bind mounts** let the container's libjack find the host's
+  running jackd through its POSIX-shm registry.
+- **`--user "$(id -u):$(id -g)" --group-add audio`** keep the
+  in-container uid matching the host's shm-segment owner and add
+  the runtime user to the host's `audio` group (needed for RT
+  scheduling permission on most distros).
 
-(`just docker-run` runs the gui-dummy form;
-`just docker-run-jack` runs this form with the same flags.)
+**macOS:** Docker Desktop's Linux VM doesn't expose host audio
+devices at all, so JACK shm passthrough doesn't apply. Mac users
+wanting real audio hardware should use **Path 1 (host install)**
+— `Ardour9.app` against CoreAudio works without JACK, and Foyer
+attaches identically.
 
-To consume a **host-running** jackd instead of an embedded one
-(Linux hosts only — JACK shm doesn't exist on macOS Docker
-Desktop's VM), add `-e FOYER_JACK_MODE=shm` plus the bind mounts
-detailed in the **JACK passthrough** section below.
+Other JACK modes available via `FOYER_JACK_MODE` (see env-knobs
+table below):
 
-**`ASAN_COREDUMP=0` is set inside the image now** — if you saw
-`ardev_common_waf.sh: line 62: ASAN_COREDUMP: unbound variable` on
-an earlier `:snapshot-*` tag, that was a missing default and is
-fixed in any image built after 2026-04-30.
+- **`embedded`** — in-container `jackd dummy`. The default for
+  `jack-headless` mode if you don't pass `FOYER_JACK_MODE`. Useful
+  on a host without its own jackd when you want the RT-scheduling
+  path anyway (rare).
+- **`netjack`** — the container connects to a remote NetJack2
+  server over the LAN. Needs `FOYER_NETJACK_HOST` + optionally
+  `FOYER_NETJACK_PORT` (default 19000).
+- **`none`** — skip JACK entirely (only useful with
+  `FOYER_BACKEND=stub` for demo mode).
 
-### Cloud Run notes (gen2 sandbox)
+### Container env knobs
 
-The Quickstart `docker run` above already matches what Cloud Run
-gen2 supports — gui-dummy mode needs no privileged flags, no
-ulimits, and no shm sizing (gen2 auto-sizes `/dev/shm`). The only
-local-only flags that don't translate are listed for reference:
+The image's [`entrypoint.sh`](../scripts/runtime/entrypoint.sh)
+honors these on every boot:
 
-**Prerequisite — Artifact Registry remote repo proxying ghcr.io.**
-Cloud Run can ONLY pull from `gcr.io` / `*-docker.pkg.dev` / `docker.io`;
-`ghcr.io/...` URLs are rejected at deploy time. Set up a one-time
-remote repo that transparently proxies ghcr (preserves multi-arch
-manifests, caches layers after first pull):
+| Env var | Default | What it does |
+|---|---|---|
+| `PORT` | `3838` | Bind port. Cloud Run injects this. |
+| `FOYER_BACKEND` | `ardour` | `stub` skips Ardour entirely. |
+| `FOYER_JAIL` | `/projects` | File-picker root — bind a volume here. |
+| `FOYER_RUNTIME_MODE` | `gui-dummy` | `gui-dummy` (works everywhere) or `jack-headless` (needs privileged + rtprio/memlock). `auto` picks based on rtprio probe. |
+| `FOYER_JACK_MODE` | `embedded` | Only when `jack-headless`: one of `embedded` / `shm` / `netjack` / `none`. |
+| `FOYER_NETJACK_HOST` / `FOYER_NETJACK_PORT` | _unset_ / `19000` | NetJack2 target when `FOYER_JACK_MODE=netjack`. |
+| `FOYER_SAMPLE_RATE` | `48000` | Engine sample rate (Hz). |
+| `FOYER_PERIOD_FRAMES` | `1024` | JACK period frames (latency vs. CPU). |
+| `FOYER_TLS_CERT` / `FOYER_TLS_KEY` | _unset_ | Direct HTTPS without a fronting proxy. |
 
-```bash
-gcloud services enable artifactregistry.googleapis.com
+### Uploading and exporting projects
 
-gcloud artifacts repositories create ghcr-remote \
-  --location=us-central1 \
-  --repository-format=docker \
-  --mode=remote-repository \
-  --remote-docker-repo=https://ghcr.io \
-  --remote-repo-config-desc="ghcr.io passthrough"
-```
-
-Then any image at `ghcr.io/<owner>/<name>:<tag>` is reachable as
-`us-central1-docker.pkg.dev/<PROJECT>/ghcr-remote/<owner>/<name>:<tag>`.
-Use that URL in `--image=`.
-
-Mapping table:
-
-| Local docker flag        | Cloud Run equivalent                                                                                                       |
-|--------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| `--privileged`           | **Not supported.** JACK falls back to non-realtime scheduling. Acceptable for collab/mix work; not great for tracking.    |
-| `--network=host`         | **Not applicable.** Cloud Run terminates HTTPS at its edge; the container only sees its own NAT'd net namespace.          |
-| `--ulimit rtprio=95`     | **Not supported by gVisor.** Same fallback as `--privileged`.                                                              |
-| `--ulimit memlock=-1`    | **Not supported by gVisor.** JACK's `mlockall()` errors silently and continues without locking pages.                     |
-| `--shm-size=2g`          | **Don't pass.** Cloud Run gen2 provides `/dev/shm` automatically at ~50% of `--memory` (so `--memory=2Gi` → ~1 GiB shm). Mounts under `/dev`, `/proc`, `/sys` are rejected with "Mount paths [/dev/shm] are in one of disallowed mount points" — the older volume-mount workaround no longer works. |
-| `-e ASAN_COREDUMP=0`     | Already baked into the image's `ENV` block (any image after 2026-04-30) — pass nothing. For older snapshots, add `--set-env-vars=ASAN_COREDUMP=0`. |
-
-Reference deploy (substitute your project ID):
-
-```bash
-gcloud run deploy foyer-studio \
-  --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/ghcr-remote/hotspoons/foyer-studio:latest \
-  --region=us-central1 \
-  --port=3838 \
-  --memory=2Gi --cpu=2 \
-  --min-instances=0 --max-instances=1 \
-  --execution-environment=gen2 \
-  --cpu-boost \
-  --timeout=3600 \
-  --allow-unauthenticated
-```
-
-`--cpu-boost` matters because Ardour's session load reads thousands
-of small files; cold-start without boost is ~15s slower. The
-`--timeout=3600` covers a long-running collaborative session
-(default Cloud Run timeout is 60s).
+The UI's **Session → Upload Project…** takes a `.zip`, `.tar.gz`,
+or `.tar.zst` archive and unpacks into `/projects`. **Session →
+Export Project…** does the reverse. The upload pipeline runs four
+layers of defense (symlink-reject, zip-bomb caps, XML scrubber for
+`<Script>` / `<Videotimeline>` blocks, deletion of `instant.xml` /
+`*.history`); legitimate Lua scripts in your own sessions are
+preserved as inert XML comments and can be restored on a trusted
+desktop via `foyer scrub-restore <session.ardour>`. Full
+threat-model walk-through in [SECURITY.md](SECURITY.md).
 
 ### Building the image locally
 
 ```bash
-just docker-build
-# or, for a custom tag / extra build args:
-just docker-build image=ghcr.io/me/foyer:dev args="--build-arg ARDOUR_TAG=master"
+just docker-build       # ~15 min for the Ardour compile, then cached
+just docker-run         # standalone (gui-dummy) form
+just docker-run-jack    # jack-headless form with the privileged flags
 ```
 
-…and to spin one up locally:
-
-```bash
-just docker-run
-# Wraps `docker run` with the runtime flags listed above (privileged,
-# host net, rtprio + memlock ulimits, 2g shm). Override the image tag:
-#   just docker-run image=ghcr.io/me/foyer:dev
-```
-
-Open <http://127.0.0.1:3838>. The first boot lights up an internal
-`jackd dummy` so the headless Ardour the picker spawns has a backend
-to talk to; pick (or upload) a project and you're mixing.
-
-### Container env knobs
-
-The image's [`entrypoint.sh`](../scripts/runtime/entrypoint.sh) reads
-these on every boot:
-
-| Env var               | Default       | What it does                                                                                                  |
-|-----------------------|---------------|---------------------------------------------------------------------------------------------------------------|
-| `PORT`                | `3838`        | Port to bind. Cloud Run injects this; we honor it.                                                            |
-| `FOYER_BACKEND`       | `ardour`      | Initial backend id. `stub` skips Ardour entirely.                                                             |
-| `FOYER_JAIL`          | `/projects`   | Directory the file picker is confined to. Bind-mount a host volume here for persistent projects.              |
-| `FOYER_RUNTIME_MODE`  | `gui-dummy`   | `gui-dummy` (default) — GUI Ardour + Xvfb + libardour Dummy backend, works everywhere. `jack-headless` — `hardour` + `jackd` + RT scheduling, requires `--privileged` + rtprio/memlock ulimits. `auto` — probes rtprio at boot and picks `jack-headless` if available, else `gui-dummy`.                       |
-| `FOYER_JACK_MODE`     | `embedded`    | Only honored when `FOYER_RUNTIME_MODE=jack-headless`. One of `embedded` / `shm` / `netjack` / `none`. See **JACK passthrough** below.                              |
-| `FOYER_SAMPLE_RATE`   | `48000`       | Engine sample rate, Hz.                                                                                       |
-| `FOYER_PERIOD_FRAMES` | `1024`        | JACK period frames (latency vs. CPU tradeoff). Honored only by `embedded` and `netjack` modes.                |
-| `FOYER_JACK_REALTIME` | `auto`        | `auto` probes `ulimit -r` and uses jackd's `-R -P 10` only when the kernel allows realtime scheduling. `on` forces RT (fails fast in non-privileged containers). `off` always non-RT. Cloud Run / non-privileged docker auto-resolves to `off`. |
-| `FOYER_NETJACK_HOST`  | _unset_       | NetJack2 server hostname or `host:port`. Required when `FOYER_JACK_MODE=netjack`.                             |
-| `FOYER_NETJACK_PORT`  | `19000`       | NetJack2 server port; only used if `FOYER_NETJACK_HOST` doesn't already include a port.                       |
-| `FOYER_TLS_CERT`      | _unset_       | PEM cert path (for direct HTTPS without a fronting proxy). Pair with `FOYER_TLS_KEY`.                         |
-| `FOYER_TLS_KEY`       | _unset_       | PEM key path matching `FOYER_TLS_CERT`.                                                                       |
-| `FOYER_LISTEN`        | `0.0.0.0:$PORT` | Override the listen address entirely. The defaults already DTRT; reach for this only if you need IPv6 or a unix socket. |
-
-### JACK passthrough — the four modes
-
-The container has its own `jackd` available. How (or whether) it
-connects to host audio depends on `FOYER_JACK_MODE`:
-
-#### `embedded` (default)
-
-`jackd -d dummy` runs inside the container. No host audio. This is
-the right mode for Cloud Run, fly.io, an off-site demo box —
-anywhere the container has no hardware to drive. The browser still
-gets audio via the master-tap egress over WebSocket; collaborators
-can still send their mics in. The DAW just doesn't push samples to
-a soundcard.
-
-```bash
-docker run --rm -p 3838:3838 -v foyer-projects:/projects foyer-studio:latest
-```
-
-#### `shm` — share the host's running JACK over `/dev/shm`
-
-Host already has `jackd` running. The JACK client libs find their
-server through `/dev/shm/jack-<uid>/*` and `/tmp/jack-<uid>/*`
-sockets, so we bind-mount them in. **Linux hosts only** — JACK's
-shm path doesn't exist on macOS Docker Desktop's VM.
-
-```bash
-# On the host first:
-jackd -R -d alsa -d hw:0 -r 48000 -p 1024 &
-
-# Then in the container:
-docker run --rm -p 3838:3838 \
-  --ipc=host \
-  -v /dev/shm:/dev/shm \
-  -v /tmp:/tmp:rw \
-  -e FOYER_JACK_MODE=shm \
-  -v foyer-projects:/projects \
-  --user "$(id -u):$(id -g)" \
-  --group-add audio \
-  foyer-studio:latest
-```
-
-`--ipc=host` lets the container's JACK clients talk to the host
-server's POSIX shm segments. `--user "$(id -u):$(id -g)"` keeps
-file ownership predictable on the bind mounts (the image's default
-`foyer:foyer` uid/gid is 1000, but if your host user is uid 1001
-the shm segments belong to a different uid). `--group-add audio`
-adds the runtime user to the host's `audio` group so realtime
-priorities can be requested.
-
-#### `netjack` — connect over the network
-
-Useful when host and container are on different machines (e.g. a
-home studio host and a cloud-rendered Foyer instance). The
-container spawns a JACK client with the `net` driver pointed at
-the remote NetJack2 server.
-
-```bash
-# On the audio host (linux):
-#   apt install jack-tools  # for jack_load
-jack_load netmanager &     # publishes the host's jackd over the LAN
-
-# On the Foyer container's host:
-docker run --rm -p 3838:3838 \
-  -e FOYER_JACK_MODE=netjack \
-  -e FOYER_NETJACK_HOST=192.168.1.42 \
-  -e FOYER_NETJACK_PORT=19000 \
-  -v foyer-projects:/projects \
-  foyer-studio:latest
-```
-
-Latency tracks the LAN round-trip; on a quiet wired LAN this is
-typically 5–10 ms. NetJack2 is built into JACK 2 — no extra
-package needed in the container.
-
-#### `none` — skip JACK entirely
-
-For when you only want the stub backend (Foyer demo mode without
-a real DAW behind it).
-
-```bash
-docker run --rm -p 3838:3838 \
-  -e FOYER_JACK_MODE=none \
-  -e FOYER_BACKEND=stub \
-  foyer-studio:latest
-```
-
-### Docker on macOS — about audio passthrough
-
-Docker Desktop on macOS runs containers inside a Linux VM that
-**doesn't** expose CoreAudio devices. `embedded` and `netjack`
-modes still work; `shm` does not (no host JACK to share). Mac users
-who need real audio hardware should use **Path 1 (host install)**.
-
-### Persistent projects
-
-The image stores nothing in `/projects` itself, so without a volume
-all uploads vanish on container stop. Pin a Docker volume:
-
-```bash
-docker volume create foyer-projects
-docker run --rm -p 3838:3838 -v foyer-projects:/projects foyer-studio:latest
-```
-
-…or a host directory bind-mount if you want to inspect the
-filesystem outside the container:
-
-```bash
-mkdir -p ~/foyer-projects
-docker run --rm -p 3838:3838 \
-  -v ~/foyer-projects:/projects \
-  --user "$(id -u):$(id -g)" \
-  foyer-studio:latest
-```
-
-### Uploading and exporting projects
-
-Once the container is running, the UI's **Session → Upload
-Project…** action takes a `.zip`, `.tar.gz`, or `.tar.zst` archive
-and unpacks it into the jailed `/projects` directory. Collisions
-get a numeric suffix (`my-session-2`). The matching **Export
-Project…** action saves the open session and downloads it as a
-`.tar.gz`. This is the easiest way to seed a fresh container with
-existing Ardour sessions, or move sessions between an embedded
-deploy and a desktop.
-
-The upload pipeline runs four layers of defense before the
-project lands in the jail — symlink-rejecting extractor, zip-bomb
-caps, an XML scrubber that quarantines `<Script>` /
-`<Videotimeline>` blocks (Ardour auto-executes them; we don't),
-and outright deletion of `instant.xml` / `*.history` (parsed with
-libxml2's `XML_PARSE_HUGE` → DoS surface). If you upload your own
-session and it carried legitimate Lua scripts, the originals are
-preserved as inert XML comments — restore them on a trusted
-desktop with `foyer scrub-restore <session.ardour>`. Full
-threat-model walk-through in [SECURITY.md](SECURITY.md).
-
-### Pulling a prebuilt image from GHCR
-
-CI publishes the image to GitHub Container Registry on every push.
-Two tagging schemes:
+### GHCR tags
 
 | Tag | When it updates | Pin lifetime |
 |---|---|---|
-| `ghcr.io/<owner>/foyer-studio:latest` | After every merge to `main` | Mutable |
-| `ghcr.io/<owner>/foyer-studio:main-<short-sha>` | After every merge to `main` | Immutable per commit |
-| `ghcr.io/<owner>/foyer-studio:snapshot-latest` | After every push to a non-main branch | Mutable |
-| `ghcr.io/<owner>/foyer-studio:snapshot-<short-sha>` | After every push (any branch) | Immutable per commit |
+| `ghcr.io/hotspoons/foyer-studio:latest` | After every merge to `main` | Mutable |
+| `…:main-<sha>` | After every merge to `main` | Immutable |
+| `…:snapshot-latest` | After every push to a non-main branch | Mutable |
+| `…:snapshot-<sha>` | After every push (any branch) | Immutable |
 
-Production deployments pin `main-<sha>` (or `latest` if you accept
-auto-update on every merge). Feature-branch previews — "let me see
-what this PR ships in a real container" — pull
-`snapshot-<short-sha>` from the branch's most recent CI run.
-
-```bash
-docker pull ghcr.io/hotspoons/foyer-studio:latest
-docker run --rm -p 3838:3838 -v foyer-projects:/projects \
-  ghcr.io/hotspoons/foyer-studio:latest
-```
-
-The first push of a fresh branch triggers a ~15-30 min Ardour
-compile inside the builder stage; subsequent pushes restore from
-the BuildKit cache and finish in 1-2 minutes. Cache scopes per
-branch with `main` as fallback, so a new feature branch inherits a
-warm cache.
+Production: pin `main-<sha>`. Feature-branch previews:
+`snapshot-<sha>` from the branch's most recent CI run.
 
 ### Deploying to Google Cloud Run
 
-The image is shaped to fit the free tier. Cloud Run can pull
-directly from GHCR (no need to push into Artifact Registry first):
+Cloud Run gen2 supports the standalone (gui-dummy) command directly
+— no privileged flags or shm sizing needed (gen2 auto-sizes
+`/dev/shm`). **One prerequisite:** Cloud Run can ONLY pull from
+`gcr.io` / `*-docker.pkg.dev` / `docker.io`; ghcr.io URLs are
+rejected. Set up an Artifact Registry remote-repo proxy once:
 
 ```bash
-gcloud run deploy foyer-studio \
-  --image=ghcr.io/hotspoons/foyer-studio:latest \
-  --region=us-central1 \
-  --port=3838 \
-  --memory=2Gi --cpu=2 \
-  --min-instances=0 --max-instances=1 \
-  --execution-environment=gen2 \
-  --cpu-boost \
-  --timeout=3600 \
-  --allow-unauthenticated \
-  --add-volume=name=shm,type=in-memory,size-limit=512Mi \
-  --add-volume-mount=volume=shm,mount-path=/dev/shm
+gcloud services enable artifactregistry.googleapis.com
+gcloud artifacts repositories create ghcr-remote \
+  --location=us-central1 \
+  --repository-format=docker \
+  --mode=remote-repository \
+  --remote-docker-repo=https://ghcr.io
 ```
 
-The `/dev/shm` mount is non-negotiable: gen2's default tmpfs is
-~64 MB but libardour reserves ~107 MB on session load, so without
-the explicit volume Ardour fails open with an opaque ENOMEM. 512 MB
-is generous; `size-limit` is a cap, not an allocation, so it only
-consumes physical memory when actually used.
+Then any `ghcr.io/<owner>/<name>:<tag>` is reachable as
+`<region>-docker.pkg.dev/<project>/ghcr-remote/<owner>/<name>:<tag>`.
 
-**Continuous deployment.** [`.github/workflows/cloudrun-deploy.yml`](../.github/workflows/cloudrun-deploy.yml)
-auto-deploys the `:latest` GHCR image after every successful main
-build. It's gated on the `GCP_PROJECT` repo variable being set —
-the workflow file's header has the one-time setup recipe (Workload
-Identity Federation, service account, the four secrets/variables
-to add). Once configured, every merge to `main` lands on Cloud Run
-within a couple of minutes of the GHCR push completing.
-
-For private images, mirror to Artifact Registry first:
+Deploy:
 
 ```bash
-docker pull ghcr.io/hotspoons/foyer-studio:latest
-docker tag ghcr.io/hotspoons/foyer-studio:latest \
-  us-central1-docker.pkg.dev/$PROJECT/foyer/foyer-studio:latest
-docker push us-central1-docker.pkg.dev/$PROJECT/foyer/foyer-studio:latest
-
 gcloud run deploy foyer-studio \
-  --image=us-central1-docker.pkg.dev/$PROJECT/foyer/foyer-studio:latest \
+  --image=us-central1-docker.pkg.dev/YOUR_PROJECT/ghcr-remote/hotspoons/foyer-studio:latest \
   --region=us-central1 \
   --port=3838 --memory=2Gi --cpu=2 \
   --min-instances=0 --max-instances=1 \
-  --allow-unauthenticated --execution-environment=gen2 \
-  --add-volume=name=shm,type=in-memory,size-limit=512Mi \
-  --add-volume-mount=volume=shm,mount-path=/dev/shm
+  --execution-environment=gen2 --cpu-boost \
+  --timeout=3600 \
+  --allow-unauthenticated
 ```
 
-`--execution-environment=gen2` matters: gen1 doesn't expose
-`/dev/shm` the way `jackd` expects. `--max-instances=1` is intentional —
-multiple instances would each have their own in-memory state and
-`/projects` volume, so a load-balancer hop between them would lose
-the user's session. If you need horizontal scale, that's a
-front-the-tunnel-with-a-real-orchestrator problem, not a Cloud Run
-one.
+Non-obvious flags:
 
-Cloud Run has no persistent disk on the free tier; uploaded
-projects survive only for the lifetime of the instance. For a
-public demo that's usually fine; for anything beyond that, mount a
-GCS bucket via [GCS Fuse](https://cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts)
-at `/projects` and Foyer's upload/export flows just work.
+- **`--execution-environment=gen2`** — gen2 auto-sizes `/dev/shm`
+  (gen1 doesn't, and gen1 also strips capabilities Foyer's xpra
+  spawn uses). Always pick gen2.
+- **`--cpu-boost`** — Ardour's session load reads thousands of
+  small files; cold-start without boost is ~15 s slower.
+- **`--timeout=3600`** — Cloud Run's default request timeout is
+  60 s; we want the WebSocket to survive longer than that.
+- **`--max-instances=1`** — Foyer's state lives in the container
+  and `/projects` is per-instance; multiple replicas would silently
+  lose collaborative session state.
+
+Persistent projects on Cloud Run: the free tier has no persistent
+disk, so uploads survive only for the instance lifetime. For
+anything beyond a public demo, mount a GCS bucket at `/projects`
+via [GCS Fuse](https://cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts)
+— Foyer's upload/export flows just work against it.
+
+**Continuous deployment.** [`.github/workflows/cloudrun-deploy.yml`](../.github/workflows/cloudrun-deploy.yml)
+auto-deploys `:latest` after every main build, gated on the
+`GCP_PROJECT` repo variable. The workflow header has the one-time
+WIF / service-account setup recipe.
 
 ## Logs and debugging
 
@@ -604,6 +420,14 @@ The `/console` HTTP endpoint streams the DAW log into the
 **View → Console** panel in the UI; you don't need to tail the
 file directly unless something is broken before the WebSocket
 connection comes up.
+
+For chasing audio-thread issues specifically, the shim emits a
+"cycle timing JITTER" warning in `daw.log` whenever the Dummy
+backend's process loop sees > 5 ms inter-cycle spread, and a
+"ring overflow" warning when the master-tap drain thread can't
+keep up with audio production. Both are silent on a healthy
+stream — `grep "JITTER\|ring overflow" ~/.local/state/foyer/daw.log`
+is the fastest "is something wrong" check.
 
 ## Where to read next
 
