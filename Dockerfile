@@ -219,6 +219,15 @@ RUN cargo build --release --manifest-path /workspace/Cargo.toml --bin foyer
 # can introspect the live container with the standard set.
 FROM debian:trixie AS runtime
 
+# Toggle for the KXStudio PPA + the four packages only it carries
+# (aida-x, airwindows-lv2, master-me, kxstudio-meta-audio-plugins-
+# collection). Default `1` keeps the full plugin set. Set to `0`
+# (CI: `--build-arg WITH_KXSTUDIO=0`) to skip when launchpad is
+# unreachable — the resulting image loses ~16 KXStudio-exclusive
+# plugins (Dexed, OB-Xd, Geonkick, TAL, AIDA-X, Airwindows,
+# Master-Me, …) but everything in Debian trixie still installs.
+ARG WITH_KXSTUDIO=1
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Diagnostic / shell-comfort pack. Most of these would be in any
@@ -277,7 +286,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # klangfalter); focal has ~40 *newer* packages (Cardinal, AIDA-X,
 # Master-Me, Odin2, Airwindows, fresher LSP/DPF builds). apt picks
 # the highest version available across both.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN if [ "$WITH_KXSTUDIO" = "0" ]; then \
+      echo "[Dockerfile] WITH_KXSTUDIO=0 — skipping KXStudio PPA setup"; \
+      exit 0; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
       gpg dirmngr ca-certificates curl \
  && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
         "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x89195BA21C5CE3C72BAC1C0A0C955638F15F1FDC" \
@@ -314,7 +327,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # plugins (Dexed/DX7, OB-Xd, Geonkick, TAL, Infamous, MOD
 # pedalboard, Klangfalter, Sorcer, Fabla, ArtyFX, sherlock.lv2,
 # moony.lv2, …) that have no Debian counterpart.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN KXSTUDIO_PKGS=""; \
+    if [ "$WITH_KXSTUDIO" = "1" ]; then \
+      KXSTUDIO_PKGS="aida-x airwindows-lv2 master-me kxstudio-meta-audio-plugins-collection"; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates python3 tini \
       # GTK/Pango/Cairo runtime support that the dev container gets
       # transitively via its `-dev` packages (libgtkmm-2.4-dev pulls
@@ -379,9 +396,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       yoshimi yoshimi-data amsynth whysynth \
       hydrogen hydrogen-data drumgizmo guitarix-lv2 \
       \
-      aida-x airwindows-lv2 master-me \
-      kxstudio-meta-audio-plugins-collection \
- && apt-get purge -y gpg dirmngr \
+      $KXSTUDIO_PKGS \
+ && if [ "$WITH_KXSTUDIO" = "1" ]; then apt-get purge -y gpg dirmngr; fi \
  && apt-get autoremove -y --purge \
  && rm -rf /var/lib/apt/lists/*
 

@@ -171,8 +171,18 @@ jobs:
           # pushed. The output digest is exposed at
           # ${{ steps.build.outputs.digest }}.
           outputs: type=image,name=${{ steps.tags.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          # WITH_KXSTUDIO=0: temporary workaround for the late-Apr-2026
+          # Canonical/Launchpad outage that left ppa.launchpad.net
+          # unreachable from CI runners. Skips the KXStudio PPA setup
+          # and the four KXStudio-exclusive packages (aida-x,
+          # airwindows-lv2, master-me, kxstudio-meta-audio-plugins-
+          # collection). Revert (or drop the build-arg) once
+          # ppa.launchpad.net is reachable again from GitHub-hosted
+          # runners — verify with `curl -I http://ppa.launchpad.net/`
+          # from a fresh `ubuntu-24.04` job.
           build-args: |
             ARDOUR_TAG=${{ steps.ardour.outputs.tag }}
+            WITH_KXSTUDIO=0
           # Per-(arch, scope) cache. arm64 and amd64 have wholly
           # different layer hashes once the toolchain selection
           # diverges, so sharing a cache key would just thrash. Both
