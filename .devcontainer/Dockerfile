@@ -99,6 +99,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libasound2-dev \
       libjack-jackd2-dev \
       libsndfile1-dev \
+      # libltc-dev: linear-timecode lib used by the Foyer Dummy audio
+      # backend (shims/ardour/backends/dummy/) for the LTC test-tone
+      # generator. Without it the shim's CMake bails at line 351 with
+      # "libltc not found." Mirrors the runtime Dockerfile's build stage.
+      libltc-dev \
+      # libudev-dev: defensive include — Ardour headers transitively
+      # pull a udev path on Linux via JACK/ALSA device enumeration.
+      # Same reason it lives in the production builder stage.
+      libudev-dev \
       # ---- audio runtime (optional — dummy mode works without hardware) ----
       # jackd2 ships the `jackd` daemon so Ardour can use its native backend
       # inside the container via `jackd -d dummy` (no audio device required).

@@ -403,7 +403,7 @@ pub fn detect_ardour_executable() -> Option<PathBuf> {
         return Some(p);
     }
     // 3b. In-repo convention (repo/ext/ardour) — used by this project's
-    //     `just run` and `just run-dummy` recipes.
+    //     `just run` and `just run-jack` recipes.
     let in_repo = std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .map(|p| {
