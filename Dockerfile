@@ -43,6 +43,8 @@ FROM debian:trixie-slim AS builder
 
 ARG ARDOUR_TAG=9.2
 ARG AUTOVOCODER_REF=master
+ARG GMSYNTH_VERSION=0.6.4
+ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -190,6 +192,22 @@ RUN if ! git -c advice.detachedHead=false clone --depth 1 \
     fi \
  && cd /opt/autovocoder \
  && INSTALL_DIR=/opt/lv2 ./scripts/install-lv2.sh
+
+# x42 General MIDI Synth (x42-gmsynth) prebuilt LV2 bundle.
+# Stage into /opt/lv2 so runtime gets it via the existing COPY.
+RUN case "${TARGETARCH}" in \
+      amd64|x86_64) GMSYNTH_ARCH="x86_64" ;; \
+      arm64|aarch64) GMSYNTH_ARCH="arm64" ;; \
+      *) echo "Unsupported TARGETARCH for x42-gmsynth: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && tmpdir="$(mktemp -d)" \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+      -o "${tmpdir}/gmsynth.tar.gz" \
+      "https://x42-plugins.com/x42/linux/x42-gmsynth-v${GMSYNTH_VERSION}-${GMSYNTH_ARCH}.tar.gz" \
+ && tar -xzf "${tmpdir}/gmsynth.tar.gz" -C "${tmpdir}" \
+ && install -d /opt/lv2 \
+ && cp -a "${tmpdir}/x42-gmsynth/gmsynth.lv2" /opt/lv2/ \
+ && rm -rf "${tmpdir}"
 
 # Tailwind CSS — must run BEFORE the Rust release build because
 # `cargo build --release` bakes the web tree into the binary via

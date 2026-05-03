@@ -12,6 +12,7 @@ FROM debian:trixie
 ARG TARGETPLATFORM
 ARG TARGETARCH
 ARG WITH_KXSTUDIO=0
+ARG GMSYNTH_VERSION=0.6.4
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -226,6 +227,22 @@ RUN KXSTUDIO_PKGS=""; \
       \
       $KXSTUDIO_PKGS \
  && rm -rf /var/lib/apt/lists/*
+
+# x42 General MIDI Synth (x42-gmsynth) prebuilt LV2 bundle.
+# Upstream publishes per-arch tarballs with gmsynth.lv2 included.
+RUN case "${TARGETARCH}" in \
+      amd64|x86_64) GMSYNTH_ARCH="x86_64" ;; \
+      arm64|aarch64) GMSYNTH_ARCH="arm64" ;; \
+      *) echo "Unsupported TARGETARCH for x42-gmsynth: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && tmpdir="$(mktemp -d)" \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+      -o "${tmpdir}/gmsynth.tar.gz" \
+      "https://x42-plugins.com/x42/linux/x42-gmsynth-v${GMSYNTH_VERSION}-${GMSYNTH_ARCH}.tar.gz" \
+ && tar -xzf "${tmpdir}/gmsynth.tar.gz" -C "${tmpdir}" \
+ && install -d /usr/lib/lv2 \
+ && cp -a "${tmpdir}/x42-gmsynth/gmsynth.lv2" /usr/lib/lv2/ \
+ && rm -rf "${tmpdir}"
 
 # Create vscode user (UID 1000) with passwordless sudo, mirroring the devcontainer convention.
 # Also add vscode to `audio` so `/dev/snd/*` nodes are readable when the

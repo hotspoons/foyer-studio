@@ -471,6 +471,16 @@ struct DecodedCmd
 	std::string   group_patch_color;
 	bool          has_group_patch_members = false;
 	std::vector<std::string> group_patch_members;
+	bool          has_group_patch_active = false;
+	bool          group_patch_active = true;
+	bool          has_group_patch_link_gain = false;
+	bool          group_patch_link_gain = true;
+	bool          has_group_patch_link_mute = false;
+	bool          group_patch_link_mute = true;
+	bool          has_group_patch_link_solo = false;
+	bool          group_patch_link_solo = true;
+	bool          has_group_patch_link_record = false;
+	bool          group_patch_link_record = true;
 
 	// SetTrackMidiChannelMode { track_id, direction, mode, mask }.
 	// `direction` is "capture" | "playback" (reuses `ports_direction`);
@@ -892,12 +902,48 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 		} else if (pk == "name") {
 			if (!in.read_str (out.patch_name)) return false;
 			out.has_patch_name = true;
+			out.group_patch_name = out.patch_name;
+			out.has_group_patch_name = true;
 		} else if (pk == "muted") {
 			if (!in.read_bool (out.patch_muted)) return false;
 			out.has_patch_muted = true;
 		} else if (pk == "color") {
 			if (!in.read_str (out.patch_color)) return false;
 			out.has_patch_color = true;
+			out.group_patch_color = out.patch_color;
+			out.has_group_patch_color = true;
+		} else if (pk == "members") {
+			std::size_t n = 0;
+			std::uint8_t b = in.peek ();
+			if ((b & 0xf0) == 0x90) { in.take_u8 (); n = b & 0x0f; }
+			else if (b == 0xdc)     { in.take_u8 (); n = in.take_be16 (); }
+			else if (b == 0xdd)     { in.take_u8 (); n = in.take_be32 (); }
+			else return false;
+			if (!in.ok ()) return false;
+			n = in.cap_count (n);
+			out.group_patch_members.clear ();
+			out.group_patch_members.reserve (n);
+			for (std::size_t i = 0; i < n; ++i) {
+				std::string tid;
+				if (!in.read_str (tid)) return false;
+				out.group_patch_members.push_back (tid);
+			}
+			out.has_group_patch_members = true;
+		} else if (pk == "active") {
+			if (!in.read_bool (out.group_patch_active)) return false;
+			out.has_group_patch_active = true;
+		} else if (pk == "link_gain") {
+			if (!in.read_bool (out.group_patch_link_gain)) return false;
+			out.has_group_patch_link_gain = true;
+		} else if (pk == "link_mute") {
+			if (!in.read_bool (out.group_patch_link_mute)) return false;
+			out.has_group_patch_link_mute = true;
+		} else if (pk == "link_solo") {
+			if (!in.read_bool (out.group_patch_link_solo)) return false;
+			out.has_group_patch_link_solo = true;
+		} else if (pk == "link_record") {
+			if (!in.read_bool (out.group_patch_link_record)) return false;
+			out.has_group_patch_link_record = true;
 		} else if (pk == "group_id") {
 			if (!in.read_str (out.patch_group_id)) return false;
 			out.has_patch_group_id = true;
@@ -990,6 +1036,26 @@ decode (const std::vector<std::uint8_t>& buf)
 				out.group_name = v;
 				out.patch_name = v;
 				out.has_patch_name = true;
+				out.group_patch_name = v;
+				out.has_group_patch_name = true;
+				} else if (k == "color") {
+					if (!in.read_str (out.group_color)) return out;
+				} else if (k == "members") {
+					std::size_t n = 0;
+					std::uint8_t b = in.peek ();
+					if ((b & 0xf0) == 0x90) { in.take_u8 (); n = b & 0x0f; }
+					else if (b == 0xdc)     { in.take_u8 (); n = in.take_be16 (); }
+					else if (b == 0xdd)     { in.take_u8 (); n = in.take_be32 (); }
+					else return out;
+					if (!in.ok ()) return out;
+					n = in.cap_count (n);
+					out.group_members.clear ();
+					out.group_members.reserve (n);
+					for (std::size_t i = 0; i < n; ++i) {
+						std::string tid;
+						if (!in.read_str (tid)) return out;
+						out.group_members.push_back (tid);
+					}
 				} else if (k == "kind") {
 					// CreateRegion's media-type selector ("midi" | "audio").
 					if (!in.read_str (out.create_kind)) return out;
@@ -2797,6 +2863,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
                     PBD::warning << "foyer_shim: create_group failed for '" << snap.group_name << "'" << endmsg;
                     return;
                 }
+				bool already_added = false;
+				for (auto const& existing : session.route_groups ()) {
+					if (existing == rg) {
+						already_added = true;
+						break;
+					}
+				}
+				if (!already_added) {
+					session.add_route_group (rg);
+				}
                 if (!snap.group_color.empty ()) {
                     // Convert #RRGGBB[AA] hex string to uint32_t rgba.
                     uint32_t rgba = 0;
@@ -2867,6 +2943,21 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
                         }
                     }
                 }
+				if (snap.has_group_patch_active) {
+					rg->set_active (snap.group_patch_active, nullptr);
+				}
+				if (snap.has_group_patch_link_gain) {
+					rg->set_gain (snap.group_patch_link_gain);
+				}
+				if (snap.has_group_patch_link_mute) {
+					rg->set_mute (snap.group_patch_link_mute);
+				}
+				if (snap.has_group_patch_link_solo) {
+					rg->set_solo (snap.group_patch_link_solo);
+				}
+				if (snap.has_group_patch_link_record) {
+					rg->set_recenable (snap.group_patch_link_record);
+				}
                 auto bytes = msgpack_out::encode_patch_reload ();
                 shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
             });
@@ -3149,17 +3240,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				std::shared_ptr<Processor> target_proc;
 				for (auto const& r : *routes) {
 					if (!r) continue;
-					for (uint32_t i = 0; ; ++i) {
-						auto proc = r->nth_plugin (i);
-						if (!proc) break;
-						auto pi = std::dynamic_pointer_cast<PluginInsert> (proc);
-						if (!pi) continue;
-						std::ostringstream os; os << pi->id ();
-						if (os.str () != pid) continue;
+					r->foreach_processor ([&] (std::weak_ptr<Processor> wp) {
+						if (target_proc) return;
+						auto proc = wp.lock ();
+						if (!proc) return;
+						std::ostringstream os;
+						os << proc->id ();
+						if (os.str () != pid) return;
 						target_route = r;
 						target_proc = proc;
-						break;
-					}
+					});
 					if (target_proc) break;
 				}
 				if (!target_route || !target_proc) {

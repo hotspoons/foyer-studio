@@ -546,7 +546,7 @@ master bus at all.
       into one transaction. Separate concern from the group API.
 
 ## Long term
-
+- [ ] Wire in crashed session recovery (currently just ignored, crash data deleted)
 - [ ] Scope RBAC denials to offender + admins
   - Today `forbidden_for_role` / `auth_required` errors broadcast to every connected
     client, so a viewer can see another viewer's denial banner flash by. Clean fix: add
