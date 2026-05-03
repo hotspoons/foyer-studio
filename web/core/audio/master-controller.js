@@ -65,18 +65,41 @@ class AudioController extends EventTarget {
       body.type === "session_focus_changed"
     ) {
       // Backend changed under us — the old listener's stream is
-      // dead. Tear it down; pref re-application below will start a
-      // fresh one if appropriate. `session_focus_changed` covers the
-      // "switch between two already-open sessions" case where no
-      // backend swap or session_opened fires but the audio stream
-      // the listener was reading from is no longer the focused
-      // session's stream.
+      // dead. `session_focus_changed` covers the "switch between two
+      // already-open sessions" case where no backend swap or
+      // session_opened fires but the audio stream the listener was
+      // reading from is no longer the focused session's stream.
       if (this._on) {
+        // The listener was running, which means the user just
+        // interacted with the page (the click that caused this event
+        // is well within Chrome's transient-activation window). Tear
+        // down + restart directly, NOT via _applyPref/_scheduleAutoStart.
+        //
+        // Why direct: the gesture-defer path installs a window-level
+        // capture-phase pointerdown handler that fires on the user's
+        // very next click. If that click is the Listen button itself,
+        // the handler silently start()s the listener; the click then
+        // bubbles to the button's toggle() which sees _on=true and
+        // stops it. Net effect: Listen appears to do nothing or
+        // briefly flickers on. Restarting here keeps _on continuously
+        // true, so the next Listen click is an honest stop.
         this._teardown();
         this._on = false;
         this._emitChange();
+        this.start({ silent: true }).catch((e) => {
+          // Autoplay refused (no transient activation, or extension
+          // interference). Fall back to the gesture path so the next
+          // user click revives audio.
+          console.warn("[audio-controller] direct restart after focus change failed:", e);
+          this._applyPref(null);
+        });
+      } else {
+        // Listener wasn't running — re-evaluate the pref against the
+        // new session. If the user's saved pref is "on" but they
+        // hadn't yet clicked anywhere, _applyPref will install the
+        // gesture-defer handler.
+        this._applyPref(null);
       }
-      this._applyPref(null);
     }
   }
 
