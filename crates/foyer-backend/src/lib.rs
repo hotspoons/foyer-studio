@@ -455,6 +455,17 @@ pub trait Backend: Send + Sync + 'static {
             "delete_patch_change not supported".into(),
         ))
     }
+    async fn set_track_midi_patch(
+        &self,
+        _track_id: EntityId,
+        _channel: u8,
+        _bank: i32,
+        _program: u8,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other(
+            "set_track_midi_patch not supported".into(),
+        ))
+    }
 
     async fn set_sequencer_layout(
         &self,

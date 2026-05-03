@@ -20,6 +20,7 @@
  */
 #include "msgpack_out.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -49,6 +50,7 @@
 #include "ardour/track.h"
 #include "ardour/types.h"
 #include "evoral/ControlList.h"
+#include "evoral/midi_events.h"
 #include "pbd/controllable.h"
 #include "temporal/tempo.h"
 #include "temporal/timeline.h"
@@ -363,6 +365,34 @@ emit_named_param (Out& o, const std::string& id, const char* label,
 	o.str ("scale"); o.str ("linear");
 	o.str ("value");
 	if (is_bool) o.b (bool_val); else o.f64 (num_val);
+}
+
+void
+emit_midi_patch_states (Out& o, std::shared_ptr<ARDOUR::MidiTrack> mt)
+{
+	o.array (16);
+	for (std::uint8_t chn = 0; chn < 16; ++chn) {
+		int bank = -1;
+		std::uint8_t program = 0;
+		auto bank_msb = mt->automation_control (
+			Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_MSB_BANK), true);
+		auto bank_lsb = mt->automation_control (
+			Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_LSB_BANK), true);
+		if (bank_msb && bank_lsb) {
+			bank = ((static_cast<int> (bank_msb->get_value ()) & 0x7f) << 7)
+			     | (static_cast<int> (bank_lsb->get_value ()) & 0x7f);
+		}
+		auto program_ctl = mt->automation_control (
+			Evoral::Parameter (MidiPgmChangeAutomation, chn), true);
+		if (program_ctl) {
+			program = static_cast<std::uint8_t> (
+				std::max<int> (0, std::min<int> (127, static_cast<int> (program_ctl->get_value ()))));
+		}
+		o.map (3);
+		o.str ("channel"); o.u (chn);
+		o.str ("bank");    o.i (bank);
+		o.str ("program"); o.u (program);
+	}
 }
 
 // Plugin-param emitter — variable map shape that includes range, unit,
@@ -762,7 +792,7 @@ encode_session_snapshot (Session& session,
 			if (!sends.empty ()) ++track_fields;
 			if (!bus_assign.empty ()) ++track_fields;
 			if (!group_id.empty ()) ++track_fields;
-			if (emit_midi_channels) track_fields += 4;
+			if (emit_midi_channels) track_fields += 5;
 
 			o.map (track_fields);
 			o.str ("id");   o.str (s.self_id);
@@ -882,6 +912,8 @@ encode_session_snapshot (Session& session,
 				o.str (channel_mode_str (mt_self->get_playback_channel_mode ()));
 				o.str ("playback_channel_mask");
 				o.u (static_cast<std::uint32_t> (mt_self->get_playback_channel_mask ()));
+				o.str ("midi_patches");
+				emit_midi_patch_states (o, mt_self);
 			}
 
 			// Automation lanes for the well-known track controls. Each
@@ -1538,7 +1570,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 		if (!sends.empty ()) ++track_fields;
 		if (!bus_assign.empty ()) ++track_fields;
 		if (!group_id.empty ()) ++track_fields;
-		if (emit_midi_channels) track_fields += 4;
+		if (emit_midi_channels) track_fields += 5;
 
 		o.map (track_fields);
 		o.str ("id");   o.str (matched.self_id);
@@ -1586,6 +1618,8 @@ encode_track_updated (Session& session, const std::string& track_id)
 			o.str (channel_mode_str (mt_self->get_playback_channel_mode ()));
 			o.str ("playback_channel_mask");
 			o.u (static_cast<std::uint32_t> (mt_self->get_playback_channel_mask ()));
+			o.str ("midi_patches");
+			emit_midi_patch_states (o, mt_self);
 		}
 
 		if (!input_ports.empty ()) {

@@ -47,6 +47,7 @@
 #include "ardour/track.h"
 #include "evoral/Note.h"
 #include "evoral/PatchChange.h"
+#include "evoral/midi_events.h"
 #include "ardour/automation_list.h"
 #include "pbd/controllable.h"
 #include "pbd/error.h"
@@ -301,6 +302,7 @@ struct DecodedCmd
 		AddPatchChange,
 		UpdatePatchChange,
 		DeletePatchChange,
+		SetTrackMidiPatch,
 		Undo,
 		Redo,
 		ListPluginPresets,
@@ -489,7 +491,8 @@ struct DecodedCmd
 	// is a 16-bit channel bitmask (bit 0 = ch 1) — its own field since
 	// no other command carries a u16 mask.
 	std::uint16_t midi_chan_mask = 0;
-	// ListMidiPatchNames { track_id, channel }.
+	// ListMidiPatchNames { track_id, channel } and
+	// SetTrackMidiPatch { track_id, channel, bank, program }.
 	std::uint8_t  midi_channel = 0;
 
 	// Automation lane edit payloads (Phase B).
@@ -1026,7 +1029,7 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.id)) return out;
 				} else if (k == "note") {
 					if (!read_note_fields (in, out)) return out;
-				} else if (k == "patch_change") {
+				} else if (k == "patch_change" || k == "patch") {
 					if (!read_pc_fields (in, out)) return out;
 				} else if (k == "patch_change_id") {
 					if (!in.read_str (out.id)) return out;
@@ -1123,6 +1126,16 @@ decode (const std::vector<std::uint8_t>& buf)
 					std::uint64_t v = 0;
 					if (!in.read_u64 (v)) return out;
 					out.midi_channel = static_cast<std::uint8_t> (std::min<std::uint64_t> (15, v));
+				} else if (k == "bank") {
+					std::int64_t v = 0;
+					if (!read_i64 (in, v)) return out;
+					out.pc_bank = static_cast<std::int32_t> (v);
+					out.has_pc_bank = true;
+				} else if (k == "program") {
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.pc_program = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+					out.has_pc_program = true;
 				} else if (k == "target_track_id") {
 					// AddSend { track_id, target_track_id, pre_fader }
 					if (!in.read_str (out.send_target_track)) return out;
@@ -1308,6 +1321,7 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "add_patch_change")    out.kind = DecodedCmd::Kind::AddPatchChange;
 			else if (cmd_type == "update_patch_change") out.kind = DecodedCmd::Kind::UpdatePatchChange;
 			else if (cmd_type == "delete_patch_change") out.kind = DecodedCmd::Kind::DeletePatchChange;
+			else if (cmd_type == "set_track_midi_patch") out.kind = DecodedCmd::Kind::SetTrackMidiPatch;
 			else if (cmd_type == "undo")               out.kind = DecodedCmd::Kind::Undo;
 			else if (cmd_type == "redo")               out.kind = DecodedCmd::Kind::Redo;
 			else if (cmd_type == "list_plugin_presets") out.kind = DecodedCmd::Kind::ListPluginPresets;
@@ -2248,6 +2262,61 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			FoyerShim* shim = &_shim;
 			_shim.call_slot (MISSING_INVALIDATOR, [shim, track_id, channel] () {
 				auto bytes = msgpack_out::encode_midi_patch_names_listed (shim->session (), track_id, channel);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SetTrackMidiPatch: {
+			if (cmd.track_id.empty () || !cmd.has_pc_program) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				if (snap.track_id.rfind ("track.", 0) != 0) return;
+				const std::string sid = snap.track_id.substr (6);
+				auto& session = shim->session ();
+				std::shared_ptr<Route> route;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp;
+					tmp << r->id ();
+					if (tmp.str () == sid) { route = r; break; }
+				}
+				if (!route) return;
+				const std::uint8_t chn = static_cast<std::uint8_t> (std::min<int> (15, snap.midi_channel));
+				const std::uint8_t pgm = snap.pc_program;
+				const int bank = snap.has_pc_bank ? snap.pc_bank : -1;
+
+				if (std::shared_ptr<MidiTrack> mt = std::dynamic_pointer_cast<MidiTrack> (route)) {
+					if (bank >= 0) {
+						auto bank_msb = mt->automation_control (
+							Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_MSB_BANK), true);
+						auto bank_lsb = mt->automation_control (
+							Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_LSB_BANK), true);
+						if (bank_msb) bank_msb->set_value ((bank >> 7) & 0x7f, PBD::Controllable::NoGroup);
+						if (bank_lsb) bank_lsb->set_value (bank & 0x7f, PBD::Controllable::NoGroup);
+					}
+					auto program = mt->automation_control (
+						Evoral::Parameter (MidiPgmChangeAutomation, chn), true);
+					if (program) program->set_value (pgm, PBD::Controllable::NoGroup);
+				} else if (std::shared_ptr<PluginInsert> pi =
+				           std::dynamic_pointer_cast<PluginInsert> (route->the_instrument ())) {
+					if (bank >= 0) {
+						uint8_t event[3];
+						event[0] = (MIDI_CMD_CONTROL | chn);
+						event[1] = MIDI_CTL_MSB_BANK;
+						event[2] = (bank >> 7) & 0x7f;
+						pi->write_immediate_event (Evoral::MIDI_EVENT, 3, event);
+						event[1] = MIDI_CTL_LSB_BANK;
+						event[2] = bank & 0x7f;
+						pi->write_immediate_event (Evoral::MIDI_EVENT, 3, event);
+					}
+					uint8_t event[2];
+					event[0] = (MIDI_CMD_PGM_CHANGE | chn);
+					event[1] = pgm;
+					pi->write_immediate_event (Evoral::MIDI_EVENT, 2, event);
+				}
+				auto bytes = msgpack_out::encode_track_updated (session, snap.track_id);
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;

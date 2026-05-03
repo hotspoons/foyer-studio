@@ -6,6 +6,7 @@
 
 #include <sstream>
 #include <algorithm>
+#include <map>
 
 #include "ardour/audioregion.h"
 #include "ardour/file_source.h"
@@ -948,18 +949,50 @@ list_midi_patch_names (Session& session, const std::string& track_id, std::uint8
 
 	auto chan_set = info.get_patches (out.channel);
 	if (!chan_set) return out;
+	std::map<std::uint16_t, MidiPatchBankDesc> generic_banks;
 	for (auto const& bank : chan_set->patch_banks ()) {
 		if (!bank) continue;
-		MidiPatchBankDesc b;
-		b.bank = static_cast<std::uint16_t> (std::max<int> (0, bank->number ()));
-		b.name = bank->name ();
-		for (auto const& patch : bank->patch_name_list ()) {
-			if (!patch) continue;
-			MidiPatchProgramDesc p;
-			p.program = patch->program_number ();
-			p.name = patch->name ();
-			b.programs.push_back (std::move (p));
+		if (bank->number () == UINT16_MAX) {
+			// Ardour's patch selector treats UINT16_MAX PatchBanks as
+			// "generic" name lists: the bank to send lives on each Patch
+			// primary key, not on the PatchBank itself. Mirror that shape
+			// on the wire so selecting e.g. SC-55 "Piano" sends the real
+			// 14-bit bank instead of 0xffff/16383.
+			for (auto const& patch : bank->patch_name_list ()) {
+				if (!patch) continue;
+				const std::uint16_t real_bank = patch->bank_number ();
+				auto& b = generic_banks[real_bank];
+				b.bank = real_bank;
+				if (b.name.empty ()) {
+					std::ostringstream name;
+					name << "Bank " << (static_cast<unsigned> (real_bank) + 1);
+					if (!bank->name ().empty ()) name << " (" << bank->name () << ")";
+					b.name = name.str ();
+				}
+				MidiPatchProgramDesc p;
+				p.program = patch->program_number ();
+				p.name = patch->name ();
+				b.programs.push_back (std::move (p));
+			}
+		} else {
+			MidiPatchBankDesc b;
+			b.bank = static_cast<std::uint16_t> (std::max<int> (0, bank->number ()));
+			b.name = bank->name ();
+			for (auto const& patch : bank->patch_name_list ()) {
+				if (!patch) continue;
+				MidiPatchProgramDesc p;
+				p.program = patch->program_number ();
+				p.name = patch->name ();
+				b.programs.push_back (std::move (p));
+			}
+			std::sort (b.programs.begin (), b.programs.end (), [] (auto const& a, auto const& z) {
+				return a.program < z.program;
+			});
+			out.banks.push_back (std::move (b));
 		}
+	}
+	for (auto& it : generic_banks) {
+		auto& b = it.second;
 		std::sort (b.programs.begin (), b.programs.end (), [] (auto const& a, auto const& z) {
 			return a.program < z.program;
 		});

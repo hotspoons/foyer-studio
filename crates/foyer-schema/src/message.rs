@@ -1055,6 +1055,16 @@ pub enum Command {
         region_id: EntityId,
         patch_change_id: EntityId,
     },
+    /// Set the live patch on a MIDI track/channel. This mirrors
+    /// Ardour's patch selector: MIDI tracks update bank/program
+    /// automation controls, while instrument inserts receive immediate
+    /// MIDI bank/program events.
+    SetTrackMidiPatch {
+        track_id: EntityId,
+        channel: u8,
+        bank: i32,
+        program: u8,
+    },
 
     /// Install a beat-sequencer layout on a MIDI region. The shim
     /// persists it in the region's `_extra_xml` sub-tree so stock
@@ -1339,6 +1349,7 @@ mod tests {
             capture_channel_mask: None,
             playback_channel_mode: None,
             playback_channel_mask: None,
+            midi_patches: vec![],
         };
         let patch = Patch::TrackAdded { track: Box::new(t) };
         let j = serde_json::to_string(&patch).unwrap();

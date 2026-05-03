@@ -24,9 +24,9 @@ use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmRx, PcmTx};
 use foyer_schema::{
     AudioFormat, AudioSource, AutomationMode, AutomationPoint, Command, ControlValue, EnginePort,
-    EntityId, LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch,
-    PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta,
-    Track, TrackPatch, WaveformPeaks,
+    EntityId, LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange,
+    PatchChangePatch, PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout,
+    Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 
 mod waveform;
@@ -536,6 +536,18 @@ impl Backend for HostBackend {
     ) -> Result<(), BackendError> {
         self.client
             .delete_patch_change(region_id, patch_change_id)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn set_track_midi_patch(
+        &self,
+        track_id: EntityId,
+        channel: u8,
+        bank: i32,
+        program: u8,
+    ) -> Result<(), BackendError> {
+        self.client
+            .set_track_midi_patch(track_id, channel, bank, program)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }

@@ -51,7 +51,7 @@ const CHANNEL_DIRECTIONS = [
   { key: "capture",  label: "Inbound (record)" },
   { key: "playback", label: "Playback" },
 ];
-const NO_BANK_SENTINELS = new Set([-1, 16383, 65535]);
+const NO_BANK_SENTINELS = new Set([-1]);
 const SECTION_STATE_KEY = "foyer.midi-manager.sections.v1";
 const DEFAULT_SECTIONS = {
   instrument: true,
@@ -109,6 +109,17 @@ function normalizeBank(bank) {
   const n = Number(bank);
   if (!Number.isFinite(n) || NO_BANK_SENTINELS.has(n)) return -1;
   return Math.max(0, Math.min(16383, n));
+}
+function midnamBankToPatchBank(bank) {
+  const n = Number(bank);
+  if (!Number.isFinite(n) || n < 0) return -1;
+  // Ardour/MidNAM can expose 0xffff for the 127/127 bank. Evoral
+  // PatchChange stores banks as a 14-bit MSB<<7 | LSB value.
+  return n & 0x3fff;
+}
+function displayBankLabel(bank) {
+  const n = normalizeBank(midnamBankToPatchBank(bank));
+  return n < 0 ? "" : String(n);
 }
 function bankToMsbLsb(bank) {
   const n = normalizeBank(bank);
@@ -690,6 +701,7 @@ export class MidiManager extends LitElement {
       this._patchNames = body.names || null;
       this._patchNamesFor = `${this.trackId}:${body.names?.channel ?? 0}`;
       this._patchNamesLoading = false;
+      if (this._pickerOpen) this._ensurePickerBankForNames(body.names);
     }
   }
 
@@ -704,6 +716,11 @@ export class MidiManager extends LitElement {
       track_id: this.trackId,
       channel: ch,
     });
+  }
+
+  _defaultPickerBankFromNames(names = this._patchNames) {
+    const firstBank = (names?.banks || []).find((b) => b?.programs?.length);
+    return midnamBankToPatchBank(firstBank?.bank);
   }
 
   _requestPresetsFor(pluginId) {
@@ -814,7 +831,14 @@ export class MidiManager extends LitElement {
               || (a.pc.start_ticks || 0) - (b.pc.start_ticks || 0),
     );
     const firstMidiRegion = this._regions[0];
+    const liveSummary = this._livePatchSummary();
     return html`
+      <div class="card muted">
+        <div class="row">
+          <span class="label">Current live patch</span>
+          <span class="value">${liveSummary}</span>
+        </div>
+      </div>
       ${allPcs.length === 0
         ? html`
             <div class="card muted">
@@ -910,14 +934,15 @@ export class MidiManager extends LitElement {
     const track = this._track();
     const playbackMask = track?.playback_channel_mask ?? 0x0001;
     const defaultChannel = channelMaskToList(playbackMask)[0] ?? 1;
+    const live = this._trackMidiPatch(displayChannelToWire(defaultChannel));
     const pc = {
       // Server generates the real id via Evoral event_id; this
       // optimistic prefix is harmless because AddPatchChange echos
       // with the authoritative id, and our region list gets replaced.
       id: `patchchange.opt.${Math.random().toString(36).slice(2)}`,
       channel: displayChannelToWire(defaultChannel),
-      program: 0,
-      bank: -1,
+      program: live?.program ?? 0,
+      bank: normalizeBank(live?.bank),
       start_ticks: 0,
     };
     ws.send({ type: "add_patch_change", region_id: region.id, patch_change: pc });
@@ -944,25 +969,50 @@ export class MidiManager extends LitElement {
     });
   }
   _openPatchPicker(region, pc) {
+    const live = this._trackMidiPatch(pc?.channel ?? 0);
     this._pickerRegionId = region?.id || "";
     this._pickerPatchId = pc?.id || "";
     this._pickerChannel = pc?.channel ?? 0;
-    this._pickerBank = normalizeBank(pc?.bank);
-    this._pickerProgram = pc?.program ?? 0;
+    this._pickerBank = normalizeBank(live?.bank ?? pc?.bank);
+    this._pickerProgram = live?.program ?? pc?.program ?? 0;
     this._requestPatchNamesForWireChannel(this._pickerChannel);
+    this._ensurePickerBankForNames();
     this._pickerOpen = true;
   }
   _closePatchPicker() {
     this._pickerOpen = false;
   }
   _pickerBanks() {
-    return (this._patchNames?.banks || []).filter((b) => normalizeBank(b.bank) >= 0);
+    return (this._patchNames?.banks || []).filter((b) => midnamBankToPatchBank(b.bank) >= 0);
   }
   _pickerProgramBank() {
     if (this._pickerBank >= 0) {
-      return (this._patchNames?.banks || []).find((b) => normalizeBank(b.bank) === normalizeBank(this._pickerBank));
+      return (this._patchNames?.banks || []).find((b) => midnamBankToPatchBank(b.bank) === normalizeBank(this._pickerBank));
     }
-    return (this._patchNames?.banks || []).find((b) => normalizeBank(b.bank) < 0 && b?.programs?.length);
+    return null;
+  }
+  _trackMidiPatch(channel = 0) {
+    const ch = Math.max(0, Math.min(15, Number(channel) || 0));
+    return (this._track()?.midi_patches || []).find((p) => Number(p.channel) === ch) || null;
+  }
+  _livePatchSummary(track = this._track()) {
+    const playbackMask = track?.playback_channel_mask ?? 0x0001;
+    const displayChannel = channelMaskToList(playbackMask)[0] ?? 1;
+    const live = this._trackMidiPatch(displayChannelToWire(displayChannel));
+    if (!live) return "live patch unknown";
+    const bank = normalizeBank(live.bank);
+    return `live ch ${wireChannelToDisplay(live.channel)} · ${bank < 0 ? "program only" : `bank ${bank}`} · program ${Number(live.program ?? 0) + 1}`;
+  }
+  _ensurePickerBankForNames(names = this._patchNames) {
+    if (this._patchNamesFor !== `${this.trackId}:${this._pickerChannel}`) return;
+    const banks = names?.banks || [];
+    if (banks.length === 0) return;
+    if (this._pickerBank >= 0) {
+      const hasBank = banks.some((b) => midnamBankToPatchBank(b.bank) === normalizeBank(this._pickerBank));
+      if (hasBank) return;
+    }
+    const nextBank = this._defaultPickerBankFromNames(names);
+    if (nextBank >= 0) this._pickerBank = nextBank;
   }
   _pickerPrograms() {
     const bank = this._pickerProgramBank();
@@ -976,17 +1026,26 @@ export class MidiManager extends LitElement {
     for (let i = 0; i < 128; i += 1) out.push({ program: i, name: `Program ${i + 1}` });
     return out;
   }
-  _applyPatchPicker({ close = true } = {}) {
-    if (!this._pickerRegionId || !this._pickerPatchId) return;
-    const region = this._regions.find((r) => r.id === this._pickerRegionId);
-    const pc = region?.patch_changes?.find((p) => p.id === this._pickerPatchId);
-    if (!region || !pc) return;
-    this._editPatchChange(region, pc, {
+  _commitPatchPicker() {
+    const bank = normalizeBank(this._pickerBank);
+    if (this._pickerRegionId && this._pickerPatchId) {
+      const region = this._regions.find((r) => r.id === this._pickerRegionId);
+      const pc = region?.patch_changes?.find((p) => p.id === this._pickerPatchId);
+      if (region && pc) {
+        this._editPatchChange(region, pc, {
+          channel: this._pickerChannel,
+          bank,
+          program: this._pickerProgram,
+        });
+      }
+    }
+    window.__foyer?.ws?.send({
+      type: "set_track_midi_patch",
+      track_id: this.trackId,
       channel: this._pickerChannel,
-      bank: normalizeBank(this._pickerBank),
+      bank,
       program: this._pickerProgram,
     });
-    if (close) this._pickerOpen = false;
   }
 
   _track() {
@@ -1153,6 +1212,7 @@ export class MidiManager extends LitElement {
     const sectionMode = this.mode || "all";
     const showSetup = sectionMode !== "patches";
     const showPatches = sectionMode !== "setup";
+    const patchEventCount = this._regions.reduce((n, r) => n + (r.patch_changes?.length || 0), 0);
 
     return html`
       <div class="tb">
@@ -1265,7 +1325,7 @@ export class MidiManager extends LitElement {
         ${showPatches ? this._renderFold(
           "patches",
           "Patches & banks",
-          `${this._regions.reduce((n, r) => n + (r.patch_changes?.length || 0), 0)} event${this._regions.reduce((n, r) => n + (r.patch_changes?.length || 0), 0) === 1 ? "" : "s"}`,
+          `${this._livePatchSummary(t)} · ${patchEventCount} event${patchEventCount === 1 ? "" : "s"}`,
           this._renderPatchChanges(),
         ) : null}
       </div>
@@ -1285,11 +1345,14 @@ export class MidiManager extends LitElement {
           <label>Bank</label>
           <select
             .value=${String(normalizeBank(this._pickerBank))}
-            @change=${(e) => { this._pickerBank = normalizeBank(e.currentTarget.value); }}
+            @change=${(e) => {
+              this._pickerBank = normalizeBank(e.currentTarget.value);
+              this._commitPatchPicker();
+            }}
           >
             <option value="-1">Program only</option>
             ${banks.map((b) => html`
-              <option value=${String(normalizeBank(b.bank))}>${b.name || "Bank"}${normalizeBank(b.bank) >= 0 ? ` · ${normalizeBank(b.bank)}` : ""}</option>
+              <option value=${String(midnamBankToPatchBank(b.bank))}>${b.name || `Bank ${displayBankLabel(b.bank)}`}</option>
             `)}
           </select>
         </div>
@@ -1308,7 +1371,7 @@ export class MidiManager extends LitElement {
               class="program-btn ${this._pickerProgram === p.program ? "active" : ""}"
               @click=${() => {
                 this._pickerProgram = p.program;
-                this._applyPatchPicker({ close: false });
+                this._commitPatchPicker();
               }}
               title=${`Program ${p.program + 1}`}
             >
@@ -1325,6 +1388,7 @@ export class MidiManager extends LitElement {
               @change=${(e) => {
                 this._pickerChannel = displayChannelToWire(e.currentTarget.value);
                 this._requestPatchNamesForWireChannel(this._pickerChannel);
+                this._commitPatchPicker();
               }}
             >
               ${Array.from({ length: 16 }).map((_, i) => html`
@@ -1337,17 +1401,19 @@ export class MidiManager extends LitElement {
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
               <input class="num" type="number" min="0" max="127" step="1"
                      .value=${String(msb)}
-                     @change=${(e) => { this._pickerBank = msbLsbToBank(e.currentTarget.value, lsb); }}>
+                     @change=${(e) => {
+                       this._pickerBank = msbLsbToBank(e.currentTarget.value, lsb);
+                       this._commitPatchPicker();
+                     }}>
               <input class="num" type="number" min="0" max="127" step="1"
                      .value=${String(lsb)}
-                     @change=${(e) => { this._pickerBank = msbLsbToBank(msb, e.currentTarget.value); }}>
+                     @change=${(e) => {
+                       this._pickerBank = msbLsbToBank(msb, e.currentTarget.value);
+                       this._commitPatchPicker();
+                     }}>
             </div>
           </div>
         </details>
-        <div class="modal-foot" style="padding:0;border-top:0;background:transparent">
-          <button @click=${() => this._closePatchPicker()}>Cancel</button>
-          <button class="primary" @click=${() => this._applyPatchPicker()}>Apply</button>
-        </div>
       </div>
     `;
   }

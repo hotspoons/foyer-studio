@@ -64,6 +64,16 @@ pub struct Send {
     pub pre_fader: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MidiPatchState {
+    /// MIDI channel 0..15.
+    pub channel: u8,
+    /// Current 14-bit bank (MSB << 7 | LSB), or -1 if unset/unknown.
+    pub bank: i32,
+    /// Current program 0..127.
+    pub program: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: EntityId,
@@ -137,6 +147,11 @@ pub struct Track {
     pub playback_channel_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub playback_channel_mask: Option<u16>,
+    /// Projected live MIDI patch state by channel. This is the track-level
+    /// instrument/program state, distinct from region-embedded patch-change
+    /// events. Empty for non-MIDI tracks or hosts that do not expose it.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub midi_patches: Vec<MidiPatchState>,
 }
 
 /// Group / submix metadata. Carries display + drag-affinity hints for
@@ -459,6 +474,7 @@ mod tests {
                 capture_channel_mask: None,
                 playback_channel_mode: None,
                 playback_channel_mask: None,
+                midi_patches: vec![],
             }],
             groups: vec![],
             dirty: false,

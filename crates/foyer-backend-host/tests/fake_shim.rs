@@ -135,6 +135,7 @@ fn fake_session() -> Session {
             capture_channel_mask: None,
             playback_channel_mode: None,
             playback_channel_mask: None,
+            midi_patches: vec![],
         }],
         groups: vec![],
         dirty: false,

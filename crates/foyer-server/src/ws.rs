@@ -729,6 +729,7 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::AddPatchChange { .. } => "add_patch_change",
         Command::UpdatePatchChange { .. } => "update_patch_change",
         Command::DeletePatchChange { .. } => "delete_patch_change",
+        Command::SetTrackMidiPatch { .. } => "set_track_midi_patch",
         Command::SetSequencerLayout { .. } => "set_sequencer_layout",
         Command::ClearSequencerLayout { .. } => "clear_sequencer_layout",
         Command::SetTrackInput { .. } => "set_track_input",
@@ -1786,6 +1787,28 @@ async fn dispatch_command(
                     state,
                     Event::Error {
                         code: "delete_patch_change_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::SetTrackMidiPatch {
+            track_id,
+            channel,
+            bank,
+            program,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_track_midi_patch(track_id, channel, bank, program)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "set_track_midi_patch_failed".into(),
                         message: e.to_string(),
                     },
                 )

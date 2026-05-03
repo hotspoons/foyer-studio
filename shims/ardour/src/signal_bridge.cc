@@ -12,6 +12,7 @@ static constexpr bool LOG_TRANSPORT_TICK = false;
 #include "signal_bridge.h"
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <sstream>
 
@@ -20,6 +21,7 @@ static constexpr bool LOG_TRANSPORT_TICK = false;
 
 #include "ardour/chan_count.h"
 #include "ardour/monitor_control.h"
+#include "ardour/midi_track.h"
 #include "ardour/playlist.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
@@ -29,6 +31,7 @@ static constexpr bool LOG_TRANSPORT_TICK = false;
 #include "ardour/stripable.h"
 #include "ardour/track.h"
 #include "evoral/Parameter.h"
+#include "evoral/midi_events.h"
 #include "pbd/controllable.h"
 #include "pbd/stacktrace.h"
 
@@ -434,6 +437,26 @@ SignalBridge::subscribe_controls_on_route (Route& r)
 	std::ostringstream ridss;
 	ridss << r.id ();
 	const std::string track_id = "track." + ridss.str ();
+	if (auto mt = dynamic_cast<MidiTrack*> (&r)) {
+		auto wire_track_update = [&] (std::shared_ptr<AutomationControl> c) {
+			if (!c) return;
+			std::string tid = track_id;
+			c->Changed.connect (
+			    _connections, MISSING_INVALIDATOR,
+			    [this, tid] (bool, PBD::Controllable::GroupControlDisposition) {
+				    on_route_presentation_changed (tid);
+			    },
+			    _shim.event_loop ());
+		};
+		for (std::uint8_t chn = 0; chn < 16; ++chn) {
+			wire_track_update (mt->automation_control (
+				Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_MSB_BANK), true));
+			wire_track_update (mt->automation_control (
+				Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_LSB_BANK), true));
+			wire_track_update (mt->automation_control (
+				Evoral::Parameter (MidiPgmChangeAutomation, chn), true));
+		}
+	}
 	for (uint32_t i = 0;; ++i) {
 		auto proc = r.nth_plugin (i);
 		if (!proc) break;

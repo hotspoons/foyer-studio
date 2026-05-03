@@ -92,6 +92,7 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
         capture_channel_mask: is_midi.then_some(0x0001),
         playback_channel_mode: is_midi.then(|| "force".into()),
         playback_channel_mask: is_midi.then_some(0x0001),
+        midi_patches: vec![],
     }
 }
 

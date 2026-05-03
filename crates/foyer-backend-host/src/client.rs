@@ -678,6 +678,22 @@ impl HostClient {
         .await
     }
 
+    pub async fn set_track_midi_patch(
+        &self,
+        track_id: EntityId,
+        channel: u8,
+        bank: i32,
+        program: u8,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::SetTrackMidiPatch {
+            track_id,
+            channel,
+            bank,
+            program,
+        })
+        .await
+    }
+
     pub async fn set_sequencer_layout(
         &self,
         region_id: EntityId,
