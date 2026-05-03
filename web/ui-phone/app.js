@@ -36,6 +36,7 @@ export class PhoneApp extends LitElement {
     _sheetOpen: { state: true, type: Boolean },
     _advancedTrackId: { state: true, type: String },
     _rbacTick: { state: true, type: Number },
+    _audioOn: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -105,6 +106,39 @@ export class PhoneApp extends LitElement {
       font-size: 12px;
       text-align: center;
     }
+    /* Tunnel-mode audio prompt. The controller has a saved/forced
+     * "tunnel = listen on" rule, but Chrome's autoplay policy refuses
+     * to start an AudioContext outside a user-gesture call stack —
+     * the bare Listen-button-tap path is too easy to miss on a phone
+     * screen and the cold-boot flow has produced "audio just doesn't
+     * come on" complaints. This prompt is a giant unambiguous tap
+     * target that fires the gesture-bound audio toggle directly,
+     * dismisses itself on success, and only renders for tunnel guests
+     * who haven't yet enabled audio. */
+    .tunnel-audio-prompt {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 14px 18px;
+      margin: 8px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      color: #fff;
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: 0.04em;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+      cursor: pointer;
+      animation: foyer-tap-pulse 1.6s ease-in-out infinite;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .tunnel-audio-prompt:active { transform: scale(0.98); }
+    @keyframes foyer-tap-pulse {
+      0%, 100% { box-shadow: 0 6px 24px rgba(0,0,0,0.35), 0 0 0 0 color-mix(in oklab, var(--color-accent) 60%, transparent); }
+      50%      { box-shadow: 0 6px 24px rgba(0,0,0,0.35), 0 0 0 14px transparent; }
+    }
   `;
 
   constructor() {
@@ -113,7 +147,9 @@ export class PhoneApp extends LitElement {
     this._sheetOpen = false;
     this._advancedTrackId = "";
     this._rbacTick = 0;
+    this._audioOn = !!window.__foyer?.audio?.isOn?.();
     this._onChange = () => { this._tick++; };
+    this._onAudio = () => { this._audioOn = !!window.__foyer?.audio?.isOn?.(); };
     this._offRbac = null;
   }
 
@@ -122,15 +158,22 @@ export class PhoneApp extends LitElement {
     const store = window.__foyer?.store;
     store?.addEventListener("change", this._onChange);
     store?.addEventListener("sessions", this._onChange);
+    window.__foyer?.audio?.addEventListener?.("change", this._onAudio);
     this._offRbac = onRbacChange(() => { this._rbacTick++; });
   }
   disconnectedCallback() {
     const store = window.__foyer?.store;
     store?.removeEventListener("change", this._onChange);
     store?.removeEventListener("sessions", this._onChange);
+    window.__foyer?.audio?.removeEventListener?.("change", this._onAudio);
     this._offRbac?.();
     super.disconnectedCallback();
   }
+
+  _onTunnelAudioPromptTap = async () => {
+    try { await window.__foyer?.audio?.toggle?.(); }
+    catch (e) { console.error("[phone] tunnel audio prompt: toggle failed", e); }
+  };
 
   _onOpenSheet = () => { this._sheetOpen = true; };
   _onCloseSheet = () => { this._sheetOpen = false; };
@@ -147,8 +190,18 @@ export class PhoneApp extends LitElement {
     const tracks = (session?.tracks || []).filter((t) => t && t.id);
     const hasSession = !!cur;
     const canLaunch = isAllowed("launch_project");
+    const isTunnel = !!window.__foyer?.store?.state?.rbac?.isTunnel;
+    const showAudioPrompt = isTunnel && hasSession && !this._audioOn;
     return html`
       <foyer-phone-top-bar @open-sheet=${this._onOpenSheet}></foyer-phone-top-bar>
+      ${showAudioPrompt ? html`
+        <div class="tunnel-audio-prompt"
+             role="button"
+             aria-label="Tap to enable audio"
+             @click=${this._onTunnelAudioPromptTap}>
+          Tap to enable audio
+        </div>
+      ` : null}
       <main @open-track-advanced=${this._onOpenTrackAdvanced}>
         ${hasSession
           ? html`

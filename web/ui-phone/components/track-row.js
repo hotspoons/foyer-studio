@@ -15,13 +15,21 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { isAllowed } from "foyer-core/rbac.js";
+import { AudioIngress } from "foyer-core/audio/audio-ingress.js";
 import "./horizontal-fader.js";
 import { dbToNorm, normToDb } from "./horizontal-fader.js";
+
+// Shared registry of active per-track mic ingress streams. Same map
+// the advanced sheet uses, so a track-row tap and an advanced-sheet
+// tap manipulate the same audio resource — no duplicate AudioIngress
+// per track. Survives sheet open/close because it lives on globalThis.
+const TRACK_MICS = (globalThis.__foyerTrackMics ||= new Map());
 
 export class PhoneTrackRow extends LitElement {
   static properties = {
     track: { type: Object },
     _gainDb: { state: true, type: Number },
+    _takeBusy: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -100,6 +108,27 @@ export class PhoneTrackRow extends LitElement {
       background: #64748b;
       border-color: #64748b;
     }
+    /* "Take" chip (I = Input): one-tap "this track is mine, my mic is
+     * live on it." Bundles set-source-user + start-mic-ingress +
+     * input-port wiring so a remote performer doesn't have to dive
+     * into the advanced sheet for each take. Audio tracks only,
+     * tunnel guests only — there's no equivalent gesture for a host
+     * sitting at the studio rig. */
+    .chip.take.on {
+      color: #fff;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      border-color: transparent;
+      box-shadow: 0 0 12px color-mix(in oklab, var(--color-accent) 50%, transparent);
+    }
+    .chip.take.busy {
+      opacity: 0.55;
+      pointer-events: none;
+      animation: foyer-take-pulse 1s ease-in-out infinite;
+    }
+    @keyframes foyer-take-pulse {
+      0%, 100% { opacity: 0.55; }
+      50%      { opacity: 0.85; }
+    }
     .chip.disabled {
       opacity: 0.35;
       pointer-events: none;
@@ -126,7 +155,18 @@ export class PhoneTrackRow extends LitElement {
     super();
     this.track = null;
     this._gainDb = 0;
+    this._takeBusy = false;
     this._unsub = null;
+    // Re-render when the trackBrowserSources map changes (someone else
+    // claimed/released this track) or when an ingress event lands —
+    // so the Take chip's "on" state reflects reality without polling.
+    this._onPeerSrcs = () => this.requestUpdate();
+    this._onIngressEnv = (ev) => {
+      const t = ev?.detail?.body?.type;
+      if (t === "audio_ingress_opened" || t === "audio_ingress_closed") {
+        this.requestUpdate();
+      }
+    };
   }
 
   connectedCallback() {
@@ -162,6 +202,8 @@ export class PhoneTrackRow extends LitElement {
     const store = window.__foyer?.store;
     store?.addEventListener("change", this._onChange);
     store?.addEventListener("control", this._onControl);
+    store?.addEventListener("track-browser-sources", this._onPeerSrcs);
+    window.__foyer?.ws?.addEventListener?.("envelope", this._onIngressEnv);
     this._syncFromStore();
     const ro = !isAllowed("control_set");
     this.toggleAttribute("readonly", ro);
@@ -170,6 +212,8 @@ export class PhoneTrackRow extends LitElement {
     const store = window.__foyer?.store;
     store?.removeEventListener("change", this._onChange);
     store?.removeEventListener("control", this._onControl);
+    store?.removeEventListener("track-browser-sources", this._onPeerSrcs);
+    window.__foyer?.ws?.removeEventListener?.("envelope", this._onIngressEnv);
     super.disconnectedCallback();
   }
 
@@ -200,6 +244,96 @@ export class PhoneTrackRow extends LitElement {
     window.__foyer?.ws?.controlSet(this.track.gain.id, db);
   };
 
+  _isTakeActive() {
+    if (!this.track?.id) return false;
+    return TRACK_MICS.has(this.track.id);
+  }
+
+  /// Tap handler for the Take ("I") chip. One-tap source-user + mic
+  /// activation: claim the track for self, open a browser ingress,
+  /// pin the track's input_port to the new ingress port. Tapping
+  /// again reverses all three. Saves a remote performer the four
+  /// taps that would otherwise be: open advanced sheet → pick self
+  /// from the source-user dropdown → tap "Start my mic" → close.
+  _toggleTake = async () => {
+    const t = this.track;
+    if (!t?.id) return;
+    if (this._takeBusy) return;
+    const ws = window.__foyer?.ws;
+    const store = window.__foyer?.store;
+    if (!ws || !store) return;
+    const selfPeerId = store.state?.selfPeerId || "";
+    if (!selfPeerId) return;
+
+    if (this._isTakeActive()) {
+      // Active → release. Stop our ingress, clear the track's input
+      // port (so Ardour reverts to its previous auto-connection), and
+      // un-claim source-user ownership.
+      this._takeBusy = true;
+      try {
+        const live = TRACK_MICS.get(t.id);
+        if (live) {
+          try { await live.ingress.stop(); } catch {}
+          TRACK_MICS.delete(t.id);
+        }
+        ws.send({
+          type: "update_track",
+          id: t.id,
+          patch: { input_port: "" },
+        });
+        ws.send({
+          type: "set_track_browser_source",
+          track_id: t.id,
+          peer_id: "",
+        });
+      } finally {
+        this._takeBusy = false;
+        this.requestUpdate();
+      }
+      return;
+    }
+
+    // Idle → claim + start. Order matters: assign source-user FIRST
+    // so the server-side mic-routing policy sees the new ownership
+    // before the ingress port shows up; start mic SECOND so the engine
+    // port name we wire into input_port THIRD is real.
+    this._takeBusy = true;
+    try {
+      ws.send({
+        type: "set_track_browser_source",
+        track_id: t.id,
+        peer_id: selfPeerId,
+      });
+      const ingress = new AudioIngress({
+        ws,
+        baseUrl: location.origin.replace(/^http/, "ws"),
+      });
+      try {
+        await ingress.start();
+      } catch (e) {
+        console.error("[phone-track-row] take: mic ingress failed:", e);
+        // Roll back the source-user assignment so we don't leave the
+        // track claimed but silent.
+        ws.send({
+          type: "set_track_browser_source",
+          track_id: t.id,
+          peer_id: "",
+        });
+        return;
+      }
+      const portName = ingress.enginePortName;
+      TRACK_MICS.set(t.id, { ingress, portName });
+      ws.send({
+        type: "update_track",
+        id: t.id,
+        patch: { input_port: portName },
+      });
+    } finally {
+      this._takeBusy = false;
+      this.requestUpdate();
+    }
+  };
+
   _openAdvanced = () => {
     if (!this.track?.id) return;
     // Bubble up to the app shell, which owns the modal singleton —
@@ -221,6 +355,16 @@ export class PhoneTrackRow extends LitElement {
     const mute = !!Number(window.__foyer?.store?.get?.(t.mute?.id));
     const canControl = isAllowed("control_set");
     const armable = !!t.record_arm?.id;
+    // Take chip is gated on tunnel + audio kind. Tunnel because the
+    // host already has the studio interface — pulling their mic in
+    // through the browser would just add latency. Audio because MIDI
+    // tracks don't take audio input from the browser (they'd want a
+    // separate "send my MIDI" gesture, which lives on the keyboard
+    // panel, not here).
+    const isTunnel = !!window.__foyer?.store?.state?.rbac?.isTunnel;
+    const isAudio = t.kind === "audio";
+    const showTake = isTunnel && isAudio;
+    const takeOn = this._isTakeActive();
     const fmtDb = (db) => {
       if (db <= -60) return "−∞";
       const sign = db > 0 ? "+" : (db < 0 ? "−" : "");
@@ -237,6 +381,13 @@ export class PhoneTrackRow extends LitElement {
         <button class="chip mute ${mute ? "on" : ""} ${!canControl ? "disabled" : ""}"
                 title="Mute"
                 @click=${() => this._setBool(t.mute?.id, !mute)}>M</button>
+        ${showTake ? html`
+          <button class="chip take ${takeOn ? "on" : ""} ${this._takeBusy ? "busy" : ""} ${!canControl ? "disabled" : ""}"
+                  title=${takeOn
+                    ? "Stop my mic and release this track"
+                    : "Claim this track for my mic — assigns source user + opens browser ingress"}
+                  @click=${this._toggleTake}>I</button>
+        ` : null}
         <span class="name">${t.name || "(unnamed)"}</span>
         <button class="more"
                 title="Advanced — bypass plugins, routing, monitor mode"
