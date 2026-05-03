@@ -1,89 +1,79 @@
-// Recent sessions — browser-local list of paths the user has opened.
+// Recent sessions — server-tracked.
 //
-// Stored per-browser so remote collaborators working on shared sidecars
-// don't see each other's recent lists (Decision on 2026-04-22). The
-// sidecar keeps the authoritative session list for what's currently
-// open; this only tracks history (most recently used, regardless of
-// whether it's open right now).
+// The list lives in `~/.local/share/foyer/recents.json` on whichever
+// machine is running the sidecar. The browser keeps a read-through
+// cache fed by `Event::RecentsList` (sent on attach + after every
+// touch / forget / clear). Mutations round-trip through WS commands
+// so the persistent store stays authoritative.
 //
-// Schema in localStorage under `foyer.recents.v1`:
-//
-//   [
-//     { path: "/abs/path/to/session.ardour",
-//       name: "Session Name",
-//       opened_at: 1714000000,
-//       backend_id: "ardour" },
-//     ...
-//   ]
-//
-// Ordering: most-recent first. Capped by `recentsCap()` (configurable
-// via the settings panel under `foyer.recents.cap`, default 10).
+// Why not localStorage anymore: it forked per browser profile, went
+// stale when the sidecar moved between containers, and showed phantom
+// entries pointing at projects that didn't exist on the current host.
+// The recents file follows the sidecar's data dir, so a fresh
+// devcontainer that mounts the same XDG path picks up the same
+// history; one that doesn't, starts empty (correct).
 
-const KEY = "foyer.recents.v1";
-const CAP_KEY = "foyer.recents.cap";
-const DEFAULT_CAP = 10;
+let _cache = [];
+const _listeners = new Set();
 
-export function recentsCap() {
-  const raw = Number(localStorage.getItem(CAP_KEY));
-  if (!Number.isFinite(raw) || raw < 1) return DEFAULT_CAP;
-  return Math.min(50, Math.max(1, Math.round(raw)));
+/// Wire the recents cache to the global store. Called from the app
+/// shell once `window.__foyer.store` exists. Subscribes to the
+/// "recents" event the store now dispatches in response to incoming
+/// `recents_list` envelopes; each notification refills the cache and
+/// pings every listener.
+export function attach(store) {
+  if (!store) return () => {};
+  const handler = () => {
+    const next = Array.isArray(store.state?.recents) ? store.state.recents : [];
+    // Defensive copy so callers can sort/filter without mutating store
+    // state.
+    _cache = next.slice();
+    for (const fn of _listeners) {
+      try { fn(_cache); } catch (e) { console.error("[recents] listener threw:", e); }
+    }
+  };
+  store.addEventListener("recents", handler);
+  // Hydrate immediately if the store already has data (the WS layer
+  // sends RecentsList eagerly on connect, which can land before this
+  // module runs).
+  handler();
+  return () => store.removeEventListener("recents", handler);
 }
-export function setRecentsCap(n) {
-  const v = Math.min(50, Math.max(1, Math.round(Number(n) || DEFAULT_CAP)));
-  localStorage.setItem(CAP_KEY, String(v));
-  // Truncate if needed.
-  const list = load();
-  if (list.length > v) save(list.slice(0, v));
-}
 
+/// Read the current cache. Synchronous so existing call sites
+/// (welcome-screen, main-menu) keep working without an async refactor.
+/// The cache is kept fresh by the `attach()` subscription above.
 export function load() {
-  try {
-    const raw = localStorage.getItem(KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((e) => e && typeof e.path === "string" && e.path.length > 0);
-  } catch {
-    return [];
-  }
+  return _cache.slice();
 }
 
-function save(list) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(list));
-  } catch {
-    // Quota exceeded or serialization error — drop silently. Losing a
-    // recents entry never breaks an open flow.
-  }
+/// Subscribe to cache changes. Returns an off function. Useful for
+/// components that don't already react to a store event.
+export function onChange(fn) {
+  _listeners.add(fn);
+  return () => _listeners.delete(fn);
 }
 
-/** Record a session as most-recently-used. Updates `opened_at` if the
- *  path is already in the list, or prepends a new entry otherwise.
- *  Always truncates to the configured cap. */
-export function touch({ path, name, backend_id }) {
-  if (!path) return;
-  const cap = recentsCap();
-  const list = load().filter((e) => e.path !== path);
-  list.unshift({
-    path,
-    name: name || pathTail(path),
-    backend_id: backend_id || "ardour",
-    opened_at: Math.floor(Date.now() / 1000),
-  });
-  save(list.slice(0, cap));
+/// Server-tracked now — clients don't push touches anymore. Kept as a
+/// no-op so call sites (e.g. welcome-screen.js's optimistic touch on
+/// click) compile without churn. The server bumps the entry on
+/// LaunchProject / focus.
+export function touch(_entry) {
+  // intentional no-op
 }
 
-/** Remove a recent entry (user's "forget this" action). */
+/// Drop an entry by path. Sends a WS command; the resulting
+/// RecentsList broadcast updates the cache.
 export function forget(path) {
-  const list = load().filter((e) => e.path !== path);
-  save(list);
+  if (!path) return;
+  const ws = window.__foyer?.ws;
+  if (!ws) return;
+  try { ws.send({ type: "forget_recent", path }); } catch {}
 }
 
-/** Clear the entire recents list. */
+/// Empty the entire list, server-side.
 export function clearAll() {
-  save([]);
-}
-
-function pathTail(p) {
-  const m = String(p).match(/[^/\\]+$/);
-  return m ? m[0] : p;
+  const ws = window.__foyer?.ws;
+  if (!ws) return;
+  try { ws.send({ type: "clear_recents" }); } catch {}
 }

@@ -24,7 +24,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { toast } from "foyer-ui-core/widgets/toast.js";
-import { launchProjectGuarded } from "../session-launch.js";
+import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
 import "./session-view.js";
 
 function tunnelTokenQuery() {

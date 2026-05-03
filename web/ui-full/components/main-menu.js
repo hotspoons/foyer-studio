@@ -8,8 +8,9 @@ import { getTransportPref, toggleTransportPref } from "foyer-core/transport-sett
 import { showProjectPicker } from "./project-picker-modal.js";
 import { openSettings } from "./settings-modal.js";
 import { promptText } from "foyer-ui-core/widgets/prompt-modal.js";
+import { confirmChoice } from "foyer-ui-core/widgets/confirm-modal.js";
 import { load as loadRecents, forget as forgetRecent, touch as touchRecent, clearAll as clearRecents } from "foyer-core/recents.js";
-import { launchProjectGuarded } from "../session-launch.js";
+import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
 import { isAllowed, isActionAllowed } from "foyer-core/rbac.js";
 
 // Walk shadow roots to find a custom element. The timeline lives ≥2
@@ -35,13 +36,20 @@ function findTimeline() {
 }
 
 // Category → menu label + order. Categories not listed are skipped.
+//
+// Transport is intentionally absent — every action there is already
+// reachable from the always-visible transport bar, so a Transport menu
+// just duplicates buttons two pixels apart. View is absent because the
+// layout FAB owns view spawning and tile arrangement; the old View menu
+// items hooked into a stub backend handler that never landed.
+//
+// Plugin's items are folded into Settings (see _renderMenu) — there's
+// effectively only "Plugin manager…" so an entire top-level button for
+// it is overkill.
 const MENU_ORDER = [
   { cat: "session",   label: "Session"   },
   { cat: "edit",      label: "Edit"      },
-  { cat: "transport", label: "Transport" },
-  { cat: "view",      label: "View"      },
   { cat: "track",     label: "Track"     },
-  { cat: "plugin",    label: "Plugin"    },
   { cat: "settings",  label: "Settings"  },
 ];
 
@@ -225,11 +233,22 @@ export class MainMenu extends LitElement {
       ws.send({ type: "list_actions" });
     }
     window.__foyer?.store?.addEventListener("rbac", this._onRbac);
+    // Sessions add/remove flips Close Session between enabled and
+    // disabled and changes the "Close Session — <name>" suffix; the
+    // switcher dispatches "sessions" on every list/open/close event.
+    this._onSessions = () => this.requestUpdate();
+    window.__foyer?.store?.addEventListener("sessions", this._onSessions);
+    // Open Recent submenu reads from the server-tracked recents
+    // cache; re-render when the cache flips.
+    this._onRecents = () => this.requestUpdate();
+    window.__foyer?.store?.addEventListener("recents", this._onRecents);
   }
   disconnectedCallback() {
     document.removeEventListener("pointerdown", this._onDocDown, true);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     window.__foyer?.store?.removeEventListener("rbac", this._onRbac);
+    window.__foyer?.store?.removeEventListener("sessions", this._onSessions);
+    window.__foyer?.store?.removeEventListener("recents", this._onRecents);
     super.disconnectedCallback();
   }
 
@@ -370,8 +389,17 @@ export class MainMenu extends LitElement {
     return html`
       ${this._renderLaunchMenu()}
       ${MENU_ORDER.map(({ cat, label }) => {
-        const items = this._byCategory(cat);
-        if (!items.length) return null;
+        let items = this._byCategory(cat);
+        // Plugin actions get folded into Settings — there's effectively
+        // only one (Plugin manager…) and a whole top-level menu for it
+        // is wasted chrome. Order: settings first, then plugin items.
+        if (cat === "settings") {
+          items = items.concat(this._byCategory("plugin"));
+        }
+        // The session dropdown carries hard-coded extras (Close, Open
+        // Recent, Remote Access) so render it even when the backend
+        // hasn't replied to list_actions yet.
+        if (!items.length && cat !== "session") return null;
         return this._renderMenu(cat, label, items);
       })}
     `;
@@ -462,6 +490,7 @@ export class MainMenu extends LitElement {
             `;
           })}
           ${cat === "session" ? this._renderRecentSubmenu() : null}
+          ${cat === "session" ? this._renderCloseSessionItem() : null}
           ${cat === "session" && this._canManageTunnels() ? html`
             <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
             <div class="item" @click=${() => { this._openMenu = ""; import("./tunnel-manager-modal.js").then((m) => m.openTunnelManager()); }}>
@@ -541,6 +570,54 @@ export class MainMenu extends LitElement {
       backend_id: entry.backend_id || "ardour",
       project_path: entry.path,
     });
+  }
+
+  /// "Close current session" tail-item on the Session menu. Hidden if
+  /// the role can't issue close_session, disabled when no session is
+  /// open. The session-switcher's dropdown carries the same affordance;
+  /// duplicating it here is intentional — once a user covers the
+  /// switcher with a floating window, the menu bar is the only always-
+  /// reachable surface for session-level operations.
+  _renderCloseSessionItem() {
+    if (!isAllowed("close_session")) return null;
+    const cur = window.__foyer?.store?.currentSession?.();
+    const enabled = !!cur;
+    return html`
+      <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
+      <div class="item ${enabled ? '' : 'disabled'}"
+           @click=${() => enabled && this._closeCurrentSession()}>
+        <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("x-mark", 11)}</span>
+        <span class="label">Close Session${enabled && cur?.name ? ` — ${cur.name}` : ''}</span>
+      </div>
+    `;
+  }
+
+  async _closeCurrentSession() {
+    this._openMenu = "";
+    const cur = window.__foyer?.store?.currentSession?.();
+    if (!cur) return;
+    if (cur.dirty) {
+      const choice = await confirmChoice({
+        title: "Unsaved changes",
+        message:
+          `"${cur.name || "This session"}" has unsaved changes.\n\n`
+          + `Save before closing?`,
+        confirmLabel: "Save & close",
+        altLabel: "Close without saving",
+        altTone: "danger",
+        cancelLabel: "Cancel",
+        tone: "warning",
+      });
+      if (choice === "cancel") return;
+      if (choice === "confirm") {
+        // Fire-and-forget save; close_session below runs after the
+        // shim's save handler queues. Same pattern session-switcher
+        // uses — no guarantee of a sync save round-trip, just a best
+        // effort before the IPC channel closes.
+        window.__foyer?.ws?.send({ type: "save_session" });
+      }
+    }
+    window.__foyer?.ws?.send({ type: "close_session", session_id: cur.id });
   }
 
   _menuLeftFor(cat) {

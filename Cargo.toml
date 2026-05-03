@@ -10,6 +10,7 @@ members = [
     "crates/foyer-cli",
     "crates/foyer-desktop",
     "crates/foyer-config",
+    "crates/foyer-snapshot",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ foyer-server        = { path = "crates/foyer-server" }
 foyer-cli           = { path = "crates/foyer-cli" }
 foyer-desktop       = { path = "crates/foyer-desktop" }
 foyer-config        = { path = "crates/foyer-config" }
+foyer-snapshot      = { path = "crates/foyer-snapshot" }
 
 # serde stack
 serde       = { version = "1", features = ["derive"] }

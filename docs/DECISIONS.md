@@ -2115,3 +2115,112 @@ hand the dir to Ardour" a non-starter as a default path:
 Ardour's `FileArchive` — it works on the desktop." It does, on a
 desktop where the user is also the attacker and there's no security
 boundary. On a server with anonymous uploads it's a one-line RCE.
+
+---
+
+## 44. Project snapshotting = OCI layers, not VM images or bare tarballs
+
+**Date:** 2026-05-03
+
+**Decision:** Freeze an Ardour project into a multi-stage OCI image
+(`foyer snapshot`).  The DAW, each plugin, and the project each get
+their own layer so Docker's layer cache makes common dependencies free
+across projects.  We normalise mtimes and rely on `docker buildx`, NOT
+on rebundling a whole OS.
+
+**Alternatives:**
+1. Full-system VM image (Packer, QEMU, etc.) — reproduces the entire
+   host including kernel, init, desktop env, and gigs of unrelated
+   packages.
+2. Static tarball of the project + DAW + `ldd` trees — no dependency
+   deduplication; two projects using the same Ardour version still
+   ship two copies.
+3. Nix derivation with `buildFHSUserEnv` — pure and reproducible, but
+   requires the Nix ecosystem and doesn't map neatly to standard
+   container registries.
+4. Flatpak bundle — desktop-centric, hard to automate, and bundles
+   the whole runtime.
+
+**Why:**
+1. OCI is the lingua franca of CI/CD.  `docker run` works everywhere
+   from laptops to Kubernetes to GitHub Actions.
+2. Layer caching is automatic: if project A and B both use Ardour 9,
+   the Ardour layer is downloaded once.
+3. `dpkg -S` lets us map files back to APT packages.  When the mapping
+   succeeds we `apt-get install` in the Dockerfile instead of copying
+   raw `.so` files, so security updates to the base image propagate
+   naturally (the layer is still "the package", not a snapshot of its
+   contents at a point in time).
+4. We DON'T ship the whole OS — the base layer is `debian:trixie-slim`,
+   which is ~30 MB.  The DAW + plugins are usually < 500 MB.  This
+   keeps the artifact small enough to push to a registry and fast
+   enough to pull on demand.
+5. Deterministic mtimes (`touch -t 197001010000`) make the image
+   content-addressable: same inputs → same layer digest, even if built
+   on different days.
+
+**Failure mode if re-introduced.** "Just zip the project and the Ardour
+AppImage together."  An AppImage includes every library it ever linked,
+so two AppImages double the storage.  There is no deduplication, no
+registry push, and no way to security-patch a library inside the
+AppImage without rebuilding the whole thing.
+
+
+## 45. Phone UI is a separate variant (`ui-phone`), not a responsive ui-full
+
+**Decision.** The touch-first phone surface ships as a sibling
+package at `web/ui-phone/` — its own manifest, components, and
+match predicate — rather than as a small-viewport CSS branch
+inside `ui-full`. ui-phone wins automatically when
+`touch && minDim < 600`; ui-full keeps tablets and desktops.
+
+**Why a sibling, not responsive CSS:**
+
+1. **Surface area is genuinely different, not just smaller.** The
+   desktop UI has a tile layout manager, a mixer with horizontal
+   strip overflow + density toggle, a timeline with regions, MIDI
+   editors, plugin panels. The phone surface is a transport remote
+   with arm/solo/mute and a monitor fader. There's no
+   `@media (max-width: 600px)` projection from one onto the other —
+   the affordance set is different on purpose. (Audition routing
+   and project creation are explicitly punted; see ui-phone/package.js.)
+
+2. **Three-tier rule already gives us the seam for free.** core →
+   ui-core → ui-* makes "swap the whole UI" the cheap operation;
+   variants are the unit of substitution. Forking the UI tree is
+   exactly what the registry was built for, and welcoming a phone
+   variant doesn't require any new infrastructure (boot.js
+   discovers it via /variants.json on its own).
+
+3. **Future tablet and kids variants follow the same shape.** A
+   tablet UI will reuse most of ui-full's primitives but rearrange
+   the layout — same pattern: register at `ui-tablet`, raise the
+   match score in the tablet band, drop the affordances that don't
+   make sense for stylus / two-hand work. The cost of that future
+   work is dominated by the choice we make NOW about whether
+   variants are sibling packages or theme branches.
+
+4. **CSS-only responsive design lies about capabilities.** A phone
+   loaded into ui-full would still try to render the tile layout
+   manager, the mixer's overflow scroller, the timeline's region
+   editor — even with everything visually hidden, the JS for
+   those surfaces still loads, mounts, listens for store events,
+   and pays render cost. A separate variant doesn't import them.
+
+**Cross-variant code path.** `web/ui-core/session-launch.js`
+(promoted from `web/ui-full/`) is the only ui-* helper that both
+the desktop and phone UIs share — it pops the unsaved-changes
+guard before firing `launch_project`. Anything else either lives
+at the ui-core layer (if it's a primitive both can reuse) or
+duplicates between variants on purpose.
+
+**Failure mode if re-introduced.** "Just add `@media` queries to
+ui-full and call it responsive." The mixer + timeline + tile
+layout manager all assume mouse-precision affordances. Hiding
+them at small viewports leaves the JS loaded and the boot path
+slow on the device that needs it most (a phone over a remote
+tunnel). Bigger problem: tomorrow's "kids UI" (large buttons,
+no plugin chrome) and "performer UI" (only the tracks they're
+named on) won't fit through a media-query-shaped hole either,
+and we'll end up forking ui-full anyway — but with media queries
+embedded in it.

@@ -25,6 +25,7 @@ mod ingress_ws;
 mod jail;
 pub mod orphans;
 mod plugin_gui_ws;
+mod recents;
 mod ring;
 mod session_scrub;
 mod sessions;

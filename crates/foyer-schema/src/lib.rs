@@ -30,7 +30,7 @@ pub use id::EntityId;
 pub use io::{EnginePort, IoDirection, IoPort};
 pub use message::{
     BackendInfo, ChatMessageRecord, Command, ControlUpdate, Envelope, Event, OrphanInfo, Patch,
-    PeerInfo, PttSpeaker, Seq, SessionInfo, TrackBrowserSourceEntry,
+    PeerInfo, PttSpeaker, RecentEntry, Seq, SessionInfo, TrackBrowserSourceEntry,
 };
 pub use midi::{
     default_gm_drum_rows, expand_sequencer_layout, sequencer_layout_length_ticks, ArrangementSlot,

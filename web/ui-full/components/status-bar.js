@@ -42,6 +42,12 @@ export class StatusBar extends LitElement {
       /* Dropdowns inside main-menu use position:absolute relative to their
        * own row and inherit our z-index stacking context. */
     }
+    .divider {
+      align-self: stretch;
+      width: 1px;
+      margin: 6px 4px;
+      background: var(--color-border);
+    }
     .brand {
       font-family: var(--font-sans);
       font-weight: 700;
@@ -449,14 +455,23 @@ export class StatusBar extends LitElement {
           </span>
         ` : null}
         ${this._renderConnChip()}
-        <foyer-session-switcher></foyer-session-switcher>
-        ${this._renderSessionDirty()}
         ${this._renderLayoutChip()}
       </div>
-      <!-- DAW application menus (Session / Edit / Transport / Track / Plugin /
-           Settings) and the "New view" launcher share this row so we don't
-           burn a second row of chrome on a handful of buttons. -->
+      <!-- DAW application menus (Session / Edit / Track / Settings) and the
+           "New view" launcher share this row so we don't burn a second row
+           of chrome on a handful of buttons. -->
       <foyer-main-menu></foyer-main-menu>
+      <!-- Per-session chrome lives AFTER the menu: the session switcher
+           name + the unsaved-changes save button both vary in width (and
+           come and go) so anchoring them on the left would shove every
+           menu button rightward whenever a session was opened/closed.
+           The divider separates "what is open" from "what the menus
+           act on." -->
+      <span class="divider"></span>
+      <div class="pad">
+        <foyer-session-switcher></foyer-session-switcher>
+        ${this._renderSessionDirty()}
+      </div>
       <div class="pad" style="margin-left:auto">
         <button
           title=${this._fullscreen ? "Exit fullscreen" : "Enter fullscreen"}

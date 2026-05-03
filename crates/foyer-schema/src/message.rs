@@ -395,6 +395,15 @@ pub enum Event {
     OrphansDetected {
         orphans: Vec<OrphanInfo>,
     },
+    /// Recently-opened projects, server-tracked. The sidecar persists
+    /// this list across restarts (one file in XDG_DATA_HOME) so each
+    /// client doesn't carry its own per-browser fork that goes stale
+    /// when the server moves between containers. Emitted on connect
+    /// and after every touch / forget / clear so welcome screens +
+    /// the Session → Open Recent submenu stay live.
+    RecentsList {
+        recents: Vec<RecentEntry>,
+    },
 
     // ───── audio streaming negotiation ──────────────────────────────────
     /// WebRTC SDP offer/answer from the shim. Client replies with
@@ -586,6 +595,30 @@ pub struct SessionInfo {
     /// `Event::SessionDirtyChanged` for convenience in the UI.
     #[serde(default)]
     pub dirty: bool,
+}
+
+/// One entry in the server-tracked "recently opened projects" list.
+/// Persisted to disk so the list survives sidecar restarts and is
+/// shared across browser profiles. The previous design kept this in
+/// each browser's localStorage, which left stale entries pointing at
+/// projects that didn't exist on whichever container was currently
+/// hosting the sidecar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecentEntry {
+    /// Jail-relative path stored on the wire (matches the form clients
+    /// send to LaunchProject). Used as the unique key for touch /
+    /// forget operations.
+    pub path: String,
+    /// Display name, defaults to the project file's basename.
+    #[serde(default)]
+    pub name: String,
+    /// Backend adapter id ("ardour" / "stub"). Echoed back in the
+    /// touch path so the next launch goes to the right adapter.
+    #[serde(default)]
+    pub backend_id: String,
+    /// Unix epoch seconds the user last opened this project.
+    #[serde(default)]
+    pub opened_at: u64,
 }
 
 /// An orphaned session discovered on sidecar startup. Either the shim
@@ -860,6 +893,20 @@ pub enum Command {
     DismissOrphan {
         orphan_id: EntityId,
     },
+
+    // ───── recents (server-tracked recent projects) ─────────────────────
+    /// Ask the sidecar for its current recents list. Answered with
+    /// `Event::RecentsList`. Sent eagerly on initial WS attach; clients
+    /// can re-fire after a network blip to resync.
+    ListRecents,
+    /// Drop a single entry from the recents list. Persisted to disk.
+    /// Emits an updated `Event::RecentsList`.
+    ForgetRecent {
+        path: String,
+    },
+    /// Drop every recents entry. Emits an updated (empty)
+    /// `Event::RecentsList`.
+    ClearRecents,
 
     // ───── track / group / plugin lifecycle ─────────────────────────────
     /// Mutate a track. Fields in `patch` that are `None` stay unchanged.

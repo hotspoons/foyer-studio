@@ -18,7 +18,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { load as loadRecents, touch as touchRecent, forget as forgetRecent, clearAll } from "foyer-core/recents.js";
-import { launchProjectGuarded } from "../session-launch.js";
+import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
 import { isAllowed, onRbacChange } from "foyer-core/rbac.js";
 
 export class WelcomeScreen extends LitElement {
@@ -238,6 +238,10 @@ export class WelcomeScreen extends LitElement {
     this._onStore = () => this._refresh();
     this._onOrphans = () => this._refresh();
     this._onSessions = () => this._refresh();
+    // Recents are server-tracked now; the store dispatches `recents`
+    // when a fresh `RecentsList` envelope arrives. Re-render so the
+    // list paints (or repaints after touch / forget / clear).
+    this._onRecents = () => this._refresh();
   }
 
   /** Group orphans so duplicate entries for the same project path
@@ -287,6 +291,7 @@ export class WelcomeScreen extends LitElement {
     store?.addEventListener("change", this._onStore);
     store?.addEventListener("orphans", this._onOrphans);
     store?.addEventListener("sessions", this._onSessions);
+    store?.addEventListener("recents", this._onRecents);
     this._offRbac = onRbacChange(() => this.requestUpdate());
     this._refresh();
   }
@@ -295,6 +300,7 @@ export class WelcomeScreen extends LitElement {
     store?.removeEventListener("change", this._onStore);
     store?.removeEventListener("orphans", this._onOrphans);
     store?.removeEventListener("sessions", this._onSessions);
+    store?.removeEventListener("recents", this._onRecents);
     this._offRbac?.();
     super.disconnectedCallback();
   }

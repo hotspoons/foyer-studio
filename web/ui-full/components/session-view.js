@@ -4,7 +4,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { showPreview } from "foyer-ui-core/widgets/preview-modal.js";
-import { launchProjectGuarded } from "../session-launch.js";
+import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
 
 /** Parent of a jail-relative path. `""` and `"/"` return `""`. */
 function parentPath(p) {

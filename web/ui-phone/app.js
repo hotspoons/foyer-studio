@@ -1,0 +1,180 @@
+// Phone app shell. Three states + a sheet:
+//
+//   ┌──────────────────────┐
+//   │ TOP BAR              │  always visible
+//   ├──────────────────────┤
+//   │ TRANSPORT            │  visible when a session is open
+//   ├──────────────────────┤
+//   │ TRACK LIST (scroll)  │  visible when a session is open
+//   └──────────────────────┘
+//
+// When no session is open the body collapses to a full-bleed welcome
+// panel — passive "waiting for host" if the role can't launch, or a
+// recents/open-sessions list rendered inline (the same component the
+// session sheet uses) if it can.
+//
+// All store/ws/audio infrastructure is shared with ui-full — we just
+// paint differently against the same reactive state.
+
+import { LitElement, html, css } from "lit";
+import { isAllowed, onRbacChange } from "foyer-core/rbac.js";
+
+import "./components/top-bar.js";
+import "./components/transport.js";
+import "./components/track-row.js";
+import "./components/session-sheet.js";
+
+export class PhoneApp extends LitElement {
+  static properties = {
+    _tick: { state: true, type: Number },
+    _sheetOpen: { state: true, type: Boolean },
+    _rbacTick: { state: true, type: Number },
+  };
+
+  static styles = css`
+    :host {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100vh;
+      /* Use the small viewport height when available (iOS Safari)
+       * so address-bar collapse doesn't clip our last track row. */
+      height: 100svh;
+      background: var(--color-bg, #0b1120);
+      color: var(--color-text);
+      font-family: var(--font-sans);
+      overscroll-behavior: contain;
+    }
+    main {
+      flex: 1;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      min-height: 0;
+    }
+    .tracks {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    /* Welcome / empty state — same vertical centering for both
+     * "waiting" and "tap to open" variants. */
+    .welcome {
+      flex: 1;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 32px 24px;
+      text-align: center;
+      gap: 16px;
+    }
+    .welcome h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: 0.02em;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      -webkit-background-clip: text; background-clip: text;
+      color: transparent;
+    }
+    .welcome p {
+      margin: 0;
+      color: var(--color-text-muted);
+      font-size: 13px;
+      line-height: 1.5;
+      max-width: 28em;
+    }
+    .welcome .cta {
+      margin-top: 8px;
+      padding: 14px 28px;
+      border: 0; border-radius: 12px;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      color: #fff;
+      font: inherit; font-size: 14px; font-weight: 700;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+    }
+    .welcome .cta:active { transform: scale(0.97); }
+    .empty-tracks {
+      padding: 24px 16px;
+      color: var(--color-text-muted);
+      font-size: 12px;
+      text-align: center;
+    }
+  `;
+
+  constructor() {
+    super();
+    this._tick = 0;
+    this._sheetOpen = false;
+    this._rbacTick = 0;
+    this._onChange = () => { this._tick++; };
+    this._offRbac = null;
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    const store = window.__foyer?.store;
+    store?.addEventListener("change", this._onChange);
+    store?.addEventListener("sessions", this._onChange);
+    this._offRbac = onRbacChange(() => { this._rbacTick++; });
+  }
+  disconnectedCallback() {
+    const store = window.__foyer?.store;
+    store?.removeEventListener("change", this._onChange);
+    store?.removeEventListener("sessions", this._onChange);
+    this._offRbac?.();
+    super.disconnectedCallback();
+  }
+
+  _onOpenSheet = () => { this._sheetOpen = true; };
+  _onCloseSheet = () => { this._sheetOpen = false; };
+
+  render() {
+    void this._tick; void this._rbacTick;
+    const session = window.__foyer?.store?.state?.session || null;
+    const cur = window.__foyer?.store?.currentSession?.();
+    const tracks = (session?.tracks || []).filter((t) => t && t.id);
+    const hasSession = !!cur;
+    const canLaunch = isAllowed("launch_project");
+    return html`
+      <foyer-phone-top-bar @open-sheet=${this._onOpenSheet}></foyer-phone-top-bar>
+      <main>
+        ${hasSession
+          ? html`
+              <foyer-phone-transport></foyer-phone-transport>
+              <div class="tracks">
+                ${tracks.length === 0
+                  ? html`<div class="empty-tracks">This session has no tracks yet.</div>`
+                  : tracks.map((t) => html`
+                      <foyer-phone-track-row .track=${t}></foyer-phone-track-row>
+                    `)}
+              </div>
+            `
+          : html`
+              <div class="welcome">
+                <h1>Foyer</h1>
+                ${canLaunch
+                  ? html`
+                      <p>
+                        Pick a project to open, or join a session the host has
+                        already started.
+                      </p>
+                      <button class="cta" @click=${this._onOpenSheet}>
+                        Pick a session
+                      </button>
+                    `
+                  : html`
+                      <p>
+                        Waiting for the host to open a session. Once they do,
+                        this screen will switch to the transport.
+                      </p>
+                    `}
+              </div>
+            `}
+      </main>
+      <foyer-phone-session-sheet
+        ?open=${this._sheetOpen}
+        @close=${this._onCloseSheet}
+      ></foyer-phone-session-sheet>
+    `;
+  }
+}
+customElements.define("foyer-phone-app", PhoneApp);

@@ -377,7 +377,9 @@ async fn handle(
     // Initial session roll-up: send the current list of open sessions
     // and any orphans discovered at sidecar startup, so the client's
     // welcome screen / switcher can paint immediately instead of
-    // waiting for the first ListSessions round-trip.
+    // waiting for the first ListSessions round-trip. RecentsList rides
+    // along on the same paint so the welcome screen has everything it
+    // needs before the user's first interaction.
     {
         let sessions = state.sessions.list().await;
         let sess_env = Envelope {
@@ -399,6 +401,15 @@ async fn handle(
             };
             let _ = send_env(&mut tx_ws, &orph_env).await;
         }
+        let recents = crate::recents::load().await;
+        let rec_env = Envelope {
+            schema: SCHEMA_VERSION,
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            session_id: None,
+            body: Event::RecentsList { recents },
+        };
+        let _ = send_env(&mut tx_ws, &rec_env).await;
     }
 
     // Initial catch-up: either replay from ring or send snapshot.
@@ -670,6 +681,9 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::ShimQuit => "shim_quit",
         Command::ReattachOrphan { .. } => "reattach_orphan",
         Command::DismissOrphan { .. } => "dismiss_orphan",
+        Command::ListRecents => "list_recents",
+        Command::ForgetRecent { .. } => "forget_recent",
+        Command::ClearRecents => "clear_recents",
         Command::UpdateTrack { .. } => "update_track",
         Command::DeleteTrack { .. } => "delete_track",
         Command::ReorderTracks { .. } => "reorder_tracks",
@@ -1153,6 +1167,18 @@ async fn dispatch_command(
                                 *state.focus_session_id.write().await = Some(existing_id.clone());
                                 *state.backend.write().await = be;
 
+                                // Promote in recents — re-clicking an
+                                // open project is still a "use" event
+                                // and should bump it to the top.
+                                let recents = crate::recents::touch(foyer_schema::RecentEntry {
+                                    path: raw.to_string(),
+                                    name: String::new(),
+                                    backend_id: backend_id.clone(),
+                                    opened_at: 0,
+                                })
+                                .await;
+                                broadcast_event(state, Event::RecentsList { recents }).await;
+
                                 // Emit a session list refresh + snapshot so the
                                 // client repaints without a round-trip.
                                 let sessions = state.sessions.list().await;
@@ -1196,6 +1222,8 @@ async fn dispatch_command(
                     // the .ardour file's extra_xml on hello), the
                     // CLI spawner will set it on the backend before
                     // returning and we can pass it through here.
+                    let touch_path = project_path.clone();
+                    let touch_backend = backend_id.clone();
                     state
                         .swap_backend(
                             backend_id,
@@ -1206,6 +1234,20 @@ async fn dispatch_command(
                             launched.process,
                         )
                         .await;
+                    // Promote the just-opened project to the top of
+                    // recents. Persisted server-side so welcome
+                    // screens across browser profiles see the same
+                    // history.
+                    if let Some(p) = touch_path {
+                        let recents = crate::recents::touch(foyer_schema::RecentEntry {
+                            path: p,
+                            name: String::new(),
+                            backend_id: touch_backend,
+                            opened_at: 0,
+                        })
+                        .await;
+                        broadcast_event(state, Event::RecentsList { recents }).await;
+                    }
                 }
                 Err(e) => {
                     broadcast_event(
@@ -2281,6 +2323,19 @@ async fn dispatch_command(
                 let remaining = state.orphans.read().await.clone();
                 broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
             }
+        }
+
+        Command::ListRecents => {
+            let recents = crate::recents::load().await;
+            broadcast_event(state, Event::RecentsList { recents }).await;
+        }
+        Command::ForgetRecent { path } => {
+            let recents = crate::recents::forget(&path).await;
+            broadcast_event(state, Event::RecentsList { recents }).await;
+        }
+        Command::ClearRecents => {
+            let recents = crate::recents::clear().await;
+            broadcast_event(state, Event::RecentsList { recents }).await;
         }
 
         Command::CreateGroup {

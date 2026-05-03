@@ -1,4 +1,14 @@
-import { confirmChoice } from "foyer-ui-core/widgets/confirm-modal.js";
+// Project-launch guard shared by every ui-* variant. Lives in
+// ui-core because it depends on a ui-core primitive (the
+// confirm-modal) but isn't married to any one variant's surface.
+//
+// Behavior: if the currently-focused session has unsaved changes,
+// pop a 3-choice modal (Save & switch / Switch without saving /
+// Cancel) before firing `launch_project`. Without this, switching
+// from the welcome screen / a session sheet / a recents tap would
+// silently lose edits the user hadn't saved.
+
+import { confirmChoice } from "./widgets/confirm-modal.js";
 
 function currentSessionInfo(store) {
   if (!store) return null;

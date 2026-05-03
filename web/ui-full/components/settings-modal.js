@@ -1,6 +1,9 @@
-// Client-side preferences modal. Covers the settings that live in
-// localStorage — transport return-on-stop mode, waveform viz style +
-// palette, mixer density (read-only here, flip from the mixer toolbar).
+// Client-side preferences modal. The only setting that lives here is
+// the browser audio stream config (codec + sample rate) — everything
+// else has a more direct home in the UI:
+//   * transport return-on-stop  → cycle button on the transport bar
+//   * waveform style / palette  → the timeline view's settings popover
+//   * mixer density / width      → the mixer toolbar
 // DAW-side settings (buffer size, plugin paths, etc.) belong in a
 // separate modal that round-trips through the shim; this one is
 // intentionally client-only.
@@ -10,13 +13,6 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
-import { getTransportPref, setTransportPref } from "foyer-core/transport-settings.js";
-import { getReturnMode, setReturnMode, RETURN_MODES, RETURN_MODE_LABELS } from "foyer-core/transport-return.js";
-import {
-  WAVEFORM_STYLES, WAVEFORM_PALETTES,
-  getVizPref, setVizPref,
-} from "foyer-ui-core/viz/viz-settings.js";
-import { loadMixerSettings } from "foyer-core/mixer-density.js";
 import { readAudioPrefs, writeAudioPrefs } from "foyer-core/audio/audio-listener.js";
 
 export class SettingsModal extends LitElement {
@@ -193,11 +189,6 @@ export class SettingsModal extends LitElement {
   }
 
   render() {
-    const returnMode = getReturnMode();
-    const wfStyle = getVizPref("waveformStyle");
-    const wfPalette = getVizPref("palette");
-    const glow = getVizPref("glow");
-    const mixer = loadMixerSettings();
     return html`
       <div class="card" @click=${(e) => e.stopPropagation()}>
         <header>
@@ -205,55 +196,6 @@ export class SettingsModal extends LitElement {
           <button class="close" title="Close" @click=${this._close}>${icon("x-mark", 16)}</button>
         </header>
         <div class="body">
-          <div class="section">
-            <h3>Transport</h3>
-            <div class="row">
-              <label>Return-on-stop behavior</label>
-              <div class="chip-row">
-                ${RETURN_MODES.map((m) => html`
-                  <button class="chip ${m === returnMode ? "active" : ""}"
-                          @click=${() => { setReturnMode(m); this._refresh(); }}>
-                    ${RETURN_MODE_LABELS[m]}
-                  </button>
-                `)}
-              </div>
-            </div>
-          </div>
-          <div class="section">
-            <h3>Waveform visualization</h3>
-            <div class="row">
-              <label>Style</label>
-              <div class="chip-row">
-                ${Object.entries(WAVEFORM_STYLES).map(([id, s]) => html`
-                  <button class="chip ${id === wfStyle ? "active" : ""}"
-                          @click=${() => { setVizPref("waveformStyle", id); this._refresh(); }}>
-                    ${s.label}
-                  </button>
-                `)}
-              </div>
-            </div>
-            <div class="row">
-              <label>Palette</label>
-              <div class="chip-row">
-                ${Object.entries(WAVEFORM_PALETTES).map(([id, p]) => html`
-                  <button class="chip ${id === wfPalette ? "active" : ""}"
-                          @click=${() => { setVizPref("palette", id); this._refresh(); }}>
-                    ${p.label}
-                  </button>
-                `)}
-              </div>
-            </div>
-          </div>
-          <div class="section">
-            <h3>Mixer</h3>
-            <div class="row">
-              <label>Current density · width</label>
-              <span style="color:var(--color-text-muted);font-size:11px">${mixer.density} · ${mixer.widthMode}</span>
-            </div>
-            <div class="row">
-              <label style="color:var(--color-text-muted);font-size:11px">Change in the mixer toolbar.</label>
-            </div>
-          </div>
           ${this._renderAudioSection()}
         </div>
         <footer>

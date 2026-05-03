@@ -17,6 +17,7 @@ foyer-backend.workspace = true
 foyer-backend-stub.workspace = true
 foyer-backend-host.workspace = true
 foyer-config.workspace = true
+foyer-snapshot.workspace = true
 async-trait.workspace = true
 clap = { version = "4", features = ["derive"] }
 dirs = "5"

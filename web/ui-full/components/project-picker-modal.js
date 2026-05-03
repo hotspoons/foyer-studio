@@ -18,7 +18,7 @@ import { LitElement, html, css } from "lit";
 
 import "./session-view.js";
 import { icon } from "foyer-ui-core/icons.js";
-import { launchProjectGuarded } from "../session-launch.js";
+import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
 
 export class ProjectPickerModal extends LitElement {
   static properties = {

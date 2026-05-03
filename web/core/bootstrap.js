@@ -24,6 +24,7 @@ import { FoyerWs } from "./ws.js";
 import { Store } from "./store.js";
 import { ChatStore } from "./chat.js";
 import { installTransportReturn } from "./transport-return.js";
+import { attach as attachRecents } from "./recents.js";
 import { pickUiVariant, sniffEnv, getUiVariant } from "./registry/ui-variants.js";
 import { setFeatures } from "./registry/features.js";
 import { setActiveVariant } from "./registry/widgets.js";
@@ -56,6 +57,7 @@ export function bootFoyerCore(opts = {}) {
 
   store.attach(ws);
   chat.attach();
+  attachRecents(store);
   installTransportReturn({ store, ws });
 
   // Fallback-timer handle — cleared the moment the greeting arrives,

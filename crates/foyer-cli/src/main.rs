@@ -139,6 +139,42 @@ enum Command {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Snapshot an Ardour project into a reproducible OCI image.
+    Snapshot {
+        /// Path to the Ardour session directory (the folder containing
+        /// the `.ardour` file).
+        project_dir: PathBuf,
+
+        /// Explicit DAW executable to snapshot. Auto-detected from
+        /// $PATH when omitted.
+        #[arg(long)]
+        daw_exec: Option<PathBuf>,
+
+        /// Output directory for the build context and plan JSON.
+        #[arg(long, short = 'o', default_value = ".")]
+        out_dir: PathBuf,
+
+        /// OCI image tag (e.g. `my-project:latest`).
+        #[arg(long, short = 't', default_value = "foyer-snapshot:latest")]
+        tag: String,
+
+        /// Build the image immediately with `docker buildx`.
+        #[arg(long, default_value_t = false)]
+        build: bool,
+
+        /// Produce a `.tar.gz` loadable with `docker load`.
+        #[arg(long, default_value_t = false)]
+        tarball: bool,
+
+        /// Push the built image to a registry.
+        #[arg(long, default_value_t = false)]
+        push: bool,
+
+        /// Registry prefix (e.g. `ghcr.io/user`). The tag becomes
+        /// `<registry>/<tag>` when this is set.
+        #[arg(long)]
+        registry: Option<String>,
+    },
     /// Restore `<Script>` blocks that the upload-time scrubber
     /// quarantined into `<!-- foyer:scrubbed:... -->` comments.
     /// Re-introduces auto-executing Lua, so this is OFF by default
@@ -196,6 +232,28 @@ async fn main() -> Result<()> {
             force,
             dry_run,
         ),
+        Command::Snapshot {
+            project_dir,
+            daw_exec,
+            out_dir,
+            tag,
+            build,
+            tarball,
+            push,
+            registry,
+        } => {
+            let args = foyer_snapshot::cli::SnapshotArgs {
+                project_dir,
+                daw_exec,
+                out_dir,
+                tag,
+                build,
+                tarball,
+                push,
+                registry,
+            };
+            foyer_snapshot::cli::run(&args).await
+        }
         Command::ScrubRestore { input, output } => scrub_restore(&input, output.as_deref()),
         Command::Serve {
             backend,

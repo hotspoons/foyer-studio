@@ -44,6 +44,11 @@ export class Store extends EventTarget {
       // reattach to, or crashed shims the user can dismiss / reopen.
       // One-shot list (cleared as the user resolves each).
       orphans: [],
+      // Server-tracked "recently opened" projects. Populated from
+      // `Event::RecentsList` on attach and after every touch / forget
+      // / clear. Replaces the per-browser localStorage list that went
+      // stale when the sidecar moved between containers.
+      recents: [],
       // Set of track ids whose regions include at least one active
       // beat-sequencer layout (`foyer_sequencer.active !== false`).
       // Populated from `regions_list` / `region_updated` events so
@@ -516,18 +521,12 @@ export class Store extends EventTarget {
           // via the switcher (which sets currentSessionId without
           // triggering a new Open).
           this.state.currentSessionId = info.id;
-          // Lazily touch the browser-local recents list so the next
-          // welcome screen visit sees this path at the top. Import
-          // inline to avoid a hard dependency cycle at module load.
-          if (info.path) {
-            import("./recents.js").then((m) => {
-              m.touch({
-                path: info.path,
-                name: info.name,
-                backend_id: info.backend_id,
-              });
-            }).catch(() => {});
-          }
+          // Recents are server-tracked now; the sidecar's
+          // LaunchProject handler bumps the entry and broadcasts a
+          // fresh `recents_list` envelope on its own. We used to
+          // optimistically touch here from the browser side, but with
+          // the persistent file living next to the sidecar that just
+          // duplicated the work.
           this.dispatchEvent(new CustomEvent("sessions"));
           this._emit();
         }
@@ -550,6 +549,12 @@ export class Store extends EventTarget {
       case "orphans_detected": {
         this.state.orphans = Array.isArray(body.orphans) ? body.orphans : [];
         this.dispatchEvent(new CustomEvent("orphans"));
+        this._emit();
+        break;
+      }
+      case "recents_list": {
+        this.state.recents = Array.isArray(body.recents) ? body.recents : [];
+        this.dispatchEvent(new CustomEvent("recents"));
         this._emit();
         break;
       }
