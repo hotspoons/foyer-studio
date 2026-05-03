@@ -223,6 +223,26 @@ pub struct Transport {
     /// through without a schema bump.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub sync_source: Option<Parameter>,
+    /// What to do with the playhead when the user hits stop.
+    /// Free-form string so future modes (`"play_end"`, `"locate_marker"`,
+    /// …) don't need a schema bump. Known values today:
+    ///   * `"leave"`      — keep the playhead where stop landed
+    ///   * `"zero"`       — return to sample 0
+    ///   * `"play_start"` — return to wherever play was last pressed
+    ///
+    /// Lives on the wire (not just in browser localStorage) so the
+    /// host's choice travels to every connected client — the phone
+    /// performer at the kit shouldn't see a different return mode
+    /// than the engineer at the desktop did, and the desktop user
+    /// shouldn't be surprised when stop behaves differently after a
+    /// remote toggle.
+    ///
+    /// `None` when the backend doesn't track this concept yet
+    /// (legacy snapshots, hosts that haven't been updated). Clients
+    /// fall back to a localStorage cache + a "leave" default in
+    /// that case.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub return_mode: Option<Parameter>,
 }
 
 /// Default session sample rate when no DAW has reported one yet. Matches
@@ -362,6 +382,7 @@ mod tests {
                 punch_out: None,
                 metronome: None,
                 sync_source: None,
+                return_mode: None,
             },
             tracks: vec![Track {
                 id: EntityId::new("track.abc"),

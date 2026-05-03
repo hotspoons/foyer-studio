@@ -336,20 +336,44 @@ export class PhoneTransport extends LitElement {
     this._seekDrag = true;
     this.toggleAttribute("seek-drag", true);
     this._seekDragSamples = samples;
+    // Single tap-to-seek: fire the seek immediately so a non-drag tap
+    // jumps without waiting for pointerup. The drag path below
+    // throttles further updates so we don't spam the engine.
     this._set("transport.position", samples);
+    this._lastSeekSendAt = performance.now();
   };
   _seekMove = (ev) => {
     if (!this._seekDrag) return;
     const samples = this._seekFromPointer(ev, ev.currentTarget);
     if (samples == null) return;
+    // ALWAYS update the local visual handle — the rail follows the
+    // finger frame-perfectly so the gesture feels immediate.
     this._seekDragSamples = samples;
-    this._set("transport.position", samples);
+    // THROTTLE the actual wire-write to the engine. 60 px/s drag at
+    // 60 Hz = ~60 controlSets/s if we sent every move. Both the
+    // Ardour shim and the Foyer Dummy backend choke on that volume:
+    // every seek triggers a transport-position write + a pcm-tap
+    // reset, so the user hears silence until the engine drains the
+    // queue (the "muted until you reach where you started" symptom
+    // Rich reported). 100 ms cap = ≤10 wire writes/sec, which the
+    // engine can absorb without backlog. The pointer-up handler
+    // sends one final `transport.position` with the settled value
+    // so the engine snaps to the exact spot the user landed on.
+    const now = performance.now();
+    if (now - (this._lastSeekSendAt || 0) >= 100) {
+      this._set("transport.position", samples);
+      this._lastSeekSendAt = now;
+    }
   };
   _seekUp = (ev) => {
     if (!this._seekDrag) return;
     this._seekDrag = false;
     this.toggleAttribute("seek-drag", false);
     ev.currentTarget.releasePointerCapture?.(ev.pointerId);
+    // Final settled position. Without this, the throttle could leave
+    // the engine 100 ms behind the visual handle.
+    this._set("transport.position", this._seekDragSamples);
+    this._lastSeekSendAt = performance.now();
   };
 
   _formatSamples(samples) {

@@ -214,6 +214,14 @@ impl StubState {
                 return Some(p);
             }
         }
+        // Optional transport extras (only present on backends that
+        // surface them — `return_mode` is the first one wired through
+        // ControlSet, so its lookup has to live here too).
+        if let Some(p) = t.return_mode.as_mut() {
+            if p.id == *id {
+                return Some(p);
+            }
+        }
         for track in &mut self.session.tracks {
             for p in [
                 &mut track.gain,

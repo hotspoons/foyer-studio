@@ -595,6 +595,21 @@ pub(crate) fn initial_session() -> Session {
             punch_out: None,
             metronome: None,
             sync_source: None,
+            // Server-authoritative return-on-stop mode. Default is
+            // "leave" (no auto-seek on stop) because that's what
+            // every DAW does out of the box. Clients change it via
+            // ControlSet on `transport.return_mode`.
+            return_mode: Some(Parameter {
+                id: EntityId::new("transport.return_mode"),
+                kind: ControlKind::Discrete,
+                label: "Return on Stop".into(),
+                range: None,
+                scale: ScaleCurve::Linear,
+                unit: None,
+                enum_labels: vec!["leave".into(), "zero".into(), "play_start".into()],
+                group: None,
+                value: ControlValue::Text("leave".into()),
+            }),
         },
         tracks: vec![
             track("kick", "Kick", TrackKind::Audio, Some("#c04040")),

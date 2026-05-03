@@ -17,7 +17,7 @@
 //! whole list back to disk. The list is small (≤25 entries) so this is
 //! cheaper than a real DB and avoids a partial-write window.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foyer_schema::RecentEntry;
@@ -41,8 +41,66 @@ fn recents_path() -> PathBuf {
 /// LaunchProject events racing each other into a corrupt file.
 static FILE_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// Normalize a path string to the form we want to store + ship: an
+/// absolute filesystem path canonicalized through `std::fs::canonicalize`
+/// (resolves `..`, symlinks, double slashes), then stripped of the
+/// jail prefix so what hits the wire is jail-relative.
+///
+/// Two things this fixes:
+///   * **Duplicates.** `/workspaces/foyer-studio/sessions/asdf` and
+///     `foyer-studio/sessions/asdf` were two separate keys in the
+///     recents store; the user saw the same project twice in their
+///     list. After normalization both collapse to `sessions/asdf`.
+///   * **Path leakage.** Absolute paths like
+///     `/workspaces/foyer-studio/sessions/asdf` carry information
+///     about the host filesystem layout that the UI has no business
+///     seeing. The jail-relative form is the contract every other
+///     UI-facing path on the wire already uses (see
+///     `SessionRegistry::jail_display_path`).
+///
+/// Falls through to the original input string when canonicalization
+/// fails (path doesn't exist on disk yet, e.g. a stub session
+/// created via `BrowsePath` that the user hasn't touched). The
+/// fallback won't dedupe a deleted-and-recreated project but it
+/// also won't lose the entry, which is the right tradeoff.
+pub fn normalize_path(path: &str, jail_root: Option<&Path>) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let absolute: PathBuf = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => {
+            // No disk reality to canonicalize against. Try a poor-man's
+            // canonicalize: if the input is jail-relative, prefix the
+            // jail; if absolute, leave it. Then run the same prefix
+            // strip below so empty-jail inputs still produce something
+            // sensible.
+            let p = Path::new(path);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else if let Some(root) = jail_root {
+                root.join(p)
+            } else {
+                return path.to_string();
+            }
+        }
+    };
+    if let Some(root) = jail_root {
+        if let Ok(rel) = absolute.strip_prefix(root) {
+            return rel.to_string_lossy().into_owned();
+        }
+    }
+    absolute.to_string_lossy().into_owned()
+}
+
 /// Read the on-disk list. Missing file → `[]`. Parse errors → `[]` +
 /// a tracing warn. Never panics.
+///
+/// Note: existing entries are NOT migrated — Rich made the call to
+/// let the on-disk file self-heal as users touch entries (project
+/// only lives on his dev machine right now, so the cost of stale
+/// duplicates is low). New entries route through `normalize_path`
+/// at touch time.
 pub async fn load() -> Vec<RecentEntry> {
     let path = recents_path();
     let bytes = match tokio::fs::read(&path).await {

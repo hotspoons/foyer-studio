@@ -113,6 +113,71 @@ NOT edit `index.html` or `boot.js`.
 - **Server is the RBAC enforcement point.** Client-side gating
   (`foyer-core/rbac.js`) mirrors the server decision for UI sugar;
   it is never the security boundary. See DECISION 38.
+- **Backend is the ONLY source of truth for shared session state.**
+  *Read this before adding any user-facing toggle.* If the setting
+  affects what every connected client sees — return-on-stop mode,
+  loop range, time signature, monitor mode, source-user assignment,
+  etc. — the value MUST live on the backend (typed schema field +
+  ControlSet wire-route + ControlUpdate echo). The UI toggle reads
+  from `store.state.controls`, writes via `ws.controlSet`. A
+  localStorage cache is fine as a cold-boot fallback / optimistic
+  layer, but it CANNOT be the canonical store.
+  - **Why this is in caps:** every Claude (and Cursor and Copilot)
+    instance that has touched this repo has, at some point, stuffed
+    a shared session setting into localStorage because that's the
+    pattern the training corpus is saturated with — solo-dev demos,
+    Stack Overflow answers about "how do I remember this checkbox,"
+    Medium tutorials about React state. The path of least resistance
+    completes the diff without expanding into the schema/backend
+    layers, which feels like restraint but in a multi-client domain
+    is just shrinking the scope of the request to fit the wrong
+    shape. Real bug from 2026-05-03: a return-on-stop button shipped
+    as localStorage-only; phone toggle → desktop never sees it →
+    user confused.
+  - **The check, before you write a line of UI code:** if I changed
+    this setting on the desktop and walked over to a phone, would
+    the phone show the new value? If "no" or "I don't know," wire
+    it through the backend FIRST. Schema field, stub fixture,
+    ControlSet handler, then the UI button — in that order.
+  - **Per-client preferences are a different category.** Theme,
+    fader-detail viz, mic-codec choice, panel layout — these are
+    correctly localStorage. The discriminator is *"does another
+    client at the same session need to see this?"* If yes:
+    backend. If no: localStorage.
+- **Jail-relative paths only on the wire.** Anything outside the
+  backend — WS envelopes, recents.json, log lines that the UI sees,
+  error messages broadcast to clients — uses paths *relative to the
+  filesystem jail root*, never absolute. The jail is the user's
+  Cloud Run / devcontainer / studio mount point and its absolute
+  form (`/workspaces/foyer-studio`, `/projects/<tenant>`, …) is a
+  host-deployment detail the UI has no business knowing. Sibling
+  contracts already enforced today:
+  - `SessionInfo.path` → `SessionRegistry::jail_display_path` strip
+    on every emit (snapshot list + per-session events).
+  - `BackendSwapped.project_path` → same strip in `swap_backend`.
+  - `RecentEntry.path` → `recents::normalize_path(path, jail_root)`
+    canonicalize-then-strip before `touch` / `forget`.
+  - `OrphanInfo.path` → `orphans_for_wire` strip at every WS emit
+    site (initial attach + ListSessions + reattach + dismiss).
+  - When you add a new event with a path field, mirror these. When
+    you add a new event with an embedded user-facing message that
+    interpolates a path, run it through the same strip — the
+    `reattach_failed` error message had a leaked socket path
+    (`/tmp/foyer/ardour-NNN.sock`) that ended up in the UI even
+    though the orphan path itself was clean. The check: *would I
+    learn anything about my host filesystem layout from this string
+    that I shouldn't?* If yes, strip; if you can't tell, log the
+    full version server-side and ship a sanitized one over the
+    wire.
+  - **Why this is also in a sticker:** the same training-corpus
+    gravity that pulls toward localStorage pulls toward
+    `path.display()` / raw `format!("{:?}", project_path)` because
+    that's how every Rust tutorial demonstrates Display impls.
+    Real bug from 2026-05-03: orphan banner displayed
+    `/workspaces/foyer-studio/sessions/asdf` while the recents row
+    next to it correctly read `foyer-studio/sessions/asdf` — same
+    project, two labels, immediate "where does this Foyer instance
+    actually live?" leak.
 - **Per-layer licensing.** `shims/ardour/` inherits GPLv2+ (links
   libardour). The Rust sidecar + web UI sit above the IPC boundary
   and stay non-copyleft. See DECISION 15.

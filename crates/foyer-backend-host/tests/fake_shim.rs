@@ -110,6 +110,7 @@ fn fake_session() -> Session {
             punch_out: None,
             metronome: None,
             sync_source: None,
+            return_mode: None,
         },
         tracks: vec![Track {
             id: EntityId::new("track.x"),

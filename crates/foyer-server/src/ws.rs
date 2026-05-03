@@ -33,6 +33,28 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::{AppState, SharedState};
 
+/// Re-shape the orphan list into the jail-relative form that hits the
+/// wire. The on-disk `RegistryEntry.project_path` is whatever absolute
+/// path the shim recorded at startup — fine for server-side
+/// bookkeeping (the reattach path needs the absolute form to
+/// canonicalize against), but a leak when broadcast verbatim because
+/// every other UI-facing path on the wire is jail-relative
+/// (`SessionInfo.path`, `BackendSwapped.project_path`,
+/// `RecentEntry.path`). Without this stripper, the welcome-screen's
+/// "Unfinished sessions found" banner displayed
+/// `/workspaces/foyer-studio/sessions/asdf` while everything else
+/// next to it read `foyer-studio/sessions/asdf` — same project, two
+/// different labels, clearly an internal detail bleeding through.
+async fn orphans_for_wire(state: &std::sync::Arc<AppState>) -> Vec<foyer_schema::OrphanInfo> {
+    let mut orphans = state.orphans.read().await.clone();
+    for o in &mut orphans {
+        if !o.path.is_empty() {
+            o.path = state.sessions.jail_display_path(&o.path).await;
+        }
+    }
+    orphans
+}
+
 /// Marker inserted as a request extension by the tunnel-auth listener.
 /// Presence means "this request came in over the public tunnel"; absence
 /// means "LAN listener, trusted". The WS upgrade reads it to decide
@@ -390,7 +412,7 @@ async fn handle(
             body: Event::SessionList { sessions },
         };
         let _ = send_env(&mut tx_ws, &sess_env).await;
-        let orphans = state.orphans.read().await.clone();
+        let orphans = orphans_for_wire(&state).await;
         if !orphans.is_empty() {
             let orph_env = Envelope {
                 schema: SCHEMA_VERSION,
@@ -1170,8 +1192,15 @@ async fn dispatch_command(
                                 // Promote in recents — re-clicking an
                                 // open project is still a "use" event
                                 // and should bump it to the top.
+                                // Normalize the path through the jail
+                                // canonicalizer so absolute and
+                                // jail-relative inputs collapse to
+                                // the same key (no duplicates) and
+                                // we never write a host-absolute
+                                // path back to the UI.
+                                let jail_root = state.sessions.jail_root.read().await.clone();
                                 let recents = crate::recents::touch(foyer_schema::RecentEntry {
-                                    path: raw.to_string(),
+                                    path: crate::recents::normalize_path(raw, jail_root.as_deref()),
                                     name: String::new(),
                                     backend_id: backend_id.clone(),
                                     opened_at: 0,
@@ -1239,8 +1268,15 @@ async fn dispatch_command(
                     // screens across browser profiles see the same
                     // history.
                     if let Some(p) = touch_path {
+                        // Same canonicalize-then-jail-strip we do on
+                        // the "already-open" focus path above —
+                        // without it a launch via `/abs/path` and a
+                        // launch via `jail-relative/path` for the
+                        // same project end up as two distinct
+                        // recents.json entries.
+                        let jail_root = state.sessions.jail_root.read().await.clone();
                         let recents = crate::recents::touch(foyer_schema::RecentEntry {
-                            path: p,
+                            path: crate::recents::normalize_path(&p, jail_root.as_deref()),
                             name: String::new(),
                             backend_id: touch_backend,
                             opened_at: 0,
@@ -2149,7 +2185,7 @@ async fn dispatch_command(
         Command::ListSessions => {
             let sessions = state.sessions.list().await;
             broadcast_event(state, Event::SessionList { sessions }).await;
-            let orphans = state.orphans.read().await.clone();
+            let orphans = orphans_for_wire(state).await;
             if !orphans.is_empty() {
                 broadcast_event(state, Event::OrphansDetected { orphans }).await;
             }
@@ -2375,7 +2411,7 @@ async fn dispatch_command(
                     .await;
                 *state.focus_session_id.write().await = Some(info.id.clone());
                 let _ = crate::orphans::remove_entry(info.id.as_str()).await;
-                let remaining = state.orphans.read().await.clone();
+                let remaining = orphans_for_wire(state).await;
                 broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
                 tracing::info!(
                     "reattach: adopted existing auto-attached backend at {} as session {}",
@@ -2417,15 +2453,21 @@ async fn dispatch_command(
                     broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
                 }
                 Err(e) => {
+                    // Don't include the full socket path in the
+                    // user-facing message — `/tmp/foyer/ardour-NNN.sock`
+                    // is a server-side coordination detail. The full
+                    // path lives in the server log if a developer
+                    // needs to debug.
+                    tracing::warn!(
+                        "reattach to {} (socket {}) failed: {e}",
+                        info.name,
+                        socket.display(),
+                    );
                     broadcast_event(
                         state,
                         Event::Error {
                             code: "reattach_failed".into(),
-                            message: format!(
-                                "reattach to {} at {} failed: {e}",
-                                info.name,
-                                socket.display(),
-                            ),
+                            message: format!("reattach to {} failed: {e}", info.name,),
                         },
                     )
                     .await;
@@ -2442,7 +2484,7 @@ async fn dispatch_command(
                 let _ = crate::orphans::remove_entry(info.id.as_str()).await;
                 // Send an updated orphan list so UIs can tear down
                 // the "dismiss" chip.
-                let remaining = state.orphans.read().await.clone();
+                let remaining = orphans_for_wire(state).await;
                 broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
             }
         }
@@ -2452,7 +2494,23 @@ async fn dispatch_command(
             broadcast_event(state, Event::RecentsList { recents }).await;
         }
         Command::ForgetRecent { path } => {
-            let recents = crate::recents::forget(&path).await;
+            // Normalize the inbound path the same way `touch` does so
+            // a Forget click from the UI lands on the canonical key
+            // even if the client cached an absolute or differently-
+            // resolved string. (Old recents files written before
+            // normalization may still hold non-canonical entries —
+            // the Forget click sees the displayed path, which IS
+            // canonical now, so this also matches new entries.)
+            let jail_root = state.sessions.jail_root.read().await.clone();
+            let normalized = crate::recents::normalize_path(&path, jail_root.as_deref());
+            let mut recents = crate::recents::forget(&normalized).await;
+            // Defensive: if the click came in pre-normalization shape
+            // (e.g. an old client tab that still has the absolute
+            // path cached), retry with the raw input so the user
+            // can actually evict the entry they're looking at.
+            if normalized != path {
+                recents = crate::recents::forget(&path).await;
+            }
             broadcast_event(state, Event::RecentsList { recents }).await;
         }
         Command::ClearRecents => {

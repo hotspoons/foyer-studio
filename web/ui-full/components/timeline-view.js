@@ -17,7 +17,7 @@ import "foyer-ui-core/viz/waveform-gl.js";
 import "./midi-strip.js";
 import "./automation-lane.js";
 import "foyer-ui-core/viz/viz-picker.js";
-import { getVizPrefs } from "foyer-ui-core/viz/viz-settings.js";
+import { getVizPref, getVizPrefs, setVizPref } from "foyer-ui-core/viz/viz-settings.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { toast } from "foyer-ui-core/widgets/toast.js";
@@ -526,12 +526,16 @@ export class TimelineView extends LitElement {
     this._transportDropStats = { stale_seq: 0, backward_jump: 0 };
     // Quantization grid prefs persist per-browser. Default off so a
     // first-time user doesn't see extra lines they didn't ask for.
+    // Visibility (`_quantOn`) is now mirrored to the viz prefs
+    // (`quantGridOn`) so the Viz menu can toggle it alongside the
+    // time-grid toggle. Subdivision (`_quantDiv`) stays in its own
+    // localStorage key — it's a per-timeline setting that doesn't
+    // belong in the broader viz prefs blob.
+    this._quantOn = getVizPref("quantGridOn") === true;
     try {
-      this._quantOn = localStorage.getItem("foyer.timeline.quant.on") === "1";
       const d = parseInt(localStorage.getItem("foyer.timeline.quant.div") || "16", 10);
       this._quantDiv = [4, 8, 16, 32, 6, 12].includes(d) ? d : 16;
     } catch {
-      this._quantOn = false;
       this._quantDiv = 16;
     }
   }
@@ -587,7 +591,20 @@ export class TimelineView extends LitElement {
     // existing rules on `.lane-gridlines .gl` and `.quant-line` read
     // them via `var(--foyer-time-grid)` / `var(--foyer-quant-grid)`.
     this._applyGridColors();
-    this._onVizPrefsChanged = () => this._applyGridColors();
+    this._onVizPrefsChanged = () => {
+      // Mirror the quant-on toggle from the Viz menu so the timeline
+      // re-renders when the user flips it from over there. Without
+      // this the menu writes the pref but the timeline holds its
+      // own stale `_quantOn` until something else triggers an
+      // update. The time-grid render path reads `getVizPref` live
+      // each render so it doesn't need a mirrored property.
+      const next = getVizPref("quantGridOn") === true;
+      if (next !== this._quantOn) {
+        this._quantOn = next;
+      }
+      this._applyGridColors();
+      this.requestUpdate();
+    };
     window.addEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
   }
 
@@ -1632,12 +1649,8 @@ export class TimelineView extends LitElement {
           >Loop selection</button>
         ` : null}
         <span style="flex:1"></span>
-        <label title="BPM-quantized grid overlay (uses transport.tempo)">
-          <input type="checkbox" .checked=${!!this._quantOn} @change=${() => this._toggleQuantOn()}>
-          Grid
-        </label>
         ${this._quantOn ? html`
-          <select title="Grid subdivision per quarter note"
+          <select title="Grid subdivision per quarter note (toggle visibility from the Viz menu)"
                   @change=${(e) => this._setQuantDiv(Number(e.currentTarget.value))}>
             <option value="4"  ?selected=${this._quantDiv === 4}>1/4</option>
             <option value="8"  ?selected=${this._quantDiv === 8}>1/8</option>
@@ -1648,7 +1661,6 @@ export class TimelineView extends LitElement {
           </select>
         ` : null}
         <foyer-viz-picker></foyer-viz-picker>
-        <span>${totalSec.toFixed(1)}s · ${sr} Hz · wheel to zoom · Alt-wheel for lane height</span>
         ${this._diagEnabled() ? html`
           <span>
             drops: seq=${this._transportDropStats.stale_seq || 0}
@@ -1671,11 +1683,13 @@ export class TimelineView extends LitElement {
               </span>
             `)}
           </div>
-          <div class="lane-gridlines" style="width:${widthPx}px">
-            ${ticks.map(({ t, major }) => html`
-              <span class="gl ${major ? 'major' : ''}" style="left:${t * this._zoom}px"></span>
-            `)}
-          </div>
+          ${getVizPref("timeGridOn") !== false ? html`
+            <div class="lane-gridlines" style="width:${widthPx}px">
+              ${ticks.map(({ t, major }) => html`
+                <span class="gl ${major ? 'major' : ''}" style="left:${t * this._zoom}px"></span>
+              `)}
+            </div>
+          ` : null}
           ${this._renderQuantGrid()}
           ${tracks.map(t => this._renderLane(t))}
           ${this._renderSelection()}
@@ -1783,7 +1797,13 @@ export class TimelineView extends LitElement {
 
   _toggleQuantOn() {
     this._quantOn = !this._quantOn;
-    try { localStorage.setItem("foyer.timeline.quant.on", this._quantOn ? "1" : "0"); } catch {}
+    // Mirror to the viz prefs so the Viz menu's checkbox reflects the
+    // change. The legacy `foyer.timeline.quant.on` localStorage key
+    // is no longer the source of truth — kept only as fallback for
+    // anything that hasn't been migrated. setVizPref dispatches
+    // `foyer:viz-prefs-changed`, which the timeline already listens
+    // for via `_onVizPrefsChanged`.
+    setVizPref("quantGridOn", this._quantOn);
   }
   _setQuantDiv(d) {
     this._quantDiv = d;
