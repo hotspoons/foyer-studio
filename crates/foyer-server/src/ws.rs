@@ -2282,26 +2282,18 @@ async fn dispatch_command(
             }
         }
         Command::ReattachOrphan { orphan_id } => {
-            let mut orphans = state.orphans.write().await;
-            if let Some(pos) = orphans.iter().position(|o| o.id == orphan_id) {
-                let info = orphans.remove(pos);
-                drop(orphans);
-                // Stub for now: without the spawner's "attach to
-                // existing socket" path we can't reach the orphan.
-                // Emit the error + clear it from the registry so the
-                // user can at least dismiss.
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "reattach_unimplemented".into(),
-                        message: format!(
-                            "reattach to orphan {} at {} is not yet wired; you can dismiss it for now",
-                            info.name, info.socket.as_deref().unwrap_or("?"),
-                        ),
-                    },
-                )
-                .await;
-            } else {
+            // Pull the orphan info out of the registry. We hold the
+            // write lock just long enough to remove it; the rest of
+            // the work happens with the lock dropped so a slow
+            // shim handshake can't block other commands.
+            let info = {
+                let mut orphans = state.orphans.write().await;
+                orphans
+                    .iter()
+                    .position(|o| o.id == orphan_id)
+                    .map(|pos| orphans.remove(pos))
+            };
+            let Some(info) = info else {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -2310,6 +2302,136 @@ async fn dispatch_command(
                     },
                 )
                 .await;
+                return Ok(());
+            };
+
+            // Need a spawner to call into — without one we can't build
+            // a HostBackend (foyer-server stays adapter-agnostic). The
+            // CLI provides the concrete `CliSpawner::reattach`.
+            let Some(spawner) = state.spawner.clone() else {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "no_spawner".into(),
+                        message: "this sidecar has no spawner; cannot reattach".into(),
+                    },
+                )
+                .await;
+                // Put the orphan back so the user can dismiss it.
+                state.orphans.write().await.push(info);
+                return Ok(());
+            };
+            let Some(socket_path) = info.socket.as_deref() else {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "reattach_no_socket".into(),
+                        message: format!(
+                            "orphan {} has no socket path on disk; can't reattach. Use Dismiss + Reopen to relaunch.",
+                            info.name,
+                        ),
+                    },
+                )
+                .await;
+                state.orphans.write().await.push(info);
+                return Ok(());
+            };
+            let socket = std::path::Path::new(socket_path);
+
+            // Fast-path: if the CLI already auto-attached to this exact
+            // shim socket on startup, the implicit backend in
+            // `state.backend` IS this orphan — opening a second IPC
+            // connection would deadlock (the shim only services one
+            // client at a time, so the new connect would sit in the
+            // kernel's accept queue forever and silently break event
+            // flow). Adopt the existing backend by registering it in
+            // the sessions map with the orphan's metadata.
+            let attached = state.attached_socket.read().await.clone();
+            let already_attached = attached.as_ref().is_some_and(|p| p.as_path() == socket);
+            if already_attached && state.sessions.list().await.is_empty() {
+                let existing = state.backend.read().await.clone();
+                // Abort the legacy single-backend pump — the new
+                // per-session pump that `sessions.add` spawns will
+                // take over. Without this both pumps run and every
+                // event fans out twice.
+                if let Some(handle) = state.pump_handle.lock().await.take() {
+                    handle.abort();
+                }
+                state
+                    .sessions
+                    .clone()
+                    .add(
+                        info.id.clone(),
+                        info.backend_id.clone(),
+                        existing,
+                        info.path.clone(),
+                        if info.name.is_empty() {
+                            info.id.to_string()
+                        } else {
+                            info.name.clone()
+                        },
+                        None,
+                    )
+                    .await;
+                *state.focus_session_id.write().await = Some(info.id.clone());
+                let _ = crate::orphans::remove_entry(info.id.as_str()).await;
+                let remaining = state.orphans.read().await.clone();
+                broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
+                tracing::info!(
+                    "reattach: adopted existing auto-attached backend at {} as session {}",
+                    socket.display(),
+                    info.id
+                );
+                return Ok(());
+            }
+
+            match spawner.reattach(&info.backend_id, socket).await {
+                Ok(launched) => {
+                    // Reuse the orphan's session id so the .ardour
+                    // file's extra_xml UUID stays stable; the next
+                    // crash + reattach round trip lands on the same
+                    // identity.
+                    state
+                        .swap_backend(
+                            info.backend_id.clone(),
+                            if info.path.is_empty() {
+                                None
+                            } else {
+                                Some(info.path.clone())
+                            },
+                            launched.backend,
+                            Some(info.id.clone()),
+                            if info.name.is_empty() {
+                                None
+                            } else {
+                                Some(info.name.clone())
+                            },
+                            launched.process,
+                        )
+                        .await;
+                    // Remove the on-disk registry entry — the orphan
+                    // is now an attached session, not crash debris.
+                    let _ = crate::orphans::remove_entry(info.id.as_str()).await;
+                    // Refresh the orphan list for clients.
+                    let remaining = state.orphans.read().await.clone();
+                    broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "reattach_failed".into(),
+                            message: format!(
+                                "reattach to {} at {} failed: {e}",
+                                info.name,
+                                socket.display(),
+                            ),
+                        },
+                    )
+                    .await;
+                    // Put the orphan back so the user can retry / dismiss.
+                    state.orphans.write().await.push(info);
+                }
             }
         }
         Command::DismissOrphan { orphan_id } => {

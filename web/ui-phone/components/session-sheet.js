@@ -14,6 +14,13 @@ import { icon } from "foyer-ui-core/icons.js";
 import { isAllowed } from "foyer-core/rbac.js";
 import { load as loadRecents, forget as forgetRecent } from "foyer-core/recents.js";
 import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
+import {
+  cycleTheme,
+  getTheme,
+  onThemeChange,
+  THEMES,
+  THEME_META,
+} from "foyer-ui-core/theme.js";
 
 export class PhoneSessionSheet extends LitElement {
   static properties = {
@@ -78,6 +85,43 @@ export class PhoneSessionSheet extends LitElement {
       font-size: 10px; font-weight: 700;
       letter-spacing: 0.14em; text-transform: uppercase;
       color: var(--color-text-muted);
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    /* Preferences section: gear-icon header + a chip-row of theme
+     * options. Same chip styling we use elsewhere on the phone
+     * surface so the accent treatment is consistent. */
+    .pref-row {
+      padding: 8px 16px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .pref-row .pref-label {
+      flex: 0 0 80px;
+      font-size: 12px;
+      color: var(--color-text-muted);
+    }
+    .pref-row .pref-chips {
+      display: flex; gap: 6px; flex-wrap: wrap; flex: 1;
+    }
+    .pref-chip {
+      flex: 0 0 auto;
+      min-height: 36px;
+      padding: 6px 10px;
+      display: inline-flex; align-items: center; gap: 5px;
+      border-radius: 8px;
+      border: 1px solid var(--color-border);
+      background: transparent;
+      color: var(--color-text-muted);
+      font-family: var(--font-sans);
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.12s ease;
+    }
+    .pref-chip:active { transform: scale(0.96); }
+    .pref-chip.on {
+      color: #fff;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      border-color: transparent;
     }
     .row {
       display: grid;
@@ -135,6 +179,10 @@ export class PhoneSessionSheet extends LitElement {
     this._onBackdrop = (ev) => {
       if (ev.target === this) this._close();
     };
+    // Re-render when the theme cycles so the Preferences section
+    // shows the now-current theme name + icon. The `theme.js`
+    // module fires a window CustomEvent on every change.
+    this._offThemeChange = null;
   }
 
   connectedCallback() {
@@ -142,12 +190,14 @@ export class PhoneSessionSheet extends LitElement {
     window.__foyer?.store?.addEventListener("change", this._onChange);
     window.__foyer?.store?.addEventListener("sessions", this._onChange);
     window.__foyer?.store?.addEventListener("recents", this._onChange);
+    this._offThemeChange = onThemeChange(() => this._onChange());
     this.addEventListener("click", this._onBackdrop);
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("change", this._onChange);
     window.__foyer?.store?.removeEventListener("sessions", this._onChange);
     window.__foyer?.store?.removeEventListener("recents", this._onChange);
+    this._offThemeChange?.();
     this.removeEventListener("click", this._onBackdrop);
     super.disconnectedCallback();
   }
@@ -246,9 +296,59 @@ export class PhoneSessionSheet extends LitElement {
               Wait for the host to switch sessions.
             </div>
           `}
+
+          ${this._renderPreferences()}
         </div>
       </div>
     `;
+  }
+
+  /// Mobile preferences section. Lives in the session sheet because
+  /// the phone shell deliberately doesn't have a top-level Settings
+  /// menu — every "where do I change this?" question that doesn't
+  /// fit on a track row should resolve here. Header is gear-prefixed
+  /// to match the universal "settings" affordance.
+  ///
+  /// First entry is theme — light / dim / dark / auto. Tapping a chip
+  /// jumps to that theme directly (rather than cycling) so the
+  /// 4-state cycle doesn't require four taps to land on the one
+  /// you wanted.
+  _renderPreferences() {
+    const cur = getTheme();
+    return html`
+      <section>
+        <h3>${icon("cog-6-tooth", 12)} Preferences</h3>
+        <div class="pref-row">
+          <span class="pref-label">Theme</span>
+          <div class="pref-chips">
+            ${THEMES.map((t) => {
+              const meta = THEME_META[t] || { icon: "cog-6-tooth", label: t };
+              return html`
+                <button class="pref-chip ${t === cur ? "on" : ""}"
+                        title=${meta.label}
+                        @click=${() => this._setTheme(t)}>
+                  ${icon(meta.icon, 12)}
+                  <span>${meta.label}</span>
+                </button>
+              `;
+            })}
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  _setTheme(name) {
+    if (name === getTheme()) {
+      // Tap on the active chip → cycle as a fallback gesture, so the
+      // chip stays useful for users who didn't realize each theme
+      // has its own button.
+      cycleTheme();
+      return;
+    }
+    // Direct-set; theme.js dispatches `foyer:theme-change`, which our
+    // `onThemeChange` listener picks up to re-render the chips.
+    import("foyer-ui-core/theme.js").then((m) => m.setTheme(name));
   }
 }
 customElements.define("foyer-phone-session-sheet", PhoneSessionSheet);

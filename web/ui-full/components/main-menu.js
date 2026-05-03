@@ -53,19 +53,12 @@ const MENU_ORDER = [
   { cat: "settings",  label: "Settings"  },
 ];
 
-// A built-in "Launch" menu that spawns views into the workspace. Lives in
-// the top menu bar (always reachable — can't be covered by a floating window
-// because the top chrome has a higher z-index than floating tiles).
-//
-// Only the two core tile-class views (mixer + timeline) belong here.
-// Everything else lives in the widgets layer and is spawned via the
-// right-dock's widget "+" menu — see `right-dock.js` SPAWNABLE_WIDGETS.
-// Project picking is reachable through the Session menu (Open) and the
-// welcome screen, both of which open `<foyer-project-picker-modal>`.
-const LAUNCH_VIEWS = [
-  { view: "mixer",       label: "Mixer",       icon: "adjustments-horizontal" },
-  { view: "timeline",    label: "Timeline",    icon: "list-bullet" },
-];
+// The "+ New" tile launcher used to live here — a button that
+// spawned Mixer / Timeline as floating windows or tile splits. The
+// layout FAB on the right rail now owns that affordance (preset
+// layouts pin the same views), and the always-visible workspace
+// already paints the mixer + timeline by default. The launcher's
+// only effect was eating chrome real-estate; removed.
 
 export class MainMenu extends LitElement {
   static properties = {
@@ -167,41 +160,6 @@ export class MainMenu extends LitElement {
       margin: 4px 0;
     }
 
-    .btn.launch {
-      display: inline-flex; align-items: center;
-      color: var(--color-accent-3);
-      font-weight: 600;
-    }
-    .btn.launch:hover, .btn.launch.open {
-      background: color-mix(in oklab, var(--color-accent) 12%, transparent);
-      color: #fff;
-    }
-    .dropdown.launch-drop { min-width: 260px; }
-    .menu-heading {
-      padding: 6px 10px 2px;
-      font-size: 9px;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--color-text-muted);
-    }
-    .launch-item .icon-chip {
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 22px; height: 22px;
-      border-radius: 6px;
-      background: color-mix(in oklab, var(--color-accent) 15%, transparent);
-      color: var(--color-accent-3);
-      flex: 0 0 auto;
-    }
-    .launch-item .hint {
-      font-size: 9px;
-      color: var(--color-text-muted);
-      opacity: 0.6;
-    }
-    .launch-item:hover .icon-chip {
-      background: rgba(255,255,255,0.18);
-      color: #fff;
-    }
-    .launch-item:hover .hint { color: rgba(255,255,255,0.8); opacity: 1; }
   `;
 
   constructor() {
@@ -387,7 +345,6 @@ export class MainMenu extends LitElement {
 
   render() {
     return html`
-      ${this._renderLaunchMenu()}
       ${MENU_ORDER.map(({ cat, label }) => {
         let items = this._byCategory(cat);
         // Plugin actions get folded into Settings — there's effectively
@@ -403,67 +360,6 @@ export class MainMenu extends LitElement {
         return this._renderMenu(cat, label, items);
       })}
     `;
-  }
-
-  /**
-   * Built-in "Launch" menu. Always present, never obscured by floating
-   * windows — the answer to "where's the button to make a new tile when the
-   * one that spawned this window is covered?"
-   *
-   * Click an item: open that view as a floating window at the user's sticky
-   * slot (or center if no sticky). Shift-click: open as a tile split below
-   * the currently focused tile. Drag an item out to tear it into a floating
-   * window at the cursor.
-   */
-  _renderLaunchMenu() {
-    const open = this._openMenu === "__launch__";
-    return html`
-      <button class="btn launch ${open ? 'open' : ''}"
-              title="Launch a view — click to open, shift-click to tile"
-              @click=${() => { this._openMenu = open ? "" : "__launch__"; }}>
-        ${icon("plus", 12)}
-        <span style="margin-left:4px">New</span>
-      </button>
-      ${open ? html`
-        <div class="dropdown launch-drop" style="left:0">
-          <div class="menu-heading">Launch view</div>
-          ${LAUNCH_VIEWS.map(v => html`
-            <div class="item launch-item"
-                 @click=${(ev) => this._launchView(v.view, ev)}
-                 @contextmenu=${(ev) => this._launchWithPicker(v.view, ev)}>
-              <span class="icon-chip">${icon(v.icon, 12)}</span>
-              <span class="label">${v.label}</span>
-              <span class="hint">click · shift-click tiles · right-click picks slot</span>
-            </div>
-          `)}
-        </div>
-      ` : null}
-    `;
-  }
-
-  _launchView(view, ev) {
-    this._openMenu = "";
-    const layout = window.__foyer?.layout;
-    if (!layout) return;
-    if (ev?.shiftKey) {
-      // Shift-click → split the focused tile below with this view.
-      layout.split("column", view);
-      return;
-    }
-    // Default → float at the view's sticky slot, or center if none.
-    layout.openFloating(view);
-  }
-
-  _launchWithPicker(view, ev) {
-    ev.preventDefault();
-    this._openMenu = "";
-    const layout = window.__foyer?.layout;
-    if (!layout) return;
-    const id = layout.openFloating(view);
-    setTimeout(() => {
-      const ft = window.__foyer?.floatingTiles;
-      if (ft) ft._slotPickerFor = id;
-    }, 0);
   }
 
   _renderMenu(cat, label, items) {

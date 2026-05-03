@@ -88,6 +88,15 @@ export class Store extends EventTarget {
     this._lastTransportPos = 0;
     this._lastTransportSeekAt = 0;
     this._transportDropStats = { stale_seq: 0, backward_jump: 0 };
+    // Self-echo guard: control id → { value, at_ms }. When this
+    // client sends a `control_set`, the ws layer dispatches
+    // `control_set_request`; we pin {value, now} here and `_applyControl`
+    // refuses to overwrite it for `_PIN_TTL_MS` so a stale broadcast
+    // (snapshot loaded before our command, backend echo from a
+    // different control with the same id, etc.) can't roll us back.
+    // The pin clears on first matching echo (server confirmed) or
+    // on TTL expiry, whichever comes first.
+    this._pendingControls = new Map();
     this._peerPruneInterval = null;
     if (typeof window !== "undefined") {
       this._peerPruneInterval = setInterval(() => this._prunePeers(), 3000);
@@ -285,13 +294,23 @@ export class Store extends EventTarget {
       const target = Number(ev?.detail?.value);
       if (Number.isFinite(target)) this._lastTransportPos = target;
     };
+    const onControlSetRequest = (ev) => {
+      const id = ev?.detail?.id;
+      if (typeof id !== "string" || id.length === 0) return;
+      this._pendingControls.set(id, {
+        value: ev.detail.value,
+        at_ms: Number(ev.detail.at_ms) || Date.now(),
+      });
+    };
     ws.addEventListener("status", onStatus);
     ws.addEventListener("envelope", onEnvelope);
     ws.addEventListener("transport_seek_request", onSeekRequest);
+    ws.addEventListener("control_set_request", onControlSetRequest);
     return () => {
       ws.removeEventListener("status", onStatus);
       ws.removeEventListener("envelope", onEnvelope);
       ws.removeEventListener("transport_seek_request", onSeekRequest);
+      ws.removeEventListener("control_set_request", onControlSetRequest);
       if (this._ws === ws) this._ws = null;
     };
   }
@@ -410,6 +429,22 @@ export class Store extends EventTarget {
           for (const pi of tr.plugins || []) {
             for (const p of pi.params || []) walk(p);
           }
+        }
+        // Overlay still-fresh self-set pins so a snapshot that lands
+        // AFTER the user just hit a transport button (or moved a
+        // fader) doesn't silently revert their optimistic local
+        // state. Without this, the user-visible symptom is
+        // "occasionally hitting record bounces back to off" —
+        // exactly the race we got bug-reported about. TTL semantics
+        // match `_applyControl`'s pin handling: confirm-on-equal,
+        // drop-on-stale, otherwise reassert.
+        const now = Date.now();
+        for (const [pinId, pin] of this._pendingControls) {
+          if (now - pin.at_ms > Store._PIN_TTL_MS) {
+            this._pendingControls.delete(pinId);
+            continue;
+          }
+          c.set(pinId, pin.value);
         }
         this.state.controls = c;
         this._lastTransportSeq = Number(env?.seq || 0);
@@ -604,11 +639,35 @@ export class Store extends EventTarget {
     this.dispatchEvent(new CustomEvent("control", { detail: id }));
   }
 
+  /// How long a self-set control stays pinned against incoming
+  /// echoes/snapshots. Bigger than a typical WS round trip (LAN ≈ 5
+  /// ms, tunnel ≈ 100–400 ms) but small enough that a server-driven
+  /// reset (someone else flipped the control) lands within a tick or
+  /// two. 800 ms is the same window the existing transport-position
+  /// `seekRecent` check uses, so the eyeball calibration matches.
+  static _PIN_TTL_MS = 800;
+
   /**
    * Apply an incoming control value, honoring any active front-end lock.
    * Returns `true` if the store actually changed and listeners should be
-   * notified. Right now only `transport.position` has a lock (installed
-   * by `transport-return.js`); the pattern is generic enough to reuse.
+   * notified.
+   *
+   * Two locks layer here:
+   *   1. The legacy `transportPositionLock()` callback (installed by
+   *      `transport-return.js`) — pins `transport.position` to a
+   *      specific value while the user is in a "stop, return to zero"
+   *      gesture. Function-based because the lock value is computed.
+   *   2. The generic self-set pin (`_pendingControls`). When this
+   *      client just sent a `control_set` for `id` and the incoming
+   *      echo carries a DIFFERENT value, we suppress the echo for up
+   *      to `_PIN_TTL_MS`. Cleared as soon as the server confirms
+   *      our value, or when the TTL expires.
+   *
+   * The self-set pin is what stops the "phone hits record while
+   * desktop is open → record briefly turns on, then resets to off"
+   * race: the desktop's slightly-stale snapshot or the backend's
+   * echo arrives carrying `record=0`, but our pin still has
+   * `record=1` from <800ms ago, so we ignore it.
    */
   _applyControl(id, value) {
     if (id === "transport.position") {
@@ -621,6 +680,30 @@ export class Store extends EventTarget {
         // the backend thinks. We still emit so UI listeners redraw
         // to the pinned value (useful when the user just seeked).
         this.state.controls.set(id, pinned);
+        return true;
+      }
+    }
+    const pending = this._pendingControls.get(id);
+    if (pending) {
+      const fresh = Date.now() - pending.at_ms <= Store._PIN_TTL_MS;
+      if (!fresh) {
+        // TTL expired without confirmation — drop the pin and accept
+        // whatever the wire says. Possible cause: the server never
+        // got our command (offline blip), so the control state is
+        // genuinely whatever the rest of the world thinks.
+        this._pendingControls.delete(id);
+      } else if (Object.is(value, pending.value)) {
+        // Server confirmed the value we sent — release the pin so a
+        // FUTURE remote write can update us cleanly. Apply normally.
+        this._pendingControls.delete(id);
+      } else {
+        // Pin still active and the incoming value disagrees with our
+        // self-set. Treat this as a stale broadcast (snapshot from
+        // before our command, etc.) and reassert the pin instead of
+        // accepting it. We still write the pinned value into the
+        // controls map so any new subscriber gets the right state,
+        // and return true so the existing UI listeners repaint.
+        this.state.controls.set(id, pending.value);
         return true;
       }
     }

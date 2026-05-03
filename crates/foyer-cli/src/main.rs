@@ -588,12 +588,19 @@ async fn serve(
     let is_launcher_mode =
         matches!(backend.kind, BackendKind::Ardour) && socket.is_none() && project.is_none();
 
+    // Tracks the socket path of an auto-attached shim, when applicable.
+    // Threaded into `Server::set_attached_socket` so `Command::ReattachOrphan`
+    // knows the orphan's shim is already our implicit backend and can
+    // adopt the existing connection instead of opening a duplicate
+    // (the shim only services one IPC client at a time).
+    let mut attached_socket_path: Option<PathBuf> = None;
     let initial_backend: Arc<dyn Backend> = match (backend.kind, socket.clone()) {
         (BackendKind::Ardour, Some(s)) => {
             let host = HostBackend::connect(s.clone())
                 .await
                 .with_context(|| format!("connect to shim at {}", s.display()))?;
             tracing::info!("connected to shim at {}", s.display());
+            attached_socket_path = Some(s.clone());
             Arc::new(host)
         }
         (BackendKind::Ardour, None) if project.is_none() => {
@@ -609,6 +616,7 @@ async fn serve(
                 match HostBackend::connect(adv.socket.clone()).await {
                     Ok(host) => {
                         tracing::info!("connected to advertised shim at {}", adv.socket.display());
+                        attached_socket_path = Some(adv.socket.clone());
                         connected = Some(host);
                     }
                     Err(e) => {
@@ -669,6 +677,17 @@ async fn serve(
     // stub, but the picker should treat the user's configured default as
     // the preferred target — so we report the config id as "active."
     server.set_active_backend(initial_backend_id).await;
+    // Tell the server which shim socket the initial backend holds —
+    // the orphan-reattach handler needs this to detect "this orphan
+    // is the implicit backend you already auto-attached to" and adopt
+    // the existing connection instead of opening a second IPC channel
+    // (which would deadlock against the shim's single-client accept
+    // loop). No-op when we didn't auto-attach (launcher / spawned
+    // launches go through `swap_backend` which already populates the
+    // sessions registry properly).
+    if let Some(path) = attached_socket_path {
+        server.set_attached_socket(path).await;
+    }
     // Scan for orphaned shim sessions left behind by a previous Foyer
     // run that crashed (or was killed without closing its sessions).
     // The first client that connects will see these in their
@@ -775,6 +794,31 @@ impl BackendSpawner for CliSpawner {
                 ))
             }
         }
+    }
+
+    async fn reattach(
+        &self,
+        backend_id: &str,
+        socket: &Path,
+    ) -> anyhow::Result<foyer_server::LaunchedBackend> {
+        let cfg_backend = self
+            .config
+            .backend(backend_id)
+            .ok_or_else(|| anyhow!("no backend with id `{backend_id}`"))?;
+        if !matches!(cfg_backend.kind, BackendKind::Ardour) {
+            anyhow::bail!(
+                "reattach only applies to host-process backends (ardour); `{backend_id}` is `{:?}`",
+                cfg_backend.kind,
+            );
+        }
+        // Connect to the orphan's existing shim socket. No process
+        // handle — Foyer didn't fork this Ardour. The session will
+        // disconnect cleanly on close but Ardour stays alive; the
+        // user can quit it themselves.
+        let host = HostBackend::connect(socket.to_path_buf())
+            .await
+            .with_context(|| format!("reattach to shim at {} failed", socket.display()))?;
+        Ok(foyer_server::LaunchedBackend::new(Arc::new(host)))
     }
 }
 

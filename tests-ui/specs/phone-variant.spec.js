@@ -51,8 +51,23 @@ test.describe("phone variant boot", () => {
 
   test("welcome state renders when no session is open", async ({ page }) => {
     await gotoPhone(page);
-    // The probe earlier confirmed the stub doesn't auto-open a
-    // session, so the phone shell stays in welcome until we launch.
+    // The stub backend retains session state across tests within a
+    // single playwright run (single foyer process, workers: 1), so by
+    // the time this spec file runs the stub may already have a session
+    // open from another spec in the suite. Force-empty the local store
+    // cache so the phone shell falls into welcome regardless. We don't
+    // close server-side because that would cascade into every other
+    // spec that assumes a working session.
+    await page.evaluate(() => {
+      const store = window.__foyer?.store;
+      if (!store) return;
+      store.state.sessions = [];
+      store.state.currentSessionId = null;
+      store.state.session = null;
+      store.dispatchEvent(new CustomEvent("sessions"));
+      store.dispatchEvent(new CustomEvent("change"));
+    });
+
     const has = await page.evaluate(`(() => {
       ${DEEP_FIND_PHONE}
       return {
@@ -132,6 +147,48 @@ test.describe("phone with an open session", () => {
     });
     expect(result.before).toBe(false);
     expect(result.after).toBe(true);
+  });
+
+  test("the per-track Advanced button opens a phone-shaped editor sheet", async ({ page }) => {
+    await gotoPhone(page);
+    await page.evaluate(() => {
+      window.__foyer.ws.send({
+        type: "launch_project", backend_id: "stub", project_path: "",
+      });
+    });
+    await page.waitForFunction(
+      () => !!window.__foyer.store.currentSession(),
+    );
+    await page.waitForFunction(() =>
+      document.querySelector("foyer-phone-app")
+        .shadowRoot.querySelectorAll("foyer-phone-track-row").length > 0,
+    );
+
+    // Tap the kebab on the first track-row, wait for the sheet to
+    // reflect open=true, then assert the sheet renders the three
+    // sections we wired (Plugins, Routing, Monitor).
+    const probe = await page.evaluate(async () => {
+      const app = document.querySelector("foyer-phone-app");
+      const row = app.shadowRoot.querySelector("foyer-phone-track-row");
+      const more = row.shadowRoot.querySelector(".more");
+      more.click();
+      await app.updateComplete;
+      const sheet = app.shadowRoot.querySelector("foyer-phone-track-advanced-sheet");
+      await sheet.updateComplete;
+      const headings = Array.from(
+        sheet.shadowRoot.querySelectorAll("section h3"),
+      ).map((h) => h.textContent?.trim());
+      return {
+        open: sheet.open,
+        trackId: sheet.trackId,
+        headings,
+      };
+    });
+    expect(probe.open).toBe(true);
+    expect(probe.trackId).toBeTruthy();
+    expect(probe.headings).toEqual(
+      expect.arrayContaining(["Plugins", "Routing", "Monitor"]),
+    );
   });
 
   test("tapping the top-bar session opens the sheet", async ({ page }) => {

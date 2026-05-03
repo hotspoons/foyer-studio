@@ -65,6 +65,24 @@ export class PhoneTrackRow extends LitElement {
       user-select: none;
       transition: all 0.1s ease;
     }
+    /* Per-row Advanced button. Same height as the R/S/M row but
+     * narrower because the kebab is the universal "more" affordance.
+     * Lives at the right edge of the chip row so the eye groups it
+     * with the track name (the thing the kebab acts on). */
+    .more {
+      flex: 0 0 auto;
+      width: 32px; height: 36px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 8px;
+      border: 1px solid var(--color-border);
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.1s ease;
+    }
+    .more:active { transform: scale(0.94); }
+    .more:hover { color: var(--color-text); }
     .chip:active { transform: scale(0.94); }
     .chip.rec.on {
       color: #fff;
@@ -113,17 +131,45 @@ export class PhoneTrackRow extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    // Track gain echoes back as ControlUpdate events on the
-    // gain.id wire-control. We don't get a per-control subscription
-    // here — just re-render on any store change and read.
+    // Two store listeners by design:
+    //   * `change` fires on snapshot replacements + session lifecycle
+    //     events. Used to repaint when the underlying track shape
+    //     changes (e.g. session swap).
+    //   * `control` fires for every ControlUpdate. The R/S/M chips +
+    //     fader read directly from the controls map at render time,
+    //     so we MUST request an update on every relevant control
+    //     event — without this the buttons "do nothing" on tap from
+    //     the phone (the wire round-trip succeeds, the desktop sees
+    //     the change, but the phone's render is never invalidated).
     this._onChange = () => this._syncFromStore();
-    window.__foyer?.store?.addEventListener("change", this._onChange);
+    this._onControl = (ev) => {
+      const id = ev.detail;
+      const t = this.track;
+      if (!t || !id) return;
+      if (id === t.gain?.id) {
+        // Update the @state-tracked dB so the fader cap moves.
+        this._syncFromStore();
+      } else if (
+        id === t.mute?.id
+        || id === t.solo?.id
+        || id === t.record_arm?.id
+      ) {
+        // Plain re-render — chip CSS branches on store.get() at
+        // render time, no separate state to mirror.
+        this.requestUpdate();
+      }
+    };
+    const store = window.__foyer?.store;
+    store?.addEventListener("change", this._onChange);
+    store?.addEventListener("control", this._onControl);
     this._syncFromStore();
     const ro = !isAllowed("control_set");
     this.toggleAttribute("readonly", ro);
   }
   disconnectedCallback() {
-    window.__foyer?.store?.removeEventListener("change", this._onChange);
+    const store = window.__foyer?.store;
+    store?.removeEventListener("change", this._onChange);
+    store?.removeEventListener("control", this._onControl);
     super.disconnectedCallback();
   }
 
@@ -154,6 +200,19 @@ export class PhoneTrackRow extends LitElement {
     window.__foyer?.ws?.controlSet(this.track.gain.id, db);
   };
 
+  _openAdvanced = () => {
+    if (!this.track?.id) return;
+    // Bubble up to the app shell, which owns the modal singleton —
+    // we don't keep one sheet per track-row in the DOM (memory + a
+    // pile of sheet event listeners that all want to close on
+    // backdrop tap).
+    this.dispatchEvent(new CustomEvent("open-track-advanced", {
+      detail: { trackId: this.track.id },
+      bubbles: true,
+      composed: true,
+    }));
+  };
+
   render() {
     const t = this.track;
     if (!t) return html``;
@@ -179,6 +238,9 @@ export class PhoneTrackRow extends LitElement {
                 title="Mute"
                 @click=${() => this._setBool(t.mute?.id, !mute)}>M</button>
         <span class="name">${t.name || "(unnamed)"}</span>
+        <button class="more"
+                title="Advanced — bypass plugins, routing, monitor mode"
+                @click=${this._openAdvanced}>${icon("ellipsis-vertical", 16)}</button>
       </div>
       <div class="gainline">
         <foyer-phone-hfader

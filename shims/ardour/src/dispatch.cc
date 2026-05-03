@@ -1470,9 +1470,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// Wire pan format is [-1, 1]; Ardour's
 				// pan_azimuth_control wants [0, 1]. Convert
 				// before set_value (no-op for non-pan ids).
+				// Gain controls round-trip through dB ↔ linear —
+				// the wire schema is dB but Ardour's GainControl
+				// stores the linear coefficient. Without this the
+				// "-6 dB" the user requested ends up as a -6
+				// linear coefficient (clamped to 0 = silence).
 				double write_value = snap.value;
 				if (schema_map::is_pan_id (snap.id)) {
 					write_value = schema_map::pan_wire_to_ardour (write_value);
+				} else if (schema_map::is_gain_id (snap.id)) {
+					write_value = schema_map::gain_wire_to_ardour (write_value);
 				}
 				ctrl->set_value (write_value, Controllable::UseGroup);
 				if (alist && before) {

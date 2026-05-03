@@ -15,6 +15,7 @@
 #ifndef foyer_shim_schema_map_h
 #define foyer_shim_schema_map_h
 
+#include <cmath>
 #include <cstdint>
 #include <list>
 #include <memory>
@@ -347,6 +348,56 @@ inline double pan_wire_to_ardour (double v) { return (v + 1.0) * 0.5; }
 inline bool is_pan_id (const std::string& id) {
     return id.size () >= 4
         && id.compare (id.size () - 4, 4, ".pan") == 0;
+}
+
+/// Gain conversion. Ardour's `GainControl::get_value()` /
+/// `set_value()` operate on the LINEAR amplitude coefficient
+/// (1.0 = unity, 0.5 ≈ -6 dB, 2.0 ≈ +6 dB, 0.0 = silence). The
+/// foyer wire format declares track/bus gain as **dB** (see
+/// `fader()` in foyer-backend-stub/src/fixtures.rs — `unit: "dB"`,
+/// `scale: ScaleCurve::Decibels`, `range: [-60, 6]`), and the web
+/// faders read/write dB via `normToDb`/`dbToNorm`.
+///
+/// Without conversion at the shim, two symptoms reported as bugs:
+///   * Defaults look "blown out" — Ardour's unity (1.0 linear)
+///     surfaces on the wire as the value 1.0 which the UI labels
+///     "1.0 dB" (~+1 dB above unity, visually +6 dB-ish on the
+///     log curve).
+///   * Attenuation feels broken — the user pulls the fader to
+///     "-6 dB", we send -6, the shim writes that as a LINEAR
+///     coefficient. Ardour clamps negative coefficients to 0
+///     (silence). Anything below 0 dB collapses to mute.
+///
+/// Apply `gain_ardour_to_wire` at every shim emit site that pulls
+/// from `GainControl::get_value()`, and `gain_wire_to_ardour` at
+/// every dispatch path that writes to a gain control.
+///
+/// `kSilenceDb` is the floor we surface for the linear-zero case;
+/// must round-trip cleanly (a `dB → linear → dB` round trip with
+/// linear=0 would otherwise yield `-inf`, which serializes ugly
+/// and breaks numeric comparisons in JS).
+inline constexpr double kSilenceDb = -120.0;
+inline double gain_ardour_to_wire (double linear) {
+    if (linear <= 1e-9) return kSilenceDb;
+    return 20.0 * std::log10 (linear);
+}
+inline double gain_wire_to_ardour (double db) {
+    if (db <= kSilenceDb + 1e-3) return 0.0;
+    return std::pow (10.0, db / 20.0);
+}
+
+/// Whether a control id refers to a track or bus gain control.
+/// Track gain matches `track.<pbd-id>.gain`, send level matches
+/// `send.<id>.gain` (see ControlSet::SetSendLevel handling). Plugin
+/// parameters that happen to end in `.gain` are NOT covered — they
+/// have their own per-plugin scaling and shouldn't be touched here.
+/// Conservative match: only `track.<x>.gain` and `bus.<x>.gain`
+/// triggers conversion.
+inline bool is_gain_id (const std::string& id) {
+    if (id.size () < 6) return false;
+    if (id.compare (id.size () - 5, 5, ".gain") != 0) return false;
+    return id.compare (0, 6, "track.") == 0
+        || id.compare (0, 4, "bus.") == 0;
 }
 
 } // namespace ArdourSurface::schema_map

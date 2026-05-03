@@ -142,7 +142,10 @@ export class StatusBar extends LitElement {
       box-shadow: 0 0 6px color-mix(in oklab, var(--color-accent) 40%, transparent);
     }
     .peers-popover {
-      position: absolute; bottom: 100%; left: 0; margin-bottom: 4px;
+      /* Anchor to the chip's RIGHT edge — the chip lives on the
+       * right side of the bar now, so a left-anchored popover would
+       * overflow off-screen. */
+      position: absolute; bottom: 100%; right: 0; margin-bottom: 4px;
       min-width: 220px;
       background: var(--color-surface-elevated);
       border: 1px solid var(--color-border);
@@ -427,6 +430,32 @@ export class StatusBar extends LitElement {
         <span class="brand">FOYER</span>
         <span class="dot ${s}"></span>
         <span class="label">${s}</span>
+        ${this._rbac.isTunnel ? html`
+          <span class="role-chip ${this._rbac.isAuthenticated ? "" : "unauthenticated"}">
+            ${this._rbac.isAuthenticated
+              ? html`${this._rbac.recipient || "guest"} · ${this._rbac.roleId || "?"}`
+              : html`not signed in`}
+          </span>
+        ` : null}
+        ${this._renderConnChip()}
+        ${this._renderLayoutChip()}
+      </div>
+      <!-- DAW application menus (Session / Edit / Track / Settings).
+           The "+ New" launcher used to live here too; it was a vestige
+           of an earlier "compose your own tile" experiment that the
+           layout FAB has fully absorbed. -->
+      <foyer-main-menu></foyer-main-menu>
+      <!-- Per-session chrome lives AFTER the menu: the session switcher
+           name, the unsaved-changes save button, and the peers chip
+           all vary in width (and come and go) so anchoring them on the
+           left would shove every menu button rightward whenever a
+           session was opened/closed or a peer joined/left. The
+           divider separates "what is open" from "what the menus act
+           on." -->
+      <span class="divider"></span>
+      <div class="pad">
+        <foyer-session-switcher></foyer-session-switcher>
+        ${this._renderSessionDirty()}
         ${this._peers.length
           ? html`<span
               class="peers"
@@ -447,30 +476,6 @@ export class StatusBar extends LitElement {
               ` : null}
             </span>`
           : null}
-        ${this._rbac.isTunnel ? html`
-          <span class="role-chip ${this._rbac.isAuthenticated ? "" : "unauthenticated"}">
-            ${this._rbac.isAuthenticated
-              ? html`${this._rbac.recipient || "guest"} · ${this._rbac.roleId || "?"}`
-              : html`not signed in`}
-          </span>
-        ` : null}
-        ${this._renderConnChip()}
-        ${this._renderLayoutChip()}
-      </div>
-      <!-- DAW application menus (Session / Edit / Track / Settings) and the
-           "New view" launcher share this row so we don't burn a second row
-           of chrome on a handful of buttons. -->
-      <foyer-main-menu></foyer-main-menu>
-      <!-- Per-session chrome lives AFTER the menu: the session switcher
-           name + the unsaved-changes save button both vary in width (and
-           come and go) so anchoring them on the left would shove every
-           menu button rightward whenever a session was opened/closed.
-           The divider separates "what is open" from "what the menus
-           act on." -->
-      <span class="divider"></span>
-      <div class="pad">
-        <foyer-session-switcher></foyer-session-switcher>
-        ${this._renderSessionDirty()}
       </div>
       <div class="pad" style="margin-left:auto">
         <button

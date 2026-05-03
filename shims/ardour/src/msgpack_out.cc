@@ -326,6 +326,16 @@ encode_control_update (Session& session, const Controllable& c)
 	if (schema_map::is_pan_id (id)) {
 		val = schema_map::pan_ardour_to_wire (val);
 	}
+	// Ardour's gain controls store a LINEAR coefficient (1.0 unity);
+	// the wire format declares track/bus gain in dB. Without this
+	// every fader reads ~1 dB at unity and pulling below 0 dB
+	// collapses to silence (Ardour clamps negative coefficients).
+	// schema_map::is_gain_id matches only `track.<x>.gain` and
+	// `bus.<x>.gain` so plugin params that happen to end in `.gain`
+	// (with their own arbitrary scaling) are NOT touched.
+	if (schema_map::is_gain_id (id)) {
+		val = schema_map::gain_ardour_to_wire (val);
+	}
 
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
@@ -749,7 +759,13 @@ encode_session_snapshot (Session& session,
 			bool   solo_v = false;
 			if (it != route_by_id.end ()) {
 				auto const& r = it->second;
-				if (auto gc = r->gain_control ())          gain_v = gc->get_value ();
+				// Linear coefficient → dB. The wire format declares
+				// track gain in dB (`unit: "dB"`); without this
+				// conversion Ardour's unity (1.0 linear) surfaces
+				// as "1.0 dB" on the slider — visibly above unity
+				// and the source of "everything defaults blown
+				// out" + "below 0 dB goes to silence" reports.
+				if (auto gc = r->gain_control ())          gain_v = schema_map::gain_ardour_to_wire (gc->get_value ());
 				if (auto pc = r->pan_azimuth_control ())
 					pan_v = schema_map::pan_ardour_to_wire (pc->get_value ());
 				if (auto mc = r->mute_control ())          mute_v = mc->get_value () >= 0.5;
@@ -1472,7 +1488,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 		else                         { o.str ("color"); o.nil (); }
 		// Values echo the snapshot shape; the client overwrites them from
 		// ControlUpdate events, so exact numerical accuracy isn't required.
-		o.str ("gain"); emit_named_param (o, matched.self_id + ".gain", "Gain", "continuous", false, route->gain_control () ? route->gain_control ()->get_value () : 0.0, false);
+		o.str ("gain"); emit_named_param (o, matched.self_id + ".gain", "Gain", "continuous", false, route->gain_control () ? schema_map::gain_ardour_to_wire (route->gain_control ()->get_value ()) : schema_map::kSilenceDb, false);
 		o.str ("pan");  emit_named_param (o, matched.self_id + ".pan",  "Pan",  "continuous", false, route->pan_azimuth_control () ? schema_map::pan_ardour_to_wire (route->pan_azimuth_control ()->get_value ()) : 0.0, false);
 		o.str ("mute"); emit_named_param (o, matched.self_id + ".mute", "Mute", "trigger", true, 0.0, route->mute_control () && route->mute_control ()->get_value () >= 0.5);
 		o.str ("solo"); emit_named_param (o, matched.self_id + ".solo", "Solo", "trigger", true, 0.0, route->solo_control () && route->solo_control ()->get_value () >= 0.5);

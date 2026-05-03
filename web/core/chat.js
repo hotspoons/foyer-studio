@@ -17,7 +17,7 @@
 //     chat.pttStart();     // enables mic capture → server fanout
 //     chat.pttStop();
 //
-// The chat UI (web/ui-full/components/chat-panel.js) consumes this.
+// The chat UI (web/ui-core/chat-panel.js) consumes this.
 
 const PTT_MAGIC = 0x50;  // 'P'
 const PTT_VERSION = 0x01;

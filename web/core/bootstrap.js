@@ -25,6 +25,7 @@ import { Store } from "./store.js";
 import { ChatStore } from "./chat.js";
 import { installTransportReturn } from "./transport-return.js";
 import { attach as attachRecents } from "./recents.js";
+import { audioController } from "./audio/master-controller.js";
 import { pickUiVariant, sniffEnv, getUiVariant } from "./registry/ui-variants.js";
 import { setFeatures } from "./registry/features.js";
 import { setActiveVariant } from "./registry/widgets.js";
@@ -59,6 +60,12 @@ export function bootFoyerCore(opts = {}) {
   chat.attach();
   attachRecents(store);
   installTransportReturn({ store, ws });
+  // Master-bus listen controller. Lives at the core layer (not in any
+  // ui-* variant) so the phone shell, the desktop shell, and any
+  // future variant all share one singleton — without this the phone
+  // top-bar's Listen button was a no-op because `window.__foyer.audio`
+  // was undefined (only `ui-full/app.js` was wiring it up).
+  audioController.attach(ws, store);
 
   // Fallback-timer handle — cleared the moment the greeting arrives,
   // because the timer's job is "server is dead, paint something," NOT
@@ -96,6 +103,7 @@ export function bootFoyerCore(opts = {}) {
     store,
     ws,
     chat,
+    audio: audioController,
     mountVariant,
     unmountVariant,
   });

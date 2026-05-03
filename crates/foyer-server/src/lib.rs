@@ -76,6 +76,22 @@ pub trait BackendSpawner: Send + Sync + 'static {
         backend_id: &str,
         project_path: Option<&Path>,
     ) -> anyhow::Result<LaunchedBackend>;
+
+    /// Connect to an existing host process by its IPC socket — the
+    /// orphan-reattach path. Used when the server detects an Ardour
+    /// shim still listening on a registry-recorded socket but with no
+    /// matching session in our map (Foyer crashed; Ardour didn't).
+    /// Default impl bails so spawners that have nothing to attach to
+    /// (the stub) don't have to override.
+    ///
+    /// `process: None` on the returned `LaunchedBackend` is intentional
+    /// for reattach — Foyer didn't fork this Ardour, so we have no
+    /// authority to SIGTERM/SIGKILL it on close. The user can quit
+    /// Ardour manually if they want; closing the foyer session just
+    /// drops the IPC channel.
+    async fn reattach(&self, _backend_id: &str, _socket: &Path) -> anyhow::Result<LaunchedBackend> {
+        anyhow::bail!("this spawner does not implement reattach")
+    }
 }
 
 /// Result of `BackendSpawner::launch`. `process` is `Some` when the
@@ -219,6 +235,17 @@ pub(crate) struct AppState {
     pub(crate) pump_handle: Mutex<Option<JoinHandle<()>>>,
     /// Optional filesystem jail for the session picker.
     pub(crate) jail: Option<Jail>,
+    /// Socket path of the shim the *initial* (auto-attached) backend
+    /// is talking to, when applicable. The CLI sets this when it
+    /// boots and auto-attaches to an already-running Ardour shim
+    /// (`adv.socket` from discovery). Used by `Command::ReattachOrphan`
+    /// to detect "the orphan you're trying to reattach is already
+    /// the implicit backend" and adopt the existing connection
+    /// instead of opening a second IPC channel — the shim only
+    /// services one client at a time, so a second connect would sit
+    /// in the kernel's accept queue forever and silently break event
+    /// flow.
+    pub(crate) attached_socket: RwLock<Option<PathBuf>>,
     /// Port this server is listening on — snapshotted from `Config::listen`
     /// at `run()` time so the WS handler can include it in the client
     /// greeting for share-session URLs.
@@ -522,6 +549,7 @@ impl Server {
             spawner,
             pump_handle: Mutex::new(None),
             jail: None,
+            attached_socket: RwLock::new(None),
             listen_port: std::sync::atomic::AtomicU16::new(0),
             tls_enabled: std::sync::atomic::AtomicBool::new(false),
             audio_hub: Arc::new(audio::AudioHub::new()),
@@ -579,6 +607,16 @@ impl Server {
     /// knows what's active.
     pub async fn set_active_backend(&self, backend_id: impl Into<String>) {
         *self.state.active_backend_id.write().await = Some(backend_id.into());
+    }
+
+    /// Record the socket path that the initial (auto-attached) backend
+    /// is talking to, when applicable. Set by the CLI when its boot
+    /// path discovers an already-running shim and connects via
+    /// `HostBackend::connect`. The orphan-reattach path consults this
+    /// to avoid opening a duplicate IPC connection to the same shim
+    /// (the shim only services one client at a time).
+    pub async fn set_attached_socket(&self, path: PathBuf) {
+        *self.state.attached_socket.write().await = Some(path);
     }
 
     /// Populate the orphan list from the session registry directory.

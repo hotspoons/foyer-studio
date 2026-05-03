@@ -23,11 +23,18 @@ import "./components/top-bar.js";
 import "./components/transport.js";
 import "./components/track-row.js";
 import "./components/session-sheet.js";
+import "./components/track-advanced-sheet.js";
+// Chat FAB + push-to-talk panel — same component the desktop UI uses,
+// promoted to ui-core so both variants share it. The FAB is draggable
+// and clamps to the viewport, so a phone screen gets the same
+// quadrant-anchored panel a desktop does.
+import "foyer-ui-core/chat-panel.js";
 
 export class PhoneApp extends LitElement {
   static properties = {
     _tick: { state: true, type: Number },
     _sheetOpen: { state: true, type: Boolean },
+    _advancedTrackId: { state: true, type: String },
     _rbacTick: { state: true, type: Number },
   };
 
@@ -104,6 +111,7 @@ export class PhoneApp extends LitElement {
     super();
     this._tick = 0;
     this._sheetOpen = false;
+    this._advancedTrackId = "";
     this._rbacTick = 0;
     this._onChange = () => { this._tick++; };
     this._offRbac = null;
@@ -126,6 +134,11 @@ export class PhoneApp extends LitElement {
 
   _onOpenSheet = () => { this._sheetOpen = true; };
   _onCloseSheet = () => { this._sheetOpen = false; };
+  _onOpenTrackAdvanced = (ev) => {
+    const id = ev?.detail?.trackId;
+    if (id) this._advancedTrackId = id;
+  };
+  _onCloseTrackAdvanced = () => { this._advancedTrackId = ""; };
 
   render() {
     void this._tick; void this._rbacTick;
@@ -136,7 +149,7 @@ export class PhoneApp extends LitElement {
     const canLaunch = isAllowed("launch_project");
     return html`
       <foyer-phone-top-bar @open-sheet=${this._onOpenSheet}></foyer-phone-top-bar>
-      <main>
+      <main @open-track-advanced=${this._onOpenTrackAdvanced}>
         ${hasSession
           ? html`
               <foyer-phone-transport></foyer-phone-transport>
@@ -174,6 +187,17 @@ export class PhoneApp extends LitElement {
         ?open=${this._sheetOpen}
         @close=${this._onCloseSheet}
       ></foyer-phone-session-sheet>
+      <foyer-phone-track-advanced-sheet
+        ?open=${!!this._advancedTrackId}
+        .trackId=${this._advancedTrackId}
+        @close=${this._onCloseTrackAdvanced}
+      ></foyer-phone-track-advanced-sheet>
+      <!--
+        Chat / PTT FAB. The panel binds its drag bounds to
+        window.innerWidth/innerHeight so it shrinks to fit a phone
+        viewport on its own; we just need it in the DOM.
+      -->
+      <foyer-chat-panel></foyer-chat-panel>
     `;
   }
 }
