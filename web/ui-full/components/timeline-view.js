@@ -7,10 +7,9 @@
 //   - Major (every 5s) + minor (every 1s) grid lines
 //   - Drag region body to move; drag edges to resize — optimistic + UpdateRegion
 //   - Ctrl/Cmd + edge drag: time-stretch via StretchRegion (Ardour: MidiStretch /
-//     RBStretch). Shift held: pitch-preserving elastic stretch (editor Time Stretch
-//     default). No Shift (audio): varispeed / tape-style (pitch scales ~1/duration,
-//     same idea as editor_timefx “resample without preserving pitch”). MIDI ignores
-//     preserve_pitch.
+//     RBStretch). Overlay: "elastic" with no modifier (pitch-preserving); "tape" while
+//     Shift is held (varispeed). `preserve_pitch` is the inverse of Shift on pointer-up.
+//     MIDI ignores preserve_pitch.
 //   - S: split selected regions at the hover cursor line when the pointer
 //        is over the grid, else at the playhead (SplitRegion)
 //   - Waveforms via WaveformCache; resolution picked from current zoom level
@@ -347,7 +346,7 @@ export class TimelineView extends LitElement {
       z-index: 1;
     }
     .region.stretch-active::after {
-      content: "stretch";
+      content: attr(data-stretch-mode);
       position: absolute;
       top: 4px;
       left: 50%;
@@ -2754,7 +2753,14 @@ export class TimelineView extends LitElement {
         if (stretchResize) teardownLeftTrimPreview();
         else ensureLeftTrimPreview();
       }
-      for (const el of els) el.classList.toggle("stretch-active", stretchResize);
+      for (const el of els) {
+        el.classList.toggle("stretch-active", stretchResize);
+        if (stretchResize) {
+          el.dataset.stretchMode = e.shiftKey ? "tape" : "elastic";
+        } else {
+          delete el.dataset.stretchMode;
+        }
+      }
       for (const id of movingIds) {
         const o = origs.get(id);
         if (!o) continue;
@@ -2821,6 +2827,7 @@ export class TimelineView extends LitElement {
       for (const el of els) {
         el.classList.remove("dragging");
         el.classList.remove("stretch-active");
+        delete el.dataset.stretchMode;
       }
       // Drop the waveform freeze + placeholder. The post-commit
       // RegionUpdated event will invalidate the wf cache and the
@@ -2860,7 +2867,7 @@ export class TimelineView extends LitElement {
             new_start_samples: r.start_samples,
             new_length_samples: r.length_samples,
             anchor: mode === "resize-left" ? "end" : "start",
-            preserve_pitch: !!upEv.shiftKey,
+            preserve_pitch: !upEv.shiftKey,
           });
           continue;
         }
