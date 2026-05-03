@@ -692,6 +692,8 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::ListActions => "list_actions",
         Command::InvokeAction { .. } => "invoke_action",
         Command::ListRegions { .. } => "list_regions",
+        Command::ListAudioPool => "list_audio_pool",
+        Command::ImportAudio { .. } => "import_audio",
         Command::ListPlugins => "list_plugins",
         Command::BrowsePath { .. } => "browse_path",
         Command::OpenSession { .. } => "open_session",
@@ -944,6 +946,35 @@ async fn dispatch_command(
                 },
             )
             .await;
+        }
+        Command::ListAudioPool => {
+            let sources = state.backend().await.list_audio_pool().await?;
+            broadcast_event(state, Event::AudioPoolListed { sources }).await;
+        }
+        Command::ImportAudio { path } => {
+            let resolved = if let Some(jail) = state.jail.as_ref() {
+                let rel = crate::files::sanitize_relative_path(&path);
+                let abs = jail.root().join(rel);
+                let canon = abs.canonicalize().map_err(|e| {
+                    DispatchError::Backend(foyer_backend::BackendError::NoSuchPath(format!(
+                        "import_audio path: {e}"
+                    )))
+                })?;
+                let root = jail.root().canonicalize().map_err(|e| {
+                    DispatchError::Backend(foyer_backend::BackendError::Other(format!(
+                        "jail root: {e}"
+                    )))
+                })?;
+                if !canon.starts_with(&root) {
+                    return Err(DispatchError::Backend(foyer_backend::BackendError::OutsideJail(
+                        path,
+                    )));
+                }
+                canon.to_string_lossy().into_owned()
+            } else {
+                path
+            };
+            state.backend().await.import_audio(resolved).await?;
         }
         Command::ListPlugins => {
             let entries = state.backend().await.list_plugins().await?;

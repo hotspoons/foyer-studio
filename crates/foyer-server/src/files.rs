@@ -60,6 +60,12 @@ pub(crate) async fn serve_file(
     ([(header::CONTENT_TYPE, mime)], bytes).into_response()
 }
 
+/// Jail-safe relative path: strip leading slashes, drop `..` and other
+/// non-normal components. Used by `/files/*` and import-audio resolution.
+pub(crate) fn sanitize_relative_path(raw: &str) -> PathBuf {
+    sanitize(raw)
+}
+
 fn sanitize(raw: &str) -> PathBuf {
     let trimmed = raw.trim_start_matches('/').trim();
     let mut out = PathBuf::new();

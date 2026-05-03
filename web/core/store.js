@@ -60,6 +60,8 @@ export class Store extends EventTarget {
       // don't own their own region state (mixer strip chips,
       // agent tools) can query without a dedicated subscription.
       regionsByTrack: new Map(),
+      // Latest `Event::AudioPoolListed.sources` for the focused session.
+      audioPoolSources: [],
       // track_id → peer_id, mirrors the server's routing table. The
       // host sets an entry by choosing a user in the track editor;
       // the named browser then shows a mic toolbar affordance. Used
@@ -250,6 +252,7 @@ export class Store extends EventTarget {
     const changed = this.state.currentSessionId !== id;
     if (changed) {
       this.state.currentSessionId = id;
+      this.state.audioPoolSources = [];
       // Drop the snapshot so views re-render their loading state
       // while the next SessionSnapshot arrives from the selected
       // session's pump.
@@ -329,7 +332,8 @@ export class Store extends EventTarget {
       || body.type === "session_dirty_changed"
       || body.type === "regions_list"
       || body.type === "region_updated"
-      || body.type === "region_removed";
+      || body.type === "region_removed"
+      || body.type === "audio_pool_listed";
     if (
       isSessionScoped
       && activeSessionId
@@ -539,10 +543,12 @@ export class Store extends EventTarget {
             && !this.state.sessions.some((s) => s.id === this.state.currentSessionId)) {
           this.state.currentSessionId =
             this.state.sessions[this.state.sessions.length - 1]?.id || null;
+          this.state.audioPoolSources = [];
         } else if (!this.state.currentSessionId && this.state.sessions.length > 0) {
           // Auto-focus the first (or most recently opened) session.
           this.state.currentSessionId =
             this.state.sessions[this.state.sessions.length - 1]?.id || null;
+          this.state.audioPoolSources = [];
         }
         this.dispatchEvent(new CustomEvent("sessions"));
         this._emit();
@@ -560,6 +566,7 @@ export class Store extends EventTarget {
           // via the switcher (which sets currentSessionId without
           // triggering a new Open).
           this.state.currentSessionId = info.id;
+          this.state.audioPoolSources = [];
           // Recents are server-tracked now; the sidecar's
           // LaunchProject handler bumps the entry and broadcasts a
           // fresh `recents_list` envelope on its own. We used to
@@ -577,6 +584,7 @@ export class Store extends EventTarget {
         if (this.state.currentSessionId === id) {
           this.state.currentSessionId =
             this.state.sessions[this.state.sessions.length - 1]?.id || null;
+          this.state.audioPoolSources = [];
           // Drop the stale snapshot so the UI repaints to welcome
           // (or the next session's snapshot once it arrives).
           if (!this.state.currentSessionId) this.state.session = null;
@@ -601,6 +609,12 @@ export class Store extends EventTarget {
         const list = Array.isArray(body.regions) ? body.regions : [];
         this.state.regionsByTrack.set(body.track_id, list);
         this._recomputeSequencerTracks();
+        this._emit();
+        break;
+      }
+      case "audio_pool_listed": {
+        this.state.audioPoolSources = Array.isArray(body.sources) ? body.sources : [];
+        this.dispatchEvent(new CustomEvent("audio-pool"));
         this._emit();
         break;
       }

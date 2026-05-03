@@ -21,6 +21,7 @@ mod cloudflare_provider;
 mod cloudflared_dl;
 mod dev;
 mod files;
+mod import_audio;
 mod ingress_ws;
 mod jail;
 pub mod orphans;
@@ -766,6 +767,11 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
         .route(
             "/sessions/upload",
             post(archive::upload).layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)),
+        )
+        .route(
+            "/sessions/import_audio",
+            post(import_audio::import_audio)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
         )
         .route("/sessions/export", get(archive::export))
         .route("/console", get(console_tail))

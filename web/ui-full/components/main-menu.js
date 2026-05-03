@@ -386,6 +386,16 @@ export class MainMenu extends LitElement {
             `;
           })}
           ${cat === "session" ? this._renderRecentSubmenu() : null}
+          ${cat === "session" && isAllowed("list_audio_pool") ? html`
+            <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
+            <div class="item" @click=${() => {
+              this._openMenu = "";
+              import("./audio-pool-modal.js").then((m) => m.openAudioPoolModal());
+            }}>
+              <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("musical-note", 11)}</span>
+              <span class="label">Audio pool…</span>
+            </div>
+          ` : null}
           ${cat === "session" ? this._renderCloseSessionItem() : null}
           ${cat === "session" && this._canManageTunnels() ? html`
             <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>

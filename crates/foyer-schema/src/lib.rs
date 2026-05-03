@@ -22,8 +22,8 @@ pub mod value;
 
 pub use action::{Action, ActionCategory};
 pub use audio::{
-    AudioCodec, AudioFormat, AudioSource, AudioTransport, IceCandidate, LatencyReport,
-    SampleFormat, SdpPayload,
+    AudioCodec, AudioFormat, AudioPoolSource, AudioSource, AudioTransport, IceCandidate,
+    LatencyReport, SampleFormat, SdpPayload,
 };
 pub use fs::{FsEntry, FsEntryKind, PathListing};
 pub use id::EntityId;
@@ -53,7 +53,7 @@ pub use value::{
 };
 
 /// Current wire-schema version. Major bump = breaking; minor = additive.
-pub const SCHEMA_VERSION: (u16, u16) = (0, 2);
+pub const SCHEMA_VERSION: (u16, u16) = (0, 3);
 
 /// Kubernetes-style named API revision for control-plane envelopes (IPC shim ↔ sidecar
 /// and WebSocket). Evolve `v1alpha1` in place during development; promote to `v1beta1` /

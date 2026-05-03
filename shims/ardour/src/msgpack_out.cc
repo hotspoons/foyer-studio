@@ -1696,4 +1696,25 @@ encode_track_updated (Session& session, const std::string& track_id)
 	});
 }
 
+std::vector<std::uint8_t>
+encode_audio_pool_listed (const std::vector<AudioPoolListRow>& rows)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");  o.str ("event");
+		o.str ("type"); o.str ("audio_pool_listed");
+		o.str ("sources");
+		o.array (rows.size ());
+		for (auto const& r : rows) {
+			o.map (6);
+			o.str ("id");             o.str (r.id);
+			o.str ("name");           o.str (r.name);
+			o.str ("path");           o.str (r.path);
+			o.str ("channel");        o.u (static_cast<std::uint32_t> (r.channel));
+			o.str ("length_samples"); o.u (r.length_samples);
+			o.str ("sample_rate");    o.u (r.sample_rate);
+		}
+	});
+}
+
 } // namespace ArdourSurface::msgpack_out

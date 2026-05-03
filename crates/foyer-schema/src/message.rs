@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    audio::{AudioTransport, IceCandidate, SdpPayload},
+    audio::{AudioPoolSource, AudioTransport, IceCandidate, SdpPayload},
     midi::{MidiNote, MidiNotePatch, MidiPatchNames},
     session::{Group, GroupPatch, Track, TrackPatch},
     Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, LatencyReport,
@@ -179,6 +179,11 @@ pub enum Event {
         track_id: EntityId,
         timeline: TimelineMeta,
         regions: Vec<Region>,
+    },
+    /// Reply to `Command::ListAudioPool`: pool entries backed by on-disk audio
+    /// (typically one row per channel for multichannel files).
+    AudioPoolListed {
+        sources: Vec<AudioPoolSource>,
     },
     /// Reply to `Command::ListPlugins`.
     PluginsList {
@@ -791,6 +796,15 @@ pub enum Command {
     /// Ask for regions on a given track.
     ListRegions {
         track_id: EntityId,
+    },
+    /// Ask the shim for all audio file sources in the session pool.
+    /// Answered with `Event::AudioPoolListed`. Stub returns an empty list.
+    ListAudioPool,
+    /// Import/register an on-disk audio file into the pool via Ardour's
+    /// `SourceFactory::createExternal`. `path` must be an absolute filesystem
+    /// path readable by the host.
+    ImportAudio {
+        path: String,
     },
     /// Ask for the plugin catalog.
     ListPlugins,

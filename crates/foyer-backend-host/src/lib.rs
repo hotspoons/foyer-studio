@@ -239,6 +239,20 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn list_audio_pool(&self) -> Result<Vec<foyer_schema::AudioPoolSource>, BackendError> {
+        self.client
+            .list_audio_pool()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn import_audio(&self, path: String) -> Result<(), BackendError> {
+        self.client
+            .import_audio(path)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn update_region(
         &self,
         id: EntityId,

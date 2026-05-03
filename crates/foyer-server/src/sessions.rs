@@ -298,6 +298,12 @@ impl SessionRegistry {
             .map(|e| e.id.clone())
     }
 
+    /// Canonical on-disk path to the session `.ardour` project file (not
+    /// jail-stripped). Used by HTTP import to target `interchange/.../audiofiles`.
+    pub(crate) async fn project_file_abs_path(&self, id: &EntityId) -> Option<String> {
+        self.sessions.read().await.get(id).map(|e| e.path.clone())
+    }
+
     /// Returns true if the session with `id` still exists. Used by the
     /// WS layer to validate a client's currently-selected session
     /// after events that might have closed it.

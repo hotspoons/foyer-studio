@@ -15,10 +15,10 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use foyer_schema::{
-    Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, Event, LatencyReport,
-    MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch, PathListing,
-    PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta,
-    Track, TrackPatch, WaveformPeaks,
+    Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EnginePort, EntityId, Event,
+    LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch,
+    PathListing, PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session,
+    TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -206,6 +206,16 @@ pub trait Backend: Send + Sync + 'static {
     }
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {
         Ok(Vec::new())
+    }
+    /// Enumerate audio file sources in the session pool (Ardour: imported /
+    /// recorded media). Default empty; host + Ardour shim implement.
+    async fn list_audio_pool(&self) -> Result<Vec<AudioPoolSource>, BackendError> {
+        Ok(Vec::new())
+    }
+    /// Register an absolute on-disk path as a session audio source. Host sends
+    /// `ImportAudio` to the shim; default is a no-op so minimal backends keep running.
+    async fn import_audio(&self, _path: String) -> Result<(), BackendError> {
+        Ok(())
     }
     async fn add_plugin(
         &self,

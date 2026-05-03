@@ -25,9 +25,10 @@ use foyer_ipc::{
     Control,
 };
 use foyer_schema::{
-    AudioFormat, AudioSource, Command, EnginePort, EntityId, Envelope, Event, LatencyReport,
-    MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch, PluginCatalogEntry,
-    PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch,
+    AudioFormat, AudioPoolSource, AudioSource, Command, EnginePort, EntityId, Envelope, Event,
+    LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch,
+    PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta,
+    Track, TrackPatch,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -124,6 +125,8 @@ struct Shared {
     /// correlation id, so every concurrent awaiter resolves to the
     /// same snapshot.
     pending_ports_list: Mutex<Vec<oneshot::Sender<Vec<EnginePort>>>>,
+    /// In-flight `list_audio_pool` requests — shared answer like plugins/ports.
+    pending_audio_pool_list: Mutex<Vec<oneshot::Sender<Vec<AudioPoolSource>>>>,
     /// Cache of known regions, keyed by region id. Populated from every
     /// `RegionsList` / `RegionUpdated` event; drained on `RegionRemoved`.
     /// Used to look up `source_path` when the sidecar needs to decode
@@ -179,6 +182,7 @@ impl HostClient {
             pending_midi_patch_names: Mutex::new(HashMap::new()),
             pending_plugins_list: Mutex::new(Vec::new()),
             pending_ports_list: Mutex::new(Vec::new()),
+            pending_audio_pool_list: Mutex::new(Vec::new()),
             regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
             disconnected: AtomicBool::new(false),
@@ -395,6 +399,21 @@ impl HostClient {
         })
         .await?;
         timeout(rx, "list_regions").await
+    }
+
+    pub async fn list_audio_pool(&self) -> Result<Vec<AudioPoolSource>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_audio_pool_list
+            .lock()
+            .await
+            .push(tx);
+        self.send_command(Command::ListAudioPool).await?;
+        timeout(rx, "list_audio_pool").await
+    }
+
+    pub async fn import_audio(&self, path: String) -> Result<(), ClientError> {
+        self.send_command(Command::ImportAudio { path }).await
     }
 
     pub async fn update_region(
@@ -1050,6 +1069,13 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                         std::mem::take(&mut *shared.pending_ports_list.lock().await);
                     for w in waiters {
                         let _ = w.send(ports.clone());
+                    }
+                }
+                Event::AudioPoolListed { sources } => {
+                    let waiters: Vec<_> =
+                        std::mem::take(&mut *shared.pending_audio_pool_list.lock().await);
+                    for w in waiters {
+                        let _ = w.send(sources.clone());
                     }
                 }
                 Event::PluginPresetsListed { plugin_id, presets } => {

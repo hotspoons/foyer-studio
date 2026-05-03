@@ -41,6 +41,9 @@
 #include "ardour/location.h"
 #include "ardour/playlist.h"
 #include "ardour/region_factory.h"
+#include "ardour/source_factory.h"
+#include "ardour/audiofilesource.h"
+#include "ardour/file_source.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
 #include "ardour/plugin_manager.h"
@@ -62,6 +65,8 @@
 #include "pbd/stateful_diff_command.h"
 #include "temporal/beats.h"
 #include "temporal/timeline.h"
+
+#include <sndfile.h>
 
 #include "ipc.h"
 #include "master_tap.h"
@@ -368,6 +373,8 @@ struct DecodedCmd
 		AudioStreamClose, // Command::AudioStreamClose { stream_id }
 		Latency,
 		ListRegions,
+		ListAudioPool,
+		ImportAudio,
 		UpdateRegion,
 		DeleteRegion,
 		UpdateTrack,
@@ -532,6 +539,9 @@ struct DecodedCmd
 	std::uint64_t stretch_new_length_u64 = 0;
 	std::string   stretch_anchor;
 	bool          stretch_preserve_pitch = true;
+
+	// ImportAudio payload — absolute path on the host.
+	std::string   import_audio_path;
 
 	// ReplaceRegionNotes payload — parsed into a vector so the
 	// handler can feed it straight into a single NoteDiffCommand.
@@ -1194,6 +1204,8 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.stretch_anchor)) return out;
 				} else if (k == "preserve_pitch") {
 					if (!in.read_bool (out.stretch_preserve_pitch)) return out;
+				} else if (k == "path") {
+					if (!in.read_str (out.import_audio_path)) return out;
 				} else if (k == "source_offset_samples") {
 					// DuplicateRegionRange's slice anchor — offset
 					// INTO the source region's content.
@@ -1436,6 +1448,8 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "request_snapshot")   out.kind = DecodedCmd::Kind::RequestSnapshot;
 			else if (cmd_type == "control_set")        out.kind = DecodedCmd::Kind::ControlSet;
 			else if (cmd_type == "list_regions")       out.kind = DecodedCmd::Kind::ListRegions;
+			else if (cmd_type == "list_audio_pool")    out.kind = DecodedCmd::Kind::ListAudioPool;
+			else if (cmd_type == "import_audio")        out.kind = DecodedCmd::Kind::ImportAudio;
 			else if (cmd_type == "update_region")      out.kind = DecodedCmd::Kind::UpdateRegion;
 			else if (cmd_type == "delete_region")      out.kind = DecodedCmd::Kind::DeleteRegion;
 			else if (cmd_type == "update_track")       out.kind = DecodedCmd::Kind::UpdateTrack;
@@ -1734,6 +1748,67 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			// properly registered.)
 			auto bytes = msgpack_out::encode_regions_list (_shim.session (), cmd.track_id);
 			_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			break;
+		}
+		case DecodedCmd::Kind::ListAudioPool: {
+			std::vector<msgpack_out::AudioPoolListRow> rows;
+			auto& session = _shim.session ();
+			session.foreach_source ([&] (std::shared_ptr<Source> s) {
+				auto afs = std::dynamic_pointer_cast<AudioFileSource> (s);
+				if (!afs) {
+					return;
+				}
+				auto fs = std::dynamic_pointer_cast<FileSource> (afs);
+				msgpack_out::AudioPoolListRow row;
+				{
+					std::ostringstream oid;
+					oid << "source." << afs->id ();
+					row.id = oid.str ();
+				}
+				row.name = afs->name ();
+				row.path = fs ? fs->path () : std::string ();
+				row.channel = static_cast<std::uint16_t> (afs->channel ());
+				row.length_samples =
+				    static_cast<std::uint64_t> (afs->readable_length_samples ());
+				row.sample_rate =
+				    static_cast<std::uint32_t> (afs->sample_rate ());
+				rows.push_back (std::move (row));
+			});
+			auto bytes = msgpack_out::encode_audio_pool_listed (rows);
+			_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			break;
+		}
+		case DecodedCmd::Kind::ImportAudio: {
+			if (cmd.import_audio_path.empty ()) {
+				break;
+			}
+			const std::string path = cmd.import_audio_path;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, path] () {
+				SF_INFO info;
+				std::memset (&info, 0, sizeof (info));
+				SNDFILE* f = sf_open (path.c_str (), SFM_READ, &info);
+				if (!f) {
+					PBD::warning << "foyer_shim: import_audio: sf_open failed for "
+					             << path << endmsg;
+					return;
+				}
+				const int nch = std::max (0, info.channels);
+				sf_close (f);
+				auto& session = shim->session ();
+				for (int ch = 0; ch < nch; ++ch) {
+					try {
+						(void)SourceFactory::createExternal (
+						    DataType::AUDIO, session, path, ch,
+						    Source::Flag (0), true, false);
+					} catch (...) {
+						PBD::warning << "foyer_shim: import_audio: createExternal failed ch="
+						             << ch << " path=" << path << endmsg;
+						return;
+					}
+				}
+				session.set_dirty ();
+			});
 			break;
 		}
 		case DecodedCmd::Kind::UpdateRegion: {
