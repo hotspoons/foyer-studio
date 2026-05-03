@@ -532,6 +532,7 @@ impl Backend for StubBackend {
         new_start_samples: i64,
         new_length_samples: u64,
         anchor: String,
+        _preserve_pitch: bool,
     ) -> Result<(), BackendError> {
         const MIN_LEN: u64 = 4_800;
         let (track_id, _region) = {

@@ -380,6 +380,7 @@ pub trait Backend: Send + Sync + 'static {
         _new_start_samples: i64,
         _new_length_samples: u64,
         _anchor: String,
+        _preserve_pitch: bool,
     ) -> Result<(), BackendError> {
         Err(BackendError::Other("stretch_region not supported".into()))
     }

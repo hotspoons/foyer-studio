@@ -28,7 +28,6 @@ use foyer_schema::{
     AudioFormat, AudioSource, Command, EnginePort, EntityId, Envelope, Event, LatencyReport,
     MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch, PluginCatalogEntry,
     PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch,
-    SCHEMA_VERSION,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -213,13 +212,12 @@ impl HostClient {
     }
 
     pub async fn send_command(&self, cmd: Command) -> Result<(), ClientError> {
-        let env = Envelope {
-            schema: SCHEMA_VERSION,
-            seq: self.next_seq(),
-            origin: Some("sidecar".into()),
-            session_id: None,
-            body: Control::Command(cmd),
-        };
+        let env = Envelope::new(
+            self.next_seq(),
+            Some("sidecar".into()),
+            None,
+            Control::Command(cmd),
+        );
         self.shared
             .out_tx
             .send(WriteItem::Control(Box::new(env)))
@@ -456,6 +454,7 @@ impl HostClient {
         new_start_samples: i64,
         new_length_samples: u64,
         anchor: String,
+        preserve_pitch: bool,
     ) -> Result<(), ClientError> {
         self
             .send_command(Command::StretchRegion {
@@ -463,6 +462,7 @@ impl HostClient {
                 new_start_samples,
                 new_length_samples,
                 anchor,
+                preserve_pitch,
             })
             .await
     }

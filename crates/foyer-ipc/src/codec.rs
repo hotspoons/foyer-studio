@@ -76,7 +76,7 @@ pub fn unpack_audio(body: &[u8]) -> Option<(u32, &[u8])> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foyer_schema::{Command, ControlValue, EntityId, SCHEMA_VERSION};
+    use foyer_schema::{Command, ControlValue, EntityId};
     use std::io::Cursor;
 
     fn duplex(buf: Vec<u8>) -> Cursor<Vec<u8>> {
@@ -85,16 +85,15 @@ mod tests {
 
     #[tokio::test]
     async fn control_frame_round_trip() {
-        let env = Envelope {
-            schema: SCHEMA_VERSION,
-            seq: 7,
-            origin: Some("test".into()),
-            session_id: None,
-            body: Control::Command(Command::ControlSet {
+        let env = Envelope::new(
+            7,
+            Some("test".into()),
+            None,
+            Control::Command(Command::ControlSet {
                 id: EntityId::new("track.abc.gain"),
                 value: ControlValue::Float(-6.0),
             }),
-        };
+        );
         let payload = encode_control(&env).unwrap();
         let frame = Frame {
             kind: FrameKind::Control,

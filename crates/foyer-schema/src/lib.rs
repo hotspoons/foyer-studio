@@ -54,3 +54,9 @@ pub use value::{
 
 /// Current wire-schema version. Major bump = breaking; minor = additive.
 pub const SCHEMA_VERSION: (u16, u16) = (0, 2);
+
+/// Kubernetes-style named API revision for control-plane envelopes (IPC shim ↔ sidecar
+/// and WebSocket). Evolve `v1alpha1` in place during development; promote to `v1beta1` /
+/// `v1` when stabilizing breaking changes. The numeric [`SCHEMA_VERSION`] tuple tracks
+/// finer-grained wire compatibility.
+pub const CONTROL_PLANE_API_VERSION: &str = "foyer.sh/v1alpha1";

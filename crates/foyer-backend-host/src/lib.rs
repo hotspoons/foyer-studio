@@ -293,9 +293,16 @@ impl Backend for HostBackend {
         new_start_samples: i64,
         new_length_samples: u64,
         anchor: String,
+        preserve_pitch: bool,
     ) -> Result<(), BackendError> {
         self.client
-            .stretch_region(id, new_start_samples, new_length_samples, anchor)
+            .stretch_region(
+                id,
+                new_start_samples,
+                new_length_samples,
+                anchor,
+                preserve_pitch,
+            )
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }

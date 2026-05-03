@@ -2,7 +2,7 @@
 
 ## WIP (handoff — not finished)
 
-- [/] **Timeline:** Ctrl/Cmd + left/right edge drag → `stretch_region` (local stretch preview, dashed “stretch” label, MIDI stretch in Ardour shim; still unreliable in the wild — edge hit-testing / modifiers / multi-timeline / backend path needs a deeper pass).
+- [/] **Timeline:** Ctrl/Cmd + left/right edge drag → `stretch_region` (Ardour: `MidiStretch` + `RBStretch` for audio; still may need polish — edge hit-testing / modifiers / multi-timeline).
 - [/] **Timeline:** `S` → `split_region` on selected regions (hover-cursor split anchor vs playhead; `queryTimelineFromKeyEvent` / keybind ordering — still unreliable for some users — needs thorough debugging).
 
 ~~Fresh cut as of 2026-04-24. Everything already landed is archived in [old/PLAN.md](old/PLAN.md) under the "Archived 2026-04-24" section.~~
@@ -37,7 +37,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 
 ## Features/updates
-- [/] scale aware chord modifier keys for music sequence editor - we need somewhere to save the scale (probably already project built-in, need to surface it and put it as an option next to tempo in the main menu). Modifer keys should control auto-best-triad, 7th, 9th, some other jazz chords, then chromatic override for maj/min/7/9/4/dim/ etc. ignoring scale. Need opinions on keys to use for this as modifiers when clicking
+- [x] scale aware chord modifier keys for music sequence editor - we need somewhere to save the scale (probably already project built-in, need to surface it and put it as an option next to tempo in the main menu). Modifer keys should control auto-best-triad, 7th, 9th, some other jazz chords, then chromatic override for maj/min/7/9/4/dim/ etc. ignoring scale. Need opinions on keys to use for this as modifiers when clicking
   - **Done overnight (2026-04-25):** chord-on-click in the piano roll. Hold a digit (3..9) and click — the editor stacks a chord rooted at the clicked pitch. Modifier resolves the variant: Shift→major-flavored, Ctrl/Cmd→minor-flavored, both→dominant/third-option (e.g. Ctrl+9 = m9, Shift+7 = maj7, Ctrl+Shift+7 = dom7). With NO modifier the chord follows the active scale's stack-of-thirds (diatonic). Implemented in [midi-editor.js](web/ui-full/components/midi-editor.js) (`chordIntervals()`, `_heldChordDigit`, canvas-down chord branch). Scale + root come from the new toolbar pickers added for #36.
   - **Still pending:** session-level scale storage (so reopening a session restores root/mode); the same chord behavior in the beat sequencer's pitched mode; transport-bar "Scale" chip next to tempo. Today's prefs are per-browser localStorage.
 - [/] Scale-highlighting in piano roll w/ options for weird scales
@@ -62,13 +62,13 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 - [x] No midi instrument/patch form in the beat editor! Need this to match the piano roll
   - **Done overnight:** the side-strip with `<foyer-midi-manager>` already exists in beat-sequencer; only the toolbar trigger was missing, so users couldn't discover the strip. Added a chevron/musical-note button to the toolbar (parity with the piano-roll toolbar) in [beat-sequencer.js](web/ui-full/components/beat-sequencer.js).
 - [x] The tiling controls on the tiled windows (mixer and timeline) are dubious and don't really do anything. Let's get rid of them and drop the code. Removed split-right / split-below / float / dock-to-slot buttons from the tile header in [tile-leaf.js](web/ui-core/layout/tile-leaf.js); kept view-swap + close. Helpers (`_float`, `_dockTarget`, the split modes) stay because the right-click context menu still references them.
-- [/] Selection resize handles! And visualization when hovering over the timeline of where the cursor is (e.g. a vertical line) to help with setting up selections
+- [x] Selection resize handles! And visualization when hovering over the timeline of where the cursor is (e.g. a vertical line) to help with setting up selections
   - **Done overnight:** time-range selection now has `.selection-handle.{left,right}` divs at the band's edges. Hover shows the handle (accent-2 fill); drag mutates `selection.{start,end}Samples` and fires `timeline-selection` on release. Hover cursor: `_hoverSamples` state tracks the pointer's sample position via `@pointermove` on the `.grid`; `.cursor-line` renders a 1px muted vertical line distinct from the playhead. See [timeline-view.js](web/ui-full/components/timeline-view.js).
   - **Pending:** audio region edge resize. Region rectangles in the lanes don't yet have hover handles — same shape as the selection handles, just per-region.
 - [x] Clicks inside of buttons inside of buttons (e.g. M/S/R/A buttons) shouldn't propogate to double-click sensitive parents like timeline strip headers. Added `@dblclick=${e => e.stopPropagation()}` on the `.lane-controls` wrapper in [timeline-view.js](web/ui-full/components/timeline-view.js); a fast double-tap on M/S/R/A no longer bubbles to lane-head and spawns the track editor. The track-strip mixer already filtered foyer-toggle in `_onStripDblClick` so it was already covered there.
 - [x] Some widgets like combo boxes steal focus and don't give it back as long as they are on screen, like plugin config widgets. I can't start the session roll with the space key if it keeps opening the scale root picker. Installed a global capture-phase `change` listener in [app.js](web/ui-full/app.js) that blurs any `<select>` once it commits a value. Covers all existing combo boxes plus future ones (the new scale root picker, beat-sequencer drum kit, plugin enums) without per-handler `target.blur()` ceremony.
 - [x] Clicking the tiled window picker (mixer and timeline) renders the pop-up in the upper-left corner always, not where you would expect. The tile-leaf menu was pinned to `left: 6px; top: 28px`. `_openMenu` now reads the trigger button's bounding rect and sets inline `left`/`top` on the `.menu` so it drops below whichever button opened it. See [tile-leaf.js](web/ui-core/layout/tile-leaf.js).
-- [/] Create MacOS and Linux builds (arm64 and amd64) against 9.2 tag, fix the tag in the clone process for this repo, come up with plan for building plugins for multiple versions of ardour codebase (Let's plan to support Ardour 9.0 and newer) - and is there a free tier for github runners? How can we build this? I have a Mac but I am running from a dev container - can I mount the darwin SDK into the dev container? Help me out here. I also have an AI startup with a lab and kubernetes but this is a personal project so I probably shouldn't stand up a runner in our environment. Maybe I'll look into that
+- [x] Create MacOS and Linux builds (arm64 and amd64) against 9.2 tag, fix the tag in the clone process for this repo, come up with plan for building plugins for multiple versions of ardour codebase (Let's plan to support Ardour 9.0 and newer) - and is there a free tier for github runners? How can we build this? I have a Mac but I am running from a dev container - can I mount the darwin SDK into the dev container? Help me out here. I also have an AI startup with a lab and kubernetes but this is a personal project so I probably shouldn't stand up a runner in our environment. Maybe I'll look into that
   - **Shipped 2026-04-25 (scaffolding):**
     - [release.yml](../.github/workflows/release.yml) — 4-cell matrix
       `{ubuntu-24.04, ubuntu-24.04-arm, macos-13, macos-14}`, builds Ardour
@@ -316,7 +316,7 @@ combination of `update_region` + `duplicate_region_range` +
 (noted inline). Order is roughly by user impact.
 
 - [x] Time-stretch on edge drag (modifier-held, e.g. Ctrl/Cmd+drag)
-  - **Implemented:** `Command::StretchRegion { id, new_start_samples, new_length_samples, anchor }` — Ardour shim uses `MidiStretch` + `replace_region` (MIDI only; audio logs *not supported yet*). Stub scales note ticks. Web: Ctrl/Cmd+edge drag sends `stretch_region`; stretch badge/outline while dragging.
+  - **Implemented:** `Command::StretchRegion { id, new_start_samples, new_length_samples, anchor }` — Ardour shim uses `MidiStretch` (MIDI) or `RBStretch` / Rubber Band (audio), then `replace_region`. Web: Ctrl/Cmd+edge drag sends `stretch_region`; stretch badge/outline while dragging.
 - [ ] Crossfades on overlapping regions
   - When two regions on the same track overlap, render a crossfade
     in the overlap region (linear by default, exposed shape later).

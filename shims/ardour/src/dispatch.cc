@@ -29,6 +29,10 @@
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
 #include "ardour/midi_stretch.h"
+#include "ardour/stretch.h"
+
+#include "pbd/progress.h"
+#include <rubberband/RubberBandStretcher.h>
 #include "ardour/midi_source.h"
 #include "ardour/timefx_request.h"
 #include "ardour/midi_track.h"
@@ -95,6 +99,14 @@ foyer_playback_wire_channel_for_patch (std::shared_ptr<MidiTrack> const& mt)
 	}
 	return 0;
 }
+
+/// RBEffect::run() requires a non-null `Progress*` (it calls
+/// `progress->set_progress()` with no guard). The editor passes
+/// `TimeFXDialog`; we use this stub on the control-surface thread.
+struct FoyerRBProgress final : PBD::Progress {
+private:
+	void set_overall_progress (float) override {}
+};
 
 /// New MIDI regions start with no patch-change rows; playback then never sends
 /// bank/program before notes. Seed tick 0 to match live track patch state.
@@ -519,6 +531,7 @@ struct DecodedCmd
 	bool          has_stretch_new_length = false;
 	std::uint64_t stretch_new_length_u64 = 0;
 	std::string   stretch_anchor;
+	bool          stretch_preserve_pitch = true;
 
 	// ReplaceRegionNotes payload — parsed into a vector so the
 	// handler can feed it straight into a single NoteDiffCommand.
@@ -1097,8 +1110,9 @@ decode (const std::vector<std::uint8_t>& buf)
 	DecodedCmd out;
 	In in { buf.data (), buf.data () + buf.size () };
 
-	// Envelope { schema, seq, origin, body } — we only care about body, but
-	// we walk the map so future field additions don't break us.
+	// Envelope { schema, api_version, seq, origin, body } — we only decode `body`
+	// in depth, but we read api_version for forward compatibility.
+	std::string wire_api_version;
 	std::size_t n = 0;
 	if (!in.read_map_header (n)) return out;
 
@@ -1178,6 +1192,8 @@ decode (const std::vector<std::uint8_t>& buf)
 					out.has_stretch_new_length = true;
 				} else if (k == "anchor") {
 					if (!in.read_str (out.stretch_anchor)) return out;
+				} else if (k == "preserve_pitch") {
+					if (!in.read_bool (out.stretch_preserve_pitch)) return out;
 				} else if (k == "source_offset_samples") {
 					// DuplicateRegionRange's slice anchor — offset
 					// INTO the source region's content.
@@ -1479,9 +1495,19 @@ decode (const std::vector<std::uint8_t>& buf)
 			    ||   cmd_type == "audio_egress_stop")   out.kind = DecodedCmd::Kind::AudioStreamClose;
 			else if (cmd_type.rfind ("audio_", 0) == 0) out.kind = DecodedCmd::Kind::Audio;
 			else if (cmd_type == "latency_probe")      out.kind = DecodedCmd::Kind::Latency;
+		} else if (key == "api_version") {
+			if (!in.read_str (wire_api_version)) return out;
 		} else {
 			if (!in.skip_value ()) return out;
 		}
+	}
+	if (!wire_api_version.empty () &&
+	    wire_api_version != msgpack_out::CONTROL_PLANE_API_VERSION) {
+		PBD::warning << "foyer_shim: unsupported control plane api_version "
+		             << wire_api_version << " (only "
+		             << msgpack_out::CONTROL_PLANE_API_VERSION
+		             << " is supported)" << endmsg;
+		return DecodedCmd ();
 	}
 	return out;
 }
@@ -2275,8 +2301,9 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					PBD::warning << "foyer_shim: stretch_region: unknown region: " << snap.id << endmsg;
 					return;
 				}
-				if (hit.region->data_type () != DataType::MIDI) {
-					PBD::warning << "foyer_shim: stretch_region: audio not supported yet" << endmsg;
+				const DataType rdt = hit.region->data_type ();
+				if (rdt != DataType::MIDI && rdt != DataType::AUDIO) {
+					PBD::warning << "foyer_shim: stretch_region: unsupported region type" << endmsg;
 					return;
 				}
 				std::shared_ptr<ARDOUR::Playlist> playlist;
@@ -2335,21 +2362,55 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				playlist->clear_changes ();
 				ARDOUR::TimeFXRequest request;
 				request.time_fraction = ratio;
-				MidiStretch stretch (session, request);
-				if (stretch.run (hit.region) != 0 ||
-				    stretch.results.empty () ||
-				    !stretch.results[0]) {
-					PBD::warning << "foyer_shim: stretch_region: MidiStretch failed" << endmsg;
-					if (own_txn) session.commit_reversible_command ();
-					return;
+				std::shared_ptr<Region> stretched;
+				if (rdt == DataType::MIDI) {
+					request.pitch_fraction = 1.0f;
+					MidiStretch ms (session, request);
+					if (ms.run (hit.region) != 0 ||
+					    ms.results.empty () ||
+					    !ms.results[0]) {
+						PBD::warning << "foyer_shim: stretch_region: MidiStretch failed" << endmsg;
+						if (own_txn) session.commit_reversible_command ();
+						return;
+					}
+					stretched = ms.results[0];
+				} else {
+					if (snap.stretch_preserve_pitch) {
+						/* Editor Time Stretch dialog: pitch-preserving elastic stretch. */
+						request.pitch_fraction = 1.0f;
+					} else {
+						/* editor_timefx.cc mode 6: duration changes, pitch tracks
+						 * inversely (varispeed / “no pitch preserve”). */
+						const double tf = ratio.to_double ();
+						request.pitch_fraction = tf > 0.0
+						    ? static_cast<float> (1.0 / tf)
+						    : 1.0f;
+					}
+					if (request.pitch_fraction <= 0.f) {
+						request.pitch_fraction = 1.0f;
+					}
+					/* Match gtk2_ardour/editor_timefx.cc default Rubber Band mode
+					 * (OptionTransientsCrisp is 0; R3 builds add OptionEngineFiner). */
+					request.opts = static_cast<int> (
+					    RubberBand::RubberBandStretcher::OptionEngineFiner);
+					FoyerRBProgress rb_progress;
+					RBStretch rb (session, request);
+					if (rb.run (hit.region, &rb_progress) != 0 ||
+					    rb.results.empty () ||
+					    !rb.results[0]) {
+						PBD::warning << "foyer_shim: stretch_region: RBStretch failed" << endmsg;
+						if (own_txn) session.commit_reversible_command ();
+						return;
+					}
+					stretched = rb.results[0];
 				}
 				timepos_t newpos;
 				if (anchor == "end") {
-					newpos = hit.region->end ().earlier (stretch.results[0]->length ());
+					newpos = hit.region->end ().earlier (stretched->length ());
 				} else {
 					newpos = hit.region->position ();
 				}
-				playlist->replace_region (hit.region, stretch.results[0], newpos);
+				playlist->replace_region (hit.region, stretched, newpos);
 				session.add_command (new PBD::StatefulDiffCommand (playlist));
 				if (own_txn) session.commit_reversible_command ();
 				session.set_dirty ();

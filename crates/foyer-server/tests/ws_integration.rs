@@ -65,6 +65,7 @@ async fn snapshot_then_control_set_round_trip() {
     // Client requests subscribe explicitly; server pushes a snapshot back.
     let cmd = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq: 0,
         origin: Some("alice".into()),
         session_id: None,
@@ -98,6 +99,7 @@ async fn snapshot_then_control_set_round_trip() {
     // Move the tempo, expect a ControlUpdate echo tagged with our origin.
     let cmd = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq: 0,
         origin: Some("alice".into()),
         session_id: None,
@@ -151,6 +153,7 @@ async fn second_client_gets_cached_snapshot_without_request() {
     ws1.send(Message::Text(
         serde_json::to_string(&Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: 0,
             origin: None,
             session_id: None,

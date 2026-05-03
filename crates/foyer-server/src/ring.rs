@@ -51,6 +51,7 @@ mod tests {
     fn env(seq: u64) -> Envelope<Event> {
         Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq,
             origin: None,
             session_id: None,

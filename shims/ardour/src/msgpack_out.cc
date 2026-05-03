@@ -286,9 +286,10 @@ envelope_event (BodyFn write_body)
 {
 	std::vector<std::uint8_t> buf;
 	Out o { buf };
-	// Envelope { schema, seq, origin, body }
-	o.map (4);
+	// Envelope { schema, api_version, seq, origin, body }
+	o.map (5);
 	o.str ("schema"); o.array (2); o.u (0); o.u (1);
+	o.str ("api_version"); o.str (CONTROL_PLANE_API_VERSION);
 	o.str ("seq");    o.u (next_seq ());
 	o.str ("origin"); o.str ("shim");
 	o.str ("body");

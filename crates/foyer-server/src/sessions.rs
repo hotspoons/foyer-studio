@@ -309,6 +309,7 @@ impl SessionRegistry {
     async fn broadcast_event(&self, body: Event) {
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: self.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -342,6 +343,7 @@ async fn pump_session(
         let seq = reg.next_seq.fetch_add(1, Ordering::Relaxed);
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq,
             origin: Some("backend".into()),
             session_id: Some(session_id.clone()),
@@ -356,6 +358,7 @@ async fn pump_session(
     // through to another session.
     let lost = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq: reg.next_seq.fetch_add(1, Ordering::Relaxed),
         origin: Some("server".into()),
         session_id: Some(session_id.clone()),

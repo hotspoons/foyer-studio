@@ -29,6 +29,9 @@ class Controllable;
 
 namespace ArdourSurface::msgpack_out {
 
+/// Kubernetes-style control-plane API version (must match Rust `CONTROL_PLANE_API_VERSION`).
+inline constexpr char CONTROL_PLANE_API_VERSION[] = "foyer.sh/v1alpha1";
+
 /// Encode `session.snapshot` from the current session state. The
 /// `routes` list must come from the caller's own weak_ptr tracking
 /// (see `SignalBridge::snapshot_tracked_routes`) — we do NOT touch

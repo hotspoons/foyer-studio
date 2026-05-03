@@ -1,9 +1,9 @@
 //! Message envelope and event/command types shared across `foyer-ipc` and
 //! `foyer-ws`.
 //!
-//! The envelope adds `seq`, `origin`, and a schema version tag so consumers can detect
-//! drops (by seq gap), attribute changes (for presence/UI), and reject incompatible
-//! senders.
+//! The envelope adds `seq`, `origin`, numeric `schema`, Kubernetes-style `api_version`,
+//! and a body so consumers can detect drops (by seq gap), attribute changes (for
+//! presence/UI), reject incompatible senders, and gate coarse API evolution.
 
 use std::collections::BTreeMap;
 
@@ -26,6 +26,10 @@ pub type Seq = u64;
 pub struct Envelope<T> {
     /// Schema version at send time. `(major, minor)` — major mismatches are hard errors.
     pub schema: (u16, u16),
+    /// Named API line (`group/version`), Kubernetes-style. Prefer this for coarse
+    /// compatibility; [`Self::schema`] remains the fine-grained tuple.
+    #[serde(default = "default_control_plane_api_version")]
+    pub api_version: String,
     pub seq: Seq,
     /// Free-form origin tag, e.g. `"shim"`, `"user:alice"`, `"sidecar"`. Used for
     /// presence displays and to let clients ignore echoes of their own changes.
@@ -41,6 +45,29 @@ pub struct Envelope<T> {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub session_id: Option<EntityId>,
     pub body: T,
+}
+
+fn default_control_plane_api_version() -> String {
+    crate::CONTROL_PLANE_API_VERSION.to_string()
+}
+
+impl<T> Envelope<T> {
+    /// Envelope with [`crate::SCHEMA_VERSION`] and [`crate::CONTROL_PLANE_API_VERSION`].
+    pub fn new(
+        seq: Seq,
+        origin: Option<String>,
+        session_id: Option<EntityId>,
+        body: T,
+    ) -> Self {
+        Self {
+            schema: crate::SCHEMA_VERSION,
+            api_version: crate::CONTROL_PLANE_API_VERSION.to_string(),
+            seq,
+            origin,
+            session_id,
+            body,
+        }
+    }
 }
 
 /// Value update for a single control — produced whenever an authoritative side observes
@@ -579,6 +606,10 @@ fn default_stretch_anchor() -> String {
     "start".to_string()
 }
 
+fn default_stretch_preserve_pitch() -> bool {
+    true
+}
+
 /// One currently-open session as tracked by the sidecar. Multi-session
 /// clients render this in the session switcher chip and in the
 /// Session → Recent menu.
@@ -841,15 +872,23 @@ pub enum Command {
     /// Time-stretch or squash region contents so they fill a new timeline
     /// span. `anchor` is `"start"` when the left edge stays fixed (typical
     /// right-edge drag) or `"end"` when the right edge stays fixed (left-edge
-    /// drag). The Ardour shim routes MIDI through `MidiStretch`; audio is
-    /// not supported yet. Emits `RegionUpdated` / playlist echoes like other
-    /// region mutations.
+    /// drag). The Ardour shim applies MIDI via `MidiStretch` and audio via
+    /// `RBStretch` (Rubber Band), then `replace_region` so the session owns the
+    /// new source. Emits `RegionUpdated` / playlist echoes like other region
+    /// mutations.
+    ///
+    /// For **audio**, `preserve_pitch` selects Rubber Band behavior: `true`
+    /// keeps perceived pitch (editor "Time Stretch" default); `false` uses
+    /// inverse pitch scale like Ardour's "resample / no pitch preserve" preset
+    /// (varispeed / tape-style: longer → lower pitch). MIDI ignores this field.
     StretchRegion {
         id: EntityId,
         new_start_samples: i64,
         new_length_samples: u64,
         #[serde(default = "default_stretch_anchor")]
         anchor: String,
+        #[serde(default = "default_stretch_preserve_pitch")]
+        preserve_pitch: bool,
     },
     /// Split one region into two at an absolute timeline position (`at_samples`
     /// in session samples). The cut must fall strictly inside the region.
@@ -1333,16 +1372,15 @@ mod tests {
 
     #[test]
     fn envelope_carries_seq_and_origin() {
-        let env = Envelope {
-            schema: crate::SCHEMA_VERSION,
-            seq: 42,
-            origin: Some("user:alice".into()),
-            session_id: None,
-            body: Command::ControlSet {
+        let env = Envelope::new(
+            42,
+            Some("user:alice".into()),
+            None,
+            Command::ControlSet {
                 id: EntityId::new("transport.tempo"),
                 value: ControlValue::Float(128.0),
             },
-        };
+        );
         let j = serde_json::to_string(&env).unwrap();
         let back: Envelope<Command> = serde_json::from_str(&j).unwrap();
         assert_eq!(env, back);

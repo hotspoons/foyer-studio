@@ -380,6 +380,7 @@ impl AppState {
     pub(crate) fn envelope(&self, body: Event, session_id: Option<EntityId>) -> Envelope<Event> {
         Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: self.next_seq(),
             origin: Some("server".into()),
             session_id,
@@ -916,6 +917,7 @@ async fn event_pump(
         let seq = state.next_seq();
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq,
             origin: Some("backend".to_string()),
             // Legacy bootstrap pump — the initial stub/launcher
@@ -965,6 +967,7 @@ async fn emit_backend_lost(state: &Arc<AppState>, backend_id: &str, reason: Stri
     );
     let env = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq: state.next_seq(),
         origin: Some("server".into()),
         session_id: None,

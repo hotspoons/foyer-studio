@@ -6,7 +6,11 @@
 //   - Playhead rendered from transport.position, click ruler to seek
 //   - Major (every 5s) + minor (every 1s) grid lines
 //   - Drag region body to move; drag edges to resize — optimistic + UpdateRegion
-//   - Ctrl/Cmd + edge drag: time-stretch (MidiStretch / stub tick scale) via StretchRegion
+//   - Ctrl/Cmd + edge drag: time-stretch via StretchRegion (Ardour: MidiStretch /
+//     RBStretch). Shift held: pitch-preserving elastic stretch (editor Time Stretch
+//     default). No Shift (audio): varispeed / tape-style (pitch scales ~1/duration,
+//     same idea as editor_timefx “resample without preserving pitch”). MIDI ignores
+//     preserve_pitch.
 //   - S: split selected regions at the hover cursor line when the pointer
 //        is over the grid, else at the playhead (SplitRegion)
 //   - Waveforms via WaveformCache; resolution picked from current zoom level
@@ -2856,6 +2860,7 @@ export class TimelineView extends LitElement {
             new_start_samples: r.start_samples,
             new_length_samples: r.length_samples,
             anchor: mode === "resize-left" ? "end" : "start",
+            preserve_pitch: !!upEv.shiftKey,
           });
           continue;
         }

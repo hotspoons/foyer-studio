@@ -290,6 +290,7 @@ async fn handle(
         };
         let greeting = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -342,6 +343,7 @@ async fn handle(
             state.peers.read().await.values().cloned().collect();
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -366,6 +368,7 @@ async fn handle(
             .collect();
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -386,6 +389,7 @@ async fn handle(
     {
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -406,6 +410,7 @@ async fn handle(
         let sessions = state.sessions.list().await;
         let sess_env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -416,6 +421,7 @@ async fn handle(
         if !orphans.is_empty() {
             let orph_env = Envelope {
                 schema: SCHEMA_VERSION,
+                api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
                 seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
                 origin: Some("server".into()),
                 session_id: None,
@@ -426,6 +432,7 @@ async fn handle(
         let recents = crate::recents::load().await;
         let rec_env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -570,6 +577,7 @@ async fn handle(
     state.peers.write().await.remove(&peer_id);
     let env = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
         origin: Some("server".into()),
         session_id: None,
@@ -860,6 +868,7 @@ async fn dispatch_command(
             let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
             let out = Envelope {
                 schema: SCHEMA_VERSION,
+                api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
                 seq,
                 origin: Some("backend".to_string()),
                 session_id: None,
@@ -883,6 +892,7 @@ async fn dispatch_command(
             let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
             let out = Envelope {
                 schema: SCHEMA_VERSION,
+                api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
                 seq,
                 origin: origin.map(str::to_string),
                 session_id: None,
@@ -1218,6 +1228,7 @@ async fn dispatch_command(
                                 broadcast_event(state, Event::SessionList { sessions }).await;
                                 let out = Envelope {
                                     schema: SCHEMA_VERSION,
+                                    api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
                                     seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
                                     origin: Some("backend".into()),
                                     session_id: Some(existing_id),
@@ -1872,11 +1883,18 @@ async fn dispatch_command(
             new_start_samples,
             new_length_samples,
             anchor,
+            preserve_pitch,
         } => {
             if let Err(e) = state
                 .backend()
                 .await
-                .stretch_region(id, new_start_samples, new_length_samples, anchor)
+                .stretch_region(
+                    id,
+                    new_start_samples,
+                    new_length_samples,
+                    anchor,
+                    preserve_pitch,
+                )
                 .await
             {
                 broadcast_event(
@@ -2330,6 +2348,7 @@ async fn dispatch_command(
             if let Ok(snap) = state.backend().await.snapshot().await {
                 let out = Envelope {
                     schema: SCHEMA_VERSION,
+                    api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
                     seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
                     origin: Some("backend".into()),
                     session_id: Some(session_id),
@@ -2876,6 +2895,7 @@ async fn broadcast_event(state: &AppState, event: Event) {
     let is_snapshot = matches!(event, Event::SessionSnapshot { .. });
     let env = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq,
         origin: Some("backend".to_string()),
         session_id: None,
