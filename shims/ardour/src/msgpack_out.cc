@@ -628,11 +628,21 @@ encode_session_snapshot (Session& session,
 		o.array (session.route_groups ().size ());
 		for (auto const& g : session.route_groups ()) {
 			if (!g) {
-				o.map (4);
+				// Defensive: a null shared_ptr from route_groups() is
+				// pathological but cheap to guard. Emit a placeholder
+				// shaped like a real group entry so the UI doesn't
+				// crash on a missing field. Link flags default to true
+				// to match the schema defaults.
+				o.map (9);
 				o.str ("id"); o.str ("group.unknown");
 				o.str ("name"); o.str ("Group");
 				o.str ("color"); o.nil ();
 				o.str ("members"); o.array (0);
+				o.str ("active");      o.b (true);
+				o.str ("link_gain");   o.b (true);
+				o.str ("link_mute");   o.b (true);
+				o.str ("link_solo");   o.b (true);
+				o.str ("link_record"); o.b (true);
 				continue;
 			}
 			std::ostringstream gid;
@@ -644,7 +654,16 @@ encode_session_snapshot (Session& session,
 				rid << r->id ();
 				members.push_back ("track." + rid.str ());
 			});
-			o.map (4);
+			// Mirror Ardour's RouteGroup link properties onto our
+			// schema's `link_*` flags. `is_*()` accessors return the
+			// current value of each property bag entry; `is_active()`
+			// is the master gate (matches our `active`).
+			const bool g_active = g->is_active ();
+			const bool g_gain   = g->is_gain ();
+			const bool g_mute   = g->is_mute ();
+			const bool g_solo   = g->is_solo ();
+			const bool g_rec    = g->is_recenable ();
+			o.map (9);
 			o.str ("id"); o.str ("group." + gid.str ());
 			o.str ("name"); o.str (g->name ());
 			const std::uint32_t c = g->rgba ();
@@ -659,6 +678,11 @@ encode_session_snapshot (Session& session,
 			o.str ("members");
 			o.array (members.size ());
 			for (auto const& m : members) o.str (m);
+			o.str ("active");      o.b (g_active);
+			o.str ("link_gain");   o.b (g_gain);
+			o.str ("link_mute");   o.b (g_mute);
+			o.str ("link_solo");   o.b (g_solo);
+			o.str ("link_record"); o.b (g_rec);
 		}
 
 		o.str ("tracks");

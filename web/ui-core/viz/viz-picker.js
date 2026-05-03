@@ -104,22 +104,20 @@ export class VizPicker extends LitElement {
     this._open = false;
     this._prefs = getVizPrefs();
     this._refresh = () => { this._prefs = getVizPrefs(); };
-    this._onDocClick = (e) => {
-      if (!this._open) return;
-      if (!this.renderRoot.contains(e.composedPath?.()[0] || e.target)) {
-        this._open = false;
-      }
-    };
+    // The Viz menu used to auto-dismiss on outside-click — but tuning
+    // visualizations often requires touching other controls (toggling
+    // playback, scrubbing, switching tracks) to see how a setting
+    // looks under different scenarios. The popover snapping shut
+    // every time made that loop frustrating. Now only the toggle
+    // button closes it; the user opts back out explicitly.
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener("foyer:viz-prefs-changed", this._refresh);
-    document.addEventListener("pointerdown", this._onDocClick);
   }
   disconnectedCallback() {
     window.removeEventListener("foyer:viz-prefs-changed", this._refresh);
-    document.removeEventListener("pointerdown", this._onDocClick);
     super.disconnectedCallback();
   }
 

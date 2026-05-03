@@ -136,6 +136,7 @@ export class PhoneTopBar extends LitElement {
         `}
       </button>
       <button class="listen ${this._audioOn ? "on" : ""}"
+              data-foyer-listen-toggle="1"
               title=${this._audioOn ? "Stop monitoring" : "Listen to master"}
               @click=${this._toggleListen}>
         ${icon(this._audioOn ? "speaker-wave" : "speaker-x-mark", 18)}

@@ -77,7 +77,7 @@ export class GroupManagerModal extends LitElement {
     input[type=text]:focus, select:focus { outline: none; border-color: var(--color-accent); }
 
     .group-row {
-      display: flex; align-items: center; gap: 10px;
+      display: flex; flex-direction: column; gap: 6px;
       padding: 7px 10px;
       border-radius: var(--radius-sm);
       background: var(--color-surface);
@@ -88,6 +88,46 @@ export class GroupManagerModal extends LitElement {
     .group-row:hover {
       background: color-mix(in oklab, var(--color-accent) 5%, var(--color-surface));
     }
+    .group-row.inactive { opacity: 0.55; }
+    .group-head { display: flex; align-items: center; gap: 10px; }
+    .links {
+      display: flex; gap: 4px; flex-wrap: wrap;
+      padding-left: 28px; /* lines up with name, past the swatch */
+    }
+    .link-pill {
+      font-size: 9px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--color-border);
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      transition: all 0.1s ease;
+      user-select: none;
+    }
+    .link-pill:hover { color: var(--color-text); border-color: var(--color-accent); }
+    .link-pill.on {
+      color: #fff;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      border-color: transparent;
+    }
+    .link-pill.master {
+      /* The master "active" pill leads the row and shows a tiny dot
+         when on — distinguishes the kill-switch from per-field links. */
+      padding-left: 18px;
+      position: relative;
+    }
+    .link-pill.master::before {
+      content: "";
+      position: absolute;
+      left: 7px; top: 50%; transform: translateY(-50%);
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--color-text-muted);
+    }
+    .link-pill.master.on::before { background: #fff; }
     .swatch {
       width: 16px; height: 16px; border-radius: 4px;
       border: 1px solid var(--color-border); flex-shrink: 0;
@@ -175,6 +215,14 @@ export class GroupManagerModal extends LitElement {
     });
   }
 
+  _setLink(g, key, value) {
+    window.__foyer?.ws?.send({
+      type: "update_group",
+      id: g.id,
+      patch: { [key]: value },
+    });
+  }
+
   async _delete(g) {
     const ok = await confirmAction({
       title: "Delete group",
@@ -226,32 +274,67 @@ export class GroupManagerModal extends LitElement {
             : this._groups.map((g) => {
                 const members = this._membersOf(g.id);
                 const editing = this._editing === g.id;
+                // Defaults match the schema's `default_true` so groups
+                // created on backends that don't emit the new fields
+                // (or sessions saved before this feature shipped) read
+                // as fully-linked — the existing-member experience
+                // doesn't change underfoot.
+                const active = g.active !== false;
+                const lg = g.link_gain !== false;
+                const lm = g.link_mute !== false;
+                const ls = g.link_solo !== false;
+                const lr = g.link_record !== false;
                 return html`
-                  <div class="group-row">
-                    <div class="swatch" style="background:${g.color || "var(--color-accent)"}"></div>
-                    ${editing ? html`
-                      <div class="flex" style="display:flex;align-items:center;gap:8px;">
-                        <input type="text" .value=${g.name} style="flex:1;"
-                               id="group-name-input-${g.id}"
-                               @keydown=${(e) => { if (e.key === "Enter") this._commitEdit(g, e.currentTarget.value); if (e.key === "Escape") this._editing = null; }}
-                               @blur=${(e) => this._commitEdit(g, e.currentTarget.value)}>
-                        <div class="swatch-row">
-                          ${COLOR_PALETTE.map((c) => html`
-                            <button class="swatch-btn ${g.color === c.hex ? "active" : ""}"
-                                    style="background:${c.hex}"
-                                    title=${c.label}
-                                    @click=${() => this._commitEdit(g, g.name, c.hex)}></button>
-                          `)}
+                  <div class="group-row ${active ? "" : "inactive"}">
+                    <div class="group-head">
+                      <div class="swatch" style="background:${g.color || "var(--color-accent)"}"></div>
+                      ${editing ? html`
+                        <div class="flex" style="display:flex;align-items:center;gap:8px;">
+                          <input type="text" .value=${g.name} style="flex:1;"
+                                 id="group-name-input-${g.id}"
+                                 @keydown=${(e) => { if (e.key === "Enter") this._commitEdit(g, e.currentTarget.value); if (e.key === "Escape") this._editing = null; }}
+                                 @blur=${(e) => this._commitEdit(g, e.currentTarget.value)}>
+                          <div class="swatch-row">
+                            ${COLOR_PALETTE.map((c) => html`
+                              <button class="swatch-btn ${g.color === c.hex ? "active" : ""}"
+                                      style="background:${c.hex}"
+                                      title=${c.label}
+                                      @click=${() => this._commitEdit(g, g.name, c.hex)}></button>
+                            `)}
+                          </div>
                         </div>
-                      </div>
-                    ` : html`
-                      <span class="name">${g.name}</span>
-                      <span class="count">${members.length} track${members.length === 1 ? "" : "s"}</span>
-                      <div class="actions">
-                        <button @click=${() => this._startEdit(g.id)}>${icon("pencil-square", 10)} Rename</button>
-                        <button class="danger" @click=${() => this._delete(g)}>${icon("trash", 10)} Delete</button>
-                      </div>
-                    `}
+                      ` : html`
+                        <span class="name">${g.name}</span>
+                        <span class="count">${members.length} track${members.length === 1 ? "" : "s"}</span>
+                        <div class="actions">
+                          <button @click=${() => this._startEdit(g.id)}>${icon("pencil-square", 10)} Rename</button>
+                          <button class="danger" @click=${() => this._delete(g)}>${icon("trash", 10)} Delete</button>
+                        </div>
+                      `}
+                    </div>
+                    <div class="links" title="Click a pill to toggle which gestures fan out across this group's members">
+                      <button class="link-pill master ${active ? "on" : ""}"
+                              title="Master enable. When off, no gestures propagate."
+                              @click=${() => this._setLink(g, "active", !active)}>
+                        ${active ? "Active" : "Inactive"}
+                      </button>
+                      <button class="link-pill ${lg ? "on" : ""}"
+                              ?disabled=${!active}
+                              title="Link gain — moving one member's fader applies the same dB delta to every member."
+                              @click=${() => this._setLink(g, "link_gain", !lg)}>Gain</button>
+                      <button class="link-pill ${lm ? "on" : ""}"
+                              ?disabled=${!active}
+                              title="Link mute — toggling mute on one member toggles all members."
+                              @click=${() => this._setLink(g, "link_mute", !lm)}>Mute</button>
+                      <button class="link-pill ${ls ? "on" : ""}"
+                              ?disabled=${!active}
+                              title="Link solo — soloing one member solos all members."
+                              @click=${() => this._setLink(g, "link_solo", !ls)}>Solo</button>
+                      <button class="link-pill ${lr ? "on" : ""}"
+                              ?disabled=${!active}
+                              title="Link record-arm — arming one member arms all members."
+                              @click=${() => this._setLink(g, "link_record", !lr)}>Rec</button>
+                    </div>
                   </div>
                 `;
               })}

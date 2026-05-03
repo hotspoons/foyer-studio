@@ -33,9 +33,9 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx};
 use foyer_schema::{
-    Action, AudioFormat, AudioSource, ControlUpdate, ControlValue, EntityId, Event, LatencyReport,
-    PathListing, PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch, Session,
-    TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    Action, AudioFormat, AudioSource, ControlValue, EntityId, Event, LatencyReport, PathListing,
+    PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch, Session, TimelineMeta,
+    Track, TrackPatch, WaveformPeaks,
 };
 use futures::{Stream, StreamExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -236,10 +236,13 @@ impl Backend for StubBackend {
 
     async fn set_control(&self, id: EntityId, value: ControlValue) -> Result<(), BackendError> {
         let mut st = self.state.lock().await;
-        st.set_control(&id, value.clone())?;
-        let _ = self.tx.send(Event::ControlUpdate {
-            update: ControlUpdate { id, value },
-        });
+        // `set_control_with_fanout` returns the primary update plus
+        // any sibling updates produced by an active group link, so
+        // the UI's optimistic-pin layer sees every echo it expects.
+        let updates = st.set_control_with_fanout(&id, value)?;
+        for update in updates {
+            let _ = self.tx.send(Event::ControlUpdate { update });
+        }
         Ok(())
     }
 
@@ -535,6 +538,45 @@ impl Backend for StubBackend {
             track: Box::new(updated.clone()),
         });
         Ok(updated)
+    }
+
+    async fn create_group(
+        &self,
+        name: String,
+        color: Option<String>,
+        members: Vec<EntityId>,
+    ) -> Result<(), BackendError> {
+        let group = self.state.lock().await.create_group(name, color, members);
+        // Per-event `GroupUpdated` doesn't currently have a store-side
+        // reducer, so we emit a `Patch::Reload` to force the UI to
+        // re-fetch the snapshot — that's also what the Ardour shim
+        // does after `RouteGroup` mutations (`encode_patch_reload`),
+        // so backends behave the same way on the wire.
+        let _ = self.tx.send(Event::SessionPatch {
+            patch: foyer_schema::Patch::Reload,
+        });
+        let _ = self.tx.send(Event::GroupUpdated { group });
+        Ok(())
+    }
+
+    async fn update_group(
+        &self,
+        id: EntityId,
+        patch: foyer_schema::GroupPatch,
+    ) -> Result<(), BackendError> {
+        self.state.lock().await.update_group(&id, &patch)?;
+        let _ = self.tx.send(Event::SessionPatch {
+            patch: foyer_schema::Patch::Reload,
+        });
+        Ok(())
+    }
+
+    async fn delete_group(&self, id: EntityId) -> Result<(), BackendError> {
+        self.state.lock().await.delete_group(&id)?;
+        let _ = self.tx.send(Event::SessionPatch {
+            patch: foyer_schema::Patch::Reload,
+        });
+        Ok(())
     }
 
     async fn set_track_midi_channel_mode(

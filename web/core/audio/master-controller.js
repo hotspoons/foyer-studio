@@ -139,7 +139,28 @@ class AudioController extends EventTarget {
   /// Idempotent; only one set of listeners is registered at a time.
   _scheduleAutoStart() {
     if (this._gestureHandler) return;
-    const onGesture = () => {
+    const onGesture = (ev) => {
+      // If the user's gesture IS a tap on a Listen button, hand off:
+      // unbind without starting and let the button's own `@click =>
+      // toggle()` do the start. Otherwise we'd start() here in
+      // capture phase, then the button's click sees `_on=true` and
+      // immediately stops — the user-visible "Listen does nothing /
+      // briefly flickers" symptom on cold-boot. Listen buttons mark
+      // themselves with `data-foyer-listen-toggle="1"` for this
+      // probe; composedPath() pierces shadow roots so it works for
+      // both phone (`<foyer-phone-top-bar>`) and desktop
+      // (`<foyer-mixer>`) toggle locations.
+      if (ev?.composedPath) {
+        const onListenButton = ev.composedPath().some(
+          (n) => n?.dataset?.foyerListenToggle === "1",
+        );
+        if (onListenButton) {
+          window.removeEventListener("pointerdown", onGesture, true);
+          window.removeEventListener("keydown", onGesture, true);
+          this._gestureHandler = null;
+          return;
+        }
+      }
       window.removeEventListener("pointerdown", onGesture, true);
       window.removeEventListener("keydown", onGesture, true);
       this._gestureHandler = null;

@@ -139,9 +139,17 @@ pub struct Track {
     pub playback_channel_mask: Option<u16>,
 }
 
-/// Group / submix metadata. Purely a display + drag-affinity hint for
-/// clients — the actual audio routing is still expressed via `sends`
-/// and each track's `outputs`.
+/// Group / submix metadata. Carries display + drag-affinity hints for
+/// clients, plus a set of link flags that determine which control
+/// gestures (gain, mute, solo, record-arm) propagate across member
+/// tracks. The actual audio routing is still expressed via `sends`
+/// and each track's `outputs` — groups don't sum signal, they link
+/// gestures, the way Ardour's `RouteGroup` and most DAW edit-groups
+/// do. Backends that own a native group concept (Ardour `RouteGroup`)
+/// mirror these flags onto their own primitive; the stub backend
+/// implements propagation in-process. Either way the wire contract
+/// is the same: a `ControlSet` on a member track triggers per-member
+/// `ControlUpdate`s for every track in the group.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub id: EntityId,
@@ -151,6 +159,30 @@ pub struct Group {
     /// Track ids that belong to this group. Order is display order.
     #[serde(default)]
     pub members: Vec<EntityId>,
+    /// Master enable. If `false`, no gestures propagate, regardless of
+    /// the per-flag state. Lets a user temporarily un-link without
+    /// having to re-enter all four flags.
+    #[serde(default = "default_true")]
+    pub active: bool,
+    /// Whether changes to a member's gain propagate (relative-delta —
+    /// the same dB delta is applied to every member, so the mix
+    /// balance set at the moment the link was enabled is preserved).
+    #[serde(default = "default_true")]
+    pub link_gain: bool,
+    /// Whether toggling mute on a member propagates (absolute — every
+    /// member ends up in the new state).
+    #[serde(default = "default_true")]
+    pub link_mute: bool,
+    /// Whether toggling solo on a member propagates (absolute).
+    #[serde(default = "default_true")]
+    pub link_solo: bool,
+    /// Whether toggling record-arm on a member propagates (absolute).
+    #[serde(default = "default_true")]
+    pub link_record: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Patch set for [`Command::UpdateTrack`]. `None` fields are left
@@ -193,6 +225,16 @@ pub struct GroupPatch {
     /// changes use separate `Command::MoveTrackToGroup` (not in schema yet).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub members: Option<Vec<EntityId>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub link_gain: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub link_mute: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub link_solo: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub link_record: Option<bool>,
 }
 
 /// Alias for readability in code paths that semantically talk about buses; structurally

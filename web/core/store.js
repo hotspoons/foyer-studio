@@ -454,12 +454,14 @@ export class Store extends EventTarget {
       }
       case "control_update": {
         if (body.update?.id === "transport.position") {
-          if (this._applyTransportPosition(body.update.value, Number(env?.seq || 0))) {
-            this._emitControl("transport.position");
+          const r = this._applyTransportPosition(body.update.value, Number(env?.seq || 0));
+          if (r.changed) {
+            this._emitControl("transport.position", r.local);
           }
         } else if (body.update?.id) {
-          if (this._applyControl(body.update.id, body.update.value)) {
-            this._emitControl(body.update.id);
+          const r = this._applyControl(body.update.id, body.update.value);
+          if (r.changed) {
+            this._emitControl(body.update.id, r.local);
           }
         }
         break;
@@ -467,13 +469,15 @@ export class Store extends EventTarget {
       case "meter_batch": {
         for (const u of body.values || []) {
           if (u?.id === "transport.position") {
-            if (this._applyTransportPosition(u.value, Number(env?.seq || 0))) {
-              this._emitControl("transport.position");
+            const r = this._applyTransportPosition(u.value, Number(env?.seq || 0));
+            if (r.changed) {
+              this._emitControl("transport.position", r.local);
             }
             continue;
           }
-          if (this._applyControl(u.id, u.value)) {
-            this._emitControl(u.id);
+          const r = this._applyControl(u.id, u.value);
+          if (r.changed) {
+            this._emitControl(u.id, r.local);
           }
         }
         break;
@@ -635,8 +639,18 @@ export class Store extends EventTarget {
   _emit() {
     this.dispatchEvent(new CustomEvent("change"));
   }
-  _emitControl(id) {
-    this.dispatchEvent(new CustomEvent("control", { detail: id }));
+  /// Dispatch a `control` event. `detail` stays a bare id string so the
+  /// many existing `if (ev.detail === "transport.playing")` consumers
+  /// keep working unchanged. The `local` flag tags whether the update
+  /// originated from THIS client's own gesture (matched a fresh entry
+  /// in `_pendingControls`). Listeners that need to distinguish "I did
+  /// this" from "a peer did this" — most importantly transport-return,
+  /// which would otherwise re-seek on every peer's stop event and
+  /// produce an N-client position storm — read `ev.local`.
+  _emitControl(id, local = false) {
+    const ev = new CustomEvent("control", { detail: id });
+    ev.local = local;
+    this.dispatchEvent(ev);
   }
 
   /// How long a self-set control stays pinned against incoming
@@ -680,10 +694,11 @@ export class Store extends EventTarget {
         // the backend thinks. We still emit so UI listeners redraw
         // to the pinned value (useful when the user just seeked).
         this.state.controls.set(id, pinned);
-        return true;
+        return { changed: true, local: true };
       }
     }
     const pending = this._pendingControls.get(id);
+    let local = false;
     if (pending) {
       const fresh = Date.now() - pending.at_ms <= Store._PIN_TTL_MS;
       if (!fresh) {
@@ -695,7 +710,9 @@ export class Store extends EventTarget {
       } else if (Object.is(value, pending.value)) {
         // Server confirmed the value we sent — release the pin so a
         // FUTURE remote write can update us cleanly. Apply normally.
+        // Locality: yes — the wire just confirmed *our* gesture.
         this._pendingControls.delete(id);
+        local = true;
       } else {
         // Pin still active and the incoming value disagrees with our
         // self-set. Treat this as a stale broadcast (snapshot from
@@ -703,12 +720,13 @@ export class Store extends EventTarget {
         // accepting it. We still write the pinned value into the
         // controls map so any new subscriber gets the right state,
         // and return true so the existing UI listeners repaint.
+        // Locality: still ours — we're holding our own value.
         this.state.controls.set(id, pending.value);
-        return true;
+        return { changed: true, local: true };
       }
     }
     this.state.controls.set(id, value);
-    return true;
+    return { changed: true, local };
   }
 
   /**
@@ -720,7 +738,7 @@ export class Store extends EventTarget {
     const next = Number(value) || 0;
     if (seq && seq < this._lastTransportSeq) {
       this._noteTransportDrop("stale_seq");
-      return false;
+      return { changed: false, local: false };
     }
 
     const now = Date.now();
@@ -737,15 +755,15 @@ export class Store extends EventTarget {
 
     if (playing && !looping && backwardsBy > jitterThreshold && !seekRecent) {
       this._noteTransportDrop("backward_jump");
-      return false;
+      return { changed: false, local: false };
     }
 
-    const changed = this._applyControl("transport.position", next);
-    if (changed) {
+    const r = this._applyControl("transport.position", next);
+    if (r.changed) {
       if (seq) this._lastTransportSeq = seq;
       this._lastTransportPos = next;
     }
-    return changed;
+    return r;
   }
 
   _noteTransportDrop(reason) {

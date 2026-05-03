@@ -46,7 +46,6 @@ import "foyer-ui-core/chat-panel.js";
 // the menu bar / project picker. The components remain on disk but
 // nothing imports them, so they're not registered with the FAB
 // registry and don't appear in the rail.
-import "./components/windows-fab.js";
 import "./components/command-palette.js";
 import "./components/layout-fab.js";
 import "./components/automation-panel.js";
@@ -469,8 +468,7 @@ export class FoyerApp extends LitElement {
       <foyer-floating-tiles .store=${this.layout}></foyer-floating-tiles>
       <!-- <foyer-agent-panel></foyer-agent-panel> disabled, see import comment -->
       <foyer-chat-panel></foyer-chat-panel>
-      <!-- <foyer-actions-fab>, <foyer-session-fab> retired -->
-      <foyer-windows-fab></foyer-windows-fab>
+      <!-- <foyer-actions-fab>, <foyer-session-fab>, <foyer-windows-fab> retired -->
       <foyer-layout-fab .store=${this.layout}></foyer-layout-fab>
       <foyer-command-palette></foyer-command-palette>
       <foyer-automation-panel></foyer-automation-panel>

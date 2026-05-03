@@ -1855,6 +1855,14 @@ export class TimelineView extends LitElement {
             detail: { startSamples: lo, endSamples: hi },
             bubbles: true, composed: true,
           }));
+          // Loop-follows-selection: if the transport is actively looping
+          // when the user finishes resizing the selection, push the new
+          // range to the engine so the loop tracks the visible band.
+          // Scoped to *resize* (not initial selection drag) so an
+          // unrelated selection gesture doesn't yank the loop.
+          if (window.__foyer?.store?.state?.controls?.get?.("transport.looping")) {
+            this._setLoopToSelection();
+          }
         }
       }
     };

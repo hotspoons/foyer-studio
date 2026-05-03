@@ -187,9 +187,24 @@ export function installTransportReturn({ store, ws }) {
       const pos = Number(store.state.controls.get("transport.position") || 0);
       playStartSample = pos;
     } else if (!now && wasPlaying) {
-      const mode = getReturnMode();
-      if (mode === "zero") applyReturn(0);
-      else if (mode === "play_start") applyReturn(playStartSample);
+      // Only the client whose user actually pressed Stop runs the
+      // return seek. Without this gate, every connected client reacts
+      // to the playing→stopped echo and fires its own
+      // `controlSet("transport.position", target)` — N clients
+      // produces an N-way position storm that locks each client's
+      // `transportPositionLock`, fights the engine's natural ticks,
+      // and (on a multi-client session) fans out as the play/pause
+      // thrashing the user reported. The originating client's echo
+      // carries `ev.local === true` because its `_pendingControls`
+      // pin matched on confirmation; peers see `ev.local === false`
+      // and skip the return — they'll receive the position seek the
+      // active client issues, the same way they receive any other
+      // peer-originated transport seek.
+      if (ev.local) {
+        const mode = getReturnMode();
+        if (mode === "zero") applyReturn(0);
+        else if (mode === "play_start") applyReturn(playStartSample);
+      }
     }
     wasPlaying = now;
   };
