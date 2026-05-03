@@ -45,6 +45,9 @@ const H_ZOOM_LEVELS = [
   0.125, 0.1875, 0.25, 0.375, 0.5,
 ];
 const V_ROW_HEIGHTS = [8, 10, 12, 14, 18, 22, 28];
+const STRIP_WIDTH_KEY = "foyer.midi.strip-width.v1";
+const STRIP_WIDTH_MIN = 280;
+const STRIP_WIDTH_DEFAULT = 380;
 
 // Snap values in fractions of a beat: 1 = quarter, 1/2 = eighth,
 // 1/4 = sixteenth, 1/8 = 32nd.
@@ -99,6 +102,7 @@ export class MidiEditor extends LitElement {
     _localNotes: { state: true, type: Array },
     _drag:       { state: true, type: Object },
     _stripOpen:  { state: true, type: Boolean },
+    _stripW:     { state: true, type: Number },
     /** Opaque: the track id this editor's region belongs to. Plumbed
      *  so the side-strip's <foyer-midi-manager> can show the right
      *  track's instruments + patches. PLAN 154. */
@@ -327,7 +331,19 @@ export class MidiEditor extends LitElement {
       background: var(--color-surface-elevated);
       overflow: hidden;
     }
-    .side-strip.open { width: min(360px, 45%); }
+    .side-strip.open {
+      width: var(--strip-w, 380px);
+      max-width: 65%;
+    }
+    .strip-resize {
+      flex: 0 0 6px;
+      cursor: ew-resize;
+      background: transparent;
+      border-right: 1px solid var(--color-border);
+    }
+    .strip-resize:hover {
+      background: color-mix(in oklab, var(--color-accent, #7c5cff) 20%, transparent);
+    }
     .side-strip foyer-midi-manager { flex: 1; min-width: 0; overflow: auto; }
   `;
 
@@ -348,6 +364,15 @@ export class MidiEditor extends LitElement {
     } catch {
       this._stripOpen = false;
     }
+    try {
+      const raw = Number(localStorage.getItem(STRIP_WIDTH_KEY));
+      this._stripW = Number.isFinite(raw) && raw >= STRIP_WIDTH_MIN ? raw : STRIP_WIDTH_DEFAULT;
+    } catch {
+      this._stripW = STRIP_WIDTH_DEFAULT;
+    }
+    this._stripResizeActive = false;
+    this._onStripResizeMoveBound = null;
+    this._onStripResizeUpBound = null;
     this.trackId = "";
     // Always render the full A0–C8 keyboard. Scroll position is
     // the affordance for "focus on notes here" — narrowing the
@@ -519,6 +544,7 @@ export class MidiEditor extends LitElement {
     if (this._onSequencerLayoutChanged) {
       window.removeEventListener("foyer:sequencer-layout-changed", this._onSequencerLayoutChanged);
     }
+    this._stopStripResize(false);
     super.disconnectedCallback();
   }
 
@@ -595,6 +621,48 @@ export class MidiEditor extends LitElement {
     try {
       localStorage.setItem("foyer.midi.strip-open", this._stripOpen ? "1" : "0");
     } catch { /* ignore */ }
+  }
+
+  _clampStripWidth(next) {
+    const hostW = this.getBoundingClientRect?.().width || 1200;
+    const maxW = Math.max(STRIP_WIDTH_MIN + 20, Math.floor(hostW * 0.65));
+    return Math.max(STRIP_WIDTH_MIN, Math.min(maxW, Math.round(next)));
+  }
+
+  _startStripResize(ev) {
+    if (!this._stripOpen) return;
+    ev.preventDefault();
+    this._stripResizeActive = true;
+    this._stripResizeStartX = ev.clientX;
+    this._stripResizeStartW = this._stripW;
+    this._onStripResizeMoveBound = (e) => this._onStripResizeMove(e);
+    this._onStripResizeUpBound = () => this._stopStripResize(true);
+    window.addEventListener("pointermove", this._onStripResizeMoveBound);
+    window.addEventListener("pointerup", this._onStripResizeUpBound, { once: true });
+  }
+
+  _onStripResizeMove(ev) {
+    if (!this._stripResizeActive) return;
+    const delta = this._stripResizeStartX - ev.clientX;
+    this._stripW = this._clampStripWidth(this._stripResizeStartW + delta);
+    this.requestUpdate();
+  }
+
+  _stopStripResize(persist = false) {
+    this._stripResizeActive = false;
+    if (this._onStripResizeMoveBound) {
+      window.removeEventListener("pointermove", this._onStripResizeMoveBound);
+      this._onStripResizeMoveBound = null;
+    }
+    if (this._onStripResizeUpBound) {
+      window.removeEventListener("pointerup", this._onStripResizeUpBound);
+      this._onStripResizeUpBound = null;
+    }
+    if (persist) {
+      try {
+        localStorage.setItem(STRIP_WIDTH_KEY, String(this._stripW));
+      } catch { /* ignore */ }
+    }
   }
 
   // ── coordinate helpers ────────────────────────────────────────────
@@ -1217,7 +1285,10 @@ export class MidiEditor extends LitElement {
           </div>
         </div>
         ${this._stripOpen ? html`
-          <aside class="side-strip open">
+          <aside class="side-strip open" style=${`--strip-w:${this._stripW}px`}>
+            <div class="strip-resize"
+                 title="Drag to resize"
+                 @pointerdown=${(e) => this._startStripResize(e)}></div>
             <foyer-midi-manager
               .trackId=${this.trackId || ""}
               .trackName=${this.regionName || ""}

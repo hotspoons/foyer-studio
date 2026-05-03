@@ -275,7 +275,7 @@ export class TrackEditorModal extends LitElement {
     // filter: we only route track inputs *from* readable ports.
     this._requestPorts();
     const preferred = this.initialTab || this._loadLastTab();
-    if (preferred === "midi" || preferred === "setup") this._tab = preferred;
+    if (preferred === "midi" || preferred === "setup") this._tab = "midi";
   }
   disconnectedCallback() {
     document.removeEventListener("keydown", this._keyHandler);
@@ -341,14 +341,14 @@ export class TrackEditorModal extends LitElement {
   _loadLastTab() {
     try {
       const tab = localStorage.getItem("foyer.trackEditor.lastMidiTab") || "editor";
-      return (tab === "midi" || tab === "setup") ? tab : "editor";
+      return (tab === "midi" || tab === "setup") ? "midi" : "editor";
     } catch {
       return "editor";
     }
   }
 
   _setTab(tab) {
-    this._tab = (tab === "midi" || tab === "setup") ? tab : "editor";
+    this._tab = (tab === "midi" || tab === "setup") ? "midi" : "editor";
     try {
       localStorage.setItem("foyer.trackEditor.lastMidiTab", this._tab);
     } catch {}
@@ -445,17 +445,16 @@ export class TrackEditorModal extends LitElement {
             <div class="tabs">
               <button class="tab ${this._tab === "editor" ? "active" : ""}" @click=${() => this._setTab("editor")}>Track</button>
               <button class="tab ${this._tab === "midi" ? "active" : ""}" @click=${() => this._setTab("midi")}>MIDI</button>
-              <button class="tab ${this._tab === "setup" ? "active" : ""}" @click=${() => this._setTab("setup")}>Setup</button>
             </div>
           ` : null}
           <button class="close" @click=${this._close}>${icon("x-mark", 16)}</button>
         </header>
-        ${t.kind === "midi" && (this._tab === "midi" || this._tab === "setup") ? html`
+        ${t.kind === "midi" && this._tab === "midi" ? html`
           <foyer-midi-manager
             style="flex:1;min-height:0"
             .trackId=${this.trackId}
             .trackName=${t.name}
-            .mode=${this._tab === "setup" ? "setup" : "patches"}
+            .mode=${"all"}
           ></foyer-midi-manager>
         ` : html`<div class="content">
           <div class="form-body">

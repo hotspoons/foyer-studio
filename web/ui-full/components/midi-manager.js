@@ -51,7 +51,15 @@ const CHANNEL_DIRECTIONS = [
   { key: "capture",  label: "Inbound (record)" },
   { key: "playback", label: "Playback" },
 ];
-const NO_BANK_SENTINEL = 16383;
+const NO_BANK_SENTINELS = new Set([-1, 16383, 65535]);
+const SECTION_STATE_KEY = "foyer.midi-manager.sections.v1";
+const DEFAULT_SECTIONS = {
+  instrument: true,
+  patches: true,
+  channel: false,
+  parameters: false,
+  inserts: false,
+};
 function channelMaskToList(mask) {
   const out = [];
   for (let i = 0; i < 16; ++i) if (mask & (1 << i)) out.push(i + 1);
@@ -93,12 +101,19 @@ function displayChannelToWire(ch) {
 function bankInputValue(bank) {
   if (bank == null) return "";
   const n = Number(bank);
-  if (!Number.isFinite(n) || n < 0 || n === NO_BANK_SENTINEL) return "";
+  if (!Number.isFinite(n) || NO_BANK_SENTINELS.has(n)) return "";
   return String(Math.max(0, Math.min(16383, n)));
 }
+function normalizeBank(bank) {
+  if (bank == null) return -1;
+  const n = Number(bank);
+  if (!Number.isFinite(n) || NO_BANK_SENTINELS.has(n)) return -1;
+  return Math.max(0, Math.min(16383, n));
+}
 function bankToMsbLsb(bank) {
-  const n = Math.max(0, Math.min(16383, Number(bank) || 0));
-  return { msb: (n >> 7) & 0x7f, lsb: n & 0x7f };
+  const n = normalizeBank(bank);
+  const safe = n < 0 ? 0 : n;
+  return { msb: (safe >> 7) & 0x7f, lsb: safe & 0x7f };
 }
 function msbLsbToBank(msb, lsb) {
   const m = Math.max(0, Math.min(127, Number(msb) || 0));
@@ -128,6 +143,7 @@ export class MidiManager extends LitElement {
     _patchNames: { state: true, type: Object },
     _patchNamesFor: { state: true, type: String },
     _patchNamesLoading: { state: true, type: Boolean },
+    _sections: { state: true, type: Object },
   };
 
   static styles = css`
@@ -163,6 +179,52 @@ export class MidiManager extends LitElement {
       font-weight: 700;
       letter-spacing: 0.1em; text-transform: uppercase;
       color: var(--color-text-muted);
+    }
+    .fold {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .fold-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      background: transparent;
+      border: 0;
+      color: var(--color-text-muted);
+      padding: 0;
+      cursor: pointer;
+      font: inherit;
+      text-align: left;
+    }
+    .fold-head .chev {
+      display: inline-flex;
+      transition: transform 0.12s ease;
+    }
+    .fold.open .fold-head .chev {
+      transform: rotate(90deg);
+    }
+    .fold-head .label {
+      color: var(--color-text-muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .fold-head .summary {
+      min-width: 0;
+      flex: 1;
+      color: var(--color-text-muted);
+      font-size: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .fold-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
     }
     .card {
       background: var(--color-surface-elevated);
@@ -364,6 +426,57 @@ export class MidiManager extends LitElement {
       border-color: var(--color-accent);
       color: var(--color-text);
     }
+    .patch-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .patch-card {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm, 4px);
+      padding: 10px 12px;
+    }
+    .patch-summary {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) minmax(150px, 2fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .patch-summary .region {
+      color: var(--color-text);
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .patch-summary .choice {
+      color: var(--color-text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    details.advanced {
+      border-top: 1px solid var(--color-border);
+      padding-top: 6px;
+    }
+    details.advanced > summary {
+      cursor: pointer;
+      color: var(--color-text-muted);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .inline-picker {
+      border-top: 1px solid var(--color-border);
+      padding-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
     .preset-group {
       font-size: 10px; color: var(--color-text-muted);
       letter-spacing: 0.08em; text-transform: uppercase;
@@ -528,6 +641,7 @@ export class MidiManager extends LitElement {
     this._patchNames = null;
     this._patchNamesFor = "";
     this._patchNamesLoading = false;
+    this._sections = this._loadSections();
     this._storeHandler = () => { this._tick++; };
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
   }
@@ -600,6 +714,41 @@ export class MidiManager extends LitElement {
     window.__foyer?.ws?.send({ type: "list_plugin_presets", plugin_id: pluginId });
   }
 
+  _loadSections() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SECTION_STATE_KEY) || "{}");
+      return { ...DEFAULT_SECTIONS, ...(parsed && typeof parsed === "object" ? parsed : {}) };
+    } catch {
+      return { ...DEFAULT_SECTIONS };
+    }
+  }
+
+  _setSection(id, open) {
+    const next = { ...this._sections, [id]: !!open };
+    this._sections = next;
+    try {
+      localStorage.setItem(SECTION_STATE_KEY, JSON.stringify(next));
+    } catch {}
+  }
+
+  _sectionOpen(id) {
+    return this._sections?.[id] ?? DEFAULT_SECTIONS[id] ?? true;
+  }
+
+  _renderFold(id, label, summary, body) {
+    const open = this._sectionOpen(id);
+    return html`
+      <section class="fold ${open ? "open" : ""}">
+        <button class="fold-head" @click=${() => this._setSection(id, !open)}>
+          <span class="chev">${icon("chevron-right", 12)}</span>
+          <span class="label">${label}</span>
+          ${summary ? html`<span class="summary">${summary}</span>` : html`<span class="summary"></span>`}
+        </button>
+        ${open ? html`<div class="fold-body">${body}</div>` : null}
+      </section>
+    `;
+  }
+
   _loadPreset(pluginId, presetId) {
     window.__foyer?.ws?.send({ type: "load_plugin_preset", plugin_id: pluginId, preset_id: presetId });
   }
@@ -666,57 +815,76 @@ export class MidiManager extends LitElement {
     );
     const firstMidiRegion = this._regions[0];
     return html`
-      <section>
-        <h3>Patches &amp; banks</h3>
-        ${allPcs.length === 0
-          ? html`
-              <div class="card muted">
-                No program / bank change events on this track's regions.
-                Add one to trigger a patch change at a specific point in a
-                region — the instrument hears it as if a MIDI keyboard had
-                sent a PC+bank-select at that tick.
-              </div>
-            `
-          : html`
-              <div class="card">
-                <div class="row-head">
-                  <span>Region</span>
-                  <span>Time (ticks)</span>
-                  <span>Ch</span>
-                  <span>Bank</span>
-                  <span>Prog</span>
-                  <span></span>
-                </div>
-                ${allPcs.map(({ region, pc }) => html`
-                  <div class="pc-row">
-                    <span class="label">${region.name}</span>
-                    <input class="num" type="number" min="0" step="1"
-                           .value=${String(pc.start_ticks ?? 0)}
-                           @change=${(e) => this._editPatchChange(region, pc, { start_ticks: Math.max(0, Number(e.currentTarget.value) || 0) })}>
-                    <input class="num" type="number" min="1" max="16" step="1"
-                           .value=${String(wireChannelToDisplay(pc.channel ?? 0))}
-                           @change=${(e) => this._editPatchChange(region, pc, { channel: displayChannelToWire(e.currentTarget.value) })}>
-                    <input class="num" type="number" step="1"
-                           placeholder="—"
-                           .value=${bankInputValue(pc.bank)}
-                           @change=${(e) => {
-                             const v = e.currentTarget.value.trim();
-                             const next = v === "" ? -1 : Math.max(0, Math.min(16383, Number(v) || 0));
-                             this._editPatchChange(region, pc, { bank: next });
-                           }}>
-                    <input class="num" type="number" min="0" max="127" step="1"
-                           .value=${String(pc.program ?? 0)}
-                           @change=${(e) => this._editPatchChange(region, pc, { program: Math.max(0, Math.min(127, Number(e.currentTarget.value) || 0)) })}>
-                    <span class="pc-actions">
-                      <button class="pick" @click=${() => this._openPatchPicker(region, pc)}>Pick…</button>
-                      <button class="danger" @click=${() => this._deletePatchChange(region, pc)}>
-                        ${icon("trash", 12)}
-                      </button>
-                    </span>
+      ${allPcs.length === 0
+        ? html`
+            <div class="card muted">
+              No program / bank change events on this track's regions.
+              Add one to trigger a patch change at a specific point in a
+              region.
+            </div>
+          `
+        : html`
+            <div class="patch-list">
+              ${allPcs.map(({ region, pc }) => {
+                const selected = this._pickerOpen
+                  && this._pickerRegionId === region.id
+                  && this._pickerPatchId === pc.id;
+                return html`
+                  <div class="patch-card">
+                    <div class="patch-summary">
+                      <span class="region" title=${region.name}>${region.name}</span>
+                      <span class="choice">
+                        Ch ${wireChannelToDisplay(pc.channel ?? 0)}
+                        · ${normalizeBank(pc.bank) < 0 ? "program only" : `bank ${normalizeBank(pc.bank)}`}
+                        · program ${Number(pc.program ?? 0) + 1}
+                      </span>
+                      <span class="pc-actions">
+                        <button class="pick" @click=${() => selected ? this._closePatchPicker() : this._openPatchPicker(region, pc)}>
+                          ${selected ? "Close" : "Pick…"}
+                        </button>
+                        <button class="danger" @click=${() => this._deletePatchChange(region, pc)}>
+                          ${icon("trash", 12)}
+                        </button>
+                      </span>
+                    </div>
+                    ${selected ? this._renderPatchPickerInline(region, pc) : null}
+                    <details class="advanced">
+                      <summary>Advanced event fields</summary>
+                      <div class="row-head" style="margin-top:8px">
+                        <span>Region</span>
+                        <span>Time (ticks)</span>
+                        <span>Ch</span>
+                        <span>Bank</span>
+                        <span>Prog</span>
+                        <span></span>
+                      </div>
+                      <div class="pc-row">
+                        <span class="label">${region.name}</span>
+                        <input class="num" type="number" min="0" step="1"
+                               .value=${String(pc.start_ticks ?? 0)}
+                               @change=${(e) => this._editPatchChange(region, pc, { start_ticks: Math.max(0, Number(e.currentTarget.value) || 0) })}>
+                        <input class="num" type="number" min="1" max="16" step="1"
+                               .value=${String(wireChannelToDisplay(pc.channel ?? 0))}
+                               @change=${(e) => this._editPatchChange(region, pc, { channel: displayChannelToWire(e.currentTarget.value) })}>
+                        <input class="num" type="number" step="1"
+                               placeholder="—"
+                               .value=${bankInputValue(pc.bank)}
+                               @change=${(e) => {
+                                 const v = e.currentTarget.value.trim();
+                                 const next = v === "" ? -1 : Math.max(0, Math.min(16383, Number(v) || 0));
+                                 this._editPatchChange(region, pc, { bank: next });
+                               }}>
+                        <input class="num" type="number" min="0" max="127" step="1"
+                               .value=${String(pc.program ?? 0)}
+                               @change=${(e) => this._editPatchChange(region, pc, { program: Math.max(0, Math.min(127, Number(e.currentTarget.value) || 0)) })}>
+                        <span></span>
+                      </div>
+                    </details>
                   </div>
-                `)}
-              </div>
-            `}
+                `;
+              })}
+            </div>
+          `}
         ${firstMidiRegion ? html`
           <div class="actions">
             <button class="primary" @click=${() => this._addPatchChangeTo(firstMidiRegion)}>
@@ -733,7 +901,6 @@ export class MidiManager extends LitElement {
             timeline to host patch-change events.
           </div>
         `}
-      </section>
     `;
   }
 
@@ -780,7 +947,7 @@ export class MidiManager extends LitElement {
     this._pickerRegionId = region?.id || "";
     this._pickerPatchId = pc?.id || "";
     this._pickerChannel = pc?.channel ?? 0;
-    this._pickerBank = (pc?.bank == null) ? -1 : pc.bank;
+    this._pickerBank = normalizeBank(pc?.bank);
     this._pickerProgram = pc?.program ?? 0;
     this._requestPatchNamesForWireChannel(this._pickerChannel);
     this._pickerOpen = true;
@@ -789,15 +956,16 @@ export class MidiManager extends LitElement {
     this._pickerOpen = false;
   }
   _pickerBanks() {
-    return this._patchNames?.banks || [];
+    return (this._patchNames?.banks || []).filter((b) => normalizeBank(b.bank) >= 0);
+  }
+  _pickerProgramBank() {
+    if (this._pickerBank >= 0) {
+      return (this._patchNames?.banks || []).find((b) => normalizeBank(b.bank) === normalizeBank(this._pickerBank));
+    }
+    return (this._patchNames?.banks || []).find((b) => normalizeBank(b.bank) < 0 && b?.programs?.length);
   }
   _pickerPrograms() {
-    if (this._pickerBank < 0) {
-      const out = [];
-      for (let i = 0; i < 128; i += 1) out.push({ program: i, name: `Program ${i + 1}` });
-      return out;
-    }
-    const bank = this._pickerBanks().find((b) => Number(b.bank) === Number(this._pickerBank));
+    const bank = this._pickerProgramBank();
     if (bank?.programs?.length) {
       const byProgram = new Map(bank.programs.map((p) => [Number(p.program), p.name || `Program ${Number(p.program) + 1}`]));
       const out = [];
@@ -808,17 +976,17 @@ export class MidiManager extends LitElement {
     for (let i = 0; i < 128; i += 1) out.push({ program: i, name: `Program ${i + 1}` });
     return out;
   }
-  _applyPatchPicker() {
+  _applyPatchPicker({ close = true } = {}) {
     if (!this._pickerRegionId || !this._pickerPatchId) return;
     const region = this._regions.find((r) => r.id === this._pickerRegionId);
     const pc = region?.patch_changes?.find((p) => p.id === this._pickerPatchId);
     if (!region || !pc) return;
     this._editPatchChange(region, pc, {
       channel: this._pickerChannel,
-      bank: this._pickerBank,
+      bank: normalizeBank(this._pickerBank),
       program: this._pickerProgram,
     });
-    this._pickerOpen = false;
+    if (close) this._pickerOpen = false;
   }
 
   _track() {
@@ -920,48 +1088,44 @@ export class MidiManager extends LitElement {
     // multi-channel routing out of the way for the 95% of MIDI tracks
     // that don't need it (TODO #270).
     return html`
-      <section>
-        <h3>MIDI channel</h3>
-        <div class="card">
-          ${CHANNEL_DIRECTIONS.map(({ key, label }) => {
-            const mode = track[`${key}_channel_mode`] || "all";
-            const mask = track[`${key}_channel_mask`] ?? 0x0001;
-            const channelDisabled = mode === "all";
-            const cells = [];
-            for (let i = 0; i < 16; ++i) {
-              const on = !!(mask & (1 << i));
-              cells.push(html`
-                <button
-                  class="ch-cell ${on ? "on" : ""}"
-                  ?disabled=${channelDisabled}
-                  @click=${() => this._onChannelClick(key, i)}
-                >${i + 1}</button>
-              `);
-            }
-            return html`
-              <div class="chan-block">
-                <span class="dir-label">${label}</span>
-                <select
-                  .value=${mode}
-                  @change=${(e) => this._onModeChange(key, e)}
-                >
-                  ${Object.entries(CHANNEL_MODE_LABELS).map(([m, lbl]) => html`
-                    <option value=${m} ?selected=${m === mode}>${lbl}</option>
-                  `)}
-                </select>
-                <span></span>
-                <div class="ch-grid">${cells}</div>
-              </div>
-            `;
-          })}
-        </div>
-        <div class="hint">
-          New MIDI tracks are forced to channel 1 by default. Switch a
-          direction off "force" to record from or play to multiple
-          channels — most synths only listen on one, so the default
-          stays out of the way.
-        </div>
-      </section>
+      <div class="card">
+        ${CHANNEL_DIRECTIONS.map(({ key, label }) => {
+          const mode = track[`${key}_channel_mode`] || "all";
+          const mask = track[`${key}_channel_mask`] ?? 0x0001;
+          const channelDisabled = mode === "all";
+          const cells = [];
+          for (let i = 0; i < 16; ++i) {
+            const on = !!(mask & (1 << i));
+            cells.push(html`
+              <button
+                class="ch-cell ${on ? "on" : ""}"
+                ?disabled=${channelDisabled}
+                @click=${() => this._onChannelClick(key, i)}
+              >${i + 1}</button>
+            `);
+          }
+          return html`
+            <div class="chan-block">
+              <span class="dir-label">${label}</span>
+              <select
+                .value=${mode}
+                @change=${(e) => this._onModeChange(key, e)}
+              >
+                ${Object.entries(CHANNEL_MODE_LABELS).map(([m, lbl]) => html`
+                  <option value=${m} ?selected=${m === mode}>${lbl}</option>
+                `)}
+              </select>
+              <span></span>
+              <div class="ch-grid">${cells}</div>
+            </div>
+          `;
+        })}
+      </div>
+      <div class="hint">
+        New MIDI tracks are forced to channel 1 by default. Switch a
+        direction off "force" to record from or play to multiple
+        channels; most synths only listen on one.
+      </div>
     `;
   }
 
@@ -987,35 +1151,18 @@ export class MidiManager extends LitElement {
     const inDefault = isDefaultChannelState(t);
     const channelLabel = channelSummary(t);
     const sectionMode = this.mode || "all";
-    const showSetup = sectionMode === "all"
-      ? this._tab === "setup"
-      : sectionMode === "setup";
-    const showPatches = sectionMode === "all"
-      ? this._tab === "patches"
-      : sectionMode === "patches";
+    const showSetup = sectionMode !== "patches";
+    const showPatches = sectionMode !== "setup";
 
     return html`
       <div class="tb">
         <span class="title">${this.trackName || t.name}</span>
         <span>· MIDI</span>
         <span style="flex:1"></span>
-        ${sectionMode === "all" ? html`
-          <div class="actions">
-            <button
-              class=${this._tab === "setup" ? "primary" : ""}
-              title="Instrument and channel setup"
-              @click=${() => { this._tab = "setup"; }}
-            >Setup</button>
-            <button
-              class=${this._tab === "patches" ? "primary" : ""}
-              title="Per-region patch and bank events"
-              @click=${() => { this._tab = "patches"; }}
-            >Patches</button>
-          </div>
-        ` : null}
         <button
           class="chan-chip ${inDefault ? "" : "surfaced"}"
           title="Current MIDI channel routing"
+          @click=${() => this._setSection("channel", !this._sectionOpen("channel"))}
         >${channelLabel}</button>
         <span>· ${t.plugins?.length || 0} plugin${(t.plugins?.length === 1) ? "" : "s"}</span>
       </div>
@@ -1067,9 +1214,8 @@ export class MidiManager extends LitElement {
               </div>
             `}
           </section>
-          ${this._renderChannelSection(t)}
-          <section>
-            <h3>Instrument parameters</h3>
+          ${this._renderFold("channel", "MIDI channel", channelLabel, this._renderChannelSection(t))}
+          ${this._renderFold("parameters", "Instrument parameters", programLike.length > 0 ? `${programLike.length} parameter${programLike.length === 1 ? "" : "s"}` : "none exposed", html`
             ${programLike.length > 0 ? html`
               <div class="card" style="gap:8px">
                 ${programLike.map((p) => html`
@@ -1099,7 +1245,7 @@ export class MidiManager extends LitElement {
                 MIDI program-change events to the instrument.
               </div>
             `}
-          </section>
+          `)}
           ${otherPlugins.length > 0 ? html`
             <section>
               <h3>Inserts</h3>
@@ -1116,104 +1262,91 @@ export class MidiManager extends LitElement {
           ` : null}
         ` : null}
 
-        ${showPatches ? this._renderPatchChanges() : null}
-        ${showPatches && otherPlugins.length > 0 ? html`
-          <section>
-            <h3>Inserts</h3>
-            <div class="card">
-              ${otherPlugins.map((pi) => html`
-                <div class="row">
-                  <span class="label">${pi.name}</span>
-                  <span class="kind">${pi.bypassed ? "bypassed" : "active"}</span>
-                  <span class="value">${pi.params?.length ?? 0} params</span>
-                </div>
-              `)}
-            </div>
-          </section>
-        ` : null}
+        ${showPatches ? this._renderFold(
+          "patches",
+          "Patches & banks",
+          `${this._regions.reduce((n, r) => n + (r.patch_changes?.length || 0), 0)} event${this._regions.reduce((n, r) => n + (r.patch_changes?.length || 0), 0) === 1 ? "" : "s"}`,
+          this._renderPatchChanges(),
+        ) : null}
       </div>
-      ${this._pickerOpen ? this._renderPatchPickerModal() : null}
     `;
   }
-  _renderPatchPickerModal() {
+  _renderPatchPickerInline() {
     const banks = this._pickerBanks();
     const programs = this._pickerPrograms();
-    const currentBank = banks.find((b) => b.bank === this._pickerBank) || banks[0];
+    const currentBank = this._pickerProgramBank() || banks[0];
     const bankValue = this._pickerBank < 0 ? 0 : this._pickerBank;
     const { msb, lsb } = bankToMsbLsb(bankValue);
     const model = this._patchNames?.model || "";
     const mode = this._patchNames?.mode || "";
     return html`
-      <div class="modal" @click=${(e) => { if (e.target === e.currentTarget) this._closePatchPicker(); }}>
-        <div class="modal-card">
-          <div class="modal-head">
-            <span class="title">Select Patch</span>
-            <span class="spacer"></span>
-            <button class="close" title="Close" @click=${() => this._closePatchPicker()}>${icon("x-mark", 14)}</button>
+      <div class="inline-picker">
+        <div class="picker-row">
+          <label>Bank</label>
+          <select
+            .value=${String(normalizeBank(this._pickerBank))}
+            @change=${(e) => { this._pickerBank = normalizeBank(e.currentTarget.value); }}
+          >
+            <option value="-1">Program only</option>
+            ${banks.map((b) => html`
+              <option value=${String(normalizeBank(b.bank))}>${b.name || "Bank"}${normalizeBank(b.bank) >= 0 ? ` · ${normalizeBank(b.bank)}` : ""}</option>
+            `)}
+          </select>
+        </div>
+        ${(model || mode) ? html`
+          <div class="hint">
+            ${model ? `Model: ${model}` : ""}${model && mode ? " · " : ""}${mode ? `Mode: ${mode}` : ""}
           </div>
-          <div class="modal-body">
-            <div class="picker-row">
-              <label>Channel</label>
-              <select
-                .value=${String(wireChannelToDisplay(this._pickerChannel))}
-                @change=${(e) => {
-                  this._pickerChannel = displayChannelToWire(e.currentTarget.value);
-                  this._requestPatchNamesForWireChannel(this._pickerChannel);
-                }}
-              >
-                ${Array.from({ length: 16 }).map((_, i) => html`
-                  <option value=${String(i + 1)}>${i + 1}</option>
-                `)}
-              </select>
-            </div>
-            <div class="picker-row">
-              <label>Bank</label>
-              <select
-                .value=${String(this._pickerBank)}
-                @change=${(e) => { this._pickerBank = Number(e.currentTarget.value) || -1; }}
-              >
-                <option value="-1">No bank (program only)</option>
-                ${banks.map((b) => html`
-                  <option value=${String(b.bank)}>${b.name} · ${b.bank}</option>
-                `)}
-              </select>
-            </div>
-            <div class="picker-row">
-              <label>MSB / LSB</label>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-                <input class="num" type="number" min="0" max="127" step="1"
-                       .value=${String(msb)}
-                       @change=${(e) => { this._pickerBank = msbLsbToBank(e.currentTarget.value, lsb); }}>
-                <input class="num" type="number" min="0" max="127" step="1"
-                       .value=${String(lsb)}
-                       @change=${(e) => { this._pickerBank = msbLsbToBank(msb, e.currentTarget.value); }}>
-              </div>
-            </div>
-            ${(model || mode) ? html`
-              <div class="hint">
-                ${model ? `Model: ${model}` : ""}${model && mode ? " · " : ""}${mode ? `Mode: ${mode}` : ""}
-              </div>
-            ` : null}
-            ${this._patchNamesLoading ? html`<div class="hint">Loading patch names from Ardour…</div>` : null}
-            <div class="hint">
-              ${currentBank?.name || "Bank"} · pick a program:
-            </div>
-            <div class="program-grid">
-              ${programs.map((p) => html`
-                <button
-                  class="program-btn ${this._pickerProgram === p.program ? "active" : ""}"
-                  @click=${() => { this._pickerProgram = p.program; }}
-                  title=${`Program ${p.program + 1}`}
-                >
-                  ${p.program + 1}. ${p.name}
-                </button>
+        ` : null}
+        ${this._patchNamesLoading ? html`<div class="hint">Loading patch names from Ardour…</div>` : null}
+        <div class="hint">
+          ${currentBank?.name || "Program only"} · pick a program:
+        </div>
+        <div class="program-grid">
+          ${programs.map((p) => html`
+            <button
+              class="program-btn ${this._pickerProgram === p.program ? "active" : ""}"
+              @click=${() => {
+                this._pickerProgram = p.program;
+                this._applyPatchPicker({ close: false });
+              }}
+              title=${`Program ${p.program + 1}`}
+            >
+              ${p.program + 1}. ${p.name}
+            </button>
+          `)}
+        </div>
+        <details class="advanced">
+          <summary>Advanced MIDI event fields</summary>
+          <div class="picker-row" style="margin-top:8px">
+            <label>Channel</label>
+            <select
+              .value=${String(wireChannelToDisplay(this._pickerChannel))}
+              @change=${(e) => {
+                this._pickerChannel = displayChannelToWire(e.currentTarget.value);
+                this._requestPatchNamesForWireChannel(this._pickerChannel);
+              }}
+            >
+              ${Array.from({ length: 16 }).map((_, i) => html`
+                <option value=${String(i + 1)}>${i + 1}</option>
               `)}
+            </select>
+          </div>
+          <div class="picker-row" style="margin-top:8px">
+            <label>MSB / LSB</label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <input class="num" type="number" min="0" max="127" step="1"
+                     .value=${String(msb)}
+                     @change=${(e) => { this._pickerBank = msbLsbToBank(e.currentTarget.value, lsb); }}>
+              <input class="num" type="number" min="0" max="127" step="1"
+                     .value=${String(lsb)}
+                     @change=${(e) => { this._pickerBank = msbLsbToBank(msb, e.currentTarget.value); }}>
             </div>
           </div>
-          <div class="modal-foot">
-            <button @click=${() => this._closePatchPicker()}>Cancel</button>
-            <button class="primary" @click=${() => this._applyPatchPicker()}>Apply</button>
-          </div>
+        </details>
+        <div class="modal-foot" style="padding:0;border-top:0;background:transparent">
+          <button @click=${() => this._closePatchPicker()}>Cancel</button>
+          <button class="primary" @click=${() => this._applyPatchPicker()}>Apply</button>
         </div>
       </div>
     `;
