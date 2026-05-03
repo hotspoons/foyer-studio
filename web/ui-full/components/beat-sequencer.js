@@ -44,6 +44,9 @@ const PPQN = 960;
 const PREVIEW_PREF_KEY = "foyer.beat.preview.v1";
 const ARR_HEIGHT_KEY = "foyer.beat.arr-height.v1";
 const PRESETS_KEY = "foyer.beat.presets.v1";
+const STRIP_WIDTH_KEY = "foyer.beat.strip-width.v1";
+const STRIP_WIDTH_MIN = 280;
+const STRIP_WIDTH_DEFAULT = 420;
 const PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 // General-MIDI drum map — the short-name subset used by the "+ Drum" picker.
@@ -274,7 +277,8 @@ export class BeatSequencer extends LitElement {
       min-width: 0;
     }
     .side-strip.open {
-      width: min(360px, 45%);
+      width: var(--strip-w, 420px);
+      max-width: 65%;
     }
     .strip-handle {
       flex: 0 0 32px;
@@ -285,6 +289,15 @@ export class BeatSequencer extends LitElement {
       border-right: 1px solid var(--color-border);
     }
     .strip-handle:hover { color: var(--color-accent); }
+    .strip-resize {
+      flex: 0 0 8px;
+      cursor: ew-resize;
+      border-right: 1px solid var(--color-border);
+      background: transparent;
+    }
+    .strip-resize:hover {
+      background: color-mix(in oklab, var(--color-accent, #7c5cff) 20%, transparent);
+    }
     .side-strip foyer-midi-manager {
       flex: 1; min-width: 0;
       overflow: auto;
@@ -739,6 +752,17 @@ export class BeatSequencer extends LitElement {
     } catch {
       this._stripOpen = false;
     }
+    try {
+      const raw = Number(localStorage.getItem(STRIP_WIDTH_KEY));
+      this._stripW = Number.isFinite(raw) && raw >= STRIP_WIDTH_MIN ? raw : STRIP_WIDTH_DEFAULT;
+    } catch {
+      this._stripW = STRIP_WIDTH_DEFAULT;
+    }
+    this._stripResizeActive = false;
+    this._onStripResizeMoveBound = null;
+    this._onStripResizeUpBound = null;
+    this._stripResizeStartX = 0;
+    this._stripResizeStartW = this._stripW;
     this._onStoreControl = (ev) => {
       if (ev.detail === "transport.position"
           || ev.detail === "transport.tempo"
@@ -875,6 +899,7 @@ export class BeatSequencer extends LitElement {
     if (this._onMaximizeChanged) {
       document.removeEventListener("foyer-window-maximize-changed", this._onMaximizeChanged);
     }
+    this._stopStripResize();
     super.disconnectedCallback();
   }
 
@@ -1618,13 +1643,17 @@ export class BeatSequencer extends LitElement {
           ${this._renderArrangement(L)}
           ${this._renderPatternEditor(L)}
         </div>
-        <div class="side-strip ${stripOpen ? "open" : ""}">
+        <div class="side-strip ${stripOpen ? "open" : ""}"
+             style=${stripOpen ? `--strip-w:${this._stripW}px` : ""}>
           <button class="strip-handle"
                   title=${stripOpen ? "Hide instruments + patches" : "Show instruments + patches for this track"}
                   @click=${() => this._toggleStrip()}>
             ${icon(stripOpen ? "chevron-right" : "chevron-left", 14)}
           </button>
           ${stripOpen ? html`
+            <div class="strip-resize"
+                 title="Drag to resize"
+                 @pointerdown=${(e) => this._startStripResize(e)}></div>
             <foyer-midi-manager
               style="flex:1;min-height:0"
               .trackId=${this.trackId}
@@ -1643,6 +1672,48 @@ export class BeatSequencer extends LitElement {
       localStorage.setItem("foyer.beat.strip-open", this._stripOpen ? "1" : "0");
     } catch { /* ignore */ }
     this.requestUpdate();
+  }
+
+  _clampStripWidth(next) {
+    const hostW = this.getBoundingClientRect?.().width || 1200;
+    const maxW = Math.max(STRIP_WIDTH_MIN + 20, Math.floor(hostW * 0.65));
+    return Math.max(STRIP_WIDTH_MIN, Math.min(maxW, Math.round(next)));
+  }
+
+  _startStripResize(ev) {
+    if (!this._stripOpen) return;
+    ev.preventDefault();
+    this._stripResizeActive = true;
+    this._stripResizeStartX = ev.clientX;
+    this._stripResizeStartW = this._stripW;
+    this._onStripResizeMoveBound = (e) => this._onStripResizeMove(e);
+    this._onStripResizeUpBound = () => this._stopStripResize(true);
+    window.addEventListener("pointermove", this._onStripResizeMoveBound);
+    window.addEventListener("pointerup", this._onStripResizeUpBound, { once: true });
+  }
+
+  _onStripResizeMove(ev) {
+    if (!this._stripResizeActive) return;
+    const delta = this._stripResizeStartX - ev.clientX;
+    this._stripW = this._clampStripWidth(this._stripResizeStartW + delta);
+    this.requestUpdate();
+  }
+
+  _stopStripResize(persist = false) {
+    this._stripResizeActive = false;
+    if (this._onStripResizeMoveBound) {
+      window.removeEventListener("pointermove", this._onStripResizeMoveBound);
+      this._onStripResizeMoveBound = null;
+    }
+    if (this._onStripResizeUpBound) {
+      window.removeEventListener("pointerup", this._onStripResizeUpBound);
+      this._onStripResizeUpBound = null;
+    }
+    if (persist) {
+      try {
+        localStorage.setItem(STRIP_WIDTH_KEY, String(this._stripW));
+      } catch { /* ignore */ }
+    }
   }
 
   _renderArchivedBanner() {

@@ -717,6 +717,7 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::RemovePlugin { .. } => "remove_plugin",
         Command::MovePlugin { .. } => "move_plugin",
         Command::ListPluginPresets { .. } => "list_plugin_presets",
+        Command::ListMidiPatchNames { .. } => "list_midi_patch_names",
         Command::LoadPluginPreset { .. } => "load_plugin_preset",
         Command::SavePluginPreset { .. } => "save_plugin_preset",
         Command::OpenPluginGui { .. } => "open_plugin_gui",
@@ -2124,6 +2125,28 @@ async fn dispatch_command(
                         state,
                         Event::Error {
                             code: "list_plugin_presets_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::ListMidiPatchNames { track_id, channel } => {
+            match state
+                .backend()
+                .await
+                .list_midi_patch_names(track_id.clone(), channel)
+                .await
+            {
+                Ok(names) => {
+                    broadcast_event(state, Event::MidiPatchNamesListed { track_id, names }).await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "list_midi_patch_names_failed".into(),
                             message: e.to_string(),
                         },
                     )

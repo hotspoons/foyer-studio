@@ -391,13 +391,19 @@ customElements.define("foyer-plugin-layer", PluginLayer);
 /// snapshot is loaded yet / the plugin was just deleted. Used by
 /// `openPluginFloat` to prefix the window title — same shape the
 /// legacy `<foyer-plugin-window>` chrome uses on line 225 above.
-function _findOwningTrackName(pluginId) {
+function _findOwningTrack(pluginId) {
   const session = (typeof window !== "undefined" ? window : globalThis)
     ?.__foyer?.store?.state?.session;
   if (!session) return null;
   for (const t of session.tracks || []) {
-    for (const pi of t.plugins || []) {
-      if (pi.id === pluginId) return t.name || null;
+    const plugins = t.plugins || [];
+    for (let i = 0; i < plugins.length; i += 1) {
+      const pi = plugins[i];
+      if (pi.id !== pluginId) continue;
+      return {
+        trackId: t.id || "",
+        trackName: t.name || "",
+      };
     }
   }
   return null;
@@ -419,9 +425,12 @@ export function openPluginFloat(pluginInstance) {
     // The lookup walks the live session for the owning track; if
     // the plugin can't be located (race during track delete, or the
     // snapshot hasn't loaded yet), fall back to bare plugin name.
-    const trackName = _findOwningTrackName(pluginInstance.id);
+    const owning = _findOwningTrack(pluginInstance.id);
+    const trackName = owning?.trackName || "";
     const pluginName = pluginInstance.name || "Plugin";
     const titleText = trackName ? `${trackName} · ${pluginName}` : pluginName;
+    panel.trackName = trackName;
+    panel.trackId = owning?.trackId || "";
     openWindow({
       title: titleText,
       icon: "puzzle-piece",

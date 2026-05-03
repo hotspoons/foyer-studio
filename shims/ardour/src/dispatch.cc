@@ -304,6 +304,7 @@ struct DecodedCmd
 		Undo,
 		Redo,
 		ListPluginPresets,
+		ListMidiPatchNames,
 		LoadPluginPreset,
 		SetSequencerLayout,
 		ClearSequencerLayout,
@@ -488,6 +489,8 @@ struct DecodedCmd
 	// is a 16-bit channel bitmask (bit 0 = ch 1) — its own field since
 	// no other command carries a u16 mask.
 	std::uint16_t midi_chan_mask = 0;
+	// ListMidiPatchNames { track_id, channel }.
+	std::uint8_t  midi_channel = 0;
 
 	// Automation lane edit payloads (Phase B).
 	std::string   lane_id;
@@ -1116,6 +1119,10 @@ decode (const std::vector<std::uint8_t>& buf)
 				} else if (k == "direction") {
 					// ListPorts { direction: Option<String> }
 					if (!in.read_str (out.ports_direction)) return out;
+				} else if (k == "channel") {
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.midi_channel = static_cast<std::uint8_t> (std::min<std::uint64_t> (15, v));
 				} else if (k == "target_track_id") {
 					// AddSend { track_id, target_track_id, pre_fader }
 					if (!in.read_str (out.send_target_track)) return out;
@@ -1304,6 +1311,7 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "undo")               out.kind = DecodedCmd::Kind::Undo;
 			else if (cmd_type == "redo")               out.kind = DecodedCmd::Kind::Redo;
 			else if (cmd_type == "list_plugin_presets") out.kind = DecodedCmd::Kind::ListPluginPresets;
+			else if (cmd_type == "list_midi_patch_names") out.kind = DecodedCmd::Kind::ListMidiPatchNames;
 			else if (cmd_type == "load_plugin_preset") out.kind = DecodedCmd::Kind::LoadPluginPreset;
 			else if (cmd_type == "set_sequencer_layout")   out.kind = DecodedCmd::Kind::SetSequencerLayout;
 			else if (cmd_type == "clear_sequencer_layout") out.kind = DecodedCmd::Kind::ClearSequencerLayout;
@@ -2229,6 +2237,17 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			FoyerShim* shim = &_shim;
 			_shim.call_slot (MISSING_INVALIDATOR, [shim, plugin_id] () {
 				auto bytes = msgpack_out::encode_plugin_presets_listed (shim->session (), plugin_id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ListMidiPatchNames: {
+			if (cmd.track_id.empty ()) break;
+			const std::string track_id = cmd.track_id;
+			const std::uint8_t channel = static_cast<std::uint8_t> (std::min<int> (15, cmd.midi_channel));
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, track_id, channel] () {
+				auto bytes = msgpack_out::encode_midi_patch_names_listed (shim->session (), track_id, channel);
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     audio::{AudioTransport, IceCandidate, SdpPayload},
-    midi::{MidiNote, MidiNotePatch},
+    midi::{MidiNote, MidiNotePatch, MidiPatchNames},
     session::{Group, GroupPatch, Track, TrackPatch},
     Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, LatencyReport,
     PathListing, PluginCatalogEntry, PluginInstance, PluginPreset, Region, RegionPatch, Session,
@@ -156,6 +156,11 @@ pub enum Event {
     /// Reply to `Command::ListPlugins`.
     PluginsList {
         entries: Vec<PluginCatalogEntry>,
+    },
+    /// Reply to `Command::ListMidiPatchNames` for one MIDI track/channel.
+    MidiPatchNamesListed {
+        track_id: EntityId,
+        names: MidiPatchNames,
     },
     /// Reply to `Command::ListPorts`. Contains the engine-level ports
     /// the shim enumerated (post-filter if the command specified a
@@ -982,6 +987,13 @@ pub enum Command {
     /// `Event::PluginPresetsListed`.
     ListPluginPresets {
         plugin_id: EntityId,
+    },
+    /// Ask the shim/host for Midnam-backed patch names for a MIDI track.
+    /// Answered with `Event::MidiPatchNamesListed`.
+    ListMidiPatchNames {
+        track_id: EntityId,
+        /// MIDI channel 0..15.
+        channel: u8,
     },
     LoadPluginPreset {
         plugin_id: EntityId,

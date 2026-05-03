@@ -153,14 +153,13 @@ RUN curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors
       > /etc/apt/sources.list.d/xpra.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      xpra xpra-x11 xpra-html5 \
+      xpra xpra-x11 xpra-html5 dbus-x11 \
  && rm -rf /var/lib/apt/lists/*
 # `xpra-x11` is the load-bearing piece for `xpra start :NN`. xpra ≥6
 # split the X11 server modes (`seamless`/`desktop`/`shadow`) into a
 # separate package; without it `just run-dummy`'s xpra spawn aborts
 # with `you must install 'xpra-x11' to use 'seamless'` and the dev
 # loop's plugin GUI projection silently doesn't come up.
-
 # ── LV2 plugin + soundfont bundle (devcontainer = release parity) ──
 #
 # Same plugin pack the production runtime image ships (Dockerfile

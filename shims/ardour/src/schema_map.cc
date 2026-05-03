@@ -5,9 +5,11 @@
 #include "schema_map.h"
 
 #include <sstream>
+#include <algorithm>
 
 #include "ardour/audioregion.h"
 #include "ardour/file_source.h"
+#include "ardour/instrument_info.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
 #include "ardour/parameter_descriptor.h"
@@ -24,6 +26,7 @@
 #include "ardour/stripable.h"
 #include "ardour/track.h"
 #include "ardour/unknown_processor.h"
+#include "midi++/midnam_patch.h"
 #include "pbd/controllable.h"
 #include "pbd/xml++.h"
 
@@ -913,6 +916,58 @@ list_plugin_presets (Session& session, const std::string& plugin_id)
 		d.is_factory = !pr.user;
 		out.push_back (std::move (d));
 	}
+	return out;
+}
+
+MidiPatchNamesDesc
+list_midi_patch_names (Session& session, const std::string& track_id, std::uint8_t channel)
+{
+	MidiPatchNamesDesc out;
+	out.track_id = track_id;
+	out.channel = static_cast<std::uint8_t> (std::min<int> (15, channel));
+	if (track_id.rfind ("track.", 0) != 0) return out;
+	const std::string sid = track_id.substr (6);
+
+	std::shared_ptr<Route> route;
+	{
+		std::shared_ptr<RouteList const> routes = safe_get_routes (session);
+		for (auto const& r : *routes) {
+			if (!r) continue;
+			std::ostringstream tmp;
+			tmp << r->id ();
+			if (tmp.str () != sid) continue;
+			route = r;
+			break;
+		}
+	}
+	if (!route) return out;
+
+	auto& info = route->instrument_info ();
+	if (!info.model ().empty ()) out.model = info.model ();
+	if (!info.mode ().empty ()) out.mode = info.mode ();
+
+	auto chan_set = info.get_patches (out.channel);
+	if (!chan_set) return out;
+	for (auto const& bank : chan_set->patch_banks ()) {
+		if (!bank) continue;
+		MidiPatchBankDesc b;
+		b.bank = static_cast<std::uint16_t> (std::max<int> (0, bank->number ()));
+		b.name = bank->name ();
+		for (auto const& patch : bank->patch_name_list ()) {
+			if (!patch) continue;
+			MidiPatchProgramDesc p;
+			p.program = patch->program_number ();
+			p.name = patch->name ();
+			b.programs.push_back (std::move (p));
+		}
+		std::sort (b.programs.begin (), b.programs.end (), [] (auto const& a, auto const& z) {
+			return a.program < z.program;
+		});
+		out.banks.push_back (std::move (b));
+	}
+	std::sort (out.banks.begin (), out.banks.end (), [] (auto const& a, auto const& z) {
+		return a.bank < z.bank;
+	});
 	return out;
 }
 

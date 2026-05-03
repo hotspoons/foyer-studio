@@ -51,6 +51,7 @@ const CHANNEL_DIRECTIONS = [
   { key: "capture",  label: "Inbound (record)" },
   { key: "playback", label: "Playback" },
 ];
+const NO_BANK_SENTINEL = 16383;
 function channelMaskToList(mask) {
   const out = [];
   for (let i = 0; i < 16; ++i) if (mask & (1 << i)) out.push(i + 1);
@@ -79,11 +80,37 @@ function channelSummary(track) {
   }
   return "split routing";
 }
+function wireChannelToDisplay(ch) {
+  const n = Number(ch);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(1, Math.min(16, n + 1));
+}
+function displayChannelToWire(ch) {
+  const n = Number(ch);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(15, n - 1));
+}
+function bankInputValue(bank) {
+  if (bank == null) return "";
+  const n = Number(bank);
+  if (!Number.isFinite(n) || n < 0 || n === NO_BANK_SENTINEL) return "";
+  return String(Math.max(0, Math.min(16383, n)));
+}
+function bankToMsbLsb(bank) {
+  const n = Math.max(0, Math.min(16383, Number(bank) || 0));
+  return { msb: (n >> 7) & 0x7f, lsb: n & 0x7f };
+}
+function msbLsbToBank(msb, lsb) {
+  const m = Math.max(0, Math.min(127, Number(msb) || 0));
+  const l = Math.max(0, Math.min(127, Number(lsb) || 0));
+  return (m << 7) | l;
+}
 
 export class MidiManager extends LitElement {
   static properties = {
     trackId:   { type: String, attribute: "track-id" },
     trackName: { type: String, attribute: "track-name" },
+    mode:      { type: String },
     _tick:     { state: true, type: Number },
     _regions:  { state: true, type: Array },
     _presets:  { state: true, type: Array },
@@ -91,6 +118,16 @@ export class MidiManager extends LitElement {
     /// the track is in the default ForceChannel + 0x0001 state.
     /// Otherwise the section auto-hides.
     _channelExpanded: { state: true, type: Boolean },
+    _tab: { state: true, type: String },
+    _pickerOpen: { state: true, type: Boolean },
+    _pickerRegionId: { state: true, type: String },
+    _pickerPatchId: { state: true, type: String },
+    _pickerChannel: { state: true, type: Number },
+    _pickerBank: { state: true, type: Number },
+    _pickerProgram: { state: true, type: Number },
+    _patchNames: { state: true, type: Object },
+    _patchNamesFor: { state: true, type: String },
+    _patchNamesLoading: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -270,7 +307,7 @@ export class MidiManager extends LitElement {
     }
     .row-head {
       display: grid;
-      grid-template-columns: minmax(120px, 1.5fr) repeat(4, minmax(60px, 1fr)) 28px;
+      grid-template-columns: minmax(120px, 1.5fr) repeat(4, minmax(60px, 1fr)) 76px;
       gap: 6px;
       font-size: 10px;
       color: var(--color-text-muted);
@@ -281,7 +318,7 @@ export class MidiManager extends LitElement {
     }
     .pc-row {
       display: grid;
-      grid-template-columns: minmax(120px, 1.5fr) repeat(4, minmax(60px, 1fr)) 28px;
+      grid-template-columns: minmax(120px, 1.5fr) repeat(4, minmax(60px, 1fr)) 76px;
       gap: 6px; align-items: center;
       padding: 4px 4px;
       font-size: 11px;
@@ -307,6 +344,25 @@ export class MidiManager extends LitElement {
       border-radius: var(--radius-sm, 4px);
       cursor: pointer;
       display: flex; align-items: center; justify-content: center;
+    }
+    .pc-actions {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      justify-content: flex-end;
+    }
+    .pc-actions button.pick {
+      background: transparent;
+      border: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+      padding: 2px 6px;
+      border-radius: var(--radius-sm, 4px);
+      cursor: pointer;
+      font: inherit; font-size: 10px;
+    }
+    .pc-actions button.pick:hover {
+      border-color: var(--color-accent);
+      color: var(--color-text);
     }
     .preset-group {
       font-size: 10px; color: var(--color-text-muted);
@@ -353,16 +409,125 @@ export class MidiManager extends LitElement {
       text-align: center;
       color: var(--color-text-muted);
     }
+    .modal {
+      position: fixed;
+      inset: 0;
+      z-index: 2200;
+      background: rgba(0, 0, 0, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .modal-card {
+      width: min(900px, 92vw);
+      max-height: min(760px, 90vh);
+      display: flex;
+      flex-direction: column;
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-md, 8px);
+      box-shadow: var(--shadow-panel);
+      overflow: hidden;
+    }
+    .modal-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--color-border);
+      background: var(--color-surface-elevated);
+    }
+    .modal-head .title { font-size: 12px; font-weight: 600; color: var(--color-text); }
+    .modal-head .spacer { flex: 1; }
+    .modal-head button.close {
+      background: transparent; border: 0; color: var(--color-text-muted);
+      cursor: pointer; padding: 4px;
+    }
+    .modal-body {
+      display: flex; flex-direction: column; gap: 10px;
+      padding: 12px 14px;
+      overflow: auto;
+    }
+    .picker-row {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      align-items: center;
+      gap: 8px;
+    }
+    .picker-row label { color: var(--color-text-muted); font-size: 11px; }
+    .picker-row select {
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      border-radius: var(--radius-sm, 4px);
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 11px;
+    }
+    .program-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 6px;
+    }
+    .program-btn {
+      text-align: left;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      border-radius: var(--radius-sm, 4px);
+      padding: 6px 8px;
+      cursor: pointer;
+      font: inherit; font-size: 11px;
+      line-height: 1.35;
+    }
+    .program-btn:hover {
+      border-color: var(--color-accent);
+    }
+    .program-btn.active {
+      border-color: transparent;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+      color: #fff;
+    }
+    .modal-foot {
+      display: flex; justify-content: flex-end; gap: 8px;
+      padding: 10px 14px;
+      border-top: 1px solid var(--color-border);
+      background: var(--color-surface-elevated);
+    }
+    .modal-foot button {
+      background: transparent;
+      border: 1px solid var(--color-border);
+      color: var(--color-text);
+      border-radius: var(--radius-sm, 4px);
+      padding: 4px 10px;
+      font: inherit; font-size: 11px;
+      cursor: pointer;
+    }
+    .modal-foot button.primary {
+      border-color: transparent;
+      color: #fff;
+      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+    }
   `;
 
   constructor() {
     super();
     this.trackId = "";
     this.trackName = "";
+    this.mode = "all";
     this._tick = 0;
     this._regions = [];
     this._presets = [];
     this._presetsForPluginId = "";
+    this._tab = "setup";
+    this._pickerOpen = false;
+    this._pickerRegionId = "";
+    this._pickerPatchId = "";
+    this._pickerChannel = 0;
+    this._pickerBank = 0;
+    this._pickerProgram = 0;
+    this._patchNames = null;
+    this._patchNamesFor = "";
+    this._patchNamesLoading = false;
     this._storeHandler = () => { this._tick++; };
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
   }
@@ -406,7 +571,25 @@ export class MidiManager extends LitElement {
     } else if (body.type === "plugin_presets_listed"
             && body.plugin_id === this._presetsForPluginId) {
       this._presets = body.presets || [];
+    } else if (body.type === "midi_patch_names_listed"
+            && body.track_id === this.trackId) {
+      this._patchNames = body.names || null;
+      this._patchNamesFor = `${this.trackId}:${body.names?.channel ?? 0}`;
+      this._patchNamesLoading = false;
     }
+  }
+
+  _requestPatchNamesForWireChannel(wireChannel) {
+    if (!this.trackId) return;
+    const ch = Math.max(0, Math.min(15, Number(wireChannel) || 0));
+    const key = `${this.trackId}:${ch}`;
+    if (this._patchNamesFor === key && this._patchNames) return;
+    this._patchNamesLoading = true;
+    window.__foyer?.ws?.send({
+      type: "list_midi_patch_names",
+      track_id: this.trackId,
+      channel: ch,
+    });
   }
 
   _requestPresetsFor(pluginId) {
@@ -510,12 +693,12 @@ export class MidiManager extends LitElement {
                     <input class="num" type="number" min="0" step="1"
                            .value=${String(pc.start_ticks ?? 0)}
                            @change=${(e) => this._editPatchChange(region, pc, { start_ticks: Math.max(0, Number(e.currentTarget.value) || 0) })}>
-                    <input class="num" type="number" min="0" max="15" step="1"
-                           .value=${String(pc.channel ?? 0)}
-                           @change=${(e) => this._editPatchChange(region, pc, { channel: Math.max(0, Math.min(15, Number(e.currentTarget.value) || 0)) })}>
+                    <input class="num" type="number" min="1" max="16" step="1"
+                           .value=${String(wireChannelToDisplay(pc.channel ?? 0))}
+                           @change=${(e) => this._editPatchChange(region, pc, { channel: displayChannelToWire(e.currentTarget.value) })}>
                     <input class="num" type="number" step="1"
                            placeholder="—"
-                           .value=${pc.bank == null || pc.bank < 0 ? "" : String(pc.bank)}
+                           .value=${bankInputValue(pc.bank)}
                            @change=${(e) => {
                              const v = e.currentTarget.value.trim();
                              const next = v === "" ? -1 : Math.max(0, Math.min(16383, Number(v) || 0));
@@ -524,9 +707,12 @@ export class MidiManager extends LitElement {
                     <input class="num" type="number" min="0" max="127" step="1"
                            .value=${String(pc.program ?? 0)}
                            @change=${(e) => this._editPatchChange(region, pc, { program: Math.max(0, Math.min(127, Number(e.currentTarget.value) || 0)) })}>
-                    <button class="danger" @click=${() => this._deletePatchChange(region, pc)}>
-                      ${icon("trash", 12)}
-                    </button>
+                    <span class="pc-actions">
+                      <button class="pick" @click=${() => this._openPatchPicker(region, pc)}>Pick…</button>
+                      <button class="danger" @click=${() => this._deletePatchChange(region, pc)}>
+                        ${icon("trash", 12)}
+                      </button>
+                    </span>
                   </div>
                 `)}
               </div>
@@ -554,12 +740,15 @@ export class MidiManager extends LitElement {
   _addPatchChangeTo(region) {
     const ws = window.__foyer?.ws;
     if (!ws || !region?.id) return;
+    const track = this._track();
+    const playbackMask = track?.playback_channel_mask ?? 0x0001;
+    const defaultChannel = channelMaskToList(playbackMask)[0] ?? 1;
     const pc = {
       // Server generates the real id via Evoral event_id; this
       // optimistic prefix is harmless because AddPatchChange echos
       // with the authoritative id, and our region list gets replaced.
       id: `patchchange.opt.${Math.random().toString(36).slice(2)}`,
-      channel: 0,
+      channel: displayChannelToWire(defaultChannel),
       program: 0,
       bank: -1,
       start_ticks: 0,
@@ -586,6 +775,50 @@ export class MidiManager extends LitElement {
       region_id: region.id,
       patch_change_id: pc.id,
     });
+  }
+  _openPatchPicker(region, pc) {
+    this._pickerRegionId = region?.id || "";
+    this._pickerPatchId = pc?.id || "";
+    this._pickerChannel = pc?.channel ?? 0;
+    this._pickerBank = (pc?.bank == null) ? -1 : pc.bank;
+    this._pickerProgram = pc?.program ?? 0;
+    this._requestPatchNamesForWireChannel(this._pickerChannel);
+    this._pickerOpen = true;
+  }
+  _closePatchPicker() {
+    this._pickerOpen = false;
+  }
+  _pickerBanks() {
+    return this._patchNames?.banks || [];
+  }
+  _pickerPrograms() {
+    if (this._pickerBank < 0) {
+      const out = [];
+      for (let i = 0; i < 128; i += 1) out.push({ program: i, name: `Program ${i + 1}` });
+      return out;
+    }
+    const bank = this._pickerBanks().find((b) => Number(b.bank) === Number(this._pickerBank));
+    if (bank?.programs?.length) {
+      const byProgram = new Map(bank.programs.map((p) => [Number(p.program), p.name || `Program ${Number(p.program) + 1}`]));
+      const out = [];
+      for (let i = 0; i < 128; i += 1) out.push({ program: i, name: byProgram.get(i) || `Program ${i + 1}` });
+      return out;
+    }
+    const out = [];
+    for (let i = 0; i < 128; i += 1) out.push({ program: i, name: `Program ${i + 1}` });
+    return out;
+  }
+  _applyPatchPicker() {
+    if (!this._pickerRegionId || !this._pickerPatchId) return;
+    const region = this._regions.find((r) => r.id === this._pickerRegionId);
+    const pc = region?.patch_changes?.find((p) => p.id === this._pickerPatchId);
+    if (!region || !pc) return;
+    this._editPatchChange(region, pc, {
+      channel: this._pickerChannel,
+      bank: this._pickerBank,
+      program: this._pickerProgram,
+    });
+    this._pickerOpen = false;
   }
 
   _track() {
@@ -752,115 +985,139 @@ export class MidiManager extends LitElement {
     );
 
     const inDefault = isDefaultChannelState(t);
-    // Surface the channel controls when the track has been switched
-    // off the default single-channel routing, OR when the user has
-    // explicitly clicked the toolbar chip to expand them. In the
-    // default state with no manual override, render only the chip —
-    // the controls themselves stay hidden so the picker doesn't add
-    // noise to the 95% case.
-    const channelOpen = !inDefault || this._channelExpanded;
     const channelLabel = channelSummary(t);
+    const sectionMode = this.mode || "all";
+    const showSetup = sectionMode === "all"
+      ? this._tab === "setup"
+      : sectionMode === "setup";
+    const showPatches = sectionMode === "all"
+      ? this._tab === "patches"
+      : sectionMode === "patches";
 
     return html`
       <div class="tb">
         <span class="title">${this.trackName || t.name}</span>
         <span>· MIDI</span>
         <span style="flex:1"></span>
+        ${sectionMode === "all" ? html`
+          <div class="actions">
+            <button
+              class=${this._tab === "setup" ? "primary" : ""}
+              title="Instrument and channel setup"
+              @click=${() => { this._tab = "setup"; }}
+            >Setup</button>
+            <button
+              class=${this._tab === "patches" ? "primary" : ""}
+              title="Per-region patch and bank events"
+              @click=${() => { this._tab = "patches"; }}
+            >Patches</button>
+          </div>
+        ` : null}
         <button
           class="chan-chip ${inDefault ? "" : "surfaced"}"
-          title=${inDefault
-            ? "Click to expose multi-channel routing controls"
-            : "Track is using non-default MIDI channel routing"}
-          @click=${() => { this._channelExpanded = !this._channelExpanded; }}
+          title="Current MIDI channel routing"
         >${channelLabel}</button>
         <span>· ${t.plugins?.length || 0} plugin${(t.plugins?.length === 1) ? "" : "s"}</span>
       </div>
 
       <div class="body">
-        <section>
-          <h3>Instrument</h3>
-          ${instrument ? html`
-            <div class="card ${instrument.missing ? "missing" : ""}">
-              <div class="plugin-head">
-                <div>
-                  <div class="name">${instrument.name}</div>
-                  <div class="uri">${instrument.uri || ""}</div>
+        ${showSetup ? html`
+          <section>
+            <h3>Instrument</h3>
+            ${instrument ? html`
+              <div class="card ${instrument.missing ? "missing" : ""}">
+                <div class="plugin-head">
+                  <div>
+                    <div class="name">${instrument.name}</div>
+                    <div class="uri">${instrument.uri || ""}</div>
+                  </div>
+                  <div class="kind">${instrument.missing ? "missing" : (instrument.bypassed ? "bypassed" : "active")}</div>
                 </div>
-                <div class="kind">${instrument.missing ? "missing" : (instrument.bypassed ? "bypassed" : "active")}</div>
+                ${instrument.missing ? html`
+                  <div class="warn">
+                    ${icon("exclamation-triangle", 12)}
+                    Plugin binary is missing or unloadable.
+                  </div>` : null}
+                <div class="actions">
+                  <button @click=${() => this._openInstrumentPicker({ replace: true })}>
+                    Change…
+                  </button>
+                  <button
+                    ?disabled=${instrument.missing}
+                    @click=${() => this._toggleBypass(instrument.id, instrument.bypassed)}
+                  >
+                    ${instrument.bypassed ? "Unbypass" : "Bypass"}
+                  </button>
+                  <button class="danger" @click=${() => this._removeInstrument()}>
+                    Remove
+                  </button>
+                </div>
               </div>
-              ${instrument.missing ? html`
-                <div class="warn">
-                  ${icon("exclamation-triangle", 12)}
-                  Plugin binary is missing or unloadable.
-                </div>` : null}
-              <div class="actions">
-                <button @click=${() => this._openInstrumentPicker({ replace: true })}>
-                  Change…
-                </button>
-                <button
-                  ?disabled=${instrument.missing}
-                  @click=${() => this._toggleBypass(instrument.id, instrument.bypassed)}
-                >
-                  ${instrument.bypassed ? "Unbypass" : "Bypass"}
-                </button>
-                <button class="danger" @click=${() => this._removeInstrument()}>
-                  Remove
-                </button>
+              ${this._renderPresetList(instrument)}
+            ` : html`
+              <div class="card muted">
+                No instrument plugin on this track. Ardour will still
+                record + play back the MIDI, but there's no synth to
+                turn notes into audio.
+                <div class="actions" style="margin-top:10px">
+                  <button class="primary" @click=${() => this._openInstrumentPicker()}>
+                    Add instrument…
+                  </button>
+                </div>
               </div>
-            </div>
-            ${this._renderPresetList(instrument)}
-          ` : html`
-            <div class="card muted">
-              No instrument plugin on this track. Ardour will still
-              record + play back the MIDI, but there's no synth to
-              turn notes into audio.
-              <div class="actions" style="margin-top:10px">
-                <button class="primary" @click=${() => this._openInstrumentPicker()}>
-                  Add instrument…
-                </button>
+            `}
+          </section>
+          ${this._renderChannelSection(t)}
+          <section>
+            <h3>Instrument parameters</h3>
+            ${programLike.length > 0 ? html`
+              <div class="card" style="gap:8px">
+                ${programLike.map((p) => html`
+                  <foyer-param-control
+                    .param=${p}
+                    .value=${this._currentValue(p)}
+                    .size=${36}
+                    widget="auto"
+                    @input=${(e) => this._setParam(p, e.detail)}
+                    @change=${(e) => this._setParam(p, e.detail)}
+                  ></foyer-param-control>
+                `)}
               </div>
-            </div>
-          `}
-        </section>
+              <div class="hint">
+                Discrete / enum parameters on the instrument. Synths
+                route program / bank selection through these — change
+                a value and the patch updates immediately. (If the synth
+                doesn't expose a parameter for program, use the
+                "Patches &amp; banks" section above instead.)
+              </div>
+            ` : html`
+              <div class="card muted">
+                The instrument on this track doesn't expose any
+                discrete / enumerated parameters, so there's no
+                plugin-side patch selector to display here. Use the
+                "Patches &amp; banks" section above to send standard
+                MIDI program-change events to the instrument.
+              </div>
+            `}
+          </section>
+          ${otherPlugins.length > 0 ? html`
+            <section>
+              <h3>Inserts</h3>
+              <div class="card">
+                ${otherPlugins.map((pi) => html`
+                  <div class="row">
+                    <span class="label">${pi.name}</span>
+                    <span class="kind">${pi.bypassed ? "bypassed" : "active"}</span>
+                    <span class="value">${pi.params?.length ?? 0} params</span>
+                  </div>
+                `)}
+              </div>
+            </section>
+          ` : null}
+        ` : null}
 
-        ${channelOpen ? this._renderChannelSection(t) : null}
-
-        ${this._renderPatchChanges()}
-
-        <section>
-          <h3>Instrument parameters</h3>
-          ${programLike.length > 0 ? html`
-            <div class="card" style="gap:8px">
-              ${programLike.map((p) => html`
-                <foyer-param-control
-                  .param=${p}
-                  .value=${this._currentValue(p)}
-                  .size=${36}
-                  widget="auto"
-                  @input=${(e) => this._setParam(p, e.detail)}
-                  @change=${(e) => this._setParam(p, e.detail)}
-                ></foyer-param-control>
-              `)}
-            </div>
-            <div class="hint">
-              Discrete / enum parameters on the instrument. Synths
-              route program / bank selection through these — change
-              a value and the patch updates immediately. (If the synth
-              doesn't expose a parameter for program, use the
-              "Patches &amp; banks" section above instead.)
-            </div>
-          ` : html`
-            <div class="card muted">
-              The instrument on this track doesn't expose any
-              discrete / enumerated parameters, so there's no
-              plugin-side patch selector to display here. Use the
-              "Patches &amp; banks" section above to send standard
-              MIDI program-change events to the instrument.
-            </div>
-          `}
-        </section>
-
-        ${otherPlugins.length > 0 ? html`
+        ${showPatches ? this._renderPatchChanges() : null}
+        ${showPatches && otherPlugins.length > 0 ? html`
           <section>
             <h3>Inserts</h3>
             <div class="card">
@@ -874,6 +1131,90 @@ export class MidiManager extends LitElement {
             </div>
           </section>
         ` : null}
+      </div>
+      ${this._pickerOpen ? this._renderPatchPickerModal() : null}
+    `;
+  }
+  _renderPatchPickerModal() {
+    const banks = this._pickerBanks();
+    const programs = this._pickerPrograms();
+    const currentBank = banks.find((b) => b.bank === this._pickerBank) || banks[0];
+    const bankValue = this._pickerBank < 0 ? 0 : this._pickerBank;
+    const { msb, lsb } = bankToMsbLsb(bankValue);
+    const model = this._patchNames?.model || "";
+    const mode = this._patchNames?.mode || "";
+    return html`
+      <div class="modal" @click=${(e) => { if (e.target === e.currentTarget) this._closePatchPicker(); }}>
+        <div class="modal-card">
+          <div class="modal-head">
+            <span class="title">Select Patch</span>
+            <span class="spacer"></span>
+            <button class="close" title="Close" @click=${() => this._closePatchPicker()}>${icon("x-mark", 14)}</button>
+          </div>
+          <div class="modal-body">
+            <div class="picker-row">
+              <label>Channel</label>
+              <select
+                .value=${String(wireChannelToDisplay(this._pickerChannel))}
+                @change=${(e) => {
+                  this._pickerChannel = displayChannelToWire(e.currentTarget.value);
+                  this._requestPatchNamesForWireChannel(this._pickerChannel);
+                }}
+              >
+                ${Array.from({ length: 16 }).map((_, i) => html`
+                  <option value=${String(i + 1)}>${i + 1}</option>
+                `)}
+              </select>
+            </div>
+            <div class="picker-row">
+              <label>Bank</label>
+              <select
+                .value=${String(this._pickerBank)}
+                @change=${(e) => { this._pickerBank = Number(e.currentTarget.value) || -1; }}
+              >
+                <option value="-1">No bank (program only)</option>
+                ${banks.map((b) => html`
+                  <option value=${String(b.bank)}>${b.name} · ${b.bank}</option>
+                `)}
+              </select>
+            </div>
+            <div class="picker-row">
+              <label>MSB / LSB</label>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <input class="num" type="number" min="0" max="127" step="1"
+                       .value=${String(msb)}
+                       @change=${(e) => { this._pickerBank = msbLsbToBank(e.currentTarget.value, lsb); }}>
+                <input class="num" type="number" min="0" max="127" step="1"
+                       .value=${String(lsb)}
+                       @change=${(e) => { this._pickerBank = msbLsbToBank(msb, e.currentTarget.value); }}>
+              </div>
+            </div>
+            ${(model || mode) ? html`
+              <div class="hint">
+                ${model ? `Model: ${model}` : ""}${model && mode ? " · " : ""}${mode ? `Mode: ${mode}` : ""}
+              </div>
+            ` : null}
+            ${this._patchNamesLoading ? html`<div class="hint">Loading patch names from Ardour…</div>` : null}
+            <div class="hint">
+              ${currentBank?.name || "Bank"} · pick a program:
+            </div>
+            <div class="program-grid">
+              ${programs.map((p) => html`
+                <button
+                  class="program-btn ${this._pickerProgram === p.program ? "active" : ""}"
+                  @click=${() => { this._pickerProgram = p.program; }}
+                  title=${`Program ${p.program + 1}`}
+                >
+                  ${p.program + 1}. ${p.name}
+                </button>
+              `)}
+            </div>
+          </div>
+          <div class="modal-foot">
+            <button @click=${() => this._closePatchPicker()}>Cancel</button>
+            <button class="primary" @click=${() => this._applyPatchPicker()}>Apply</button>
+          </div>
+        </div>
       </div>
     `;
   }

@@ -26,8 +26,9 @@ use foyer_ipc::{
 };
 use foyer_schema::{
     AudioFormat, AudioSource, Command, EnginePort, EntityId, Envelope, Event, LatencyReport,
-    MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, PluginCatalogEntry, PluginPreset,
-    Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch, SCHEMA_VERSION,
+    MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch, PluginCatalogEntry,
+    PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch,
+    SCHEMA_VERSION,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -110,6 +111,10 @@ struct Shared {
     /// In-flight list_plugin_presets requests, keyed by plugin id.
     /// Resolved by the reader task on `Event::PluginPresetsListed`.
     pending_presets: Mutex<HashMap<EntityId, Vec<oneshot::Sender<Vec<PluginPreset>>>>>,
+    /// In-flight list_midi_patch_names requests, keyed by
+    /// "<track_id>:<channel>" so concurrent requests for different
+    /// channels don't trample each other.
+    pending_midi_patch_names: Mutex<HashMap<String, Vec<oneshot::Sender<MidiPatchNames>>>>,
     /// In-flight list_plugins requests. The shim's PluginsList event
     /// has no correlation id — every pending awaiter resolves to
     /// the same catalog. Concurrent requests just share the same
@@ -172,6 +177,7 @@ impl HostClient {
             pending_delete_region: Mutex::new(HashMap::new()),
             pending_update_track: Mutex::new(HashMap::new()),
             pending_presets: Mutex::new(HashMap::new()),
+            pending_midi_patch_names: Mutex::new(HashMap::new()),
             pending_plugins_list: Mutex::new(Vec::new()),
             pending_ports_list: Mutex::new(Vec::new()),
             regions_cache: Mutex::new(HashMap::new()),
@@ -605,6 +611,25 @@ impl HostClient {
         timeout(rx, "list_plugin_presets").await
     }
 
+    pub async fn list_midi_patch_names(
+        &self,
+        track_id: EntityId,
+        channel: u8,
+    ) -> Result<MidiPatchNames, ClientError> {
+        let key = format!("{}:{channel}", track_id.as_str());
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_midi_patch_names
+            .lock()
+            .await
+            .entry(key)
+            .or_default()
+            .push(tx);
+        self.send_command(Command::ListMidiPatchNames { track_id, channel })
+            .await?;
+        timeout(rx, "list_midi_patch_names").await
+    }
+
     pub async fn load_plugin_preset(
         &self,
         plugin_id: EntityId,
@@ -994,6 +1019,15 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     if let Some(waiters) = shared.pending_presets.lock().await.remove(plugin_id) {
                         for w in waiters {
                             let _ = w.send(presets.clone());
+                        }
+                    }
+                }
+                Event::MidiPatchNamesListed { track_id, names } => {
+                    let key = format!("{}:{}", track_id.as_str(), names.channel);
+                    if let Some(waiters) = shared.pending_midi_patch_names.lock().await.remove(&key)
+                    {
+                        for w in waiters {
+                            let _ = w.send(names.clone());
                         }
                     }
                 }

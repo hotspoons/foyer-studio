@@ -24,6 +24,8 @@ export class PluginPanel extends LitElement {
     plugin: { type: Object },
     /** Track that hosts this plugin (for context/breadcrumb display). */
     trackName: { type: String },
+    /** Owning track id for quick track-editor actions. */
+    trackId: { type: String, attribute: "track-id" },
     /** Header-only layout when true; hides group body. */
     minimized: { type: Boolean, reflect: true },
     /** Reactive: presets returned by the shim for the current plugin. */
@@ -220,6 +222,7 @@ export class PluginPanel extends LitElement {
     super();
     this.plugin = null;
     this.trackName = "";
+    this.trackId = "";
     this.minimized = false;
     /** Optimistic: per-instance open state for the native-GUI toggle.
      *  Tracked here because the wire schema doesn't (yet) carry a
@@ -243,6 +246,7 @@ export class PluginPanel extends LitElement {
     };
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
     this._measured = false;
+    this._closingForMissingPlugin = false;
     // Listen for the native-GUI iframe's size postMessage. The
     // iframe's filter script reports the plugin window's natural
     // X11 dimensions when the matched window is shown — we use
@@ -330,6 +334,7 @@ export class PluginPanel extends LitElement {
   /** When the bound plugin changes, lazily fetch its presets. */
   willUpdate(changed) {
     if (changed.has("plugin")) {
+      this._closingForMissingPlugin = false;
       const id = this.plugin?.id;
       if (id && id !== this._presetsForPluginId) {
         this._presetsForPluginId = id;
@@ -379,6 +384,52 @@ export class PluginPanel extends LitElement {
         && body.plugin_id === this._presetsForPluginId) {
       this._presets = body.presets || [];
     }
+  }
+
+  _pluginStillInSession() {
+    const pluginId = this.plugin?.id;
+    if (!pluginId) return false;
+    const session = window.__foyer?.store?.state?.session;
+    if (!session) return true;
+    for (const t of session.tracks || []) {
+      for (const p of t.plugins || []) {
+        if (p.id === pluginId) return true;
+      }
+    }
+    return false;
+  }
+
+  _requestWindowClose() {
+    if (this._closingForMissingPlugin) return;
+    this._closingForMissingPlugin = true;
+    let host = this.parentElement;
+    while (host) {
+      if (host.tagName?.toLowerCase() === "foyer-window") break;
+      host = host.parentElement;
+    }
+    if (!host) return;
+    host.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
+  }
+
+  _trackById(id) {
+    if (!id) return null;
+    const session = window.__foyer?.store?.state?.session;
+    return session?.tracks?.find((t) => t.id === id) || null;
+  }
+
+  _showMidiShortcut() {
+    if (!this.trackId || !this.plugin?.id) return false;
+    const track = this._trackById(this.trackId);
+    if (!track || track.kind !== "midi") return false;
+    const first = (track.plugins || [])[0];
+    return first?.id === this.plugin.id;
+  }
+
+  _openTrackMidiTab() {
+    if (!this.trackId) return;
+    import("./track-editor-modal.js").then((m) => {
+      m.openTrackEditor(this.trackId, { tab: "setup" });
+    });
   }
 
   _onPresetChange(ev) {
@@ -431,6 +482,10 @@ export class PluginPanel extends LitElement {
   render() {
     const p = this.plugin;
     if (!p) return html`<div class="empty">No plugin selected.</div>`;
+    if (!this._pluginStillInSession()) {
+      this._requestWindowClose();
+      return html`<div class="empty">Plugin was removed.</div>`;
+    }
 
     const bypassParam = (p.params || []).find((x) => x.id.endsWith(".bypass"));
     const bypassOn = this._currentValue(bypassParam) === true;
@@ -492,6 +547,16 @@ export class PluginPanel extends LitElement {
           >
             ${icon("eye", 12)}
             ${this._nativeGuiOpen ? "GUI Open" : "Native GUI"}
+          </button>
+        ` : null}
+        ${this._showMidiShortcut() ? html`
+          <button
+            class="native-gui"
+            title="Open track editor on MIDI tab"
+            @click=${() => this._openTrackMidiTab()}
+          >
+            ${icon("musical-note", 12)}
+            MIDI
           </button>
         ` : null}
         <button

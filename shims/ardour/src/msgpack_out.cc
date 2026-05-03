@@ -1391,6 +1391,42 @@ encode_plugin_presets_listed (Session& session, const std::string& plugin_id)
 }
 
 std::vector<std::uint8_t>
+encode_midi_patch_names_listed (Session& session, const std::string& track_id, std::uint8_t channel)
+{
+	auto d = schema_map::list_midi_patch_names (session, track_id, channel);
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");      o.str ("event");
+		o.str ("type");     o.str ("midi_patch_names_listed");
+		o.str ("track_id"); o.str (track_id);
+		o.str ("names");
+		std::size_t n = 2; // channel, banks
+		const bool emit_model = !d.model.empty ();
+		const bool emit_mode  = !d.mode.empty ();
+		if (emit_model) ++n;
+		if (emit_mode)  ++n;
+		o.map (n);
+		o.str ("channel"); o.u (d.channel);
+		if (emit_model) { o.str ("model"); o.str (d.model); }
+		if (emit_mode)  { o.str ("mode");  o.str (d.mode); }
+		o.str ("banks");
+		o.array (d.banks.size ());
+		for (auto const& b : d.banks) {
+			o.map (3);
+			o.str ("bank"); o.u (b.bank);
+			o.str ("name"); o.str (b.name);
+			o.str ("programs");
+			o.array (b.programs.size ());
+			for (auto const& p : b.programs) {
+				o.map (2);
+				o.str ("program"); o.u (p.program);
+				o.str ("name");    o.str (p.name);
+			}
+		}
+	});
+}
+
+std::vector<std::uint8_t>
 encode_region_removed (const std::string& track_id, const std::string& region_id)
 {
 	return envelope_event ([&] (Out& o) {

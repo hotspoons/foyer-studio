@@ -16,9 +16,9 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use foyer_schema::{
     Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, Event, LatencyReport,
-    MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, PathListing, PluginCatalogEntry,
-    PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch,
-    WaveformPeaks,
+    MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch, PathListing,
+    PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta,
+    Track, TrackPatch, WaveformPeaks,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -535,6 +535,18 @@ pub trait Backend: Send + Sync + 'static {
         _plugin_id: EntityId,
     ) -> Result<Vec<PluginPreset>, BackendError> {
         Ok(Vec::new())
+    }
+    async fn list_midi_patch_names(
+        &self,
+        _track_id: EntityId,
+        channel: u8,
+    ) -> Result<MidiPatchNames, BackendError> {
+        Ok(MidiPatchNames {
+            channel,
+            model: None,
+            mode: None,
+            banks: Vec::new(),
+        })
     }
     async fn load_plugin_preset(
         &self,

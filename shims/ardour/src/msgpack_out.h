@@ -91,6 +91,11 @@ std::vector<std::uint8_t> encode_track_meters_from_routes (
 std::vector<std::uint8_t> encode_plugin_presets_listed (
     ARDOUR::Session&, const std::string& plugin_id);
 
+/// Encode `Event::MidiPatchNamesListed { track_id, names }` answering
+/// `Command::ListMidiPatchNames`.
+std::vector<std::uint8_t> encode_midi_patch_names_listed (
+    ARDOUR::Session&, const std::string& track_id, std::uint8_t channel);
+
 /// Encode `Event::PluginsList { entries }` — the catalog of every
 /// plugin Ardour's PluginManager has scanned. Answers
 /// `Command::ListPlugins`.

@@ -155,6 +155,33 @@ struct PluginPresetDesc {
 	bool        is_factory = true;
 };
 
+/// Midnam patch-name row (one program entry).
+struct MidiPatchProgramDesc {
+	std::uint8_t  program = 0;   ///< 0..127
+	std::string   name;
+};
+
+/// Midnam patch bank + its named programs.
+struct MidiPatchBankDesc {
+	std::uint16_t bank = 0;      ///< Ardour/Midnam bank number
+	std::string   name;
+	std::vector<MidiPatchProgramDesc> programs;
+};
+
+/// Midnam data resolved for one track/channel request.
+struct MidiPatchNamesDesc {
+	std::string   track_id;
+	std::uint8_t  channel = 0;   ///< 0..15
+	std::string   model;         ///< InstrumentInfo::model()
+	std::string   mode;          ///< InstrumentInfo::mode()
+	std::vector<MidiPatchBankDesc> banks;
+};
+
+/// Query Ardour's InstrumentInfo/Midnam stack for the given MIDI track.
+/// Returns empty banks when the track has no instrument or no Midnam map.
+MidiPatchNamesDesc list_midi_patch_names (
+	ARDOUR::Session&, const std::string& track_id, std::uint8_t channel);
+
 /// Look up a PluginInsert by its Foyer id (`"plugin.<pi-id>"`).
 std::shared_ptr<ARDOUR::PluginInsert> find_plugin_insert_by_foyer_id (
 	ARDOUR::Session&, const std::string& plugin_id);

@@ -275,7 +275,7 @@ export class TrackEditorModal extends LitElement {
     // filter: we only route track inputs *from* readable ports.
     this._requestPorts();
     const preferred = this.initialTab || this._loadLastTab();
-    if (preferred === "midi") this._tab = "midi";
+    if (preferred === "midi" || preferred === "setup") this._tab = preferred;
   }
   disconnectedCallback() {
     document.removeEventListener("keydown", this._keyHandler);
@@ -340,14 +340,15 @@ export class TrackEditorModal extends LitElement {
 
   _loadLastTab() {
     try {
-      return localStorage.getItem("foyer.trackEditor.lastMidiTab") || "editor";
+      const tab = localStorage.getItem("foyer.trackEditor.lastMidiTab") || "editor";
+      return (tab === "midi" || tab === "setup") ? tab : "editor";
     } catch {
       return "editor";
     }
   }
 
   _setTab(tab) {
-    this._tab = tab === "midi" ? "midi" : "editor";
+    this._tab = (tab === "midi" || tab === "setup") ? tab : "editor";
     try {
       localStorage.setItem("foyer.trackEditor.lastMidiTab", this._tab);
     } catch {}
@@ -444,15 +445,17 @@ export class TrackEditorModal extends LitElement {
             <div class="tabs">
               <button class="tab ${this._tab === "editor" ? "active" : ""}" @click=${() => this._setTab("editor")}>Track</button>
               <button class="tab ${this._tab === "midi" ? "active" : ""}" @click=${() => this._setTab("midi")}>MIDI</button>
+              <button class="tab ${this._tab === "setup" ? "active" : ""}" @click=${() => this._setTab("setup")}>Setup</button>
             </div>
           ` : null}
           <button class="close" @click=${this._close}>${icon("x-mark", 16)}</button>
         </header>
-        ${t.kind === "midi" && this._tab === "midi" ? html`
+        ${t.kind === "midi" && (this._tab === "midi" || this._tab === "setup") ? html`
           <foyer-midi-manager
             style="flex:1;min-height:0"
             .trackId=${this.trackId}
             .trackName=${t.name}
+            .mode=${this._tab === "setup" ? "setup" : "patches"}
           ></foyer-midi-manager>
         ` : html`<div class="content">
           <div class="form-body">
