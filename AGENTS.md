@@ -364,11 +364,26 @@ or schema changes require `cargo run` + restart.
 
 ## Gotchas
 
+- **Lit `css` tagged templates are normal JavaScript template literals.**
+  `${...}` interpolates. A **raw backtick** anywhere in the CSS body
+  ends the `css` template literal early; the tail is parsed as ordinary
+  code (2026-05-03: `TypeError: css(...).region is not a function` after
+  a comment used Markdown-style quoted class names with backticks).
+  **Do not** put backticks inside `css` blocks — rephrase comments.
+  Avoid angle-bracket custom element names in `css` text too (e.g.
+  `<foyer-waveform-gl>`): Lit can treat the token after `<` as an
+  identifier and throw `ReferenceError` at class init. See
+  [waveform-gl.js](web/ui-core/viz/waveform-gl.js) for the corrected
+  comments.
 - **`./web` is NOT served by default.** `foyer serve` with no flag
   serves `$XDG_DATA_HOME/foyer/web/` (extracted from the binary on
   first run). `just run` explicitly passes `--web-root web` so edits
   to the repo tree are live. Don't be surprised if `cargo run
-  --bin foyer` with no flags paints a stale UI.
+  --bin foyer` with no flags paints a stale UI. **When a UI fix
+  "does nothing", verify the browser is actually loading scripts from
+  the workspace** (e.g. DevTools Network → response path or source age).
+  An agent can ship the right patch and still think it failed because
+  the running server kept serving the old bundled tree.
 - **tile-leaf must use static-html for dynamic tags.** Rendering
   view bodies via `document.createElement(tag)` breaks Lit's element
   reuse — the mixer, timeline, etc. remount on every store event.

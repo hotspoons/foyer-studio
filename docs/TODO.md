@@ -1,5 +1,10 @@
 # Foyer Studio — active plan
 
+## WIP (handoff — not finished)
+
+- [/] **Timeline:** Ctrl/Cmd + left/right edge drag → `stretch_region` (local stretch preview, dashed “stretch” label, MIDI stretch in Ardour shim; still unreliable in the wild — edge hit-testing / modifiers / multi-timeline / backend path needs a deeper pass).
+- [/] **Timeline:** `S` → `split_region` on selected regions (hover-cursor split anchor vs playhead; `queryTimelineFromKeyEvent` / keybind ordering — still unreliable for some users — needs thorough debugging).
+
 ~~Fresh cut as of 2026-04-24. Everything already landed is archived in [old/PLAN.md](old/PLAN.md) under the "Archived 2026-04-24" section.~~
 (deleted, not needed)
 
@@ -530,10 +535,7 @@ master bus at all.
   - Plugin picker today is substring match on name + vendor. Search by sonic description
     ("warm saturation", "long reverb tail") using a local embeddings model against the
     plugin catalog's description fields.
-- [ ] Simple plugin favorites system (add a * next to each effect and instrument in the plugins
-  list, have a favorites toggle in the insert plugin / instrument picker dialog that remembers
-  its last picked state). This should be client side only, stored in browser storage, no shim
-  changes or schema changes
+- [x] Simple plugin favorites (★ / ☆ on each catalog row; “Favorites only” in plugin picker + plugins catalog with last state in localStorage). Client-only — [`plugin-favorites-store.js`](../web/ui-full/components/plugin-favorites-store.js), [`plugin-picker-modal.js`](../web/ui-full/components/plugin-picker-modal.js), [`plugins-view.js`](../web/ui-full/components/plugins-view.js).
 - [/] Plugin snapshot system with session
   - Bundle the specific plugin binaries + presets into the session archive so a session
     opens with the same plugin state on another machine (or a shipping
@@ -564,9 +566,3 @@ master bus at all.
   `AudioContext.sampleRate` (don't hardcode 48k in `audio-ingress.js:49`); shim echoes
   back the engine's rate in `AudioIngressOpened.format` so the browser knows whether to
   resize its worklet buffer.
-
-## Known deferred
-
-- Storing tunnel credential hashes in extended Ardour XML session metadata (currently in
-  `$XDG_DATA_HOME/foyer/tunnel-manifest.json`). Rich's call: "Is this even worthwhile?
-  Defer." Leave in manifest file indefinitely.

@@ -4,6 +4,12 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
+import {
+  getPluginPickerFavoritesOnly,
+  isPluginFavorite,
+  setPluginPickerFavoritesOnly,
+  togglePluginFavorite,
+} from "./plugin-favorites-store.js";
 
 export class PluginsView extends LitElement {
   static properties = {
@@ -11,12 +17,13 @@ export class PluginsView extends LitElement {
     _query:   { state: true, type: String },
     _format:  { state: true, type: String },
     _role:    { state: true, type: String },
+    _favoritesOnly: { state: true, type: Boolean },
   };
 
   static styles = css`
     :host { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
     .toolbar {
-      display: flex; gap: 10px; align-items: center;
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
       padding: 8px 14px;
       background: var(--color-surface);
       border-bottom: 1px solid var(--color-border);
@@ -36,6 +43,7 @@ export class PluginsView extends LitElement {
       color: var(--color-text);
     }
     select {
+      flex: 0 0 auto;
       background: var(--color-surface-elevated);
       color: var(--color-text);
       border: 1px solid var(--color-border);
@@ -74,6 +82,43 @@ export class PluginsView extends LitElement {
       background: var(--color-surface-muted);
       color: var(--color-text-muted);
     }
+    .fav-toggle {
+      flex: 0 0 auto;
+      box-sizing: border-box;
+      min-width: 32px;
+      height: 30px;
+      background: var(--color-surface-muted);
+      border: 1px solid var(--color-border);
+      cursor: pointer;
+      padding: 0 6px;
+      font-size: 17px;
+      line-height: 1;
+      color: var(--color-text-muted);
+      border-radius: var(--radius-sm);
+    }
+    .fav-toggle:hover {
+      background: var(--color-surface-elevated);
+      color: var(--color-text);
+      border-color: var(--color-accent);
+    }
+    .fav-toggle.on {
+      color: var(--color-accent);
+      border-color: color-mix(in oklab, var(--color-accent) 55%, var(--color-border));
+      background: color-mix(in oklab, var(--color-accent) 14%, var(--color-surface-muted));
+    }
+    label.fav-only {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 6px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+      color: var(--color-text);
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+    label.fav-only input { accent-color: var(--color-accent); }
     .empty {
       padding: 24px;
       color: var(--color-text-muted);
@@ -87,7 +132,9 @@ export class PluginsView extends LitElement {
     this._query = "";
     this._format = "all";
     this._role = "all";
+    this._favoritesOnly = getPluginPickerFavoritesOnly();
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
+    this._favPrefsHandler = () => this.requestUpdate();
   }
 
   connectedCallback() {
@@ -97,9 +144,11 @@ export class PluginsView extends LitElement {
       ws.addEventListener("envelope", this._envelopeHandler);
       ws.send({ type: "list_plugins" });
     }
+    window.addEventListener("foyer:plugin-favorites-changed", this._favPrefsHandler);
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
+    window.removeEventListener("foyer:plugin-favorites-changed", this._favPrefsHandler);
     super.disconnectedCallback();
   }
 
@@ -112,18 +161,20 @@ export class PluginsView extends LitElement {
 
   _filtered() {
     const q = this._query.trim().toLowerCase();
-    return this._entries.filter(e => {
+    let list = this._entries.filter((e) => {
       if (this._format !== "all" && e.format !== this._format) return false;
       if (this._role !== "all" && e.role !== this._role) return false;
+      if (this._favoritesOnly && !isPluginFavorite(e.uri)) return false;
       if (!q) return true;
       return e.name.toLowerCase().includes(q) || (e.vendor || "").toLowerCase().includes(q);
     });
+    return list;
   }
 
   render() {
     const filtered = this._filtered();
     const byRole = {};
-    for (const e of filtered) (byRole[e.role] ||= []).push(e);
+    for (const e of filtered) (byRole[e.role || "other"] ||= []).push(e);
     return html`
       <div class="toolbar">
         <div class="search">
@@ -156,6 +207,16 @@ export class PluginsView extends LitElement {
             <option value="utility">Utility</option>
           </select>
         </label>
+        <label class="fav-only" title="Same setting as the insert-plugin picker (this browser)">
+          <input
+            type="checkbox"
+            .checked=${this._favoritesOnly}
+            @change=${(e) => {
+              this._favoritesOnly = e.currentTarget.checked;
+              setPluginPickerFavoritesOnly(this._favoritesOnly);
+            }}>
+          Favorites only
+        </label>
       </div>
       <div class="list">
         ${filtered.length === 0
@@ -169,11 +230,21 @@ export class PluginsView extends LitElement {
   }
 
   _renderCard(p) {
+    const fav = isPluginFavorite(p.uri);
     return html`
       <div class="card"
            draggable="true"
            @dragstart=${(ev) => this._onCardDragStart(ev, p)}
            @click=${() => this._select(p)}>
+        <button
+          type="button"
+          class="fav-toggle ${fav ? "on" : ""}"
+          title=${fav ? "Remove from favorites" : "Add to favorites"}
+          @click=${(e) => {
+            e.stopPropagation();
+            togglePluginFavorite(p.uri);
+            this.requestUpdate();
+          }} aria-label=${fav ? "Remove from favorites" : "Add to favorites"}>${fav ? "★" : "☆"}</button>
         ${icon("puzzle-piece", 18)}
         <div>
           <div class="name">${p.name}</div>

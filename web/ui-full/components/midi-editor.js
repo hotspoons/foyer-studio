@@ -27,7 +27,13 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
-import { SCALES, PITCH_CLASS_LABELS, inScale, chordIntervals } from "foyer-core/music-theory.js";
+import {
+  SCALES,
+  PITCH_CLASS_LABELS,
+  inScale,
+  chordIntervals,
+  isScaleHighlightEnabled,
+} from "foyer-core/music-theory.js";
 // Side-strip body — see `_toggleStrip` + render().
 import "./midi-manager.js";
 
@@ -200,16 +206,34 @@ export class MidiEditor extends LitElement {
       border-bottom-color: rgba(255, 255, 255, 0.05);
     }
     .key.c-row { font-weight: 700; }
-    /* Scale highlights: in-scale = subtle accent tint on top of base
-     * key color; root note = stronger accent. Out-of-scale stays
-     * default. Layered as a box-shadow so the existing key colors are
-     * preserved underneath. */
+    /* Scale highlights (only when mode ≠ chromatic): left rail + inset tint
+     * so white vs black keys both read; out-of-scale keys are clearly dimmed. */
+    .key.out-of-scale {
+      box-shadow: inset 0 0 0 9999px rgba(0, 0, 0, 0.42);
+    }
+    .key.out-of-scale.black {
+      box-shadow: inset 0 0 0 9999px rgba(0, 0, 0, 0.55);
+    }
     .key.in-scale {
-      box-shadow: inset 0 0 0 9999px color-mix(in oklab, var(--color-accent-2) 10%, transparent);
+      box-shadow:
+        inset 4px 0 0 var(--color-accent-2),
+        inset 0 0 0 9999px color-mix(in oklab, var(--color-accent-2) 32%, transparent);
+    }
+    .key.in-scale.black {
+      box-shadow:
+        inset 4px 0 0 var(--color-accent-2),
+        inset 0 0 0 9999px color-mix(in oklab, var(--color-accent-2) 22%, transparent);
     }
     .key.scale-root {
-      box-shadow: inset 0 0 0 9999px color-mix(in oklab, var(--color-accent) 22%, transparent);
-      border-bottom-color: color-mix(in oklab, var(--color-accent) 60%, var(--color-border));
+      box-shadow:
+        inset 4px 0 0 var(--color-accent),
+        inset 0 0 0 9999px color-mix(in oklab, var(--color-accent) 40%, transparent);
+      border-bottom-color: color-mix(in oklab, var(--color-accent) 45%, var(--color-border));
+    }
+    .key.scale-root.black {
+      box-shadow:
+        inset 4px 0 0 var(--color-accent),
+        inset 0 0 0 9999px color-mix(in oklab, var(--color-accent) 28%, transparent);
     }
     .notes-scroll {
       flex: 1; min-width: 0;
@@ -225,6 +249,28 @@ export class MidiEditor extends LitElement {
         var(--color-surface) calc(var(--row-h, 14px) * 2));
       cursor: crosshair;
     }
+    .notes-canvas.scale-hl-on {
+      /* Flat base — row colors come from .scale-lane.* overlays */
+      background: var(--color-surface);
+    }
+    .scale-lane {
+      position: absolute;
+      left: 0;
+      right: 0;
+      pointer-events: none;
+      z-index: 0;
+      box-sizing: border-box;
+    }
+    .scale-lane.out {
+      background: color-mix(in oklab, var(--color-surface) 42%, #000);
+    }
+    .scale-lane.in {
+      background: color-mix(in oklab, var(--color-accent-2) 30%, var(--color-surface-elevated));
+    }
+    .scale-lane.root {
+      background: color-mix(in oklab, var(--color-accent) 38%, var(--color-surface-elevated));
+      box-shadow: inset 4px 0 0 var(--color-accent);
+    }
     .notes-canvas.dragging { cursor: grabbing; }
     .notes-canvas .c-stripe {
       position: absolute;
@@ -238,10 +284,12 @@ export class MidiEditor extends LitElement {
       width: 1px;
       background: rgba(255, 255, 255, 0.05);
       pointer-events: none;
+      z-index: 1;
     }
     .beat-line.bar { background: rgba(255, 255, 255, 0.14); }
     .note {
       position: absolute;
+      z-index: 2;
       border-radius: 2px;
       background: linear-gradient(180deg, var(--color-accent-2, #b084ff), var(--color-accent, #7c5cff));
       border: 1px solid color-mix(in oklab, var(--color-accent, #7c5cff) 60%, #000 40%);
@@ -1119,13 +1167,27 @@ export class MidiEditor extends LitElement {
       beatLines.push(html`<div class="beat-line ${isBar ? "bar" : ""}" style="left:${x}px"></div>`);
     }
     const cStripes = [];
+    const scaleLanes = [];
     visiblePitches.forEach((p, i) => {
-      if (p % 12 === 0) {
-        cStripes.push(html`<div class="c-stripe" style="top:${i * rowH}px"></div>`);
+      const top = i * rowH;
+      if (scaleHL) {
+        const cls12 = ((p - scaleRoot) % 12 + 12) % 12;
+        const isRoot = cls12 === 0;
+        const inS = inScale(p, scaleRoot, scaleMode);
+        let lane = "scale-lane ";
+        if (isRoot) lane += "root";
+        else if (inS) lane += "in";
+        else lane += "out";
+        scaleLanes.push(html`<div class="${lane}" style="top:${top}px;height:${rowH}px"></div>`);
+      } else if (p % 12 === 0) {
+        cStripes.push(html`<div class="c-stripe" style="top:${top}px"></div>`);
       }
     });
 
     const selCount = this._selection.size;
+    const scaleMode = this._scaleMode || "chromatic";
+    const scaleHL = isScaleHighlightEnabled(scaleMode);
+    const scaleRoot = this._scaleRoot ?? 0;
 
     // Resolve a velocity value to display / use as the slider start.
     // If exactly one note is selected, show that; if multiple, show
@@ -1179,7 +1241,7 @@ export class MidiEditor extends LitElement {
           </select>
         </div>
 
-        <div class="group" title="Highlight in-scale notes on the keyboard rail">
+        <div class="group" title="Highlight scale vs non-scale rows on the grid and keyboard. Choose “Chromatic (off)” to disable.">
           <span>Scale</span>
           <select @change=${(e) => {
                     this._scaleRoot = Number(e.currentTarget.value);
@@ -1238,10 +1300,15 @@ export class MidiEditor extends LitElement {
         <div class="keyboard">
           <div class="keys" style="height:${canvasH}px">
             ${visiblePitches.map((p) => {
-              const cls = ((p - (this._scaleRoot ?? 0)) % 12 + 12) % 12;
-              const root = cls === 0;
-              const inS = inScale(p, this._scaleRoot ?? 0, this._scaleMode || "chromatic");
-              const scaleClass = root ? "scale-root" : (inS ? "in-scale" : "");
+              const cls12 = ((p - scaleRoot) % 12 + 12) % 12;
+              const isRoot = cls12 === 0;
+              const inS = inScale(p, scaleRoot, scaleMode);
+              let scaleClass = "";
+              if (scaleHL) {
+                if (isRoot) scaleClass = "scale-root";
+                else if (inS) scaleClass = "in-scale";
+                else scaleClass = "out-of-scale";
+              }
               return html`
                 <div class="key ${isBlackKey(p) ? "black" : ""} ${p % 12 === 0 ? "c-row" : ""} ${scaleClass}"
                      style="height:${rowH}px"
@@ -1253,9 +1320,10 @@ export class MidiEditor extends LitElement {
           </div>
         </div>
         <div class="notes-scroll" @scroll=${this._onKeyboardSync}>
-          <div class="notes-canvas ${this._drag ? "dragging" : ""}"
+          <div class="notes-canvas ${this._drag ? "dragging" : ""} ${scaleHL ? "scale-hl-on" : ""}"
                style="width:${canvasW}px;height:${canvasH}px"
                @pointerdown=${(e) => this._onCanvasDown(e)}>
+            ${scaleLanes}
             ${cStripes}
             ${beatLines}
             ${notes.length === 0 ? html`
