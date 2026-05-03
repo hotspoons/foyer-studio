@@ -526,6 +526,56 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    async fn stretch_region(
+        &self,
+        id: EntityId,
+        new_start_samples: i64,
+        new_length_samples: u64,
+        anchor: String,
+    ) -> Result<(), BackendError> {
+        const MIN_LEN: u64 = 4_800;
+        let (track_id, _region) = {
+            let mut store = self.regions.lock().await;
+            store
+                .stretch_content(&id, new_start_samples, new_length_samples, &anchor, MIN_LEN)
+                .map_err(BackendError::Other)?
+        };
+        self.waveforms.lock().await.clear_region(&id);
+        let regions = {
+            let mut store = self.regions.lock().await;
+            store.regions_for(&track_id, self.sample_rate()).clone()
+        };
+        let _ = self.tx.send(Event::RegionsList {
+            track_id,
+            regions,
+            timeline: self.timeline_meta(),
+        });
+        Ok(())
+    }
+
+    async fn split_region(&self, id: EntityId, at_samples: i64) -> Result<(), BackendError> {
+        const MIN_LEN: u64 = 4_800;
+        let left = crate::regions::fresh_region_id(self.next_dup_seed());
+        let right = crate::regions::fresh_region_id(self.next_dup_seed());
+        let track_id = {
+            let mut store = self.regions.lock().await;
+            store
+                .split_at(&id, at_samples, MIN_LEN, left, right)
+                .map_err(BackendError::Other)?
+        };
+        self.waveforms.lock().await.clear_region(&id);
+        let regions = {
+            let mut store = self.regions.lock().await;
+            store.regions_for(&track_id, self.sample_rate()).clone()
+        };
+        let _ = self.tx.send(Event::RegionsList {
+            track_id,
+            regions,
+            timeline: self.timeline_meta(),
+        });
+        Ok(())
+    }
+
     async fn update_track(&self, id: EntityId, patch: TrackPatch) -> Result<Track, BackendError> {
         let updated = self
             .state

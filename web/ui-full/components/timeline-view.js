@@ -6,6 +6,8 @@
 //   - Playhead rendered from transport.position, click ruler to seek
 //   - Major (every 5s) + minor (every 1s) grid lines
 //   - Drag region body to move; drag edges to resize — optimistic + UpdateRegion
+//   - Ctrl/Cmd + edge drag: time-stretch (MidiStretch / stub tick scale) via StretchRegion
+//   - S: split selected regions at the playhead (SplitRegion)
 //   - Waveforms via WaveformCache; resolution picked from current zoom level
 //
 // All sample-math uses `sample_rate` from the TimelineMeta payload so
@@ -335,6 +337,27 @@ export class TimelineView extends LitElement {
     }
     .region .edge.left  { left: 0; }
     .region .edge.right { right: 0; }
+    .region.stretch-active {
+      outline: 1px dashed color-mix(in oklab, var(--color-accent) 70%, transparent);
+      z-index: 1;
+    }
+    .region.stretch-active::after {
+      content: "stretch";
+      position: absolute;
+      top: 4px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: color-mix(in oklab, var(--color-accent) 35%, transparent);
+      color: var(--color-text);
+      pointer-events: none;
+      z-index: 4;
+    }
 
     .playhead {
       position: absolute;
@@ -606,6 +629,8 @@ export class TimelineView extends LitElement {
       this.requestUpdate();
     };
     window.addEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
+    this._onTimelineKeydown = (e) => this._onGlobalTimelineKeydown(e);
+    window.addEventListener("keydown", this._onTimelineKeydown, true);
   }
 
   _applyGridColors() {
@@ -635,7 +660,41 @@ export class TimelineView extends LitElement {
     );
     this.style.setProperty("--foyer-quant-grid", rgba(quant, quantA));
   }
+
+  _onGlobalTimelineKeydown(ev) {
+    if (ev.defaultPrevented) return;
+    const t = ev.target;
+    if (t && typeof t.closest === "function") {
+      if (t.closest("input, textarea, select, [contenteditable='true']")) return;
+    }
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    if (ev.key !== "s" && ev.key !== "S") return;
+    if (ev.repeat) return;
+    ev.preventDefault();
+    this._splitSelectedRegionsAtPlayhead();
+  }
+
+  /** Reaper-style: S splits each selected region under the playhead. */
+  _splitSelectedRegionsAtPlayhead() {
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    const ph = Math.round(Number(this._playheadSamples) || 0);
+    const minPiece = 4800;
+    for (const id of [...this._selectedRegionIds]) {
+      const r = this._regionForId(id);
+      if (!r) continue;
+      const start = r.start_samples;
+      const end = start + r.length_samples;
+      if (ph <= start || ph >= end) continue;
+      const leftLen = ph - start;
+      const rightLen = end - ph;
+      if (leftLen < minPiece || rightLen < minPiece) continue;
+      ws.send({ type: "split_region", id: r.id, at_samples: ph });
+    }
+  }
+
   disconnectedCallback() {
+    window.removeEventListener("keydown", this._onTimelineKeydown, true);
     if (this._onVizPrefsChanged) window.removeEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     window.__foyer?.ws?.removeEventListener("transport_seek_request", this._seekHandler);
@@ -2603,6 +2662,9 @@ export class TimelineView extends LitElement {
   _startDrag(ev, region, mode) {
     ev.preventDefault();
     ev.stopPropagation();
+    const stretchResize =
+      (mode === "resize-left" || mode === "resize-right") &&
+      (ev.ctrlKey || ev.metaKey);
     const isMulti = this._selectedRegionIds.has(region.id) && this._selectedRegionIds.size > 1;
     const movingIds = isMulti && mode === "move"
       ? [...this._selectedRegionIds]
@@ -2637,7 +2699,7 @@ export class TimelineView extends LitElement {
     // freeze is reverted in `up` so the post-RegionUpdated peak
     // refetch repaints normally.
     let resizeLeftPreview = null;
-    if (mode === "resize-left") {
+    if (mode === "resize-left" && !stretchResize) {
       const o = origs.get(region.id);
       const regionEl = this.renderRoot.querySelector(`.region[data-id="${region.id}"]`);
       const wfEl = regionEl?.querySelector("foyer-waveform-gl");
@@ -2679,6 +2741,9 @@ export class TimelineView extends LitElement {
         didDrag = true;
         // Real drag started — keep the multi-selection; demote is off.
         this._pendingDemoteRegionId = null;
+        if (stretchResize) {
+          for (const el of els) el.classList.add("stretch-active");
+        }
       }
       for (const id of movingIds) {
         const o = origs.get(id);
@@ -2695,6 +2760,13 @@ export class TimelineView extends LitElement {
         } else if (mode === "resize-right") {
           preview.length_samples = Math.max(4800, o.len + dxSamples);
         } else if (mode === "resize-left") {
+          if (stretchResize) {
+            const minDx = -o.offset;
+            const maxDx = o.len - 4_800;
+            const dx = Math.max(minDx, Math.min(maxDx, dxSamples));
+            preview.start_samples = o.start + dx;
+            preview.length_samples = o.len - dx;
+          } else {
           // Trim from the start: advance the source-media offset by
           // the same amount the timeline edge moves, so the lozenge
           // shrinks AND the underlying content slides forward (rather
@@ -2729,12 +2801,16 @@ export class TimelineView extends LitElement {
               ph.style.display = "none";
             }
           }
+          }
         }
         this._patchRegionLocally(preview);
       }
     };
     const up = () => {
-      for (const el of els) el.classList.remove("dragging");
+      for (const el of els) {
+        el.classList.remove("dragging");
+        el.classList.remove("stretch-active");
+      }
       // Drop the waveform freeze + placeholder. The post-commit
       // RegionUpdated event will invalidate the wf cache and the
       // next ensure() call refetches peaks for the new offset+length.
@@ -2762,6 +2838,20 @@ export class TimelineView extends LitElement {
         if (!r) continue;
         const o = origs.get(id);
         if (!o) continue;
+        if (stretchResize && (mode === "resize-left" || mode === "resize-right")) {
+          if (
+            r.start_samples === o.start
+            && r.length_samples === o.len
+          ) continue;
+          window.__foyer?.ws?.send({
+            type: "stretch_region",
+            id: r.id,
+            new_start_samples: r.start_samples,
+            new_length_samples: r.length_samples,
+            anchor: mode === "resize-left" ? "end" : "start",
+          });
+          continue;
+        }
         const newOffset = Number(r.source_offset_samples || 0);
         const offsetMoved = newOffset !== o.offset;
         // Skip the round-trip if nothing actually moved (e.g. the

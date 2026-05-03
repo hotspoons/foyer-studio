@@ -302,28 +302,6 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     `view_plugin_gui` RBAC permission.
   - **Phase 3 pending:** VST3 IPlugView + IComponentHandler bridge.
 
-# Cloud Run can't pull ghcr.io directly — the deploy goes through an
-# Artifact Registry remote-repo proxy. One-time setup:
-#   gcloud services enable artifactregistry.googleapis.com
-#   gcloud artifacts repositories create ghcr-remote --location=us-central1 \
-#     --repository-format=docker --mode=remote-repository \
-#     --remote-docker-repo=https://ghcr.io
-# Then deploy with the AR-prefixed URL (substitute your project id):
-gcloud run deploy foyer-studio \
-  --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/ghcr-remote/hotspoons/foyer-studio:latest \
-  --region=us-central1 \
-  --port=3838 \
-  --memory=2Gi --cpu=2 \
-  --min-instances=0 --max-instances=1 \
-  --execution-environment=gen2 \
-  --cpu-boost \
-  --timeout=3600 \
-  --allow-unauthenticated
-# Don't add `--add-volume name=shm` / `--add-volume-mount` at /dev/shm —
-# Cloud Run rejects mounts under /dev /proc /sys. Gen2 already provides
-# /dev/shm sized at ~50% of --memory (so 2Gi memory → ~1 GiB shm).
-# For older snapshots without ASAN_COREDUMP=0 baked into ENV, also pass
-# `--set-env-vars=ASAN_COREDUMP=0`.
 
 ## Region edits — DAW timeline backlog
 
@@ -332,20 +310,8 @@ combination of `update_region` + `duplicate_region_range` +
 `delete_region` on the existing schema; a few need new schema verbs
 (noted inline). Order is roughly by user impact.
 
-- [ ] Time-stretch on edge drag (modifier-held, e.g. Ctrl/Cmd+drag)
-  - Today edge-drag = trim. With a modifier, the region length should
-    change WHILE the source content stretches/compresses to fill the
-    new span. Ardour's `Region::set_length_unchecked` + a non-trivial
-    `Region::stretch_to` aren't directly exposed yet; needs a
-    `Command::StretchRegion { id, new_length_samples }` that the shim
-    routes through `Editor::commit_resize_drag` (Stretch) or the
-    region-fx time-stretch chain.
-  - Web side: same edge-drag handler, but with modifier set send the
-    stretch command instead of the trim command. UI cue: a
-    different cursor + a "stretch" badge during drag.
-  - Visual during drag: the waveform stretching that the trim path
-    currently shows accidentally is *exactly* what stretch should
-    look like — this is mostly a backend wiring + a modifier check.
+- [x] Time-stretch on edge drag (modifier-held, e.g. Ctrl/Cmd+drag)
+  - **Implemented:** `Command::StretchRegion { id, new_start_samples, new_length_samples, anchor }` — Ardour shim uses `MidiStretch` + `replace_region` (MIDI only; audio logs *not supported yet*). Stub scales note ticks. Web: Ctrl/Cmd+edge drag sends `stretch_region`; stretch badge/outline while dragging.
 - [ ] Crossfades on overlapping regions
   - When two regions on the same track overlap, render a crossfade
     in the overlap region (linear by default, exposed shape later).
@@ -360,13 +326,8 @@ combination of `update_region` + `duplicate_region_range` +
     inside corner of the lozenge that you drag inward to set the fade
     length. Holding the modifier rotates through fade shapes (linear,
     log, exp, S-curve).
-- [ ] Razor / split tool — split a region at the playhead or at click
-  - Bind to S (Reaper's keybind). Sends a `Command::SplitRegion {
-    id, at_samples }` that the shim implements via
-    `Playlist::cut(timerange)` or `Region::trim_to_internal` twice.
-    Stub equivalent: replace one region with two whose lengths sum
-    to the original. Multi-region split if the playhead crosses
-    multiple selected regions.
+- [x] Razor / split tool — split a region at the playhead or at click
+  - **Implemented:** `Command::SplitRegion { id, at_samples }` — shim calls `Playlist::split_region`; stub replaces one region with two. **S** splits each selected region under the playhead (strict interior, min 4800 samples per piece).
 - [ ] Glue / consolidate selected regions into one
   - Render the selected regions to a single audio file (or, for MIDI,
     merge the note streams into one region) and replace them with the
@@ -507,7 +468,7 @@ master bus at all.
   - `registerWidget` / `widgetTag` registries exist but most shipping components still
     hardcode tag names. Migrating to `widgetTag(...)` lookups would let alt-UIs override
     at widget granularity without forking whole views.
-- [ ] - Additional UI variants (`ui-lite`, `ui-touch`, `ui-kids`)
+- [/] - Additional UI variants (`ui-lite`, `ui-touch`, `ui-kids`)
   - Scaffolding is ready (auto-discovery via `/variants.json`, layered overlays, the
     variant registry picks by `match(env)` score). No concrete variants written yet
     beyond `ui-full`.
@@ -516,7 +477,7 @@ master bus at all.
 
 ## Infra + ops
 
-- [/] Serve HTTP, HTTPS, or both simultaneously
+- [x] Serve HTTP, HTTPS, or both simultaneously
   - HTTPS solo works today (`just run-tls`, `--tls-cert/--tls-key`, or
     `server.tls_cert`/`server.tls_key` in config.yaml). Running HTTP + HTTPS concurrently
     on two sockets isn't wired yet — would need a second listener task off the same
@@ -555,14 +516,12 @@ master bus at all.
     `crates/foyer-server/src/ws.rs` to route denials only to the offending connection +
     LAN/admin roles. Message already names the recipient in current builds (DECISION 38);
     this is the client-scope half.
-- [ ] Delete dead `TunnelRole::allows_command` (and its tests) in
+- [x] Delete dead `TunnelRole::allows_command` (and its tests) in
   [`crates/foyer-schema/src/tunnel.rs`](../crates/foyer-schema/src/tunnel.rs).
-  - Pre-DECISION-38 hardcoded RBAC table; zero call sites today (gate is the YAML-driven
-    `RolesConfig::allows` at [`crates/foyer-server/src/ws.rs`](../crates/foyer-server/src/ws.rs)).
-    SECURITY.md was pointing at it as authoritative until 2026-04-28 — remove the dead
-    function so the next reader doesn't trip the same way. Also drop the `display_name` /
-    `description` arms of `TunnelRole` if their only consumer was that function (audit
-    before deleting).
+  - Removed the pre–DECISION-38 hardcoded table and the unused `label` /
+    `description` helpers (no call sites). `TunnelRole` is now only the serde
+    token taxonomy; enforcement is `RolesConfig::allows` in `ws.rs`. DECISIONS §37
+    follow-up #3 marked done; module docs point at DECISION 38.
 - [x] Add read-only, transport-only, and admin roles with API keys
   - Roles already config-driven (DECISION 38) but API-key-to-role mapping isn't wired.
     Shape: `roles.yaml` gains an `api_keys: {key_hash: role_id}` section; server accepts
@@ -571,7 +530,11 @@ master bus at all.
   - Plugin picker today is substring match on name + vendor. Search by sonic description
     ("warm saturation", "long reverb tail") using a local embeddings model against the
     plugin catalog's description fields.
-- [ ] Plugin snapshot system with session
+- [ ] Simple plugin favorites system (add a * next to each effect and instrument in the plugins
+  list, have a favorites toggle in the insert plugin / instrument picker dialog that remembers
+  its last picked state). This should be client side only, stored in browser storage, no shim
+  changes or schema changes
+- [/] Plugin snapshot system with session
   - Bundle the specific plugin binaries + presets into the session archive so a session
     opens with the same plugin state on another machine (or a shipping
     Foyer container). Export a full Foyer container that includes the plugins used
@@ -579,6 +542,8 @@ master bus at all.
     - Big task, maybe defer to a DAW vendor and don't quit my day job. But containers/
     OverlayFS with split compute environment snapshots and working project files would 
     be a good fit for fixing DAW bitrot issues
+      - WIP got the basics done, conceptually it would work but it needs to be tested
+      and further refined
 
 ## Resampler (audio ingress / egress sample-rate handling)
 

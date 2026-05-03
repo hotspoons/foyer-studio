@@ -13,6 +13,7 @@
 #include "signal_bridge.h"
 
 #include <algorithm>
+#include <cctype>
 #include <csignal>
 #include <cstring>
 #include <limits>
@@ -27,7 +28,9 @@
 #include "ardour/internal_send.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
+#include "ardour/midi_stretch.h"
 #include "ardour/midi_source.h"
+#include "ardour/timefx_request.h"
 #include "ardour/midi_track.h"
 #include "ardour/types.h"
 #include "ardour/monitor_control.h"
@@ -381,6 +384,8 @@ struct DecodedCmd
 		AudioIngressClose,
 		DuplicateRegion,
 		DuplicateRegionRange,
+		StretchRegion,
+		SplitRegion,
 		CreateRegion,
 		ReplaceRegionNotes,
 		ListPlugins,
@@ -487,9 +492,13 @@ struct DecodedCmd
 	// schema_map::set_sequencer_layout.
 	schema_map::SequencerLayoutDesc seq_layout;
 
-	// DuplicateRegion payload.
+	// DuplicateRegion / CreateRegion / SplitRegion `at_samples` (signed on
+	// the wire so regions left of the timeline zero still decode).
+	bool          has_cmd_at_samples   = false;
+	std::int64_t  cmd_at_samples_i64   = 0;
+
+	// DuplicateRegion payload (reuses cmd_at_samples_i64 via has_cmd_at_samples).
 	std::string   dup_source_id;
-	std::uint64_t dup_at_samples = 0;
 	bool          dup_has_length = false;
 	std::uint64_t dup_length_samples = 0;
 	// DuplicateRegionRange payload — same source_id + at_samples as
@@ -503,6 +512,13 @@ struct DecodedCmd
 	// RegionPatch; `create_kind` is the region's media type ("midi" is
 	// the only wired variant).
 	std::string   create_kind;
+
+	// StretchRegion payload.
+	bool          has_stretch_new_start   = false;
+	std::int64_t  stretch_new_start_i64 = 0;
+	bool          has_stretch_new_length = false;
+	std::uint64_t stretch_new_length_u64 = 0;
+	std::string   stretch_anchor;
 
 	// ReplaceRegionNotes payload — parsed into a vector so the
 	// handler can feed it straight into a single NoteDiffCommand.
@@ -1057,6 +1073,24 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 	return true;
 }
 
+static std::uint64_t
+cmd_at_u64 (DecodedCmd const& snap)
+{
+	if (!snap.has_cmd_at_samples || snap.cmd_at_samples_i64 < 0) {
+		return 0;
+	}
+	return static_cast<std::uint64_t> (snap.cmd_at_samples_i64);
+}
+
+static Temporal::samplepos_t
+cmd_at_samplepos (DecodedCmd const& snap)
+{
+	if (!snap.has_cmd_at_samples) {
+		return static_cast<Temporal::samplepos_t> (0);
+	}
+	return static_cast<Temporal::samplepos_t> (snap.cmd_at_samples_i64);
+}
+
 DecodedCmd
 decode (const std::vector<std::uint8_t>& buf)
 {
@@ -1096,7 +1130,8 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.id)) return out;
 				} else if (k == "note") {
 					if (!read_note_fields (in, out)) return out;
-				} else if (k == "patch_change" || k == "patch") {
+				} else if (k == "patch_change") {
+					// AddPatchChange — nested bank/program/start_ticks map.
 					if (!read_pc_fields (in, out)) return out;
 				} else if (k == "patch_change_id") {
 					if (!in.read_str (out.id)) return out;
@@ -1133,7 +1168,16 @@ decode (const std::vector<std::uint8_t>& buf)
 					// CreateRegion's media-type selector ("midi" | "audio").
 					if (!in.read_str (out.create_kind)) return out;
 				} else if (k == "at_samples") {
-					if (!in.read_u64 (out.dup_at_samples)) return out;
+					if (!read_i64 (in, out.cmd_at_samples_i64)) return out;
+					out.has_cmd_at_samples = true;
+				} else if (k == "new_start_samples") {
+					if (!read_i64 (in, out.stretch_new_start_i64)) return out;
+					out.has_stretch_new_start = true;
+				} else if (k == "new_length_samples") {
+					if (!in.read_u64 (out.stretch_new_length_u64)) return out;
+					out.has_stretch_new_length = true;
+				} else if (k == "anchor") {
+					if (!in.read_str (out.stretch_anchor)) return out;
 				} else if (k == "source_offset_samples") {
 					// DuplicateRegionRange's slice anchor — offset
 					// INTO the source region's content.
@@ -1160,14 +1204,18 @@ decode (const std::vector<std::uint8_t>& buf)
 				} else if (k == "value") {
 					if (!in.read_f64 (out.value)) return out;
 				} else if (k == "patch") {
-					// RegionPatch and MidiNotePatch have disjoint keys,
-					// so a single reader is safe — unknown keys fall
-					// through the opposite path. But structurally: try
-					// MIDI-note fields first if the current command kind
-					// is a note cmd. For simplicity we read both: the
-					// decoder is a forward-only walk and unknown-key
-					// skipping is cheap.
-					if (!read_region_patch_or_note (in, out)) return out;
+					// Overloaded key: UpdateRegion / UpdateTrack / UpdateNote /
+					// UpdateGroup share `read_region_patch_or_note`; only
+					// UpdatePatchChange uses PatchChangePatch keys parsed by
+					// `read_pc_fields`.  Do NOT route every `patch` through
+					// read_pc_fields — it skips `start_samples` / length and
+					// made UpdateRegion a silent no-op (regions "snapped back").
+					// serde's tag="type" normally emits `type` before `patch`.
+					if (cmd_type == "update_patch_change") {
+						if (!read_pc_fields (in, out)) return out;
+					} else {
+						if (!read_region_patch_or_note (in, out)) return out;
+					}
 				} else if (k == "plugin_uri") {
 					if (!in.read_str (out.plugin_uri)) return out;
 				} else if (k == "plugin_id") {
@@ -1400,6 +1448,8 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "audio_ingress_close") out.kind = DecodedCmd::Kind::AudioIngressClose;
 			else if (cmd_type == "duplicate_region")    out.kind = DecodedCmd::Kind::DuplicateRegion;
 			else if (cmd_type == "duplicate_region_range") out.kind = DecodedCmd::Kind::DuplicateRegionRange;
+			else if (cmd_type == "stretch_region")       out.kind = DecodedCmd::Kind::StretchRegion;
+			else if (cmd_type == "split_region")         out.kind = DecodedCmd::Kind::SplitRegion;
 			else if (cmd_type == "create_region")       out.kind = DecodedCmd::Kind::CreateRegion;
 			else if (cmd_type == "replace_region_notes") out.kind = DecodedCmd::Kind::ReplaceRegionNotes;
             else if (cmd_type == "list_plugins")        out.kind = DecodedCmd::Kind::ListPlugins;
@@ -2073,7 +2123,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				playlist->clear_changes ();
 				playlist->add_region (clone, Temporal::timepos_t (
-					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+					static_cast<Temporal::samplepos_t> (cmd_at_u64 (snap))));
 				session.add_command (new PBD::StatefulDiffCommand (playlist));
 				if (own_txn) session.commit_reversible_command ();
 				session.set_dirty ();
@@ -2158,7 +2208,148 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				playlist->clear_changes ();
 				playlist->add_region (clone, Temporal::timepos_t (
-					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+					static_cast<Temporal::samplepos_t> (cmd_at_u64 (snap))));
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SplitRegion: {
+			if (cmd.id.empty ()) break;
+			if (!cmd.has_cmd_at_samples) {
+				PBD::warning << "foyer_shim: split_region: missing at_samples" << endmsg;
+				break;
+			}
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: split_region: unknown region: " << snap.id << endmsg;
+					return;
+				}
+				std::shared_ptr<ARDOUR::Playlist> playlist;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					auto track = std::dynamic_pointer_cast<Track> (r);
+					if (!track) continue;
+					auto pl = track->playlist ();
+					if (pl && pl->region_by_id (hit.region->id ())) {
+						playlist = pl;
+						break;
+					}
+				}
+				if (!playlist) {
+					PBD::warning << "foyer_shim: split_region: region not on any playlist" << endmsg;
+					return;
+				}
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer split region");
+				playlist->clear_changes ();
+				playlist->split_region (
+					hit.region,
+					Temporal::timepos_t (cmd_at_samplepos (snap)));
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
+			});
+			break;
+		}
+		case DecodedCmd::Kind::StretchRegion: {
+			if (cmd.id.empty ()) break;
+			if (!cmd.has_stretch_new_start || !cmd.has_stretch_new_length ||
+			    cmd.stretch_new_length_u64 == 0) {
+				PBD::warning << "foyer_shim: stretch_region: incomplete geometry" << endmsg;
+				break;
+			}
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: stretch_region: unknown region: " << snap.id << endmsg;
+					return;
+				}
+				if (hit.region->data_type () != DataType::MIDI) {
+					PBD::warning << "foyer_shim: stretch_region: audio not supported yet" << endmsg;
+					return;
+				}
+				std::shared_ptr<ARDOUR::Playlist> playlist;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					auto track = std::dynamic_pointer_cast<Track> (r);
+					if (!track) continue;
+					auto pl = track->playlist ();
+					if (pl && pl->region_by_id (hit.region->id ())) {
+						playlist = pl;
+						break;
+					}
+				}
+				if (!playlist) {
+					PBD::warning << "foyer_shim: stretch_region: region not on any playlist" << endmsg;
+					return;
+				}
+				const Temporal::samplecnt_t old_len_samples = hit.region->length ().samples ();
+				if (old_len_samples == 0) {
+					return;
+				}
+				std::string anchor = snap.stretch_anchor.empty () ? "start" : snap.stretch_anchor;
+				for (char& c : anchor) {
+					c = static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+				}
+				const Temporal::samplepos_t old_pos_samples = hit.region->position ().samples ();
+				const Temporal::samplepos_t old_end_samples =
+					old_pos_samples + static_cast<Temporal::samplepos_t> (old_len_samples);
+				const Temporal::samplepos_t new_start_sp =
+					static_cast<Temporal::samplepos_t> (snap.stretch_new_start_i64);
+				const Temporal::samplecnt_t new_len_u =
+					static_cast<Temporal::samplecnt_t> (snap.stretch_new_length_u64);
+				if (anchor == "start") {
+					if (new_start_sp != old_pos_samples) {
+						PBD::warning << "foyer_shim: stretch_region: start anchor mismatch" << endmsg;
+						return;
+					}
+				} else if (anchor == "end") {
+					const Temporal::samplepos_t expect_start =
+						old_end_samples - static_cast<Temporal::samplepos_t> (new_len_u);
+					if (new_start_sp != expect_start) {
+						PBD::warning << "foyer_shim: stretch_region: end anchor mismatch" << endmsg;
+						return;
+					}
+				} else {
+					PBD::warning << "foyer_shim: stretch_region: bad anchor" << endmsg;
+					return;
+				}
+				const Temporal::ratio_t ratio (
+					static_cast<std::int64_t> (new_len_u),
+					static_cast<std::int64_t> (old_len_samples));
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer stretch region");
+				playlist->clear_changes ();
+				ARDOUR::TimeFXRequest request;
+				request.time_fraction = ratio;
+				MidiStretch stretch (session, request);
+				if (stretch.run (hit.region) != 0 ||
+				    stretch.results.empty () ||
+				    !stretch.results[0]) {
+					PBD::warning << "foyer_shim: stretch_region: MidiStretch failed" << endmsg;
+					if (own_txn) session.commit_reversible_command ();
+					return;
+				}
+				timepos_t newpos;
+				if (anchor == "end") {
+					newpos = hit.region->end ().earlier (stretch.results[0]->length ());
+				} else {
+					newpos = hit.region->position ();
+				}
+				playlist->replace_region (hit.region, stretch.results[0], newpos);
 				session.add_command (new PBD::StatefulDiffCommand (playlist));
 				if (own_txn) session.commit_reversible_command ();
 				session.set_dirty ();
@@ -2240,7 +2431,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					return;
 				}
 				playlist->add_region (region, Temporal::timepos_t (
-					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+					static_cast<Temporal::samplepos_t> (cmd_at_u64 (snap))));
 				foyer_seed_default_region_patch_change (shim->session (), track, region);
 				shim->session ().set_dirty ();
 				// Playlist's RegionAdded signal fires an echo back

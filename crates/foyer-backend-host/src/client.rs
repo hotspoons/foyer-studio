@@ -450,6 +450,27 @@ impl HostClient {
         .await
     }
 
+    pub async fn stretch_region(
+        &self,
+        id: EntityId,
+        new_start_samples: i64,
+        new_length_samples: u64,
+        anchor: String,
+    ) -> Result<(), ClientError> {
+        self
+            .send_command(Command::StretchRegion {
+                id,
+                new_start_samples,
+                new_length_samples,
+                anchor,
+            })
+            .await
+    }
+
+    pub async fn split_region(&self, id: EntityId, at_samples: i64) -> Result<(), ClientError> {
+        self.send_command(Command::SplitRegion { id, at_samples }).await
+    }
+
     pub async fn create_region(
         &self,
         track_id: EntityId,

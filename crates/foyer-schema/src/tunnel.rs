@@ -1,20 +1,22 @@
 //! Remote-access tunnel schema — CloudFlare (and future providers).
 //!
-//! Every incoming WebSocket connection carries an optional token that maps
-//! to a role.  When a token is present the server runs in *restricted mode*:
-//! commands are filtered through the role's allow-list before reaching the
-//! backend.  The tunnel itself (Cloudflare `cloudflared`, Ngrok, whatever)
-//! is an orthogonal concern — this module only deals with the *local*
-//! auth + sharing surface.
+//! Incoming WebSocket connections may carry a share token that maps to
+//! [`TunnelRole`], persisted in the server's tunnel manifest. **Which
+//! commands each role may run is not defined here** — see DECISION 38 in
+//! `docs/DECISIONS.md`: allow/deny lists live in `roles.yaml` (the
+//! `foyer-config` crate) and are enforced in `foyer-server`'s WebSocket
+//! `dispatch_command` (`command_tag` + policy check).
+//!
+//! The tunnel transport (`cloudflared`, Ngrok, etc.) is orthogonal — this
+//! module is only data shapes for sharing + provider config.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 use crate::EntityId;
 
 // ─── Role-based access control ───────────────────────────────────────
 
-/// What a remote user is allowed to do.
+/// Invite / token role taxonomy (`roles.yaml` maps these to allow/deny lists).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelRole {
@@ -25,99 +27,10 @@ pub enum TunnelRole {
     Performer,
     /// Can control the session: play/pause/seek, mute/solo tracks,
     /// adjust channel gain. Cannot edit structure (add/remove tracks,
-    /// plugins, regions) or grant/revoke tokens.
+    /// plugins, regions) or grant/revoke tokens — unless overridden in YAML.
     SessionController,
     /// Full access — same as a local user.
     Admin,
-}
-
-impl TunnelRole {
-    /// Human label used in UI pickers and e-mail invites.
-    pub fn label(&self) -> &'static str {
-        match self {
-            TunnelRole::Viewer => "Viewer / Listener",
-            TunnelRole::Performer => "Performer",
-            TunnelRole::SessionController => "Session Controller",
-            TunnelRole::Admin => "Admin",
-        }
-    }
-
-    /// One-sentence description for the share form.
-    pub fn description(&self) -> &'static str {
-        match self {
-            TunnelRole::Viewer => "Watch and listen only",
-            TunnelRole::Performer => "Send live audio or MIDI into the session",
-            TunnelRole::SessionController => {
-                "Control transport, levels, mute/solo, and capture input"
-            }
-            TunnelRole::Admin => "Full control — same as owner",
-        }
-    }
-
-    /// Whether this role may send the given command type on the wire.
-    /// The FE uses the same list to grey-out disallowed controls.
-    pub fn allows_command(&self, cmd_id: &str) -> bool {
-        match self {
-            TunnelRole::Admin => true,
-
-            TunnelRole::SessionController => {
-                // Deny structural edits, plugin management, undo, and
-                // token management.
-                let denied: HashSet<&str> = [
-                    "track.add",
-                    "track.delete",
-                    "track.add_bus",
-                    "plugin.add",
-                    "plugin.delete",
-                    "plugin_window",
-                    "create_group",
-                    "delete_group",
-                    "update_group",
-                    "session.save",
-                    "session.save_as",
-                    "session.new",
-                    "session.open",
-                    "undo",
-                    "redo",
-                    "tunnel.create_token",
-                    "tunnel.revoke_token",
-                ]
-                .into();
-                !denied.contains(cmd_id)
-            }
-
-            TunnelRole::Performer => {
-                let allowed: HashSet<&str> = [
-                    // Audio ingress only
-                    "audio_stream_open",
-                    "audio_stream_close",
-                    "audio_sdp_answer",
-                    "audio_ice_candidate",
-                    // Input capture (MIDI, OSC)
-                    "capture_input",
-                    // Transport read
-                    "locate",
-                    // Self-presence
-                    "ping",
-                ]
-                .into();
-                allowed.contains(cmd_id)
-            }
-
-            TunnelRole::Viewer => {
-                let allowed: HashSet<&str> = [
-                    "audio_stream_open",
-                    "audio_stream_close",
-                    "audio_sdp_answer",
-                    "audio_ice_candidate",
-                    "locate",
-                    "ping",
-                ]
-                .into();
-                allowed.contains(cmd_id)
-            }
-        }
-    }
 }
 
 // ─── Connection token / manifest entry ───────────────────────────────

@@ -287,6 +287,26 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn stretch_region(
+        &self,
+        id: EntityId,
+        new_start_samples: i64,
+        new_length_samples: u64,
+        anchor: String,
+    ) -> Result<(), BackendError> {
+        self.client
+            .stretch_region(id, new_start_samples, new_length_samples, anchor)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn split_region(&self, id: EntityId, at_samples: i64) -> Result<(), BackendError> {
+        self.client
+            .split_region(id, at_samples)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn create_region(
         &self,
         track_id: EntityId,

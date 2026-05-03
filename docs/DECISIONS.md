@@ -1608,17 +1608,13 @@ a dedicated port (`AUTH_SERVER_ADDR = 127.0.0.1:3839` in
 `cloudflare_provider.rs`). `cloudflared` in every mode — quick,
 auto-provision, raw-token — is pointed at that port, never at the main
 port. This separate server is where per-guest authentication and
-role-based command gating (`TunnelRole::allows_command`) will enforce
-privilege levels.
+YAML-driven role-based command gating (`roles_policy.allows` in
+`ws.rs`; DECISION 38) enforce privilege levels.
 
-**Current state.** The tunnel-side listener serves the same router
-(`crate::build_http_router`) as the main listener — tunnel guests see
-the real Foyer UI and the real WebSocket bus. They share the same
-`Arc<AppState>`, so commands from either side route into the same
-backend. **RBAC is not yet implemented** — at this moment, any guest
-who can reach the tunnel URL gets the same privileges a LAN owner
-does. This is a temporary state: the follow-ups below are what close
-the gap.
+**Current state (post DECISION 38).** Tunnel-authenticated WebSocket
+connections carry a role id resolved from the share token; every
+`Command` is checked against `roles.yaml` before reaching the backend.
+LAN clients on the main listener bypass RBAC.
 
 **Alternatives.**
 - Single-port model (tunnel points at main server directly) — rejected.
@@ -1644,13 +1640,11 @@ just leave the tunnel-side port closed (no cloudflared → no auth server
 **Shared router, not a reverse proxy.** Both listeners call
 `build_http_router(state)` with the same `Arc<AppState>`, so the
 tunnel listener handles WS upgrades in-process instead of proxying to
-the main listener. Simpler, lower latency, and — crucially — the
-future RBAC middleware can introspect `ConnectInfo<SocketAddr>` and
-request extensions directly rather than reading headers bounced
-through a proxy hop. When RBAC lands, it layers on the tunnel
-router ONLY; the main router stays untouched.
+the main listener. Simpler, lower latency — RBAC (`TunnelOrigin`, role
+id, `roles_policy`) runs on tunnel-origin WebSockets without a proxy
+hop. The main listener stays ungated for the LAN trust model.
 
-**Follow-ups required to close the privilege gap.**
+**Follow-ups** (historical checklist; several items were superseded by DECISION 36 / 38).
 1. Tunnel-origin marker: the auth listener tags each connection with
    a `TunnelContext` extension (so the main WS handler can branch on
    "this is a tunnel guest" without relying on `127.0.0.1` peer checks
@@ -1659,9 +1653,10 @@ router ONLY; the main router stays untouched.
    `TunnelManifest.connections[].token_hash`, see DECISION 36). On
    failure, close with a 401 equivalent; on success, stash the
    matched `TunnelRole` alongside the marker.
-3. Role gating middleware: check `TunnelRole::allows_command(cmd_id)`
-   before each command reaches the backend; reject disallowed
-   commands with an `Event::Error { code: "forbidden_for_role" }`.
+3. ~~Role gating middleware: check `TunnelRole::allows_command(cmd_id)`~~
+   **Done (DECISION 38):** `dispatch_command` maps the command to a wire
+   tag via `command_tag()` and checks `state.roles_policy.allows(role_id, tag)`;
+   disallowed commands return `Event::Error { code: "forbidden_for_role" }`.
 4. Static-asset auth gate: the login page (DECISION 36 follow-up)
    lives on the tunnel router ahead of the static fallback so guests
    without a token see a credentials form rather than the raw app.

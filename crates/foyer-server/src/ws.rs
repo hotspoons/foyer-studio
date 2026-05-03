@@ -693,6 +693,8 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::CreateRegion { .. } => "create_region",
         Command::DuplicateRegion { .. } => "duplicate_region",
         Command::DuplicateRegionRange { .. } => "duplicate_region_range",
+        Command::StretchRegion { .. } => "stretch_region",
+        Command::SplitRegion { .. } => "split_region",
         Command::ListWaveform { .. } => "list_waveform",
         Command::ClearWaveformCache { .. } => "clear_waveform_cache",
         Command::ListBackends => "list_backends",
@@ -1858,6 +1860,47 @@ async fn dispatch_command(
                     state,
                     Event::Error {
                         code: "duplicate_region_range_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::StretchRegion {
+            id,
+            new_start_samples,
+            new_length_samples,
+            anchor,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .stretch_region(id, new_start_samples, new_length_samples, anchor)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "stretch_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::SplitRegion { id, at_samples } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .split_region(id, at_samples)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "split_region_failed".into(),
                         message: e.to_string(),
                     },
                 )

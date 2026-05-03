@@ -371,6 +371,24 @@ pub trait Backend: Send + Sync + 'static {
         ))
     }
 
+    /// Time-stretch region contents to span `new_length_samples` on the
+    /// timeline. `anchor` is `"start"` or `"end"` (which timeline edge stays
+    /// fixed). Fire-and-forget: the host echoes `RegionUpdated` when applied.
+    async fn stretch_region(
+        &self,
+        _id: EntityId,
+        _new_start_samples: i64,
+        _new_length_samples: u64,
+        _anchor: String,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("stretch_region not supported".into()))
+    }
+
+    /// Split a region at absolute timeline `at_samples`. Fire-and-forget.
+    async fn split_region(&self, _id: EntityId, _at_samples: i64) -> Result<(), BackendError> {
+        Err(BackendError::Other("split_region not supported".into()))
+    }
+
     /// Create a brand-new empty region on the given track.
     /// Fire-and-forget: the host echoes a `RegionsList` once the
     /// playlist has committed.

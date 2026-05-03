@@ -78,6 +78,110 @@ impl RegionStore {
         None
     }
 
+    /// Split `id` at timeline position `at` (samples). Replaces the region
+    /// with two adjacent regions whose lengths sum to the original. Returns
+    /// the affected track id.
+    pub fn split_at(
+        &mut self,
+        id: &EntityId,
+        at: i64,
+        min_len: u64,
+        left_id: EntityId,
+        right_id: EntityId,
+    ) -> Result<EntityId, String> {
+        for (track_key, list) in self.by_track.iter_mut() {
+            if let Some(idx) = list.iter().position(|r| r.id == *id) {
+                let r = list[idx].clone();
+                let start = r.start_samples;
+                let len_i = r.length_samples as i64;
+                let end = start.saturating_add(len_i);
+                if at <= start || at >= end {
+                    return Err("split_at: cut is not inside the region".into());
+                }
+                let left_len = (at - start) as u64;
+                let right_len = (end - at) as u64;
+                if left_len < min_len || right_len < min_len {
+                    return Err("split_at: pieces would be shorter than min length".into());
+                }
+                let so = r.source_offset_samples.unwrap_or(0);
+                let mut left = r.clone();
+                left.id = left_id;
+                left.start_samples = start;
+                left.length_samples = left_len;
+                left.source_offset_samples = Some(so);
+                if !left.name.is_empty() {
+                    left.name = format!("{} · A", r.name);
+                }
+                let mut right = r.clone();
+                right.id = right_id;
+                right.start_samples = at;
+                right.length_samples = right_len;
+                right.source_offset_samples = Some(so.saturating_add(left_len));
+                if !right.name.is_empty() {
+                    right.name = format!("{} · B", r.name);
+                }
+                list.remove(idx);
+                list.insert(idx, left);
+                list.insert(idx + 1, right);
+                return Ok(EntityId::new(track_key.clone()));
+            }
+        }
+        Err("split_at: unknown region".into())
+    }
+
+    /// Time-stretch stub: scales MIDI note ticks; leaves `source_offset`
+    /// unchanged. Validates geometry against `anchor` (`"start"` | `"end"`).
+    pub fn stretch_content(
+        &mut self,
+        id: &EntityId,
+        new_start: i64,
+        new_len: u64,
+        anchor: &str,
+        min_len: u64,
+    ) -> Result<(EntityId, Region), String> {
+        if new_len < min_len {
+            return Err("stretch: new length too small".into());
+        }
+        let anchor = anchor.to_ascii_lowercase();
+        if anchor != "start" && anchor != "end" {
+            return Err("stretch: anchor must be start or end".into());
+        }
+        for (_track_key, list) in self.by_track.iter_mut() {
+            if let Some(r) = list.iter_mut().find(|r| r.id == *id) {
+                let old_len = r.length_samples;
+                if old_len == 0 {
+                    return Err("stretch: zero-length region".into());
+                }
+                let old_start = r.start_samples;
+                let old_end = old_start.saturating_add(old_len as i64);
+                if anchor == "start" && new_start != old_start {
+                    return Err("stretch: start anchor requires fixed left edge".into());
+                }
+                if anchor == "end" {
+                    let expect_start = old_end.saturating_sub(new_len as i64);
+                    if new_start != expect_start {
+                        return Err("stretch: end anchor requires fixed right edge".into());
+                    }
+                }
+                let ratio_n = new_len;
+                let ratio_d = old_len;
+                for n in &mut r.notes {
+                    n.start_ticks = ((n.start_ticks as u128 * ratio_n as u128) / u128::from(ratio_d))
+                        as u64;
+                    n.length_ticks = u64::max(
+                        1,
+                        ((n.length_ticks as u128 * ratio_n as u128) / u128::from(ratio_d)) as u64,
+                    );
+                }
+                r.start_samples = new_start;
+                r.length_samples = new_len;
+                let out = r.clone();
+                return Ok((r.track_id.clone(), out));
+            }
+        }
+        Err("stretch: unknown region".into())
+    }
+
     /// Append `region` to the track-local list, in start-time order.
     /// `region.track_id` and `region.id` must already be set by the caller.
     pub fn insert(&mut self, region: Region) {

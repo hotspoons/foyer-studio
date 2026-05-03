@@ -575,6 +575,10 @@ fn default_region_kind() -> String {
     "midi".to_string()
 }
 
+fn default_stretch_anchor() -> String {
+    "start".to_string()
+}
+
 /// One currently-open session as tracked by the sidecar. Multi-session
 /// clients render this in the session switcher chip and in the
 /// Session → Recent menu.
@@ -833,6 +837,26 @@ pub enum Command {
         length_samples: u64,
         /// Destination position on the timeline in samples.
         at_samples: u64,
+    },
+    /// Time-stretch or squash region contents so they fill a new timeline
+    /// span. `anchor` is `"start"` when the left edge stays fixed (typical
+    /// right-edge drag) or `"end"` when the right edge stays fixed (left-edge
+    /// drag). The Ardour shim routes MIDI through `MidiStretch`; audio is
+    /// not supported yet. Emits `RegionUpdated` / playlist echoes like other
+    /// region mutations.
+    StretchRegion {
+        id: EntityId,
+        new_start_samples: i64,
+        new_length_samples: u64,
+        #[serde(default = "default_stretch_anchor")]
+        anchor: String,
+    },
+    /// Split one region into two at an absolute timeline position (`at_samples`
+    /// in session samples). The cut must fall strictly inside the region.
+    /// Emits a fresh `RegionsList` for the track (stub + Ardour).
+    SplitRegion {
+        id: EntityId,
+        at_samples: i64,
     },
     /// Ask for decimated peaks for `region_id` at the given resolution. The
     /// sidecar rounds the request to the nearest cached tier.
