@@ -70,6 +70,73 @@ namespace ArdourSurface {
 
 namespace {
 
+/// Playback channel 0..15 for region-embedded patch events, from the track's
+/// playback filter (Force / Filter use the first set bit; else 0).
+static std::uint8_t
+foyer_playback_wire_channel_for_patch (std::shared_ptr<MidiTrack> const& mt)
+{
+	if (!mt) {
+		return 0;
+	}
+	ChannelMode const  mode = mt->get_playback_channel_mode ();
+	std::uint16_t const mask = mt->get_playback_channel_mask ();
+	if (mode == ForceChannel || mode == FilterChannels) {
+		if (!mask) {
+			return 0;
+		}
+		for (std::uint8_t i = 0; i < 16; ++i) {
+			if (mask & (1u << i)) {
+				return i;
+			}
+		}
+	}
+	return 0;
+}
+
+/// New MIDI regions start with no patch-change rows; playback then never sends
+/// bank/program before notes. Seed tick 0 to match live track patch state.
+static void
+foyer_seed_default_region_patch_change (
+    Session&                         session,
+    std::shared_ptr<Track> const&   track,
+    std::shared_ptr<Region> const&  region)
+{
+	auto mr = std::dynamic_pointer_cast<MidiRegion> (region);
+	if (!mr) {
+		return;
+	}
+	auto model = mr->model ();
+	if (!model) {
+		return;
+	}
+	std::uint8_t ch      = 0;
+	int          bank    = -1;
+	std::uint8_t program = 0;
+	if (auto mt = std::dynamic_pointer_cast<MidiTrack> (track)) {
+		ch = foyer_playback_wire_channel_for_patch (mt);
+		auto bank_msb = mt->automation_control (
+		    Evoral::Parameter (MidiCCAutomation, ch, MIDI_CTL_MSB_BANK), true);
+		auto bank_lsb = mt->automation_control (
+		    Evoral::Parameter (MidiCCAutomation, ch, MIDI_CTL_LSB_BANK), true);
+		if (bank_msb && bank_lsb) {
+			bank = ((static_cast<int> (bank_msb->get_value ()) & 0x7f) << 7)
+			     | (static_cast<int> (bank_lsb->get_value ()) & 0x7f);
+		}
+		auto program_ctl = mt->automation_control (
+		    Evoral::Parameter (MidiPgmChangeAutomation, ch), true);
+		if (program_ctl) {
+			program = static_cast<std::uint8_t> (std::clamp (
+			    static_cast<int> (program_ctl->get_value ()), 0, 127));
+		}
+	}
+	auto pc = std::make_shared<Evoral::PatchChange<Temporal::Beats>> (
+	    Temporal::Beats::ticks (0), ch, program, bank);
+	auto* diff =
+	    model->new_patch_change_diff_command ("foyer default patch on new region");
+	diff->add (pc);
+	model->apply_diff_command_as_commit (session, diff);
+}
+
 // ---- tiny msgpack reader (what we need for inbound commands) ----
 //
 // This only supports the shapes the sidecar actually sends: Envelope with map
@@ -2174,6 +2241,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				playlist->add_region (region, Temporal::timepos_t (
 					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+				foyer_seed_default_region_patch_change (shim->session (), track, region);
 				shim->session ().set_dirty ();
 				// Playlist's RegionAdded signal fires an echo back
 				// to the sidecar, which forwards RegionsList.

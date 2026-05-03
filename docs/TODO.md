@@ -265,7 +265,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 ## Plugin and instrument features
 
-- [ ] Bundle the LV2 General MIDI Synth in the dev container + the shipped runtime image. Dev container + Cloud Run image both lack it, so any session whose default instrument is "General MIDI Synth (LV2)" loads with an inactive stub and the "Missing Plugins" dialog (`gmsynth.lv2` is the upstream package — Debian's name to be confirmed; if it's not packaged, vendor the source build into the Dockerfile alongside the autovocoder block). Without this, freshly-created MIDI tracks have no instrument until the user picks one.
+- [x] Bundle the LV2 General MIDI Synth in the dev container + the shipped runtime image. Dev container + Cloud Run image both lack it, so any session whose default instrument is "General MIDI Synth (LV2)" loads with an inactive stub and the "Missing Plugins" dialog (`gmsynth.lv2` is the upstream package — Debian's name to be confirmed; if it's not packaged, vendor the source build into the Dockerfile alongside the autovocoder block). Without this, freshly-created MIDI tracks have no instrument until the user picks one.
 - [x] Update percussive vs sustain for note mode
   - **Shipped:** drum-mode cells emit short percussive notes; pitched-mode honors `length_steps` for sustain (length 1 → full step). See [crates/foyer-schema/src/midi.rs](../crates/foyer-schema/src/midi.rs) `expand_sequencer_layout`.
 - [x] Show UI warning on missing plugins (just silent now)
