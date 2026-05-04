@@ -293,6 +293,12 @@ struct PatchChangeDesc {
 	std::uint64_t start_ticks = 0;
 };
 
+struct AudioSourceSegmentDesc {
+	std::string   path;
+	std::uint64_t offset_samples = 0;
+	std::uint64_t length_samples = 0;
+};
+
 /// Description of a single region on a track playlist, translated into
 /// Foyer's schema shape. Samples are at the session's sample rate.
 ///
@@ -310,6 +316,7 @@ struct RegionDesc {
 	std::string   source_path;            ///< "" if no file source
 	std::uint64_t source_offset_samples = 0;
 	bool          has_source_offset = false;
+	std::vector<AudioSourceSegmentDesc> source_segments;
 	/// Populated for MIDI regions only. Empty for audio.
 	std::vector<NoteDesc> notes;
 	/// Program/bank change events for MIDI regions only. Empty for

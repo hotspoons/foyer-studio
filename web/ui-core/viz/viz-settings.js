@@ -122,16 +122,12 @@ export const DEFAULT_VIZ_PREFS = Object.freeze({
   quantGridColor:   "#7c5cff",
   /** Alpha (0..1) applied to `quantGridColor`. */
   quantGridAlpha:   0.5,
-  /** Time-grid (seconds-tick) visibility. Used to live as an
-   *  always-on render path; promoted to a Viz-menu toggle when the
-   *  user wanted the same hide-the-grid affordance the quant grid
-   *  already had. Default true matches the legacy behavior. */
-  timeGridOn:       true,
-  /** Quant-grid (BPM-quantized overlay) visibility. Used to live as
-   *  a top-level "Grid" checkbox on the timeline toolbar; moved
-   *  here so the two grid toggles sit next to each other and the
-   *  toolbar isn't cluttered with timeline-only chrome. */
-  quantGridOn:      false,
+  /** Time-grid (seconds-tick) visibility. Default off so the session
+   *  opens with tempo grid only; turn on when you want second markers. */
+  timeGridOn:       false,
+  /** Quant-grid (BPM-quantized overlay) visibility. Default on so beat
+   *  subdivisions match the quant picker + magnetic snap out of the box. */
+  quantGridOn:      true,
 
   /** User-defined palette colors. Active when `palette === "custom"`. */
   customFill:       "#a78bfa",

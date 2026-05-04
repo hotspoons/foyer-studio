@@ -31,7 +31,7 @@
 # To build:
 #   docker build -t foyer-studio:latest .
 # To run locally:
-#   docker run --rm -p 3838:3838 -v foyer-projects:/projects foyer-studio:latest
+#   docker run --rm -p 3838:3838 -v "$(pwd):/projects" foyer-studio:latest
 # To deploy to Cloud Run:
 #   gcloud run deploy foyer-studio --image gcr.io/$PROJECT/foyer-studio \
 #       --port 3838 --memory 2Gi --cpu 2 --allow-unauthenticated

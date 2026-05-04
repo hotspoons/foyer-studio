@@ -578,6 +578,32 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    async fn reverse_region(&self, _id: EntityId) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn combine_regions(&self, _region_ids: Vec<EntityId>) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn strip_silence_region(
+        &self,
+        _id: EntityId,
+        _threshold_db: f32,
+        _minimum_length_samples: u64,
+        _fade_length_samples: u64,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn pitch_shift_region(
+        &self,
+        _id: EntityId,
+        _semitones: f32,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     async fn update_track(&self, id: EntityId, patch: TrackPatch) -> Result<Track, BackendError> {
         let updated = self
             .state

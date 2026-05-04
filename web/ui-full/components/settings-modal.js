@@ -3,13 +3,13 @@
 // else has a more direct home in the UI:
 //   * transport return-on-stop  → cycle button on the transport bar
 //   * waveform style / palette  → the timeline view's settings popover
-//   * mixer density / width      → the mixer toolbar
+//   * mixer density / width      → Mixer menu on the mixer toolbar
 // DAW-side settings (buffer size, plugin paths, etc.) belong in a
 // separate modal that round-trips through the shim; this one is
 // intentionally client-only.
 //
-// Opened by the `settings.preferences` action in the main menu, or
-// `Cmd+,` / `Ctrl+,`.
+// Opened from Session → Preferences…, the command palette, or
+// Cmd+, / Ctrl+, (global shortcut from main-menu).
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";

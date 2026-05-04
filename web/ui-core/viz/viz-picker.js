@@ -27,7 +27,7 @@ export class VizPicker extends LitElement {
       font-size: 10px; font-weight: 600;
       letter-spacing: 0.05em;
       padding: 4px 8px;
-      border-radius: 3px;
+      border-radius: var(--radius-sm);
       border: 1px solid var(--color-border);
       background: var(--color-surface);
       color: var(--color-text-muted);
@@ -64,7 +64,7 @@ export class VizPicker extends LitElement {
     .segs {
       display: flex;
       border: 1px solid var(--color-border);
-      border-radius: 3px;
+      border-radius: var(--radius-sm);
       overflow: hidden;
     }
     .seg {

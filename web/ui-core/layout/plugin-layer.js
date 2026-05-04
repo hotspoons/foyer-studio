@@ -139,7 +139,11 @@ export class PluginLayer extends LitElement {
       if (!n || !n.classList) continue;
       if (n.classList.contains("pwin") && root?.contains(n)) {
         const pid = n.getAttribute("data-plugin-id");
-        if (pid) this.store?.raisePluginFloat?.(pid);
+        if (pid) {
+          this.store?.raisePluginFloat?.(pid);
+          const z = this.store?.bumpGlobalStackZ?.();
+          if (z != null) this.style.zIndex = String(z);
+        }
         return;
       }
     }

@@ -694,6 +694,10 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::DuplicateRegionRange { .. } => "duplicate_region_range",
         Command::StretchRegion { .. } => "stretch_region",
         Command::SplitRegion { .. } => "split_region",
+        Command::ReverseRegion { .. } => "reverse_region",
+        Command::CombineRegions { .. } => "combine_regions",
+        Command::StripSilenceRegion { .. } => "strip_silence_region",
+        Command::PitchShiftRegion { .. } => "pitch_shift_region",
         Command::ListWaveform { .. } => "list_waveform",
         Command::ClearWaveformCache { .. } => "clear_waveform_cache",
         Command::ListBackends => "list_backends",
@@ -766,6 +770,45 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::SetTrackBrowserSource { .. } => "set_track_browser_source",
         Command::ListTrackBrowserSources => "list_track_browser_sources",
     }
+}
+
+/// Sanitize optional save-as target, reject overwrite of existing session dirs
+/// / files inside the jail, and return the path to pass to the backend: an
+/// **absolute** filesystem path to the new session folder when a jail is
+/// configured, otherwise a sanitized relative string (non-jail setups). `None` /
+/// empty string means save-in-place (same as omitting `as_path` on the wire).
+fn normalize_save_as_path(
+    raw: Option<&str>,
+    jail: Option<&crate::jail::Jail>,
+) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let rel = crate::files::sanitize_relative_path(t);
+    if rel.as_os_str().is_empty() {
+        return Err("invalid save path".into());
+    }
+    if let Some(jail) = jail {
+        match jail.existing_session_save_conflict(&rel) {
+            Ok(true) => {
+                return Err(
+                    "that path already exists or contains a session — pick a new folder name"
+                        .into(),
+                );
+            }
+            Err(e) => return Err(e.to_string()),
+            Ok(false) => {}
+        }
+        // Ardour expects an absolute filesystem path to the *new session folder*
+        // (parent/name), not a Foyer jail-relative segment.
+        let abs = jail.root().join(&rel);
+        return Ok(Some(abs.to_string_lossy().into_owned()));
+    }
+    Ok(Some(crate::files::rel_path_wire(&rel)))
 }
 
 async fn dispatch_command(
@@ -1029,7 +1072,26 @@ async fn dispatch_command(
             }
         },
         Command::SaveSession { as_path } => {
-            if let Err(e) = state.backend().await.save_session(as_path.as_deref()).await {
+            let normalized = match normalize_save_as_path(as_path.as_deref(), state.jail.as_ref()) {
+                Ok(n) => n,
+                Err(message) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "save_session_failed".into(),
+                            message,
+                        },
+                    )
+                    .await;
+                    return Ok(());
+                }
+            };
+            if let Err(e) = state
+                .backend()
+                .await
+                .save_session(normalized.as_deref())
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -1038,6 +1100,80 @@ async fn dispatch_command(
                     },
                 )
                 .await;
+            } else if let Some(abs_raw) = normalized {
+                // Save-as: Ardour switches the active session to the new folder.
+                // Refresh registry paths, tell clients (session chip + recents),
+                // and ship a snapshot so the name in the switcher matches Ardour.
+                let canon = std::path::Path::new(&abs_raw)
+                    .canonicalize()
+                    .unwrap_or_else(|_| std::path::Path::new(&abs_raw).to_path_buf());
+                let canon_str = canon.to_string_lossy().into_owned();
+                let display_rel = state.sessions.jail_display_path(&canon_str).await;
+
+                if let Some(sid) = state.focus_session_id.read().await.clone() {
+                    if state.sessions.has(&sid).await {
+                        let _ = state
+                            .sessions
+                            .update_project_location(&sid, canon_str.clone())
+                            .await;
+                    }
+                }
+
+                broadcast_event(
+                    state,
+                    Event::SessionChanged {
+                        path: Some(display_rel.clone()),
+                    },
+                )
+                .await;
+
+                if let Some(jail_root) = state.sessions.jail_root.read().await.clone() {
+                    let backend_id =
+                        if let Some(sid) = state.focus_session_id.read().await.as_ref() {
+                            match state.sessions.backend_id_of(sid).await {
+                                Some(b) => b,
+                                None => state
+                                    .active_backend_id
+                                    .read()
+                                    .await
+                                    .clone()
+                                    .unwrap_or_default(),
+                            }
+                        } else {
+                            state
+                                .active_backend_id
+                                .read()
+                                .await
+                                .clone()
+                                .unwrap_or_default()
+                        };
+                    let recents = crate::recents::touch(foyer_schema::RecentEntry {
+                        path: crate::recents::normalize_path(
+                            &display_rel,
+                            Some(jail_root.as_path()),
+                        ),
+                        name: String::new(),
+                        backend_id,
+                        opened_at: 0,
+                    })
+                    .await;
+                    broadcast_event(state, Event::RecentsList { recents }).await;
+                }
+
+                match state.backend().await.snapshot().await {
+                    Ok(snapshot) => {
+                        broadcast_event(
+                            state,
+                            Event::SessionSnapshot {
+                                session: Box::new(snapshot),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("save_session ok but snapshot failed: {e}");
+                    }
+                }
             }
         }
         Command::UpdateRegion { id, patch } => {
@@ -1939,6 +2075,68 @@ async fn dispatch_command(
                     state,
                     Event::Error {
                         code: "split_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::ReverseRegion { id } => {
+            if let Err(e) = state.backend().await.reverse_region(id).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "reverse_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::CombineRegions { region_ids } => {
+            if let Err(e) = state.backend().await.combine_regions(region_ids).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "combine_regions_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::StripSilenceRegion {
+            id,
+            threshold_db,
+            minimum_length_samples,
+            fade_length_samples,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .strip_silence_region(id, threshold_db, minimum_length_samples, fade_length_samples)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "strip_silence_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::PitchShiftRegion { id, semitones } => {
+            if let Err(e) = state.backend().await.pitch_shift_region(id, semitones).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "pitch_shift_region_failed".into(),
                         message: e.to_string(),
                     },
                 )

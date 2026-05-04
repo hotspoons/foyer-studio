@@ -340,6 +340,40 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn reverse_region(&self, id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .reverse_region(id)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn combine_regions(&self, region_ids: Vec<EntityId>) -> Result<(), BackendError> {
+        self.client
+            .combine_regions(region_ids)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn strip_silence_region(
+        &self,
+        id: EntityId,
+        threshold_db: f32,
+        minimum_length_samples: u64,
+        fade_length_samples: u64,
+    ) -> Result<(), BackendError> {
+        self.client
+            .strip_silence_region(id, threshold_db, minimum_length_samples, fade_length_samples)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn pitch_shift_region(&self, id: EntityId, semitones: f32) -> Result<(), BackendError> {
+        self.client
+            .pitch_shift_region(id, semitones)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn create_region(
         &self,
         track_id: EntityId,
@@ -702,6 +736,21 @@ impl Backend for HostBackend {
         // call for a region the client hasn't listed yet falls through
         // to the placeholder, which is fine.
         if let Some(region) = self.client.region_by_id(&region_id).await {
+            if !region.source_segments.is_empty() {
+                match waveform::decode_peaks_merged(
+                    &region.source_segments,
+                    region_id.clone(),
+                    samples_per_peak,
+                ) {
+                    Ok(peaks) => return Ok(peaks),
+                    Err(e) => {
+                        tracing::warn!(
+                            "symphonia merged decode failed for {region_id:?}: {e} — \
+                             falling back to single-file or synthesized peaks"
+                        );
+                    }
+                }
+            }
             if let Some(path) = region.source_path.as_deref() {
                 match waveform::decode_peaks(
                     std::path::Path::new(path),

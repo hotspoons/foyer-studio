@@ -2,7 +2,7 @@
 // exposes via list_actions. Arrow keys navigate, enter invokes.
 
 import { LitElement, html, css, nothing } from "lit";
-import { isActionAllowed } from "foyer-core/rbac.js";
+import { isActionAllowed, isActionHiddenFromCatalog } from "foyer-core/rbac.js";
 
 export class CommandPalette extends LitElement {
   static properties = {
@@ -151,7 +151,9 @@ export class CommandPalette extends LitElement {
     // RBAC: hide actions the current role can't invoke. The palette
     // is a power-user surface — showing denied items just to watch
     // clicks silently fail would be worse than not showing them.
-    const permitted = this._actions.filter(a => isActionAllowed(a.id));
+    const permitted = this._actions.filter(
+      (a) => isActionAllowed(a.id) && !isActionHiddenFromCatalog(a),
+    );
     const q = this._query.trim().toLowerCase();
     if (!q) return permitted;
     return permitted.filter(a =>
@@ -162,6 +164,16 @@ export class CommandPalette extends LitElement {
   }
 
   _invoke(a) {
+    if (a.id === "session.preferences") {
+      import("./settings-modal.js").then((m) => m.openSettings());
+      this._close();
+      return;
+    }
+    if (a.id === "session.save_as") {
+      import("./save-session-as-modal.js").then((m) => m.openSaveSessionAs());
+      this._close();
+      return;
+    }
     window.__foyer?.ws?.send({ type: "invoke_action", id: a.id });
     this._close();
   }
@@ -174,7 +186,7 @@ export class CommandPalette extends LitElement {
         <div class="input">
           <input
             type="text"
-            placeholder="Type an action… (play, open session, rescan plugins, …)"
+            placeholder="Type an action…"
             .value=${this._query}
             @input=${(e) => { this._query = e.currentTarget.value; this._hover = 0; }}>
         </div>

@@ -570,11 +570,13 @@ docker-build image='foyer-studio:latest' *args='':
 #
 # Override the image:
 #   just docker-run image=ghcr.io/hotspoons/foyer-studio:snapshot-latest
+# Host path for /projects: repo root (just runs recipes with cwd = this
+# Justfile’s directory). Override with FOYER_PROJECTS_DIR (e.g. foyer-projects).
 docker-run image='foyer-studio:latest' *args='':
     docker run --rm -it \
         -p 3838:3838 \
         --shm-size=1g \
-        -v foyer-projects:/projects \
+        -v "${FOYER_PROJECTS_DIR:-$(pwd)}:/projects" \
         -e PORT=3838 \
         {{args}} \
         {{image}}
@@ -594,7 +596,7 @@ docker-run-jack image='foyer-studio:latest' *args='':
         --ulimit rtprio=95 \
         --ulimit memlock=-1 \
         --shm-size=2g \
-        -v foyer-projects:/projects \
+        -v "${FOYER_PROJECTS_DIR:-$(pwd)}:/projects" \
         -e PORT=3838 \
         -e FOYER_RUNTIME_MODE=jack-headless \
         {{args}} \

@@ -25,6 +25,15 @@ pub enum FadeShape {
     Symmetric,
 }
 
+/// One contiguous slice of a file on disk. Used for compound / glued clips
+/// whose Ardour source is a `PlaylistSource` (no single `source_path`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioSourceSegment {
+    pub path: String,
+    pub offset_samples: u64,
+    pub length_samples: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Region {
     pub id: EntityId,
@@ -55,6 +64,10 @@ pub struct Region {
     /// belong to other regions on the same source.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_offset_samples: Option<u64>,
+    /// Ordered file slices for playlist-backed (e.g. glued) audio. Empty
+    /// when `source_path` alone describes the backing.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub source_segments: Vec<AudioSourceSegment>,
     /// For MIDI regions: the sequence of notes contained in this
     /// region, in tick-relative coordinates (see `foyer_schema::midi`).
     /// Audio regions leave this empty. Piano-roll clients render
@@ -184,6 +197,7 @@ mod tests {
             muted: false,
             source_path: None,
             source_offset_samples: None,
+            source_segments: vec![],
             notes: vec![],
             patch_changes: vec![],
             foyer_sequencer: None,

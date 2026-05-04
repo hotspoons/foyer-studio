@@ -20,9 +20,21 @@
 // The modal mounts into document.body on demand and cleans itself up on
 // resolve. Multiple simultaneous prompts stack — each one gets its own
 // modal, Esc dismisses the top one.
+//
+// Numeric entry with a slider:
+//
+//   const st = await promptText({
+//     title: "Pitch shift",
+//     inputKind: "slider",
+//     sliderMin: -24,
+//     sliderMax: 24,
+//     sliderStep: 0.1,
+//     defaultValue: "0",
+//   });
+//
+// Resolves to a string representation of the value (same as plain text mode).
 
 import { LitElement, html, css } from "lit";
-import { icon } from "foyer-ui-core/icons.js";
 
 export class PromptModal extends LitElement {
   static properties = {
@@ -30,9 +42,15 @@ export class PromptModal extends LitElement {
     message:      { type: String },
     placeholder:  { type: String },
     defaultValue: { type: String },
+    /** `"text"` (default) or `"slider"` — slider shows range + number inputs. */
+    inputKind:    { type: String },
+    sliderMin:    { type: Number },
+    sliderMax:    { type: Number },
+    sliderStep:   { type: Number },
     confirmLabel: { type: String },
     cancelLabel:  { type: String },
     _value:       { state: true, type: String },
+    _num:         { state: true, type: Number },
   };
 
   static styles = css`
@@ -122,6 +140,56 @@ export class PromptModal extends LitElement {
       box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-accent) 30%, transparent);
     }
 
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .slider-row input[type="range"] {
+      flex: 1 1 auto;
+      min-width: 0;
+      height: 6px;
+      -webkit-appearance: none;
+      appearance: none;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+      cursor: pointer;
+    }
+    .slider-row input[type="range"]::-webkit-slider-runnable-track {
+      height: 6px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+    }
+    .slider-row input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      margin-top: -4px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      border: 2px solid var(--color-surface-elevated);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    }
+    .slider-row input[type="range"]::-moz-range-track {
+      height: 6px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+    }
+    .slider-row input[type="range"]::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      border: 2px solid var(--color-surface-elevated);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    }
+    .slider-row input.num {
+      flex: 0 0 auto;
+      width: 5.5rem;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+
     footer {
       display: flex;
       justify-content: flex-end;
@@ -170,26 +238,52 @@ export class PromptModal extends LitElement {
     this.message = "";
     this.placeholder = "";
     this.defaultValue = "";
+    this.inputKind = "text";
+    this.sliderMin = -24;
+    this.sliderMax = 24;
+    this.sliderStep = 0.1;
     this.confirmLabel = "OK";
     this.cancelLabel = "Cancel";
     this._value = "";
+    this._num = 0;
     this._resolve = null;
+  }
+
+  _isSlider() {
+    return this.inputKind === "slider";
+  }
+
+  _clampNum(v) {
+    const lo = this.sliderMin;
+    const hi = this.sliderMax;
+    return Math.min(hi, Math.max(lo, v));
   }
 
   connectedCallback() {
     super.connectedCallback();
-    this._value = this.defaultValue || "";
+    if (this._isSlider()) {
+      let v = Number.parseFloat(String(this.defaultValue ?? "0"));
+      if (!Number.isFinite(v)) v = 0;
+      v = this._clampNum(v);
+      this._num = v;
+      this._value = String(v);
+    } else {
+      this._value = this.defaultValue || "";
+    }
     this._onKey = (ev) => {
       if (ev.key === "Escape") { ev.preventDefault(); this._cancel(); }
       else if (ev.key === "Enter") { ev.preventDefault(); this._commit(); }
     };
     window.addEventListener("keydown", this._onKey, true);
-    // Autofocus the input after first paint.
+    // Autofocus the primary control after first paint.
     requestAnimationFrame(() => {
-      const input = this.renderRoot.querySelector("input");
+      const num = this.renderRoot.querySelector("input.num");
+      const text = this.renderRoot.querySelector('input[type="text"]');
+      const range = this.renderRoot.querySelector('input[type="range"]');
+      const input = this._isSlider() ? (num || range) : text;
       if (input) {
         input.focus();
-        input.select();
+        if (input.select) input.select();
       }
     });
   }
@@ -209,12 +303,47 @@ export class PromptModal extends LitElement {
           ${this.message
             ? html`<div class="message">${this.message}</div>`
             : null}
-          <input
-            type="text"
-            .value=${this._value}
-            placeholder=${this.placeholder}
-            @input=${(e) => { this._value = e.target.value; }}
-          />
+          ${this._isSlider()
+            ? html`
+              <div class="slider-row">
+                <input
+                  type="range"
+                  min=${this.sliderMin}
+                  max=${this.sliderMax}
+                  step=${this.sliderStep}
+                  .value=${String(this._num)}
+                  @input=${(e) => {
+                    const v = Number(e.currentTarget.value);
+                    if (!Number.isFinite(v)) return;
+                    this._num = v;
+                    this._value = String(v);
+                  }}
+                />
+                <input
+                  type="number"
+                  class="num"
+                  min=${this.sliderMin}
+                  max=${this.sliderMax}
+                  step=${this.sliderStep}
+                  placeholder=${this.placeholder}
+                  .value=${this._num}
+                  @input=${(e) => {
+                    const v = e.currentTarget.valueAsNumber;
+                    if (!Number.isFinite(v)) return;
+                    this._num = this._clampNum(v);
+                    this._value = String(this._num);
+                  }}
+                />
+              </div>
+            `
+            : html`
+              <input
+                type="text"
+                .value=${this._value}
+                placeholder=${this.placeholder}
+                @input=${(e) => { this._value = e.target.value; }}
+              />
+            `}
         </div>
         <footer>
           <button class="btn" @click=${this._cancel}>
@@ -231,7 +360,13 @@ export class PromptModal extends LitElement {
   _commit = () => {
     const r = this._resolve;
     this._resolve = null;
-    if (r) r(this._value || null);
+    if (r) {
+      r(
+        this._isSlider()
+          ? String(this._num)
+          : (this._value || null),
+      );
+    }
     this.remove();
   };
   _cancel = () => {
@@ -254,6 +389,10 @@ export function promptText(options = {}) {
     el.message = options.message || "";
     el.placeholder = options.placeholder || "";
     el.defaultValue = options.defaultValue || "";
+    el.inputKind = options.inputKind || "text";
+    if (options.sliderMin != null) el.sliderMin = options.sliderMin;
+    if (options.sliderMax != null) el.sliderMax = options.sliderMax;
+    if (options.sliderStep != null) el.sliderStep = options.sliderStep;
     el.confirmLabel = options.confirmLabel || "OK";
     el.cancelLabel = options.cancelLabel || "Cancel";
     el._resolve = resolve;

@@ -415,6 +415,36 @@ pub trait Backend: Send + Sync + 'static {
         Err(BackendError::Other("split_region not supported".into()))
     }
 
+    /// Reverse audio region in time. Fire-and-forget.
+    async fn reverse_region(&self, _id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("reverse_region not supported".into()))
+    }
+
+    /// Combine regions on one track (same as Ardour Region → Combine).
+    async fn combine_regions(&self, _region_ids: Vec<EntityId>) -> Result<(), BackendError> {
+        Err(BackendError::Other("combine_regions not supported".into()))
+    }
+
+    /// Strip silence from an audio region (detect + split). Fire-and-forget.
+    async fn strip_silence_region(
+        &self,
+        _id: EntityId,
+        _threshold_db: f32,
+        _minimum_length_samples: u64,
+        _fade_length_samples: u64,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("strip_silence_region not supported".into()))
+    }
+
+    /// Pitch-shift region (audio: Rubber Band; MIDI: transpose). Fire-and-forget.
+    async fn pitch_shift_region(
+        &self,
+        _id: EntityId,
+        _semitones: f32,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("pitch_shift_region not supported".into()))
+    }
+
     /// Create a brand-new empty region on the given track.
     /// Fire-and-forget: the host echoes a `RegionsList` once the
     /// playlist has committed.

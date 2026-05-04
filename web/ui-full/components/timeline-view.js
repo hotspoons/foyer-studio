@@ -27,6 +27,8 @@ import { getVizPref, getVizPrefs, setVizPref } from "foyer-ui-core/viz/viz-setti
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { toast } from "foyer-ui-core/widgets/toast.js";
+import { promptText } from "foyer-ui-core/widgets/prompt-modal.js";
+import { icon } from "foyer-ui-core/icons.js";
 import { sessionScopedKey } from "foyer-core/session-scope.js";
 
 const LANE_HEIGHT_DEFAULT = 52;
@@ -35,17 +37,29 @@ const LANE_HEIGHT_MAX = 240;
 const RULER_HEIGHT = 26;
 const HEAD_WIDTH = 140;
 const EDGE_GRAB = 6;
-// Sample-level detail at extreme zoom requires tiers smaller than 64 —
-// at 4000 px/s on 48 kHz audio each pixel covers ~12 source samples, so
-// a tier of 64 spreads one peak over 5+ pixels and the bar looks blocky.
-// Adding 8/16/32 lets the decoder honor finer resolution when asked.
-const TIERS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
-const LANE_HEIGHT_KEY = "foyer.timeline.lane-heights.v1";
+// Sample-level detail at extreme zoom requires finer waveform tiers; see
+// WaveformCache / waveform-gl for decoding resolution.
 
-function pickTier(samplesPerPx) {
-  let best = TIERS[0];
-  for (const t of TIERS) if (t <= samplesPerPx) best = t;
-  return best;
+const LANE_HEIGHT_KEY = "foyer.timeline.lane-heights.v1";
+const SNAP_PREFS_KEY = "foyer.timeline.snap.v1";
+
+/** Beat subdivisions for quant grid / snap (value = denominator slots per bar in 4/4 terms). */
+const QUANT_SUBDIV_OPTIONS = [
+  { v: 4, label: "1/4" },
+  { v: 8, label: "1/8" },
+  { v: 16, label: "1/16" },
+  { v: 32, label: "1/32" },
+  { v: 6, label: "1/8T" },
+  { v: 12, label: "1/16T" },
+];
+
+function defaultSnapPrefs() {
+  return {
+    grid: true,
+    regionEdges: true,
+    markers: true,
+    playhead: false,
+  };
 }
 
 export class TimelineView extends LitElement {
@@ -64,13 +78,15 @@ export class TimelineView extends LitElement {
     // subdivisions over the timeline at 1/<denominator> of a beat.
     _quantOn: { state: true, type: Boolean },
     _quantDiv: { state: true, type: Number },
+    /** @type {{ grid: boolean, regionEdges: boolean, markers: boolean, playhead: boolean }} */
+    _snapPrefs: { state: true, type: Object },
   };
 
   static styles = css`
     ${scrollbarStyles}
     :host { display: flex; flex-direction: column; flex: 1; overflow: hidden; background: var(--color-surface); }
     .toolbar {
-      display: flex; align-items: center; gap: 10px;
+      display: flex; align-items: center; gap: 8px;
       padding: 6px 14px;
       background: var(--color-surface);
       border-bottom: 1px solid var(--color-border);
@@ -79,18 +95,77 @@ export class TimelineView extends LitElement {
       flex-wrap: wrap;
       min-width: 0;
     }
-    .toolbar input[type=range] { width: 200px; }
+    /* Toolbar chips — match tb-menu summaries + viz-picker (same padding/weight). */
     .toolbar button,
     .toolbar select {
       font: inherit; font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
       color: var(--color-text-muted);
-      background: transparent;
+      background: var(--color-surface);
       border: 1px solid var(--color-border);
       border-radius: var(--radius-sm);
-      padding: 2px 8px;
+      padding: 4px 8px;
       cursor: pointer;
       display: inline-flex; align-items: center;
+      gap: 4px;
       min-height: 22px;
+      box-sizing: border-box;
+      transition: color 0.1s ease, border-color 0.1s ease;
+    }
+    .zoom-toolbar {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+    .zoom-toolbar .zoom-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+    }
+    .toolbar input.zoom-range {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 120px;
+      height: 6px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+      cursor: pointer;
+    }
+    .toolbar input.zoom-range:focus-visible {
+      outline: 2px solid color-mix(in oklab, var(--color-accent) 50%, transparent);
+      outline-offset: 2px;
+    }
+    .toolbar input.zoom-range::-webkit-slider-runnable-track {
+      height: 6px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+    }
+    .toolbar input.zoom-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      margin-top: -4px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      border: 2px solid var(--color-surface-elevated);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+    }
+    .toolbar input.zoom-range::-moz-range-track {
+      height: 6px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+    }
+    .toolbar input.zoom-range::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      border: 2px solid var(--color-surface-elevated);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.35);
     }
     .toolbar button:hover,
     .toolbar select:hover { color: var(--color-text); border-color: var(--color-accent); }
@@ -98,6 +173,98 @@ export class TimelineView extends LitElement {
     .toolbar label {
       display: inline-flex; align-items: center; gap: 4px;
       font-size: 10px; color: var(--color-text-muted);
+    }
+    .toolbar details.tb-menu {
+      position: relative;
+      border: none;
+      background: transparent;
+    }
+    .toolbar details.tb-menu > summary {
+      list-style: none;
+      cursor: pointer;
+      font-family: var(--font-sans);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      padding: 4px 8px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--color-border);
+      background: var(--color-surface);
+      color: var(--color-text-muted);
+      user-select: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      min-height: 22px;
+      box-sizing: border-box;
+      transition: color 0.1s ease, border-color 0.1s ease;
+    }
+    .toolbar details.tb-menu > summary:hover {
+      color: var(--color-text);
+      border-color: var(--color-accent);
+    }
+    .toolbar details.tb-menu > summary::-webkit-details-marker { display: none; }
+    .toolbar details.tb-menu > summary::after {
+      content: "▾";
+      font-size: 9px;
+      opacity: 0.75;
+      margin-left: 2px;
+      font-weight: 400;
+      letter-spacing: normal;
+    }
+    .toolbar details.tb-menu[open] > summary {
+      color: var(--color-text);
+      border-color: var(--color-accent);
+    }
+    .toolbar .tb-panel {
+      position: absolute;
+      top: calc(100% + 4px);
+      right: 0;
+      z-index: 40;
+      min-width: 200px;
+      max-width: 280px;
+      padding: 8px;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-panel);
+      font-size: 10px;
+      color: var(--color-text);
+    }
+    .toolbar .tb-panel .tb-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0;
+    }
+    .toolbar .tb-panel .tb-row input { accent-color: var(--color-accent); }
+    .toolbar .tb-panel .tb-hint {
+      margin-top: 8px;
+      padding-top: 6px;
+      border-top: 1px solid var(--color-border);
+      font-size: 9px;
+      color: var(--color-text-muted);
+      line-height: 1.35;
+    }
+    .toolbar .tb-panel button.mi {
+      display: block;
+      width: 100%;
+      text-align: left;
+      margin: 2px 0;
+      padding: 4px 6px;
+      font-size: 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--color-text);
+      cursor: pointer;
+    }
+    .toolbar .tb-panel button.mi:hover {
+      background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+    }
+    .toolbar .tb-panel button.mi:disabled {
+      opacity: 0.45;
+      cursor: default;
     }
     /* Force border-box throughout this component. Tailwind sets it
        globally on the document, but Lit shadow DOM doesn't inherit
@@ -186,7 +353,7 @@ export class TimelineView extends LitElement {
       font-weight: 700;
       letter-spacing: 0.1em;
       padding: 1px 4px;
-      border-radius: 3px;
+      border-radius: var(--radius-sm);
       background: color-mix(in oklab, var(--color-accent) 24%, transparent);
       color: var(--color-accent);
     }
@@ -201,7 +368,7 @@ export class TimelineView extends LitElement {
       font-size: 9px;
       font-weight: 700;
       padding: 2px 0;
-      border-radius: 3px;
+      border-radius: var(--radius-sm);
       border: 1px solid var(--color-border);
       background: var(--color-surface);
       color: var(--color-text-muted);
@@ -551,9 +718,8 @@ export class TimelineView extends LitElement {
     this._lastSeekAtMs = 0;
     this._recordingAnchorSamples = null;
     this._transportDropStats = { stale_seq: 0, backward_jump: 0 };
-    // Quantization grid prefs persist per-browser. Default off so a
-    // first-time user doesn't see extra lines they didn't ask for.
-    // Visibility (`_quantOn`) is now mirrored to the viz prefs
+    // Quant overlay defaults on (`quantGridOn`); time grid defaults off.
+    // Visibility (`_quantOn`) is mirrored to the viz prefs
     // (`quantGridOn`) so the Viz menu can toggle it alongside the
     // time-grid toggle. Subdivision (`_quantDiv`) stays in its own
     // localStorage key — it's a per-timeline setting that doesn't
@@ -565,6 +731,7 @@ export class TimelineView extends LitElement {
     } catch {
       this._quantDiv = 16;
     }
+    this._snapPrefs = this._loadSnapPrefs();
   }
 
   _laneHeightStorageKey() {
@@ -1690,36 +1857,30 @@ export class TimelineView extends LitElement {
 
     return html`
       <div class="toolbar">
-        <span>Zoom</span>
-        <input type="range" min="0" max="1000" step="1"
-               .value=${String(Math.round(Math.log(this._zoom / 2) / Math.log(4000 / 2) * 1000))}
-               @input=${(e) => {
-                 const t = Number(e.currentTarget.value) / 1000;
-                 this._zoom = Math.max(2, Math.min(4000, Math.round(2 * Math.pow(4000 / 2, t))));
-               }}>
-        <span>${this._zoom} px/s · tier=${pickTier(this._samplesPerPx())}</span>
+        <label class="zoom-toolbar">
+          <span class="zoom-label">Zoom</span>
+          <input type="range" class="zoom-range" min="0" max="1000" step="1"
+                 title="Timeline scale (pixels per second)"
+                 .value=${String(Math.round(Math.log(this._zoom / 2) / Math.log(4000 / 2) * 1000))}
+                 @input=${(e) => {
+                   const t = Number(e.currentTarget.value) / 1000;
+                   this._zoom = Math.max(2, Math.min(4000, Math.round(2 * Math.pow(4000 / 2, t))));
+                 }}>
+        </label>
         ${this._selection ? html`
           <button
             @click=${() => this.zoomToSelection()}
             title="Zoom to the current timeline selection"
-          >Zoom to selection</button>
+          >${icon("magnifying-glass", 12)}<span>Zoom</span></button>
           <button
             @click=${() => this._setLoopToSelection()}
             title="Set loop start/end from current selection"
-          >Loop selection</button>
+          >${icon("loop", 12)}<span>Loop</span></button>
         ` : null}
         <span style="flex:1"></span>
-        ${this._quantOn ? html`
-          <select title="Grid subdivision per quarter note (toggle visibility from the Viz menu)"
-                  @change=${(e) => this._setQuantDiv(Number(e.currentTarget.value))}>
-            <option value="4"  ?selected=${this._quantDiv === 4}>1/4</option>
-            <option value="8"  ?selected=${this._quantDiv === 8}>1/8</option>
-            <option value="16" ?selected=${this._quantDiv === 16}>1/16</option>
-            <option value="32" ?selected=${this._quantDiv === 32}>1/32</option>
-            <option value="6"  ?selected=${this._quantDiv === 6}>1/8T</option>
-            <option value="12" ?selected=${this._quantDiv === 12}>1/16T</option>
-          </select>
-        ` : null}
+        ${this._renderRegionToolsMenu()}
+        ${this._renderSnapMenu()}
+        ${this._renderQuantSubdivMenu()}
         <foyer-viz-picker></foyer-viz-picker>
         ${this._diagEnabled() ? html`
           <span>
@@ -1868,6 +2029,628 @@ export class TimelineView extends LitElement {
   _setQuantDiv(d) {
     this._quantDiv = d;
     try { localStorage.setItem("foyer.timeline.quant.div", String(d)); } catch {}
+  }
+
+  _loadSnapPrefs() {
+    try {
+      const raw = localStorage.getItem(SNAP_PREFS_KEY);
+      const p = raw ? JSON.parse(raw) : {};
+      return { ...defaultSnapPrefs(), ...p };
+    } catch {
+      return defaultSnapPrefs();
+    }
+  }
+
+  _persistSnapPrefs() {
+    try {
+      localStorage.setItem(SNAP_PREFS_KEY, JSON.stringify(this._snapPrefs));
+    } catch {}
+  }
+
+  _gridStepSamples() {
+    const sr = this._sampleRate();
+    const ctls = window.__foyer?.store?.state?.controls;
+    const tempo = Number(ctls?.get?.("transport.tempo")) || 120;
+    if (!Number.isFinite(tempo) || tempo <= 0) return null;
+    const tsDen = Math.max(1, Math.round(Number(ctls?.get?.("transport.ts.den")) || 4));
+    const beatSec = (60 / tempo) * (4 / tsDen);
+    const div = Math.max(1, this._quantDiv | 0);
+    const subsPerBeat = Math.max(1, Math.round(div / tsDen));
+    const stepSec = beatSec / subsPerBeat;
+    return Math.max(1, Math.round(stepSec * sr));
+  }
+
+  _snapSampleToGrid(samples) {
+    const step = this._gridStepSamples();
+    if (!step) return Math.round(samples);
+    return Math.round(samples / step) * step;
+  }
+
+  /** Session marker positions in samples (empty until the schema grows markers). */
+  _sessionMarkerSamples() {
+    const m = this.session?.markers;
+    if (!Array.isArray(m)) return [];
+    const out = [];
+    for (const x of m) {
+      const s = Number(x?.position_samples ?? x?.samples ?? x);
+      if (Number.isFinite(s)) out.push(Math.round(s));
+    }
+    return out;
+  }
+
+  _snapThresholdSamples() {
+    const sr = this._sampleRate();
+    const px = Math.max(1e-6, this._zoom);
+    const samplesPerPx = sr / px;
+    return Math.max(48, Math.round(samplesPerPx * 10));
+  }
+
+  _collectSnapTargets(excludeIds, rawLeaderStart) {
+    const p = this._snapPrefs || defaultSnapPrefs();
+    const points = [];
+    const thresh = this._snapThresholdSamples();
+    if (p.grid) {
+      const step = this._gridStepSamples();
+      if (step) points.push(this._snapSampleToGrid(rawLeaderStart));
+    }
+    if (p.playhead) {
+      points.push(Math.round(Number(this._playheadSamples) || 0));
+    }
+    if (p.markers) {
+      for (const s of this._sessionMarkerSamples()) points.push(s);
+    }
+    if (p.regionEdges) {
+      const skip = excludeIds instanceof Set ? excludeIds : new Set(excludeIds || []);
+      for (const list of Object.values(this._regionsByTrack || {})) {
+        for (const r of list || []) {
+          if (!r?.id || skip.has(r.id)) continue;
+          const st = Math.round(Number(r.start_samples) || 0);
+          const en = st + Math.max(0, Math.round(Number(r.length_samples) || 0));
+          points.push(st, en);
+        }
+      }
+    }
+    let best = rawLeaderStart;
+    let bestD = thresh + 1;
+    for (const q of points) {
+      const d = Math.abs(q - rawLeaderStart);
+      if (d < bestD) {
+        bestD = d;
+        best = q;
+      }
+    }
+    if (bestD > thresh) return rawLeaderStart;
+    return best;
+  }
+
+  /** Alt during region move bypasses magnetic snap. */
+  _snapLeaderStart(leaderRawStart, movingIds, altHeld) {
+    if (altHeld) return leaderRawStart;
+    const exclude = new Set(movingIds);
+    return this._collectSnapTargets(exclude, leaderRawStart);
+  }
+
+  _selectedRegionObjects() {
+    const ids = this._selectedRegionIds;
+    const out = [];
+    for (const id of ids) {
+      const r = this._regionForId(id);
+      if (r) out.push(r);
+    }
+    return out;
+  }
+
+  _trackKind(trackId) {
+    const tracks = this.session?.tracks || [];
+    const t = tracks.find((x) => x.id === trackId);
+    return t?.kind || "audio";
+  }
+
+  _regionPairForCrossfadeGlue() {
+    const regs = this._selectedRegionObjects();
+    if (regs.length !== 2) return null;
+    const [a0, b0] = regs;
+    if (a0.track_id !== b0.track_id) return null;
+    if (this._trackKind(a0.track_id) !== "audio") return null;
+    const ordered = [...regs].sort(
+      (a, b) => Number(a.start_samples) - Number(b.start_samples),
+    );
+    const L = ordered[0];
+    const R = ordered[1];
+    const sL = Math.round(Number(L.start_samples) || 0);
+    const eL = sL + Math.max(0, Math.round(Number(L.length_samples) || 0));
+    const sR = Math.round(Number(R.start_samples) || 0);
+    const eR = sR + Math.max(0, Math.round(Number(R.length_samples) || 0));
+    const inter = Math.min(eL, eR) - Math.max(sL, sR);
+    return { L, R, sL, eL, sR, eR, inter, track_id: L.track_id };
+  }
+
+  _quantizeSelectedRegionsToGrid() {
+    const step = this._gridStepSamples();
+    if (!step) {
+      toast("Set a valid tempo to quantize to the beat grid.", { tone: "warn" });
+      return;
+    }
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    for (const id of this._selectedRegionIds) {
+      const r = this._regionForId(id);
+      if (!r) continue;
+      const snapped = this._snapSampleToGrid(Number(r.start_samples) || 0);
+      if (snapped === Math.round(Number(r.start_samples) || 0)) continue;
+      ws.send({
+        type: "update_region",
+        id: r.id,
+        patch: { start_samples: snapped },
+      });
+    }
+  }
+
+  _fadeStepSamples() {
+    const step = this._gridStepSamples();
+    return Math.max(480, step || Math.round(this._sampleRate() * 0.05));
+  }
+
+  _applyFadeInStep() {
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    const n = this._fadeStepSamples();
+    for (const id of this._selectedRegionIds) {
+      const r = this._regionForId(id);
+      if (!r || this._trackKind(r.track_id) !== "audio") continue;
+      const maxFade = Math.max(480, Math.round(Number(r.length_samples) || 0) - 480);
+      const fade = Math.min(n, maxFade);
+      ws.send({
+        type: "update_region",
+        id: r.id,
+        patch: { fade_in_samples: fade, fade_in_shape: "linear" },
+      });
+    }
+  }
+
+  _applyFadeOutStep() {
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    const n = this._fadeStepSamples();
+    for (const id of this._selectedRegionIds) {
+      const r = this._regionForId(id);
+      if (!r || this._trackKind(r.track_id) !== "audio") continue;
+      const maxFade = Math.max(480, Math.round(Number(r.length_samples) || 0) - 480);
+      const fade = Math.min(n, maxFade);
+      ws.send({
+        type: "update_region",
+        id: r.id,
+        patch: { fade_out_samples: fade, fade_out_shape: "linear" },
+      });
+    }
+  }
+
+  _clearFadeIn() {
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    for (const id of this._selectedRegionIds) {
+      const r = this._regionForId(id);
+      if (!r || this._trackKind(r.track_id) !== "audio") continue;
+      ws.send({ type: "update_region", id: r.id, patch: { fade_in_samples: 0 } });
+    }
+  }
+
+  _clearFadeOut() {
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    for (const id of this._selectedRegionIds) {
+      const r = this._regionForId(id);
+      if (!r || this._trackKind(r.track_id) !== "audio") continue;
+      ws.send({ type: "update_region", id: r.id, patch: { fade_out_samples: 0 } });
+    }
+  }
+
+  _applyCrossfadeToSelection() {
+    const pair = this._regionPairForCrossfadeGlue();
+    const ws = window.__foyer?.ws;
+    if (!pair) return;
+    if (!ws) {
+      toast("Not connected — cannot apply crossfade.", { tone: "warn" });
+      return;
+    }
+    if (pair.inter <= 0) {
+      toast(
+        "Crossfade needs two overlapping audio regions on the same track (drag one over the other).",
+        { tone: "warn" },
+      );
+      return;
+    }
+    const ov = Math.floor(pair.inter);
+    ws.send({
+      type: "update_region",
+      id: pair.L.id,
+      patch: { fade_out_samples: ov, fade_out_shape: "symmetric" },
+    });
+    ws.send({
+      type: "update_region",
+      id: pair.R.id,
+      patch: { fade_in_samples: ov, fade_in_shape: "symmetric" },
+    });
+    toast("Crossfade applied over overlap.", { tone: "info" });
+  }
+
+  /** Timeline order (left to right) for currently selected regions. */
+  _sortedSelectedRegionsByTimeline() {
+    const regs = this._selectedRegionObjects();
+    return [...regs].sort(
+      (a, b) => Number(a.start_samples) - Number(b.start_samples),
+    );
+  }
+
+  /** ≥2 regions, all on the same track — valid for `combine_regions`. */
+  _combineRegionSelection() {
+    if (this._selectedRegionIds.size < 2) return null;
+    const regs = this._sortedSelectedRegionsByTimeline();
+    const tid = regs[0]?.track_id;
+    if (!tid || !regs.every((r) => r.track_id === tid)) return null;
+    return { track_id: tid, regs };
+  }
+
+  _reverseSelectedAudioRegions() {
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    const audioRegs = this._sortedSelectedRegionsByTimeline().filter(
+      (r) => this._trackKind(r.track_id) === "audio",
+    );
+    if (!audioRegs.length) {
+      toast("Select at least one audio region.", { tone: "warn" });
+      return;
+    }
+    ws.send({ type: "undo_group_begin", name: "Foyer reverse audio" });
+    for (const r of audioRegs) {
+      ws.send({ type: "reverse_region", id: r.id });
+    }
+    ws.send({ type: "undo_group_end" });
+  }
+
+  _combineSelectedRegions() {
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    const sel = this._combineRegionSelection();
+    if (!sel) {
+      toast("Glue needs two or more regions on the same track.", { tone: "warn" });
+      return;
+    }
+    ws.send({
+      type: "combine_regions",
+      region_ids: sel.regs.map((r) => r.id),
+    });
+  }
+
+  _stripSilenceSelectedAudioRegions() {
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    const audioRegs = this._sortedSelectedRegionsByTimeline().filter(
+      (r) => this._trackKind(r.track_id) === "audio",
+    );
+    if (!audioRegs.length) {
+      toast("Select at least one audio region.", { tone: "warn" });
+      return;
+    }
+    ws.send({ type: "undo_group_begin", name: "Foyer strip silence" });
+    for (const r of audioRegs) {
+      ws.send({ type: "strip_silence_region", id: r.id });
+    }
+    ws.send({ type: "undo_group_end" });
+  }
+
+  async _pitchShiftSelectedRegions() {
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    const regs = this._selectedRegionObjects();
+    if (!regs.length) {
+      toast("Select a region.", { tone: "warn" });
+      return;
+    }
+    const raw = await promptText({
+      title: "Pitch shift",
+      message:
+        "Semitone offset. Audio uses Rubber Band; MIDI transposes notes.",
+      inputKind: "slider",
+      sliderMin: -24,
+      sliderMax: 24,
+      sliderStep: 0.1,
+      defaultValue: "0",
+      placeholder: "±24",
+      confirmLabel: "Apply",
+      cancelLabel: "Cancel",
+    });
+    if (raw == null) return;
+    const semitones = Number.parseFloat(String(raw).trim());
+    if (!Number.isFinite(semitones)) {
+      toast("Enter a valid number of semitones.", { tone: "warn" });
+      return;
+    }
+    if (semitones === 0) {
+      toast("No change (0 semitones).", { tone: "info" });
+      return;
+    }
+    ws.send({ type: "undo_group_begin", name: "Foyer pitch shift" });
+    for (const r of regs) {
+      ws.send({ type: "pitch_shift_region", id: r.id, semitones });
+    }
+    ws.send({ type: "undo_group_end" });
+  }
+
+  _regionEditMenuActions() {
+    const nSel = this._selectedRegionIds.size;
+    const pair = nSel === 2 ? this._regionPairForCrossfadeGlue() : null;
+    const combineSel = this._combineRegionSelection();
+    const anyAudio = [...this._selectedRegionIds].some((id) => {
+      const r = this._regionForId(id);
+      return r && this._trackKind(r.track_id) === "audio";
+    });
+
+    const items = [];
+    items.push({
+      label: "Quantize start to grid",
+      icon: "bars-3-bottom-left",
+      disabled: !this._gridStepSamples(),
+      action: () => this._quantizeSelectedRegionsToGrid(),
+    });
+    items.push({
+      label: "Fade in (1 grid step)",
+      icon: "speaker-wave",
+      disabled: !anyAudio,
+      action: () => this._applyFadeInStep(),
+    });
+    items.push({
+      label: "Fade out (1 grid step)",
+      icon: "speaker-wave",
+      disabled: !anyAudio,
+      action: () => this._applyFadeOutStep(),
+    });
+    items.push({
+      label: "Clear fade in",
+      icon: "x-mark",
+      disabled: !anyAudio,
+      action: () => this._clearFadeIn(),
+    });
+    items.push({
+      label: "Clear fade out",
+      icon: "x-mark",
+      disabled: !anyAudio,
+      action: () => this._clearFadeOut(),
+    });
+    if (pair) {
+      items.push({ separator: true });
+      items.push({
+        label: "Crossfade overlap",
+        icon: "arrows-pointing-in",
+        disabled: pair.inter <= 0,
+        title:
+          pair.inter <= 0
+            ? "Needs overlap: put two audio regions on the same track so they share time."
+            : "Sets symmetric fades across the overlapping span.",
+        action: () => this._applyCrossfadeToSelection(),
+      });
+    }
+    if (combineSel) {
+      if (!pair) items.push({ separator: true });
+      items.push({
+        label: "Glue regions",
+        icon: "circle-stack",
+        disabled: false,
+        title: "Combine selected regions on this track into one (Ardour playlist combine).",
+        action: () => this._combineSelectedRegions(),
+      });
+    }
+    items.push({ separator: true });
+    items.push({
+      label: "Reverse audio",
+      icon: "arrow-uturn-left",
+      disabled: !anyAudio,
+      title: anyAudio
+        ? "Reverse each selected audio region in time."
+        : "Select at least one audio region.",
+      action: () => this._reverseSelectedAudioRegions(),
+    });
+    items.push({
+      label: "Strip silence…",
+      icon: "scissors",
+      disabled: !anyAudio,
+      title: anyAudio
+        ? "Detect silence and remove it (uses default threshold / fade; Ardour strip silence)."
+        : "Select at least one audio region.",
+      action: () => this._stripSilenceSelectedAudioRegions(),
+    });
+    items.push({
+      label: "Pitch shift…",
+      icon: "musical-note",
+      disabled: nSel === 0,
+      title:
+        nSel === 0
+          ? "Select a region."
+          : "Shift pitch for audio (Rubber Band) or transpose MIDI notes.",
+      action: () => this._pitchShiftSelectedRegions(),
+    });
+    return items;
+  }
+
+  _renderSnapMenu() {
+    const p = this._snapPrefs || defaultSnapPrefs();
+    const toggle = (key) => (ev) => {
+      const on = !!ev.target.checked;
+      this._snapPrefs = { ...this._snapPrefs, [key]: on };
+      this._persistSnapPrefs();
+      this.requestUpdate();
+    };
+    return html`
+      <details class="tb-menu" @click=${(e) => e.stopPropagation()}>
+        <summary>${icon("arrows-pointing-in", 12)}<span>Snap</span></summary>
+        <div class="tb-panel" @click=${(e) => e.stopPropagation()}>
+          <div class="tb-row">
+            <label><input type="checkbox" .checked=${p.grid}
+              @change=${toggle("grid")}> Quant grid</label>
+          </div>
+          <div class="tb-row">
+            <label><input type="checkbox" .checked=${p.regionEdges}
+              @change=${toggle("regionEdges")}> Region starts / ends</label>
+          </div>
+          <div class="tb-row">
+            <label><input type="checkbox" .checked=${p.markers}
+              @change=${toggle("markers")}> Markers</label>
+          </div>
+          <div class="tb-row">
+            <label><input type="checkbox" .checked=${p.playhead}
+              @change=${toggle("playhead")}> Playhead</label>
+          </div>
+          <div class="tb-hint">
+            Hold <kbd>Alt</kbd> while dragging a region to bypass magnetic snap.
+            Marker snapping activates when the session exposes markers.
+          </div>
+        </div>
+      </details>
+    `;
+  }
+
+  _quantSubdivSummaryLabel() {
+    const d = this._quantDiv;
+    const hit = QUANT_SUBDIV_OPTIONS.find((o) => o.v === d);
+    return hit?.label ?? "1/16";
+  }
+
+  _renderQuantSubdivMenu() {
+    const d = this._quantDiv;
+    const onPick = (v) => (ev) => {
+      if (!ev.target.checked) {
+        ev.target.checked = true;
+        return;
+      }
+      this._setQuantDiv(v);
+      const det = ev.target.closest("details");
+      if (det) det.open = false;
+      this.requestUpdate();
+    };
+    return html`
+      <details class="tb-menu" @click=${(e) => e.stopPropagation()}>
+        <summary title="Beat subdivision (per quarter): magnetic snap, region quantize, and BPM quant grid when on in Viz">
+          ${icon("squares-2x2", 12)}<span>${this._quantSubdivSummaryLabel()}</span>
+        </summary>
+        <div class="tb-panel" @click=${(e) => e.stopPropagation()}>
+          ${QUANT_SUBDIV_OPTIONS.map(
+            (o) => html`
+              <div class="tb-row">
+                <label><input type="checkbox" .checked=${d === o.v} @change=${onPick(o.v)}> ${o.label}</label>
+              </div>
+            `,
+          )}
+          <div class="tb-hint">Same step as magnetic snap (Quant grid) and region quantize.</div>
+        </div>
+      </details>
+    `;
+  }
+
+  _renderRegionToolsMenu() {
+    const has = this._selectedRegionIds.size > 0;
+    if (!has) return null;
+    const nSel = this._selectedRegionIds.size;
+    const pair = nSel === 2 ? this._regionPairForCrossfadeGlue() : null;
+    const combineSel = this._combineRegionSelection();
+    const anyAudio = [...this._selectedRegionIds].some((id) => {
+      const r = this._regionForId(id);
+      return r && this._trackKind(r.track_id) === "audio";
+    });
+
+    return html`
+      <details class="tb-menu" @click=${(e) => e.stopPropagation()}>
+        <summary>${icon("square-3-stack-3d", 12)}<span>Regions</span></summary>
+        <div class="tb-panel" @click=${(e) => e.stopPropagation()}>
+          <button class="mi" ?disabled=${!this._gridStepSamples()}
+            @click=${() => this._quantizeSelectedRegionsToGrid()}>
+            Quantize start to grid
+          </button>
+          <button class="mi" ?disabled=${!anyAudio} @click=${() => this._applyFadeInStep()}>
+            Fade in (1 grid step)
+          </button>
+          <button class="mi" ?disabled=${!anyAudio} @click=${() => this._applyFadeOutStep()}>
+            Fade out (1 grid step)
+          </button>
+          <button class="mi" ?disabled=${!anyAudio} @click=${() => this._clearFadeIn()}>
+            Clear fade in
+          </button>
+          <button class="mi" ?disabled=${!anyAudio} @click=${() => this._clearFadeOut()}>
+            Clear fade out
+          </button>
+          ${pair
+            ? html`
+              <button
+                class="mi"
+                ?disabled=${pair.inter <= 0}
+                title=${pair.inter <= 0
+                  ? "Needs overlap: two audio regions on this track must share time."
+                  : "Symmetric fade-out on the left region and fade-in on the right across the overlap."}
+                @click=${() => this._applyCrossfadeToSelection()}
+              >
+                Crossfade overlap
+              </button>
+            `
+            : null}
+          ${combineSel
+            ? html`
+              <button
+                class="mi"
+                title="Combine selected regions on this track (timeline order)."
+                @click=${() => this._combineSelectedRegions()}
+              >
+                Glue regions
+              </button>
+            `
+            : null}
+          <button
+            class="mi"
+            ?disabled=${!anyAudio}
+            title=${!anyAudio
+              ? "Select at least one audio region."
+              : "Reverse each selected audio region in time."}
+            @click=${() => this._reverseSelectedAudioRegions()}
+          >
+            Reverse audio
+          </button>
+          <button
+            class="mi"
+            ?disabled=${!anyAudio}
+            title=${!anyAudio
+              ? "Select at least one audio region."
+              : "Remove silence using default detection settings."}
+            @click=${() => this._stripSilenceSelectedAudioRegions()}
+          >
+            Strip silence…
+          </button>
+          <button
+            class="mi"
+            ?disabled=${nSel === 0}
+            title=${nSel === 0
+              ? "Select a region."
+              : "Prompt for semitones; audio uses Rubber Band, MIDI transposes notes."}
+            @click=${() => this._pitchShiftSelectedRegions()}
+          >
+            Pitch shift…
+          </button>
+          <div class="tb-hint">
+            <strong>Regions:</strong> quantize, fades, crossfade (two overlapping audio),
+            glue (same track), reverse, strip silence, pitch shift (prompt).
+          </div>
+        </div>
+      </details>
+    `;
   }
 
   _renderHoverCursor() {
@@ -2060,7 +2843,15 @@ export class TimelineView extends LitElement {
             <div class="region ${regionSelected ? "selected" : ""}" data-id=${r.id}
                  tabindex="0"
                  style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px;outline:none"
-                 @pointerdown=${(e) => { this._onRegionPointerDown(e, r); this._startDrag(e, r, "move"); }}
+                 @pointerdown=${(e) => {
+                   if (e.button === 2) {
+                     this._onRegionPointerDownSecondary(e, r);
+                     return;
+                   }
+                   if (e.button !== 0) return;
+                   this._onRegionPointerDown(e, r);
+                   this._startDrag(e, r, "move");
+                 }}
                  @dblclick=${(e) => { e.stopPropagation(); this._openRegionEditor(r); }}
                  @contextmenu=${(e) => this._regionContextMenu(e, r)}>
               ${isMidi
@@ -2068,8 +2859,14 @@ export class TimelineView extends LitElement {
                 : html`<foyer-waveform-gl class="viz" data-id=${r.id}></foyer-waveform-gl>`}
               ${cutOverlay}
               <div class="name">${r.name}</div>
-              <div class="edge left"  @pointerdown=${(e) => this._startDrag(e, r, "resize-left")}></div>
-              <div class="edge right" @pointerdown=${(e) => this._startDrag(e, r, "resize-right")}></div>
+              <div class="edge left"  @pointerdown=${(e) => {
+                 if (e.button !== 0) return;
+                 this._startDrag(e, r, "resize-left");
+               }}></div>
+              <div class="edge right" @pointerdown=${(e) => {
+                 if (e.button !== 0) return;
+                 this._startDrag(e, r, "resize-right");
+               }}></div>
             </div>
           `;
         })}
@@ -2184,8 +2981,15 @@ export class TimelineView extends LitElement {
   _regionContextMenu(ev, region) {
     ev.preventDefault();
     ev.stopPropagation();
+    const nHead = this._selectedRegionIds.size;
+    const multiHead =
+      nHead > 1 && this._selectedRegionIds.has(region.id);
     const items = [
-      { heading: region.name || region.id },
+      {
+        heading: multiHead
+          ? `${nHead} regions`
+          : (region.name || region.id),
+      },
       {
         label: region.muted ? "Unmute" : "Mute",
         icon: region.muted ? "speaker-wave" : "speaker-x-mark",
@@ -2228,6 +3032,8 @@ export class TimelineView extends LitElement {
         action: () => this._openBeatSequencer(region),
       });
     }
+    items.push({ separator: true });
+    items.push(...this._regionEditMenuActions());
     items.push({ separator: true });
     // Treat any context-click on a region as "this region is the
     // selection" if it isn't already part of the multi-selection. That
@@ -2294,7 +3100,10 @@ export class TimelineView extends LitElement {
       icon: "trash",
       tone: "danger",
       shortcut: "Del",
-      action: () => window.__foyer?.ws?.send({ type: "delete_region", id: region.id }),
+      action: () => {
+        ensureSelection();
+        this.deleteSelectedRegions();
+      },
     });
     showContextMenu(ev, items);
   }
@@ -2304,8 +3113,19 @@ export class TimelineView extends LitElement {
     return navigator.platform?.startsWith?.("Mac") ? "⌘" : "Ctrl";
   }
 
+  /** Right-click before context menu: never collapse a multi-selection. */
+  _onRegionPointerDownSecondary(ev, region) {
+    if (ev.button !== 2 || !region?.id) return;
+    if (this._selectedRegionIds.has(region.id)) return;
+    this._selectedRegionIds.clear();
+    this._selectedRegionIds.add(region.id);
+    this._pendingDemoteRegionId = null;
+    this._reconcileCutPending();
+    this.requestUpdate();
+  }
+
   _onRegionPointerDown(ev, region) {
-    if (!region?.id) return;
+    if (ev.button !== 0 || !region?.id) return;
     if (ev.shiftKey || ev.ctrlKey || ev.metaKey) {
       if (this._selectedRegionIds.has(region.id)) this._selectedRegionIds.delete(region.id);
       else this._selectedRegionIds.add(region.id);
@@ -2661,6 +3481,7 @@ export class TimelineView extends LitElement {
   }
 
   _startDrag(ev, region, mode) {
+    if (ev.button !== 0) return;
     ev.preventDefault();
     ev.stopPropagation();
     const isMulti = this._selectedRegionIds.has(region.id) && this._selectedRegionIds.size > 1;
@@ -2761,6 +3582,15 @@ export class TimelineView extends LitElement {
           delete el.dataset.stretchMode;
         }
       }
+      let moveSnapAdj = 0;
+      if (mode === "move") {
+        const oLead = origs.get(region.id);
+        if (oLead) {
+          const rawLeader = oLead.start + dxSamples;
+          const snapped = this._snapLeaderStart(rawLeader, movingIds, e.altKey);
+          moveSnapAdj = snapped - rawLeader;
+        }
+      }
       for (const id of movingIds) {
         const o = origs.get(id);
         if (!o) continue;
@@ -2772,9 +3602,15 @@ export class TimelineView extends LitElement {
           // Schema's `start_samples` is signed (i64) — Ardour displays
           // the lozenge with its left edge in the pre-roll area, and
           // playback starts the source `-start_samples` in.
-          preview.start_samples = o.start + dxSamples;
+          preview.start_samples = o.start + dxSamples + moveSnapAdj;
         } else if (mode === "resize-right") {
-          preview.length_samples = Math.max(4800, o.len + dxSamples);
+          let newLen = Math.max(4800, o.len + dxSamples);
+          if (!stretchResize && !e.altKey) {
+            const rawEnd = o.start + newLen;
+            const snappedEnd = this._collectSnapTargets(new Set(movingIds), rawEnd);
+            newLen = Math.max(4800, snappedEnd - o.start);
+          }
+          preview.length_samples = newLen;
         } else if (mode === "resize-left") {
           if (stretchResize) {
             const minDx = -o.offset;
@@ -2795,7 +3631,12 @@ export class TimelineView extends LitElement {
           // The right edge stays anchored at o.start + o.len.
           const minDx = -o.offset;            // most we can trim leftward
           const maxDx = o.len - 4_800;         // most we can trim rightward
-          const dx = Math.max(minDx, Math.min(maxDx, dxSamples));
+          let dx = Math.max(minDx, Math.min(maxDx, dxSamples));
+          if (!e.altKey) {
+            const rawStart = o.start + dx;
+            const snappedStart = this._collectSnapTargets(new Set(movingIds), rawStart);
+            dx = Math.max(minDx, Math.min(maxDx, snappedStart - o.start));
+          }
           preview.start_samples = o.start + dx;
           preview.length_samples = o.len - dx;
           preview.source_offset_samples = o.offset + dx;

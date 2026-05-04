@@ -610,6 +610,18 @@ fn default_stretch_preserve_pitch() -> bool {
     true
 }
 
+fn default_strip_threshold_db() -> f32 {
+    -48.0
+}
+
+fn default_strip_minimum_length_samples() -> u64 {
+    2048
+}
+
+fn default_strip_fade_length_samples() -> u64 {
+    64
+}
+
 /// One currently-open session as tracked by the sidecar. Multi-session
 /// clients render this in the session switcher chip and in the
 /// Session → Recent menu.
@@ -905,6 +917,29 @@ pub enum Command {
     SplitRegion {
         id: EntityId,
         at_samples: i64,
+    },
+    /// Reverse audio in time (`ARDOUR::Reverse`). MIDI regions are rejected.
+    ReverseRegion {
+        id: EntityId,
+    },
+    /// Combine regions on one track into one compound region (`Playlist::combine` in Ardour).
+    CombineRegions {
+        region_ids: Vec<EntityId>,
+    },
+    /// Run silence detection (`AudioRegion::find_silence`) then `StripSilence` (splits region).
+    StripSilenceRegion {
+        id: EntityId,
+        #[serde(default = "default_strip_threshold_db")]
+        threshold_db: f32,
+        #[serde(default = "default_strip_minimum_length_samples")]
+        minimum_length_samples: u64,
+        #[serde(default = "default_strip_fade_length_samples")]
+        fade_length_samples: u64,
+    },
+    /// Pitch-shift audio via Rubber Band (`RBStretch`); MIDI via per-note transpose.
+    PitchShiftRegion {
+        id: EntityId,
+        semitones: f32,
     },
     /// Ask for decimated peaks for `region_id` at the given resolution. The
     /// sidecar rounds the request to the nearest cached tier.

@@ -1729,7 +1729,16 @@ fn bootstrap_session_if_missing(
         leaf_dir.display(),
         helper.display(),
     );
+    // Mirror `launch_and_wait_for_shim`'s bash branch: the helper is a
+    // short-lived libardour process that loads the Foyer surface .so.
+    // Without `FOYER_SHIM_NO_IPC=1` it runs full IPC bring-up (advert +
+    // listener) and exits ~2s later — foyer-cli's discovery can grab
+    // that dead socket, and Docker/package builds have seen follow-on
+    // failures for *new* sessions only (existing sessions skip this
+    // helper). See shims/ardour/src/ipc.cc and the bash launcher comment
+    // around `FOYER_SHIM_NO_IPC`.
     match std::process::Command::new(&helper)
+        .env("FOYER_SHIM_NO_IPC", "1")
         .arg(&leaf_dir)
         .arg(snapshot_name)
         .status()

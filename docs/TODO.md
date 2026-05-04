@@ -2,9 +2,6 @@
 
 ## WIP (handoff — not finished)
 
-- [/] **Timeline:** Ctrl/Cmd + left/right edge drag → `stretch_region` (Ardour: `MidiStretch` + `RBStretch` for audio; still may need polish — edge hit-testing / modifiers / multi-timeline).
-- [/] **Timeline:** `S` → `split_region` on selected regions (hover-cursor split anchor vs playhead; `queryTimelineFromKeyEvent` / keybind ordering — still unreliable for some users — needs thorough debugging).
-
 ~~Fresh cut as of 2026-04-24. Everything already landed is archived in [old/PLAN.md](old/PLAN.md) under the "Archived 2026-04-24" section.~~
 (deleted, not needed)
 
@@ -473,6 +470,10 @@ master bus at all.
   visualizations, seek heads) routes through — set the delay once per session,
   all displays stay consistent. Bluetooth audio stacks solve this already; crib
   from a video-jitter-buffer reference implementation.
+- [ ] Some expensive operations like reversing regions cause pent up lantency to occur in
+  the back end, and there is a several second lag in the audio output from the remote monitor
+  to the back end (and visibly on the timeline) - we need to detect this and reset the 
+  monitoring if there is a big build up of buffers, and maybe emit a message to the user
 - [ ] Loop button quirk: main loop button loops last selection when no selection active
   - Transport-bar toggle uses `controlSet("transport.looping", !loop)` (absolute boolean).
     When no explicit selection exists, Ardour's `loop_toggle()` falls back to the previous

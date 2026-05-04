@@ -319,6 +319,18 @@ encode_patch_reload ()
 }
 
 std::vector<std::uint8_t>
+encode_error (const std::string& code, const std::string& message)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");     o.str ("event");
+		o.str ("type");    o.str ("error");
+		o.str ("code");    o.str (code);
+		o.str ("message"); o.str (message);
+	});
+}
+
+std::vector<std::uint8_t>
 encode_control_update (Session& session, const Controllable& c)
 {
 	std::string id = schema_map::id_for_controllable (session, c);
@@ -1127,10 +1139,9 @@ encode_audio_ingress_closed (std::uint32_t stream_id)
 
 namespace {
 
-// Emit a single `Region` struct map. The size is variable because three of
-// its fields use `skip_serializing_if = "Option::is_none"` on the Rust side
-// (color, source_path, source_offset_samples). Keep this in lock-step with
-// `foyer_schema::Region`.
+// Emit a single `Region` struct map. The size is variable because several
+// fields use `skip_serializing_if` on the Rust side. Keep this in lock-step
+// with `foyer_schema::Region`.
 void
 emit_region_map (Out& o, const schema_map::RegionDesc& r)
 {
@@ -1138,6 +1149,7 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	const bool emit_color       = !r.color.empty ();
 	const bool emit_source_path = !r.source_path.empty ();
 	const bool emit_source_off  = r.has_source_offset && !r.source_path.empty ();
+	const bool emit_segments    = !r.source_segments.empty ();
 	const bool emit_notes       = !r.notes.empty ();
 	const bool emit_patches     = !r.patch_changes.empty ();
 	const bool emit_sequencer   = r.sequencer.present;
@@ -1145,6 +1157,7 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	if (emit_color)       ++n;
 	if (emit_source_path) ++n;
 	if (emit_source_off)  ++n;
+	if (emit_segments)    ++n;
 	if (emit_notes)       ++n;
 	if (emit_patches)     ++n;
 	if (emit_sequencer)   ++n;
@@ -1162,6 +1175,16 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	o.str ("muted"); o.b (r.muted);
 	if (emit_source_path) { o.str ("source_path"); o.str (r.source_path); }
 	if (emit_source_off)  { o.str ("source_offset_samples"); o.u (r.source_offset_samples); }
+	if (emit_segments) {
+		o.str ("source_segments");
+		o.array (r.source_segments.size ());
+		for (auto const& seg : r.source_segments) {
+			o.map (3);
+			o.str ("path");              o.str (seg.path);
+			o.str ("offset_samples");    o.u (seg.offset_samples);
+			o.str ("length_samples");    o.u (seg.length_samples);
+		}
+	}
 	if (emit_notes) {
 		o.str ("notes");
 		o.array (r.notes.size ());

@@ -14,7 +14,7 @@
 // The menu is a single `<foyer-context-menu>` mounted at `document.body` and
 // reused for every invocation. Submenus are rendered inline on hover.
 
-import { LitElement, html, css } from "lit";
+import { LitElement, html, css, nothing } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 
 export class ContextMenu extends LitElement {
@@ -180,6 +180,7 @@ export class ContextMenu extends LitElement {
         class="item"
         ?data-disabled=${!!it.disabled}
         data-tone=${it.tone || ""}
+        title=${it.title ?? nothing}
         @click=${(ev) => this._activate(ev, it)}
         @mouseenter=${() => (this._submenu = i)}
       >

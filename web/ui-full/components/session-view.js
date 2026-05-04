@@ -1,5 +1,6 @@
 // Session picker — jailed file browser. Shows a breadcrumb path, lists entries
-// with folder/session/file distinction, and lets the user "open" a session dir.
+// with folder/session/file distinction, and lets the user "open" a session dir
+// (unless `mode` is `new` or `save_as`, which change folder vs session behavior).
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
@@ -24,7 +25,7 @@ export class SessionView extends LitElement {
     _activeBackend:     { state: true, type: String },
     _selectedBackendId: { state: true, type: String },
     _showHidden:        { state: true, type: Boolean },
-    mode:               { type: String },  // "open" (default) or "new"
+    mode:               { type: String },  // "open" (default), "new", or "save_as"
   };
 
   static styles = css`
@@ -76,11 +77,26 @@ export class SessionView extends LitElement {
       transition: background 0.1s ease;
     }
     .row:hover { background: var(--color-surface-elevated); }
-    .row .name { flex: 1; font-family: var(--font-sans); font-size: 12px; color: var(--color-text); }
-    .row .meta { font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono); }
-    .row.session .name { font-weight: 600; }
+    .row .name { flex: 1; font-family: var(--font-sans); font-size: 12px; color: var(--color-text); min-width: 0; }
+    .row .name-block { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .row .name-primary { font-family: var(--font-sans); font-size: 12px; color: var(--color-text); }
+    .row .name-sub {
+      font-size: 10px;
+      color: var(--color-text-muted);
+      font-family: var(--font-mono);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .row .meta { font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono); flex-shrink: 0; }
+    .row.session .name-primary { font-weight: 600; }
     .row.session { color: var(--color-accent-3); }
     .row.session:hover { background: color-mix(in oklab, var(--color-accent) 15%, transparent); }
+    .row.atomic-session {
+      opacity: 0.72;
+      cursor: default;
+    }
+    .row.atomic-session:hover { background: transparent; }
     .error {
       padding: 12px 14px;
       color: var(--color-danger);
@@ -216,7 +232,7 @@ export class SessionView extends LitElement {
     // chip pins it explicitly until they click another chip.
     this._selectedBackendId = null;
     this._showHidden = false;
-    this.mode = "open";  // "open" or "new"
+    this.mode = "open";  // "open", "new", or "save_as"
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
 
     // Internal browser history for file navigation. Replaces the old
@@ -227,6 +243,8 @@ export class SessionView extends LitElement {
     // localStorage, and bind mouse 3/4 + Alt+←/Alt+→ for back/forward.
     this._history = [];      // stack of visited paths, oldest → newest
     this._histCursor = -1;   // index into _history; -1 = uninitialized
+    /** Last path sent in `browse_path` (for stale last-path recovery). */
+    this._lastBrowseRequest = "";
     this._keyHandler = (e) => this._onKey(e);
     this._mouseHandler = (e) => this._onMouseButton(e);
   }
@@ -359,11 +377,32 @@ export class SessionView extends LitElement {
   }
 
   _sendBrowse(path) {
+    this._lastBrowseRequest = path || "";
     window.__foyer?.ws?.send({
       type: "browse_path",
       path: path || "",
       show_hidden: !!this._showHidden,
     });
+  }
+
+  /**
+   * If the picker opens on a remembered folder that no longer exists,
+   * the server returns "no such path". Recover by jumping to jail root
+   * without flashing an error — same as first-run with an empty path.
+   */
+  _tryRecoverStaleInitialPath(message) {
+    if (!/no such path:/i.test(message || "")) return false;
+    const attempted = this._lastBrowseRequest;
+    if (!attempted) return false;
+    if (this._history.length !== 1 || this._history[0] !== attempted) return false;
+    this._error = "";
+    this._listing = null;
+    this._history = [""];
+    this._histCursor = 0;
+    this._saveLastPath("");
+    this._sendBrowse("");
+    this.requestUpdate();
+    return true;
   }
 
   _onEnvelope(env) {
@@ -373,6 +412,7 @@ export class SessionView extends LitElement {
       this._listing = body.listing;
       this._error = "";
     } else if (body.type === "error" && body.code?.startsWith("browse_")) {
+      if (this._tryRecoverStaleInitialPath(body.message)) return;
       this._error = body.message;
     } else if (body.type === "error" && body.code === "no_jail") {
       this._error = body.message;
@@ -451,6 +491,7 @@ export class SessionView extends LitElement {
   }
 
   _renderPicker() {
+    if (this.mode === "save_as") return null;
     const backends = (this._backends || []).filter((b) => b.enabled);
     if (backends.length <= 1) return null;
     return html`
@@ -583,18 +624,41 @@ export class SessionView extends LitElement {
     const meta = e.kind === "file" && e.size_bytes != null
       ? fmtBytes(e.size_bytes)
       : e.kind === "session_dir" ? "session" : "";
-    const click = e.kind === "dir"
-      ? () => this._browse(e.path)
+    const rowTitle = atomic
+      ? "Open this session from Session → Open"
       : e.kind === "session_dir"
-        ? (this.mode === "new"
-            ? () => this._browse(e.path)   // new mode: navigate into session_dir
-            : () => this._open(e))         // open mode: launch session
-        : () => this._preview(e);
+        ? (e.session_name && e.session_name !== e.name
+          ? `${e.path}\nAlso: ${e.session_name}.ardour in this folder`
+          : e.path)
+        : "";
+    let click = () => this._preview(e);
+    if (e.kind === "dir") {
+      click = () => this._browse(e.path);
+    } else if (e.kind === "session_dir") {
+      if (this.mode === "save_as") {
+        click = () => {};
+      } else if (this.mode === "new") {
+        click = () => this._browse(e.path);
+      } else {
+        click = () => this._open(e);
+      }
+    }
+    const atomic = e.kind === "session_dir" && this.mode === "save_as";
     return html`
-      <div class="row ${e.kind === 'session_dir' ? 'session' : ''}"
+      <div class="row ${e.kind === 'session_dir' ? 'session' : ''} ${atomic ? "atomic-session" : ""}"
+           title=${rowTitle}
            @click=${click}>
         ${icon(iconName, 16)}
-        <div class="name">${e.session_name || e.name}</div>
+        ${e.kind === "session_dir"
+          ? html`
+            <div class="name-block">
+              <div class="name-primary">${e.name}</div>
+              ${e.session_name && e.session_name !== e.name
+                ? html`<div class="name-sub">${e.session_name}.ardour</div>`
+                : null}
+            </div>
+          `
+          : html`<div class="name">${e.name}</div>`}
         <div class="meta">${meta}</div>
       </div>
     `;

@@ -534,6 +534,27 @@ export class Store extends EventTarget {
         this._emit();
         break;
       }
+      case "session_changed": {
+        // Host switched project path (Open Session, Save Session As).
+        // Keep SessionInfo in sync so the switcher chip label matches Ardour.
+        const newPath = body.path;
+        if (!newPath) break;
+        let sid = env.session_id || this.state.currentSessionId;
+        if (!sid && this.state.sessions.length === 1) {
+          sid = this.state.sessions[0].id;
+        }
+        if (sid) {
+          const info = this.state.sessions.find((s) => s.id === sid);
+          if (info) {
+            info.path = newPath;
+            const seg = newPath.split("/").filter(Boolean);
+            if (seg.length) info.name = seg[seg.length - 1];
+          }
+        }
+        this.dispatchEvent(new CustomEvent("sessions"));
+        this._emit();
+        break;
+      }
       // ── multi-session lifecycle ──────────────────────────────
       case "session_list": {
         this.state.sessions = Array.isArray(body.sessions) ? body.sessions : [];

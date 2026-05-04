@@ -13,13 +13,11 @@ use crate::EntityId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionCategory {
-    Session,   // open, save, export, new
+    Session,   // open, save, export, preferences
     Edit,      // undo, redo, cut, copy, paste
     Transport, // play, stop, record, loop, locate
     View,      // switch surfaces, toggle panels
-    Track,     // add/remove tracks, freeze, bounce
-    Plugin,    // manage plugins
-    Settings,  // preferences
+    Track,     // add/remove tracks, bounce
     Agent,     // agent-only actions (MCP-invokable)
     Other,
 }

@@ -6,12 +6,12 @@ import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { getTransportPref, toggleTransportPref } from "foyer-core/transport-settings.js";
 import { showProjectPicker } from "./project-picker-modal.js";
+import { openSaveSessionAs } from "./save-session-as-modal.js";
 import { openSettings } from "./settings-modal.js";
-import { promptText } from "foyer-ui-core/widgets/prompt-modal.js";
 import { confirmChoice } from "foyer-ui-core/widgets/confirm-modal.js";
 import { load as loadRecents, forget as forgetRecent, touch as touchRecent, clearAll as clearRecents } from "foyer-core/recents.js";
 import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
-import { isAllowed, isActionAllowed } from "foyer-core/rbac.js";
+import { isAllowed, isActionAllowed, isActionHiddenFromCatalog } from "foyer-core/rbac.js";
 
 // Walk shadow roots to find a custom element. The timeline lives ≥2
 // shadow roots deep (foyer-app → tile-container → tile-leaf →
@@ -42,15 +42,10 @@ function findTimeline() {
 // just duplicates buttons two pixels apart. View is absent because the
 // layout FAB owns view spawning and tile arrangement; the old View menu
 // items hooked into a stub backend handler that never landed.
-//
-// Plugin's items are folded into Settings (see _renderMenu) — there's
-// effectively only "Plugin manager…" so an entire top-level button for
-// it is overkill.
 const MENU_ORDER = [
   { cat: "session",   label: "Session"   },
   { cat: "edit",      label: "Edit"      },
   { cat: "track",     label: "Track"     },
-  { cat: "settings",  label: "Settings"  },
 ];
 
 // The "+ New" tile launcher used to live here — a button that
@@ -180,11 +175,23 @@ export class MainMenu extends LitElement {
       if (path.includes(this)) return;
       this._openMenu = "";
     };
+    this._onPrefsKey = (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod || e.key !== ",") return;
+      const t = e.target;
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
+          || (t && t.isContentEditable)) {
+        return;
+      }
+      e.preventDefault();
+      openSettings();
+    };
   }
 
   connectedCallback() {
     super.connectedCallback();
     document.addEventListener("pointerdown", this._onDocDown, true);
+    document.addEventListener("keydown", this._onPrefsKey, true);
     const ws = window.__foyer?.ws;
     if (ws) {
       ws.addEventListener("envelope", this._envelopeHandler);
@@ -203,6 +210,7 @@ export class MainMenu extends LitElement {
   }
   disconnectedCallback() {
     document.removeEventListener("pointerdown", this._onDocDown, true);
+    document.removeEventListener("keydown", this._onPrefsKey, true);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     window.__foyer?.store?.removeEventListener("rbac", this._onRbac);
     window.__foyer?.store?.removeEventListener("sessions", this._onSessions);
@@ -232,9 +240,40 @@ export class MainMenu extends LitElement {
     // hidden from every menu. LAN users see everything; tunnel guests
     // only see what their role permits. See web/src/rbac.js for the
     // per-action mapping.
-    return this._actions.filter(a =>
-      a.category === cat && isActionAllowed(a.id),
-    );
+    let list = this._actions.filter((a) => {
+      if (!isActionAllowed(a.id) || isActionHiddenFromCatalog(a)) return false;
+      // Preferences lives under Edit via a fixed menu row (see
+      // `_renderMenu`), not from whatever categories the host lists.
+      if (a.id === "session.preferences") return false;
+      return a.category === cat;
+    });
+    if (cat === "session") {
+      list = this._ensureSessionSaveAsInMenu(list);
+    }
+    return list;
+  }
+
+  /** Save As is client-driven (`save_session` + jail picker). The stub catalog
+   *  omits it and older shims may too — keep the menu honest next to Save. */
+  _ensureSessionSaveAsInMenu(list) {
+    if (!isActionAllowed("session.save_as")) return list;
+    if (list.some((a) => a.id === "session.save_as")) return list;
+    const row = {
+      id:           "session.save_as",
+      label:        "Save Session As…",
+      category:     "session",
+      icon:         "document-duplicate",
+      shortcut:     "Cmd+Shift+S",
+      enabled:      true,
+      description:  undefined,
+    };
+    const idx = list.findIndex((a) => a.id === "session.save");
+    if (idx >= 0) {
+      const out = [...list];
+      out.splice(idx + 1, 0, row);
+      return out;
+    }
+    return [...list, row];
   }
 
   _invoke(a) {
@@ -287,38 +326,14 @@ export class MainMenu extends LitElement {
       findTimeline()?.pasteRegions?.({ at: "mouse" });
       return;
     }
-    if (a.id === "edit.delete_selection") {
-      findTimeline()?.deleteSelection?.();
-      return;
-    }
-    if (a.id === "edit.mute_selection") {
-      findTimeline()?.muteSelection?.();
-      return;
-    }
     // Preferences is a client-side settings modal — no round trip.
-    if (a.id === "settings.preferences") {
+    if (a.id === "session.preferences") {
       openSettings();
       return;
     }
-    // Save As → prompt for filename, emit the richer `save_session`
-    // command (carries the path). Plain Save falls through to the
-    // InvokeAction path below, where the shim's `session.save`
-    // handler calls `save_state("")` (save-in-place).
+    // Save As → jail browser + new folder name (cannot enter existing sessions).
     if (a.id === "session.save_as") {
-      (async () => {
-        const ws = window.__foyer?.ws;
-        if (!ws) return;
-        const name = await promptText({
-          title: "Save session as",
-          label: "Filename (relative to session dir, or absolute path)",
-          placeholder: "my-session.ardour",
-          confirmLabel: "Save As",
-        });
-        if (name == null) return;
-        const trimmed = name.trim();
-        if (!trimmed) return;
-        ws.send({ type: "save_session", as_path: trimmed });
-      })();
+      openSaveSessionAs();
       return;
     }
     // Export: save the open session, then download a tar.gz of its
@@ -346,17 +361,11 @@ export class MainMenu extends LitElement {
   render() {
     return html`
       ${MENU_ORDER.map(({ cat, label }) => {
-        let items = this._byCategory(cat);
-        // Plugin actions get folded into Settings — there's effectively
-        // only one (Plugin manager…) and a whole top-level menu for it
-        // is wasted chrome. Order: settings first, then plugin items.
-        if (cat === "settings") {
-          items = items.concat(this._byCategory("plugin"));
-        }
-        // The session dropdown carries hard-coded extras (Close, Open
-        // Recent, Remote Access) so render it even when the backend
-        // hasn't replied to list_actions yet.
-        if (!items.length && cat !== "session") return null;
+        const items = this._byCategory(cat);
+        // Session always has hard-coded rows; Edit always has Preferences
+        // (codec, sample rate, etc.) even if `list_actions` omits it.
+        const editHasPrefsOnly = cat === "edit" && items.length === 0;
+        if (!items.length && cat !== "session" && !editHasPrefsOnly) return null;
         return this._renderMenu(cat, label, items);
       })}
     `;
@@ -385,6 +394,7 @@ export class MainMenu extends LitElement {
               </div>
             `;
           })}
+          ${cat === "edit" ? this._renderEditPreferencesItem(items.length > 0) : null}
           ${cat === "session" ? this._renderRecentSubmenu() : null}
           ${cat === "session" && isAllowed("list_audio_pool") ? html`
             <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
@@ -414,6 +424,22 @@ export class MainMenu extends LitElement {
           ` : null}
         </div>
       ` : null}
+    `;
+  }
+
+  /// Browser settings (codec, sample rate, …) — not tied to the shim's
+  /// `list_actions` catalog because many hosts omit `session.preferences`.
+  _renderEditPreferencesItem(withSep) {
+    return html`
+      ${withSep ? html`<div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>` : null}
+      <div class="item" @click=${() => {
+        this._openMenu = "";
+        openSettings();
+      }}>
+        <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("cog-6-tooth", 11)}</span>
+        <span class="label">Preferences…</span>
+        <span class="shortcut">⌘ ,</span>
+      </div>
     `;
   }
 

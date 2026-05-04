@@ -62,7 +62,31 @@ impl Jail {
             let entry_path = canon.join(&name);
             let meta = match dent.metadata() {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(_) => {
+                    // `metadata()` can fail on some FUSE / VM subtrees while
+                    // `file_type()` still works — still list the row so real
+                    // folders don't vanish from the picker.
+                    let is_dir = dent.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    let rel_path = path_join_rel(&rel, &name);
+                    let (kind, session_name) = if is_dir {
+                        if let Some(sn) = find_session_in(&entry_path) {
+                            (FsEntryKind::SessionDir, Some(sn))
+                        } else {
+                            (FsEntryKind::Dir, None)
+                        }
+                    } else {
+                        (FsEntryKind::File, None)
+                    };
+                    entries.push(FsEntry {
+                        name,
+                        path: rel_path,
+                        kind,
+                        size_bytes: None,
+                        modified_secs: None,
+                        session_name,
+                    });
+                    continue;
+                }
             };
             let mut kind = if meta.is_dir() {
                 FsEntryKind::Dir
@@ -109,6 +133,28 @@ impl Jail {
             hidden_count,
         })
     }
+
+    /// True when `rel` (jail-relative, normalized) points at an existing path
+    /// that cannot be used as a fresh "Save session as" target: either a file
+    /// already sits there, or the directory already holds an Ardour session
+    /// (`*.ardour`). Missing paths return false.
+    pub fn existing_session_save_conflict(&self, rel: &Path) -> Result<bool, JailError> {
+        if rel.as_os_str().is_empty() {
+            return Ok(false);
+        }
+        let abs = self.root.join(rel);
+        let canon = match abs.canonicalize() {
+            Ok(c) => c,
+            Err(_) => return Ok(false),
+        };
+        if !canon.starts_with(&self.root_canon) {
+            return Err(JailError::OutsideJail(rel.display().to_string()));
+        }
+        if !canon.is_dir() {
+            return Ok(true);
+        }
+        Ok(find_session_in(&canon).is_some())
+    }
 }
 
 fn normalize_relative(rel: &str) -> PathBuf {
@@ -146,12 +192,24 @@ fn path_join_rel(rel: &Path, name: &str) -> String {
 }
 
 fn find_session_in(dir: &Path) -> Option<String> {
+    let dir_stem = dir.file_name()?.to_str()?.to_string();
     let rd = std::fs::read_dir(dir).ok()?;
+    let mut stems: Vec<String> = Vec::new();
     for dent in rd.flatten() {
         let n = dent.file_name().to_string_lossy().into_owned();
         if let Some(stem) = n.strip_suffix(".ardour") {
-            return Some(stem.to_string());
+            stems.push(stem.to_string());
         }
     }
-    None
+    if stems.is_empty() {
+        return None;
+    }
+    // Prefer `session_dir/session_dir.ardour` — one folder often accumulates
+    // several `.ardour` files (templates, "Save As" leftovers). Readdir order
+    // is unstable; without this the picker label can hide the folder identity.
+    if let Some(p) = stems.iter().find(|s| *s == &dir_stem) {
+        return Some((*p).clone());
+    }
+    stems.sort();
+    Some(stems.into_iter().next().expect("non-empty"))
 }

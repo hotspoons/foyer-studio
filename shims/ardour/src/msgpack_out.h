@@ -65,6 +65,9 @@ std::vector<std::uint8_t> encode_transport_state (ARDOUR::Session&);
 /// per-op patches for a structural change.
 std::vector<std::uint8_t> encode_patch_reload ();
 
+/// Encode `Event::Error { code, message }` so the host can forward it to the browser.
+std::vector<std::uint8_t> encode_error (const std::string& code, const std::string& message);
+
 /// Encode `Event::RegionsList` — the reply to a `Command::ListRegions` for
 /// one track. Carries timeline meta (sample rate + length) alongside the
 /// regions so the client can lay things out without a second round trip.

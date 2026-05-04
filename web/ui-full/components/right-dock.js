@@ -755,7 +755,7 @@ export class RightDock extends LitElement {
     const layout = window.__foyer?.layout;
     if (!layout) return;
     if (w.minimized) layout.floatSet?.(w.id, { minimized: false });
-    layout.raiseFloat?.(w.id);
+    layout.raiseFloatToGlobalFront?.(w.id);
   }
 
   _onTileWidgetContext(ev, w) {

@@ -197,7 +197,7 @@ the right arch.
 ```bash
 docker run --rm -it --name foyer-studio \
   -p 3838:3838 --shm-size=1g \
-  -v foyer-projects:/projects \
+  -v "$(pwd):/projects" \
   ghcr.io/hotspoons/foyer-studio:latest
 ```
 
@@ -220,14 +220,14 @@ Three flags worth understanding:
   during session load. Docker's default 64 MB tmpfs ENOMEMs the
   open. Cloud Run gen2 auto-sizes `/dev/shm` to ~50% of `--memory`,
   so this flag isn't needed there.
-- **`-v foyer-projects:/projects`** — see **Volumes** below. Without
-  it, every project upload vanishes on container stop.
+- **`-v "$(pwd):/projects"`** (or any host path you prefer) — see **Volumes** below. Without
+  a mount, every project upload vanishes on container stop.
 
 ### Volumes
 
 | Mount | What's there | When you need it |
 |---|---|---|
-| `/projects` | Ardour session dirs uploaded via the UI, plus anything copied in directly. | Always — without persistence, container restart loses everything. Named volume (`foyer-projects`) for "I just want it to stick around"; bind mount (`-v ~/foyer-projects:/projects`) for "I want to inspect / version-control sessions from the host". |
+| `/projects` | Ardour session dirs uploaded via the UI, plus anything copied in directly. | Always — without persistence, container restart loses everything. **Local examples** use `-v "$(pwd):/projects"` (`pwd` is POSIX — works in bash, zsh, ksh, `/bin/sh` on macOS/Linux); use a named volume (e.g. `-v foyer-projects:/projects`) or another path if you prefer. |
 | `/dev/shm` | POSIX shm registry for the host's jackd. | Only when running in `jack-headless` mode against a host-running jackd (next section). |
 | `/tmp` | JACK's filesystem socket files. | Same — only for host-jackd passthrough. |
 
@@ -250,7 +250,7 @@ docker run --rm -it --name foyer-studio \
   --privileged --ulimit rtprio=95 --ulimit memlock=-1 \
   --ipc=host \
   -v /dev/shm:/dev/shm -v /tmp:/tmp:rw \
-  -v foyer-projects:/projects \
+  -v "$(pwd):/projects" \
   --user "$(id -u):$(id -g)" --group-add audio \
   -e FOYER_RUNTIME_MODE=jack-headless \
   -e FOYER_JACK_MODE=shm \

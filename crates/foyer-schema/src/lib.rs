@@ -42,7 +42,10 @@ pub use session::{
     Bus, Group, GroupPatch, MidiPatchState, PluginInstance, Send, Session, Track, TrackKind,
     TrackPatch, Transport, DEFAULT_SAMPLE_RATE,
 };
-pub use timeline::{FadeShape, Region, RegionPatch, TimelineMeta, WaveformPeaks, WaveformRequest};
+pub use timeline::{
+    AudioSourceSegment, FadeShape, Region, RegionPatch, TimelineMeta, WaveformPeaks,
+    WaveformRequest,
+};
 pub use tunnel::{
     TunnelConnection, TunnelCreateToken, TunnelManifest, TunnelProviderConfig, TunnelProviderKind,
     TunnelRevokeToken, TunnelRole, TunnelState, TunnelUp,
@@ -53,7 +56,7 @@ pub use value::{
 };
 
 /// Current wire-schema version. Major bump = breaking; minor = additive.
-pub const SCHEMA_VERSION: (u16, u16) = (0, 3);
+pub const SCHEMA_VERSION: (u16, u16) = (0, 4);
 
 /// Kubernetes-style named API revision for control-plane envelopes (IPC shim ↔ sidecar
 /// and WebSocket). Evolve `v1alpha1` in place during development; promote to `v1beta1` /

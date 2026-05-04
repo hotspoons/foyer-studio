@@ -19,7 +19,7 @@ use std::fs::File;
 use std::path::Path;
 
 use foyer_backend::BackendError;
-use foyer_schema::{EntityId, WaveformPeaks};
+use foyer_schema::{AudioSourceSegment, EntityId, WaveformPeaks};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphError;
@@ -192,6 +192,47 @@ pub fn decode_peaks(
         samples_per_peak,
         peaks,
         bucket_count,
+    })
+}
+
+/// Stitch symphonia decodes for each file slice (glued / compound regions).
+pub fn decode_peaks_merged(
+    segments: &[AudioSourceSegment],
+    region_id: EntityId,
+    samples_per_peak: u32,
+) -> Result<WaveformPeaks, BackendError> {
+    if segments.is_empty() {
+        return Err(BackendError::Other(
+            "decode_peaks_merged: empty segments".into(),
+        ));
+    }
+    let mut all_peaks: Vec<f32> = Vec::new();
+    let mut total_buckets: u32 = 0;
+    for seg in segments {
+        if seg.length_samples == 0 {
+            continue;
+        }
+        let part = decode_peaks(
+            Path::new(&seg.path),
+            region_id.clone(),
+            samples_per_peak,
+            seg.offset_samples,
+            seg.length_samples,
+        )?;
+        all_peaks.extend_from_slice(&part.peaks);
+        total_buckets = total_buckets.saturating_add(part.bucket_count);
+    }
+    if all_peaks.is_empty() {
+        return Err(BackendError::Other(
+            "decode_peaks_merged: no peaks decoded".into(),
+        ));
+    }
+    Ok(WaveformPeaks {
+        region_id,
+        channels: 1,
+        samples_per_peak,
+        peaks: all_peaks,
+        bucket_count: total_buckets,
     })
 }
 
