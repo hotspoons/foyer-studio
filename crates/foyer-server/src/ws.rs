@@ -1100,6 +1100,80 @@ async fn dispatch_command(
                     },
                 )
                 .await;
+            } else if let Some(abs_raw) = normalized {
+                // Save-as: Ardour switches the active session to the new folder.
+                // Refresh registry paths, tell clients (session chip + recents),
+                // and ship a snapshot so the name in the switcher matches Ardour.
+                let canon = std::path::Path::new(&abs_raw)
+                    .canonicalize()
+                    .unwrap_or_else(|_| std::path::Path::new(&abs_raw).to_path_buf());
+                let canon_str = canon.to_string_lossy().into_owned();
+                let display_rel = state.sessions.jail_display_path(&canon_str).await;
+
+                if let Some(sid) = state.focus_session_id.read().await.clone() {
+                    if state.sessions.has(&sid).await {
+                        let _ = state
+                            .sessions
+                            .update_project_location(&sid, canon_str.clone())
+                            .await;
+                    }
+                }
+
+                broadcast_event(
+                    state,
+                    Event::SessionChanged {
+                        path: Some(display_rel.clone()),
+                    },
+                )
+                .await;
+
+                if let Some(jail_root) = state.sessions.jail_root.read().await.clone() {
+                    let backend_id =
+                        if let Some(sid) = state.focus_session_id.read().await.as_ref() {
+                            match state.sessions.backend_id_of(sid).await {
+                                Some(b) => b,
+                                None => state
+                                    .active_backend_id
+                                    .read()
+                                    .await
+                                    .clone()
+                                    .unwrap_or_default(),
+                            }
+                        } else {
+                            state
+                                .active_backend_id
+                                .read()
+                                .await
+                                .clone()
+                                .unwrap_or_default()
+                        };
+                    let recents = crate::recents::touch(foyer_schema::RecentEntry {
+                        path: crate::recents::normalize_path(
+                            &display_rel,
+                            Some(jail_root.as_path()),
+                        ),
+                        name: String::new(),
+                        backend_id,
+                        opened_at: 0,
+                    })
+                    .await;
+                    broadcast_event(state, Event::RecentsList { recents }).await;
+                }
+
+                match state.backend().await.snapshot().await {
+                    Ok(snapshot) => {
+                        broadcast_event(
+                            state,
+                            Event::SessionSnapshot {
+                                session: Box::new(snapshot),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("save_session ok but snapshot failed: {e}");
+                    }
+                }
             }
         }
         Command::UpdateRegion { id, patch } => {

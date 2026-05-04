@@ -77,9 +77,19 @@ export class SessionView extends LitElement {
       transition: background 0.1s ease;
     }
     .row:hover { background: var(--color-surface-elevated); }
-    .row .name { flex: 1; font-family: var(--font-sans); font-size: 12px; color: var(--color-text); }
-    .row .meta { font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono); }
-    .row.session .name { font-weight: 600; }
+    .row .name { flex: 1; font-family: var(--font-sans); font-size: 12px; color: var(--color-text); min-width: 0; }
+    .row .name-block { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .row .name-primary { font-family: var(--font-sans); font-size: 12px; color: var(--color-text); }
+    .row .name-sub {
+      font-size: 10px;
+      color: var(--color-text-muted);
+      font-family: var(--font-mono);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .row .meta { font-size: 10px; color: var(--color-text-muted); font-family: var(--font-mono); flex-shrink: 0; }
+    .row.session .name-primary { font-weight: 600; }
     .row.session { color: var(--color-accent-3); }
     .row.session:hover { background: color-mix(in oklab, var(--color-accent) 15%, transparent); }
     .row.atomic-session {
@@ -614,6 +624,13 @@ export class SessionView extends LitElement {
     const meta = e.kind === "file" && e.size_bytes != null
       ? fmtBytes(e.size_bytes)
       : e.kind === "session_dir" ? "session" : "";
+    const rowTitle = atomic
+      ? "Open this session from Session → Open"
+      : e.kind === "session_dir"
+        ? (e.session_name && e.session_name !== e.name
+          ? `${e.path}\nAlso: ${e.session_name}.ardour in this folder`
+          : e.path)
+        : "";
     let click = () => this._preview(e);
     if (e.kind === "dir") {
       click = () => this._browse(e.path);
@@ -629,10 +646,19 @@ export class SessionView extends LitElement {
     const atomic = e.kind === "session_dir" && this.mode === "save_as";
     return html`
       <div class="row ${e.kind === 'session_dir' ? 'session' : ''} ${atomic ? "atomic-session" : ""}"
-           title=${atomic ? "Open this session from Session → Open" : ""}
+           title=${rowTitle}
            @click=${click}>
         ${icon(iconName, 16)}
-        <div class="name">${e.session_name || e.name}</div>
+        ${e.kind === "session_dir"
+          ? html`
+            <div class="name-block">
+              <div class="name-primary">${e.name}</div>
+              ${e.session_name && e.session_name !== e.name
+                ? html`<div class="name-sub">${e.session_name}.ardour</div>`
+                : null}
+            </div>
+          `
+          : html`<div class="name">${e.name}</div>`}
         <div class="meta">${meta}</div>
       </div>
     `;

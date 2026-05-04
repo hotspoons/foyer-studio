@@ -312,6 +312,39 @@ impl SessionRegistry {
         self.sessions.read().await.contains_key(id)
     }
 
+    /// Backend adapter id for a session, if registered.
+    pub(crate) async fn backend_id_of(&self, id: &EntityId) -> Option<String> {
+        self.sessions
+            .read()
+            .await
+            .get(id)
+            .map(|e| e.backend_id.clone())
+    }
+
+    /// Update on-disk project path after Save Session As. Keeps the
+    /// same session id; refreshes canonical `path`, display `name`
+    /// (folder basename), and broadcasts [`Event::SessionList`].
+    /// Returns `false` if `id` is not registered.
+    pub(crate) async fn update_project_location(&self, id: &EntityId, new_path_abs: String) -> bool {
+        {
+            let mut map = self.sessions.write().await;
+            let Some(entry) = map.get_mut(id) else {
+                return false;
+            };
+            entry.path = new_path_abs.clone();
+            let stem = std::path::Path::new(&new_path_abs)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("session");
+            entry.name = stem.to_string();
+        }
+        self.broadcast_event(Event::SessionList {
+            sessions: self.list().await,
+        })
+        .await;
+        true
+    }
+
     async fn broadcast_event(&self, body: Event) {
         let env = Envelope {
             schema: SCHEMA_VERSION,
