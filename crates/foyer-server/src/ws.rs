@@ -948,7 +948,11 @@ async fn dispatch_command(
             .await;
         }
         Command::ListAudioPool => {
-            let sources = state.backend().await.list_audio_pool().await?;
+            let Some(sid) = state.focus_session_id.read().await.clone() else {
+                broadcast_event(state, Event::AudioPoolListed { sources: vec![] }).await;
+                return Ok(());
+            };
+            let sources = state.backend().await.list_audio_pool(&sid).await?;
             broadcast_event(state, Event::AudioPoolListed { sources }).await;
         }
         Command::ImportAudio { path } => {
@@ -966,9 +970,9 @@ async fn dispatch_command(
                     )))
                 })?;
                 if !canon.starts_with(&root) {
-                    return Err(DispatchError::Backend(foyer_backend::BackendError::OutsideJail(
-                        path,
-                    )));
+                    return Err(DispatchError::Backend(
+                        foyer_backend::BackendError::OutsideJail(path),
+                    ));
                 }
                 canon.to_string_lossy().into_owned()
             } else {
@@ -1259,7 +1263,8 @@ async fn dispatch_command(
                                 broadcast_event(state, Event::SessionList { sessions }).await;
                                 let out = Envelope {
                                     schema: SCHEMA_VERSION,
-                                    api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
+                                    api_version: foyer_schema::CONTROL_PLANE_API_VERSION
+                                        .to_string(),
                                     seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
                                     origin: Some("backend".into()),
                                     session_id: Some(existing_id),
@@ -1940,12 +1945,7 @@ async fn dispatch_command(
         }
 
         Command::SplitRegion { id, at_samples } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .split_region(id, at_samples)
-                .await
-            {
+            if let Err(e) = state.backend().await.split_region(id, at_samples).await {
                 broadcast_event(
                     state,
                     Event::Error {

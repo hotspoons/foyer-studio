@@ -53,12 +53,7 @@ fn default_control_plane_api_version() -> String {
 
 impl<T> Envelope<T> {
     /// Envelope with [`crate::SCHEMA_VERSION`] and [`crate::CONTROL_PLANE_API_VERSION`].
-    pub fn new(
-        seq: Seq,
-        origin: Option<String>,
-        session_id: Option<EntityId>,
-        body: T,
-    ) -> Self {
+    pub fn new(seq: Seq, origin: Option<String>, session_id: Option<EntityId>, body: T) -> Self {
         Self {
             schema: crate::SCHEMA_VERSION,
             api_version: crate::CONTROL_PLANE_API_VERSION.to_string(),

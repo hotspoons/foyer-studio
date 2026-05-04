@@ -166,8 +166,8 @@ impl RegionStore {
                 let ratio_n = new_len;
                 let ratio_d = old_len;
                 for n in &mut r.notes {
-                    n.start_ticks = ((n.start_ticks as u128 * ratio_n as u128) / u128::from(ratio_d))
-                        as u64;
+                    n.start_ticks =
+                        ((n.start_ticks as u128 * ratio_n as u128) / u128::from(ratio_d)) as u64;
                     n.length_ticks = u64::max(
                         1,
                         ((n.length_ticks as u128 * ratio_n as u128) / u128::from(ratio_d)) as u64,

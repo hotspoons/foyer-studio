@@ -11,6 +11,7 @@
 mod actions;
 pub use actions::default_daw_actions;
 
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -207,15 +208,39 @@ pub trait Backend: Send + Sync + 'static {
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {
         Ok(Vec::new())
     }
-    /// Enumerate audio file sources in the session pool (Ardour: imported /
-    /// recorded media). Default empty; host + Ardour shim implement.
-    async fn list_audio_pool(&self) -> Result<Vec<AudioPoolSource>, BackendError> {
+    /// Enumerate audio file sources in the session media pool. Default empty.
+    ///
+    /// `session_id` is the open-session UUID. Backends that drive a real DAW
+    /// usually ignore it (the shim already scopes to the connected session);
+    /// stubs may use it for per-session disk layout.
+    async fn list_audio_pool(
+        &self,
+        _session_id: &EntityId,
+    ) -> Result<Vec<AudioPoolSource>, BackendError> {
         Ok(Vec::new())
     }
-    /// Register an absolute on-disk path as a session audio source. Host sends
-    /// `ImportAudio` to the shim; default is a no-op so minimal backends keep running.
+    /// Register an absolute on-disk path as a session audio source (after any
+    /// server-side staging). Default is a no-op so minimal backends keep running.
     async fn import_audio(&self, _path: String) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    /// Absolute directory where HTTP/browser uploads should be written before
+    /// [`Self::import_audio`] is invoked with the resulting jail-visible path.
+    ///
+    /// `session_id` is the open-session UUID (same as the `session_id` query
+    /// parameter on the upload endpoint). `project_file_abs` is the session's
+    /// primary project file on disk — hosts that mirror disk beside the project
+    /// use it; stubs may ignore it and key only on `session_id`.
+    ///
+    /// `Ok(None)` means this backend does not support the HTTP staging flow —
+    /// the sidecar should reject uploads without embedding layout rules.
+    async fn media_import_staging_dir_abs(
+        &self,
+        _session_id: &EntityId,
+        _project_file_abs: &str,
+    ) -> Result<Option<PathBuf>, BackendError> {
+        Ok(None)
     }
     async fn add_plugin(
         &self,

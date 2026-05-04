@@ -19,6 +19,7 @@ mod fixtures;
 mod jail;
 mod regions;
 mod state;
+mod stub_media_pool;
 mod waveform;
 
 pub use jail::Jail;
@@ -33,9 +34,9 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx};
 use foyer_schema::{
-    Action, AudioFormat, AudioSource, ControlValue, EntityId, Event, LatencyReport, PathListing,
-    PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch, Session, TimelineMeta,
-    Track, TrackPatch, WaveformPeaks,
+    Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EntityId, Event,
+    LatencyReport, PathListing, PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch,
+    Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 use futures::{Stream, StreamExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -768,6 +769,37 @@ impl Backend for StubBackend {
             None => cache.clear_all(),
         };
         Ok(dropped)
+    }
+
+    async fn list_audio_pool(
+        &self,
+        session_id: &EntityId,
+    ) -> Result<Vec<AudioPoolSource>, BackendError> {
+        let Some(jail) = self.jail.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let root = jail
+            .root()
+            .canonicalize()
+            .map_err(|e| BackendError::Other(format!("jail root: {e}")))?;
+        let pool = stub_media_pool::pool_dir_abs(&root, session_id);
+        stub_media_pool::list_stub_pool_entries(&pool, &root, self.sample_rate())
+            .map_err(BackendError::Other)
+    }
+
+    async fn media_import_staging_dir_abs(
+        &self,
+        session_id: &EntityId,
+        _project_file_abs: &str,
+    ) -> Result<Option<PathBuf>, BackendError> {
+        let Some(jail) = self.jail.as_ref() else {
+            return Ok(None);
+        };
+        let root = jail
+            .root()
+            .canonicalize()
+            .map_err(|e| BackendError::Other(format!("jail root: {e}")))?;
+        Ok(Some(stub_media_pool::pool_dir_abs(&root, session_id)))
     }
 
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {

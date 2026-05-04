@@ -16,6 +16,7 @@
 
 mod client;
 pub mod discovery;
+mod media_staging;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -239,7 +240,10 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
-    async fn list_audio_pool(&self) -> Result<Vec<foyer_schema::AudioPoolSource>, BackendError> {
+    async fn list_audio_pool(
+        &self,
+        _session_id: &foyer_schema::EntityId,
+    ) -> Result<Vec<foyer_schema::AudioPoolSource>, BackendError> {
         self.client
             .list_audio_pool()
             .await
@@ -251,6 +255,14 @@ impl Backend for HostBackend {
             .import_audio(path)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn media_import_staging_dir_abs(
+        &self,
+        _session_id: &foyer_schema::EntityId,
+        project_file_abs: &str,
+    ) -> Result<Option<PathBuf>, BackendError> {
+        Ok(Some(media_staging::staging_dir_abs(project_file_abs)))
     }
 
     async fn update_region(

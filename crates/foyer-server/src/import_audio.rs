@@ -1,14 +1,15 @@
-//! `POST /sessions/import_audio` — upload PCM-friendly audio into the
-//! current session's `interchange/<session>/audiofiles/` tree (Ardour layout),
-//! returning the jail-relative path for a follow-up `ImportAudio` WebSocket command.
+//! `POST /sessions/import_audio` — browser upload staged via
+//! [`foyer_backend::Backend::media_import_staging_dir_abs`]
+//! (session id + project path), then referenced by a
+//! follow-up `import_audio` WebSocket command.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use axum::body::Bytes;
 use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::body::Bytes;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -27,13 +28,7 @@ struct ApiError {
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
-    (
-        status,
-        axum::Json(ApiError {
-            error: msg.into(),
-        }),
-    )
-        .into_response()
+    (status, axum::Json(ApiError { error: msg.into() })).into_response()
 }
 
 fn allowed_extension(ext: &str) -> bool {
@@ -41,16 +36,6 @@ fn allowed_extension(ext: &str) -> bool {
         ext.to_ascii_lowercase().as_str(),
         "wav" | "wave" | "flac" | "aif" | "aiff" | "ogg" | "oga"
     )
-}
-
-fn session_audiofiles_dir(project_file: &str) -> PathBuf {
-    let p = Path::new(project_file);
-    let parent = p.parent().unwrap_or_else(|| Path::new("."));
-    let stem = p
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("session");
-    parent.join("interchange").join(stem).join("audiofiles")
 }
 
 pub(crate) async fn import_audio(
@@ -86,10 +71,7 @@ pub(crate) async fn import_audio(
         None => return err(StatusCode::BAD_REQUEST, "session_id required"),
     };
 
-    let filename = q
-        .get("filename")
-        .map(String::as_str)
-        .unwrap_or("audio.wav");
+    let filename = q.get("filename").map(String::as_str).unwrap_or("audio.wav");
     let filename = filename.trim();
     if filename.is_empty() || filename.contains('/') || filename.contains('\\') {
         return err(StatusCode::BAD_REQUEST, "invalid filename");
@@ -106,14 +88,27 @@ pub(crate) async fn import_audio(
     }
 
     let rel_for_session = {
-        let Some(project_file) = state
-            .sessions
-            .project_file_abs_path(&session_id)
-            .await
-        else {
+        let Some(backend) = state.sessions.backend(&session_id).await else {
             return err(StatusCode::NOT_FOUND, "no such open session");
         };
-        let audio_dir = session_audiofiles_dir(&project_file);
+        let Some(project_file) = state.sessions.project_file_abs_path(&session_id).await else {
+            return err(StatusCode::NOT_FOUND, "no such open session");
+        };
+
+        let audio_dir = match backend
+            .media_import_staging_dir_abs(&session_id, &project_file)
+            .await
+        {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return err(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "media import not supported for this backend",
+                );
+            }
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+
         if let Err(e) = std::fs::create_dir_all(&audio_dir) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -134,12 +129,7 @@ pub(crate) async fn import_audio(
         }
         let jail_root = match jail.root().canonicalize() {
             Ok(p) => p,
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("jail root: {e}"),
-                )
-            }
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("jail root: {e}")),
         };
         let canon_file = match dest_abs.canonicalize() {
             Ok(p) => p,
@@ -157,7 +147,10 @@ pub(crate) async fn import_audio(
     };
 
     let Some(path) = rel_for_session else {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "could not build jail-relative path");
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not build jail-relative path",
+        );
     };
 
     axum::Json(ImportOk { path }).into_response()

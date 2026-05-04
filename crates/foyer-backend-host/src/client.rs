@@ -403,11 +403,7 @@ impl HostClient {
 
     pub async fn list_audio_pool(&self) -> Result<Vec<AudioPoolSource>, ClientError> {
         let (tx, rx) = oneshot::channel();
-        self.shared
-            .pending_audio_pool_list
-            .lock()
-            .await
-            .push(tx);
+        self.shared.pending_audio_pool_list.lock().await.push(tx);
         self.send_command(Command::ListAudioPool).await?;
         timeout(rx, "list_audio_pool").await
     }
@@ -475,19 +471,19 @@ impl HostClient {
         anchor: String,
         preserve_pitch: bool,
     ) -> Result<(), ClientError> {
-        self
-            .send_command(Command::StretchRegion {
-                id,
-                new_start_samples,
-                new_length_samples,
-                anchor,
-                preserve_pitch,
-            })
-            .await
+        self.send_command(Command::StretchRegion {
+            id,
+            new_start_samples,
+            new_length_samples,
+            anchor,
+            preserve_pitch,
+        })
+        .await
     }
 
     pub async fn split_region(&self, id: EntityId, at_samples: i64) -> Result<(), ClientError> {
-        self.send_command(Command::SplitRegion { id, at_samples }).await
+        self.send_command(Command::SplitRegion { id, at_samples })
+            .await
     }
 
     pub async fn create_region(
