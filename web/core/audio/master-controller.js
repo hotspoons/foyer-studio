@@ -59,16 +59,47 @@ class AudioController extends EventTarget {
     if (!body) return;
     if (body.type === "client_greeting") {
       this._applyPref(!!body.is_local);
-    } else if (body.type === "backend_swapped" || body.type === "session_opened") {
+    } else if (
+      body.type === "backend_swapped" ||
+      body.type === "session_opened" ||
+      body.type === "session_focus_changed"
+    ) {
       // Backend changed under us — the old listener's stream is
-      // dead. Tear it down; pref re-application below will start a
-      // fresh one if appropriate.
+      // dead. `session_focus_changed` covers the "switch between two
+      // already-open sessions" case where no backend swap or
+      // session_opened fires but the audio stream the listener was
+      // reading from is no longer the focused session's stream.
       if (this._on) {
+        // The listener was running, which means the user just
+        // interacted with the page (the click that caused this event
+        // is well within Chrome's transient-activation window). Tear
+        // down + restart directly, NOT via _applyPref/_scheduleAutoStart.
+        //
+        // Why direct: the gesture-defer path installs a window-level
+        // capture-phase pointerdown handler that fires on the user's
+        // very next click. If that click is the Listen button itself,
+        // the handler silently start()s the listener; the click then
+        // bubbles to the button's toggle() which sees _on=true and
+        // stops it. Net effect: Listen appears to do nothing or
+        // briefly flickers on. Restarting here keeps _on continuously
+        // true, so the next Listen click is an honest stop.
         this._teardown();
         this._on = false;
         this._emitChange();
+        this.start({ silent: true }).catch((e) => {
+          // Autoplay refused (no transient activation, or extension
+          // interference). Fall back to the gesture path so the next
+          // user click revives audio.
+          console.warn("[audio-controller] direct restart after focus change failed:", e);
+          this._applyPref(null);
+        });
+      } else {
+        // Listener wasn't running — re-evaluate the pref against the
+        // new session. If the user's saved pref is "on" but they
+        // hadn't yet clicked anywhere, _applyPref will install the
+        // gesture-defer handler.
+        this._applyPref(null);
       }
-      this._applyPref(null);
     }
   }
 
@@ -108,7 +139,28 @@ class AudioController extends EventTarget {
   /// Idempotent; only one set of listeners is registered at a time.
   _scheduleAutoStart() {
     if (this._gestureHandler) return;
-    const onGesture = () => {
+    const onGesture = (ev) => {
+      // If the user's gesture IS a tap on a Listen button, hand off:
+      // unbind without starting and let the button's own `@click =>
+      // toggle()` do the start. Otherwise we'd start() here in
+      // capture phase, then the button's click sees `_on=true` and
+      // immediately stops — the user-visible "Listen does nothing /
+      // briefly flickers" symptom on cold-boot. Listen buttons mark
+      // themselves with `data-foyer-listen-toggle="1"` for this
+      // probe; composedPath() pierces shadow roots so it works for
+      // both phone (`<foyer-phone-top-bar>`) and desktop
+      // (`<foyer-mixer>`) toggle locations.
+      if (ev?.composedPath) {
+        const onListenButton = ev.composedPath().some(
+          (n) => n?.dataset?.foyerListenToggle === "1",
+        );
+        if (onListenButton) {
+          window.removeEventListener("pointerdown", onGesture, true);
+          window.removeEventListener("keydown", onGesture, true);
+          this._gestureHandler = null;
+          return;
+        }
+      }
       window.removeEventListener("pointerdown", onGesture, true);
       window.removeEventListener("keydown", onGesture, true);
       this._gestureHandler = null;

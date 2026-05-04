@@ -71,6 +71,20 @@ impl AudioFormat {
     }
 }
 
+/// One Ardour-side audio file source in the session pool (typically one entry
+/// per channel for multichannel files).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioPoolSource {
+    pub id: EntityId,
+    pub name: String,
+    pub path: String,
+    /// Channel index within `path` for this source (Ardour stores multichannel
+    /// files as separate single-channel sources).
+    pub channel: u16,
+    pub length_samples: u64,
+    pub sample_rate: u32,
+}
+
 /// What the shim is being asked to tap (egress) or which virtual input a caller wants
 /// to deliver to (ingress).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

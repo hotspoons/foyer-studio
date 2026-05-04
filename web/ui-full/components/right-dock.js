@@ -21,7 +21,6 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
-import "foyer-ui-core/widgets/window-list.js";
 import { openWindow, registerWindowKind } from "foyer-ui-core/widgets/window.js";
 import { findRegion as _findRegionInCache } from "foyer-core/region-cache.js";
 
@@ -502,9 +501,9 @@ export class RightDock extends LitElement {
         </div>
       ` : null}
       <div class="rail">
-        ${this._renderDockedFabs({ leadingSep: false })}
+        ${this._renderWidgetsDock({ leadingSep: false })}
         <div class="rail-spacer"></div>
-        ${this._renderWidgetsDock()}
+        ${this._renderDockedFabs({ leadingSep: false })}
       </div>
     `;
   }
@@ -625,14 +624,14 @@ export class RightDock extends LitElement {
   // rail. Lists every open widget (floating tile OR plugin float)
   // and exposes group operations + the visibility/sticky toggles.
 
-  _renderWidgetsDock() {
+  _renderWidgetsDock({ leadingSep = true } = {}) {
     const layout = window.__foyer?.layout;
     if (!layout) return null;
     const visible = layout.widgetsVisible?.() ?? true;
     const sticky  = layout.widgetsSticky?.()  ?? false;
     const widgets = (this._widgets || []).slice().sort((a, b) => (b.z | 0) - (a.z | 0));
     return html`
-      <div class="rail-sep"></div>
+      ${leadingSep ? html`<div class="rail-sep"></div>` : null}
       <div class="widgets-dock">
         <button
           class=${visible ? "toggle-active" : ""}
@@ -772,13 +771,12 @@ export class RightDock extends LitElement {
     // reflects registration order (non-deterministic across dynamic
     // imports). Core/app-critical FABs pinned to the top.
     const ORDER = [
-      // foyer.actions / foyer.session-info / foyer.agent retired or
-      // disabled — see app.js. Order kept stable for the survivors so
-      // the rail doesn't reshuffle as variants register in different
-      // dynamic-import orders.
+      // foyer.actions / foyer.session-info / foyer.agent / foyer.windows
+      // retired — see app.js. Order kept stable for the survivors so the
+      // rail doesn't reshuffle as variants register in different dynamic-
+      // import orders.
       "foyer.layout-fab.v1",
       "foyer.chat",
-      "foyer.windows",
     ];
     const rank = (id) => {
       const i = ORDER.indexOf(id);

@@ -139,6 +139,42 @@ enum Command {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Snapshot an Ardour project into a reproducible OCI image.
+    Snapshot {
+        /// Path to the Ardour session directory (the folder containing
+        /// the `.ardour` file).
+        project_dir: PathBuf,
+
+        /// Explicit DAW executable to snapshot. Auto-detected from
+        /// $PATH when omitted.
+        #[arg(long)]
+        daw_exec: Option<PathBuf>,
+
+        /// Output directory for the build context and plan JSON.
+        #[arg(long, short = 'o', default_value = ".")]
+        out_dir: PathBuf,
+
+        /// OCI image tag (e.g. `my-project:latest`).
+        #[arg(long, short = 't', default_value = "foyer-snapshot:latest")]
+        tag: String,
+
+        /// Build the image immediately with `docker buildx`.
+        #[arg(long, default_value_t = false)]
+        build: bool,
+
+        /// Produce a `.tar.gz` loadable with `docker load`.
+        #[arg(long, default_value_t = false)]
+        tarball: bool,
+
+        /// Push the built image to a registry.
+        #[arg(long, default_value_t = false)]
+        push: bool,
+
+        /// Registry prefix (e.g. `ghcr.io/user`). The tag becomes
+        /// `<registry>/<tag>` when this is set.
+        #[arg(long)]
+        registry: Option<String>,
+    },
     /// Restore `<Script>` blocks that the upload-time scrubber
     /// quarantined into `<!-- foyer:scrubbed:... -->` comments.
     /// Re-introduces auto-executing Lua, so this is OFF by default
@@ -196,6 +232,28 @@ async fn main() -> Result<()> {
             force,
             dry_run,
         ),
+        Command::Snapshot {
+            project_dir,
+            daw_exec,
+            out_dir,
+            tag,
+            build,
+            tarball,
+            push,
+            registry,
+        } => {
+            let args = foyer_snapshot::cli::SnapshotArgs {
+                project_dir,
+                daw_exec,
+                out_dir,
+                tag,
+                build,
+                tarball,
+                push,
+                registry,
+            };
+            foyer_snapshot::cli::run(&args).await
+        }
         Command::ScrubRestore { input, output } => scrub_restore(&input, output.as_deref()),
         Command::Serve {
             backend,
@@ -530,12 +588,19 @@ async fn serve(
     let is_launcher_mode =
         matches!(backend.kind, BackendKind::Ardour) && socket.is_none() && project.is_none();
 
+    // Tracks the socket path of an auto-attached shim, when applicable.
+    // Threaded into `Server::set_attached_socket` so `Command::ReattachOrphan`
+    // knows the orphan's shim is already our implicit backend and can
+    // adopt the existing connection instead of opening a duplicate
+    // (the shim only services one IPC client at a time).
+    let mut attached_socket_path: Option<PathBuf> = None;
     let initial_backend: Arc<dyn Backend> = match (backend.kind, socket.clone()) {
         (BackendKind::Ardour, Some(s)) => {
             let host = HostBackend::connect(s.clone())
                 .await
                 .with_context(|| format!("connect to shim at {}", s.display()))?;
             tracing::info!("connected to shim at {}", s.display());
+            attached_socket_path = Some(s.clone());
             Arc::new(host)
         }
         (BackendKind::Ardour, None) if project.is_none() => {
@@ -551,6 +616,7 @@ async fn serve(
                 match HostBackend::connect(adv.socket.clone()).await {
                     Ok(host) => {
                         tracing::info!("connected to advertised shim at {}", adv.socket.display());
+                        attached_socket_path = Some(adv.socket.clone());
                         connected = Some(host);
                     }
                     Err(e) => {
@@ -582,10 +648,18 @@ async fn serve(
                 }
             }
         }
-        _ => spawner
-            .launch(&backend.id, project.as_deref())
-            .await
-            .with_context(|| format!("launch backend `{}`", backend.id))?,
+        _ => {
+            // Bootstrap-time launch. The terminator (if any) is
+            // dropped here — the initial backend lives outside the
+            // SessionRegistry, so close-session escalation doesn't
+            // apply. Subsequent `LaunchProject` commands go through
+            // the swap path and DO register a terminator.
+            spawner
+                .launch(&backend.id, project.as_deref())
+                .await
+                .with_context(|| format!("launch backend `{}`", backend.id))?
+                .backend
+        }
     };
 
     let server = Server::with_spawner(initial_backend, Some(spawner.clone()));
@@ -603,6 +677,17 @@ async fn serve(
     // stub, but the picker should treat the user's configured default as
     // the preferred target — so we report the config id as "active."
     server.set_active_backend(initial_backend_id).await;
+    // Tell the server which shim socket the initial backend holds —
+    // the orphan-reattach handler needs this to detect "this orphan
+    // is the implicit backend you already auto-attached to" and adopt
+    // the existing connection instead of opening a second IPC channel
+    // (which would deadlock against the shim's single-client accept
+    // loop). No-op when we didn't auto-attach (launcher / spawned
+    // launches go through `swap_backend` which already populates the
+    // sessions registry properly).
+    if let Some(path) = attached_socket_path {
+        server.set_attached_socket(path).await;
+    }
     // Scan for orphaned shim sessions left behind by a previous Foyer
     // run that crashed (or was killed without closing its sessions).
     // The first client that connects will see these in their
@@ -655,7 +740,7 @@ impl BackendSpawner for CliSpawner {
         &self,
         backend_id: &str,
         project_path: Option<&Path>,
-    ) -> anyhow::Result<Arc<dyn Backend>> {
+    ) -> anyhow::Result<foyer_server::LaunchedBackend> {
         let cfg_backend = self
             .config
             .backend(backend_id)
@@ -679,7 +764,7 @@ impl BackendSpawner for CliSpawner {
                 if let Some(p) = project_path {
                     let _ = b.open_session(&p.display().to_string()).await;
                 }
-                Ok(Arc::new(b))
+                Ok(foyer_server::LaunchedBackend::new(Arc::new(b)))
             }
             BackendKind::Ardour => {
                 let project = project_path
@@ -697,23 +782,54 @@ impl BackendSpawner for CliSpawner {
                 } else {
                     project.to_path_buf()
                 };
-                let socket =
+                let (socket, child) =
                     launch_and_wait_for_shim(&exec, &cfg_backend.args, &cfg_backend.env, &abs)
                         .await?;
                 let host = HostBackend::connect(socket.clone())
                     .await
                     .with_context(|| format!("connect to shim at {}", socket.display()))?;
-                Ok(Arc::new(host))
+                Ok(foyer_server::LaunchedBackend::with_process(
+                    Arc::new(host),
+                    Box::new(ChildProcess::new(child)),
+                ))
             }
         }
+    }
+
+    async fn reattach(
+        &self,
+        backend_id: &str,
+        socket: &Path,
+    ) -> anyhow::Result<foyer_server::LaunchedBackend> {
+        let cfg_backend = self
+            .config
+            .backend(backend_id)
+            .ok_or_else(|| anyhow!("no backend with id `{backend_id}`"))?;
+        if !matches!(cfg_backend.kind, BackendKind::Ardour) {
+            anyhow::bail!(
+                "reattach only applies to host-process backends (ardour); `{backend_id}` is `{:?}`",
+                cfg_backend.kind,
+            );
+        }
+        // Connect to the orphan's existing shim socket. No process
+        // handle — Foyer didn't fork this Ardour. The session will
+        // disconnect cleanly on close but Ardour stays alive; the
+        // user can quit it themselves.
+        let host = HostBackend::connect(socket.to_path_buf())
+            .await
+            .with_context(|| format!("reattach to shim at {} failed", socket.display()))?;
+        Ok(foyer_server::LaunchedBackend::new(Arc::new(host)))
     }
 }
 
 /// Spawn the configured DAW with the project as argv and poll the
 /// discovery directory until its shim advertises. Returns the shim's
-/// UDS path. Times out after ~30 seconds. We intentionally DON'T kill
-/// the child on drop — the user may want Ardour to outlive the
-/// sidecar if they reconnect later.
+/// UDS path along with the spawned `Child` so the registry can later
+/// drive a graceful → SIGTERM → SIGKILL escalation on session close.
+/// Times out after ~30 seconds. The child is kept with
+/// `kill_on_drop(false)` — sidecar shutdown does NOT kill the DAW
+/// (preserves the orphan-reattach feature); explicit `CloseSession`
+/// is what triggers the escalation.
 ///
 /// Dev-build awareness: when `exec` lives inside an Ardour source
 /// checkout (`<root>/build/gtk2_ardour/`), we wrap the spawn in a bash
@@ -728,7 +844,7 @@ async fn launch_and_wait_for_shim(
     extra_args: &[String],
     env: &std::collections::BTreeMap<String, String>,
     project: &std::path::Path,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, tokio::process::Child)> {
     use std::time::Duration;
 
     let before: std::collections::HashSet<PathBuf> =
@@ -1006,7 +1122,7 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
     tracing::info!("DAW stdout/stderr → {}", log_path.display());
 
     cmd.kill_on_drop(false);
-    let _child = cmd
+    let child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", resolved_exec.display()))?;
 
@@ -1040,7 +1156,7 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
                     Ok(stream) => {
                         drop(stream);
                         tracing::info!("shim advertised at {}", s.socket.display());
-                        return Ok(s.socket);
+                        return Ok((s.socket, child));
                     }
                     Err(e) => {
                         tracing::debug!(
@@ -1060,6 +1176,108 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
             ));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// `ProcessHandle` impl wrapping a `tokio::process::Child` for an
+/// Ardour child spawned by `launch_and_wait_for_shim`. The shutdown
+/// orchestration (graceful → SIGTERM → SIGKILL) lives in
+/// `foyer_server::sessions::shutdown_child`; this struct only
+/// provides the per-stage primitives.
+///
+/// `wait()` polls `Child::try_wait()` on a timer instead of a single
+/// long `Child::wait()` so a SIGTERM landing mid-wait advances the
+/// state machine without losing the prior wait window. Internal
+/// `exited` flag short-circuits subsequent calls so the kernel only
+/// reaps once.
+struct ChildProcess {
+    child: tokio::process::Child,
+    exited: bool,
+}
+
+impl ChildProcess {
+    fn new(child: tokio::process::Child) -> Self {
+        Self {
+            child,
+            exited: false,
+        }
+    }
+
+    /// `Child::id()` only returns `Some` until the child has been
+    /// reaped (a `wait`/`try_wait` that resolved to `Exited`). We
+    /// capture the pid here and signal it directly so the SIGTERM /
+    /// SIGKILL primitives keep working even after a successful reap
+    /// from a prior `wait()` call (idempotent no-op in that case via
+    /// the `exited` flag).
+    fn pid(&self) -> Option<i32> {
+        self.child.id().map(|p| p as i32)
+    }
+}
+
+#[async_trait::async_trait]
+impl foyer_server::ProcessHandle for ChildProcess {
+    async fn wait(&mut self, timeout: std::time::Duration) -> bool {
+        if self.exited {
+            return true;
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_status)) => {
+                    self.exited = true;
+                    return true;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("ChildProcess::wait try_wait error: {e}");
+                    return false;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn sigterm(&mut self) {
+        if self.exited {
+            return;
+        }
+        if let Some(pid) = self.pid() {
+            // Use libc::kill rather than `Child::kill()` (which sends
+            // SIGKILL on Unix). SIGTERM is what triggers Ardour's
+            // own save-and-exit handler.
+            #[cfg(unix)]
+            {
+                let rv = unsafe { libc::kill(pid, libc::SIGTERM) };
+                if rv != 0 {
+                    tracing::warn!(
+                        "ChildProcess::sigterm kill({pid}, SIGTERM) failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                // Windows / non-Unix: tokio's start_kill is the
+                // closest analog (TerminateProcess). No SIGTERM
+                // distinction so the escalation effectively skips
+                // the gentle stage.
+                let _ = self.child.start_kill();
+                let _ = pid; // silence unused-warning on non-unix
+            }
+        }
+    }
+
+    async fn sigkill(&mut self) {
+        if self.exited {
+            return;
+        }
+        // start_kill is non-blocking; the eventual reap happens via
+        // a follow-up wait() call. SIGKILL bypasses Ardour's signal
+        // handlers — last-resort only.
+        let _ = self.child.start_kill();
     }
 }
 

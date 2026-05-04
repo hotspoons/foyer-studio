@@ -49,6 +49,11 @@ pub struct PluginInstance {
     /// "Show native VST3 GUI" instead of a generic label.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub native_gui_kind: Option<String>,
+    /// True when the plugin insert exists but the underlying binary
+    /// is missing / unloadable. The UI should show a warning instead
+    /// of an empty parameter panel.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub missing: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,6 +62,16 @@ pub struct Send {
     pub target_track: EntityId,
     pub level: Parameter,
     pub pre_fader: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MidiPatchState {
+    /// MIDI channel 0..15.
+    pub channel: u8,
+    /// Current 14-bit bank (MSB << 7 | LSB), or -1 if unset/unknown.
+    pub bank: i32,
+    /// Current program 0..127.
+    pub program: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,11 +126,45 @@ pub struct Track {
     /// via dedicated commands in Phase B.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub automation_lanes: Vec<crate::AutomationLane>,
+    /// MIDI inbound channel handling: how the track filters incoming
+    /// channel data. `"all"` = pass everything through, `"filter"` =
+    /// keep only channels set in `capture_channel_mask`, `"force"` =
+    /// rewrite every event onto the single channel encoded in
+    /// `capture_channel_mask`. `None` for non-MIDI tracks. New MIDI
+    /// tracks default to `"force"` at channel 1 (mask = `0x0001`) so
+    /// the channel selector stays hidden unless the user opts into a
+    /// multi-channel setup. Mirrors Ardour's `ChannelMode` enum.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub capture_channel_mode: Option<String>,
+    /// 16-bit bitmask, bit 0 = MIDI channel 1. In `"force"` mode the
+    /// lowest set bit is the target channel; in `"filter"` mode every
+    /// set bit is an enabled channel. `None` for non-MIDI tracks.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub capture_channel_mask: Option<u16>,
+    /// MIDI playback channel handling, same shape as
+    /// `capture_channel_mode` but applied on the playback side.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub playback_channel_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub playback_channel_mask: Option<u16>,
+    /// Projected live MIDI patch state by channel. This is the track-level
+    /// instrument/program state, distinct from region-embedded patch-change
+    /// events. Empty for non-MIDI tracks or hosts that do not expose it.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub midi_patches: Vec<MidiPatchState>,
 }
 
-/// Group / submix metadata. Purely a display + drag-affinity hint for
-/// clients — the actual audio routing is still expressed via `sends`
-/// and each track's `outputs`.
+/// Group / submix metadata. Carries display + drag-affinity hints for
+/// clients, plus a set of link flags that determine which control
+/// gestures (gain, mute, solo, record-arm) propagate across member
+/// tracks. The actual audio routing is still expressed via `sends`
+/// and each track's `outputs` — groups don't sum signal, they link
+/// gestures, the way Ardour's `RouteGroup` and most DAW edit-groups
+/// do. Backends that own a native group concept (Ardour `RouteGroup`)
+/// mirror these flags onto their own primitive; the stub backend
+/// implements propagation in-process. Either way the wire contract
+/// is the same: a `ControlSet` on a member track triggers per-member
+/// `ControlUpdate`s for every track in the group.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub id: EntityId,
@@ -125,6 +174,30 @@ pub struct Group {
     /// Track ids that belong to this group. Order is display order.
     #[serde(default)]
     pub members: Vec<EntityId>,
+    /// Master enable. If `false`, no gestures propagate, regardless of
+    /// the per-flag state. Lets a user temporarily un-link without
+    /// having to re-enter all four flags.
+    #[serde(default = "default_true")]
+    pub active: bool,
+    /// Whether changes to a member's gain propagate (relative-delta —
+    /// the same dB delta is applied to every member, so the mix
+    /// balance set at the moment the link was enabled is preserved).
+    #[serde(default = "default_true")]
+    pub link_gain: bool,
+    /// Whether toggling mute on a member propagates (absolute — every
+    /// member ends up in the new state).
+    #[serde(default = "default_true")]
+    pub link_mute: bool,
+    /// Whether toggling solo on a member propagates (absolute).
+    #[serde(default = "default_true")]
+    pub link_solo: bool,
+    /// Whether toggling record-arm on a member propagates (absolute).
+    #[serde(default = "default_true")]
+    pub link_record: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Patch set for [`Command::UpdateTrack`]. `None` fields are left
@@ -167,6 +240,16 @@ pub struct GroupPatch {
     /// changes use separate `Command::MoveTrackToGroup` (not in schema yet).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub members: Option<Vec<EntityId>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub link_gain: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub link_mute: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub link_solo: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub link_record: Option<bool>,
 }
 
 /// Alias for readability in code paths that semantically talk about buses; structurally
@@ -197,6 +280,26 @@ pub struct Transport {
     /// through without a schema bump.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub sync_source: Option<Parameter>,
+    /// What to do with the playhead when the user hits stop.
+    /// Free-form string so future modes (`"play_end"`, `"locate_marker"`,
+    /// …) don't need a schema bump. Known values today:
+    ///   * `"leave"`      — keep the playhead where stop landed
+    ///   * `"zero"`       — return to sample 0
+    ///   * `"play_start"` — return to wherever play was last pressed
+    ///
+    /// Lives on the wire (not just in browser localStorage) so the
+    /// host's choice travels to every connected client — the phone
+    /// performer at the kit shouldn't see a different return mode
+    /// than the engineer at the desktop did, and the desktop user
+    /// shouldn't be surprised when stop behaves differently after a
+    /// remote toggle.
+    ///
+    /// `None` when the backend doesn't track this concept yet
+    /// (legacy snapshots, hosts that haven't been updated). Clients
+    /// fall back to a localStorage cache + a "leave" default in
+    /// that case.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub return_mode: Option<Parameter>,
 }
 
 /// Default session sample rate when no DAW has reported one yet. Matches
@@ -336,6 +439,7 @@ mod tests {
                 punch_out: None,
                 metronome: None,
                 sync_source: None,
+                return_mode: None,
             },
             tracks: vec![Track {
                 id: EntityId::new("track.abc"),
@@ -366,6 +470,11 @@ mod tests {
                 inputs: vec![],
                 outputs: vec![],
                 automation_lanes: vec![],
+                capture_channel_mode: None,
+                capture_channel_mask: None,
+                playback_channel_mode: None,
+                playback_channel_mask: None,
+                midi_patches: vec![],
             }],
             groups: vec![],
             dirty: false,

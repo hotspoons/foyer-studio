@@ -4,9 +4,32 @@ use std::collections::HashMap;
 
 use foyer_backend::BackendError;
 use foyer_schema::{
-    AutomationLane, AutomationMode, AutomationPoint, ControlUpdate, ControlValue, EntityId,
-    Parameter, Session, Track, TrackPatch,
+    AutomationLane, AutomationMode, AutomationPoint, ControlUpdate, ControlValue, EntityId, Group,
+    GroupPatch, Parameter, Session, Track, TrackKind, TrackPatch,
 };
+
+/// Enumerates the track-level controls that participate in group
+/// linking. Mirrors the four `Group::link_*` flags 1:1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupField {
+    Gain,
+    Mute,
+    Solo,
+    Record,
+}
+
+/// Best-effort cast of a `ControlValue` to `f64`. Used by the gain
+/// fan-out to compute relative deltas; non-numeric values fall back to
+/// 0 (in practice gain is always `Float`, so the fallback never
+/// triggers, but it lets the call sites stay total).
+fn float_of(v: &ControlValue) -> f64 {
+    match v {
+        ControlValue::Float(f) => *f,
+        ControlValue::Int(i) => *i as f64,
+        ControlValue::Bool(true) => 1.0,
+        _ => 0.0,
+    }
+}
 
 use crate::fixtures;
 
@@ -72,6 +95,271 @@ impl StubState {
             return Ok(());
         }
         Err(BackendError::UnknownId(id.clone()))
+    }
+
+    /// Apply a `set_control` and fan-out the same gesture to other
+    /// members of the source track's group, when the group is `active`
+    /// and the corresponding `link_*` flag is set. Returns the full
+    /// list of `ControlUpdate`s produced — primary + any siblings —
+    /// so the caller (`StubBackend::set_control`) can broadcast all of
+    /// them.
+    ///
+    /// Semantics match the typical DAW edit-group convention:
+    /// - **gain** is relative-delta: every member gets the same dB
+    ///   delta as the source, preserving the mix balance the user had
+    ///   when they enabled the link.
+    /// - **mute / solo / record-arm** are absolute: every member ends
+    ///   up in the same state as the source.
+    pub(crate) fn set_control_with_fanout(
+        &mut self,
+        id: &EntityId,
+        value: ControlValue,
+    ) -> Result<Vec<ControlUpdate>, BackendError> {
+        // Classify the target field BEFORE the write so we can compute
+        // a relative-delta for gain. `field` is `None` for any control
+        // that isn't a track-level link target (transport, plugin
+        // params, automation lanes, …).
+        let classification = self.classify_track_field(id);
+        let old_value = match &classification {
+            Some((_, GroupField::Gain)) => self.find_param_mut(id).map(|p| p.value.clone()),
+            _ => None,
+        };
+
+        self.set_control(id, value.clone())?;
+        let mut out = vec![ControlUpdate {
+            id: id.clone(),
+            value: value.clone(),
+        }];
+
+        let Some((source_track_id, field)) = classification else {
+            return Ok(out);
+        };
+        let Some(group) = self.find_active_group(&source_track_id, field) else {
+            return Ok(out);
+        };
+        let members: Vec<EntityId> = group
+            .members
+            .iter()
+            .filter(|m| **m != source_track_id)
+            .cloned()
+            .collect();
+
+        for member in members {
+            let target_id = match self.member_param_id(&member, field) {
+                Some(t) => t,
+                None => continue,
+            };
+            // Compute the propagated value. Gain rides as a relative
+            // delta; everything else is absolute.
+            let propagated = match field {
+                GroupField::Gain => {
+                    let delta = float_of(&value) - float_of(old_value.as_ref().unwrap_or(&value));
+                    let cur = self
+                        .find_param_mut(&target_id)
+                        .map(|p| float_of(&p.value))
+                        .unwrap_or(0.0);
+                    ControlValue::Float(cur + delta)
+                }
+                _ => value.clone(),
+            };
+            // Best-effort: if a sibling is missing the field (e.g. a
+            // bus has no record_arm), skip silently rather than fail
+            // the whole gesture.
+            if self.find_param_mut(&target_id).is_some() {
+                self.set_control(&target_id, propagated.clone())?;
+                out.push(ControlUpdate {
+                    id: target_id,
+                    value: propagated,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Identify whether `id` is a track-level link target and, if so,
+    /// return the owning track id + which `GroupField` it represents.
+    /// Walks `session.tracks` rather than parsing the id string so we
+    /// don't hard-code the `track.<uuid>.<field>` convention here.
+    fn classify_track_field(&self, id: &EntityId) -> Option<(EntityId, GroupField)> {
+        for track in &self.session.tracks {
+            if &track.gain.id == id {
+                return Some((track.id.clone(), GroupField::Gain));
+            }
+            if &track.mute.id == id {
+                return Some((track.id.clone(), GroupField::Mute));
+            }
+            if &track.solo.id == id {
+                return Some((track.id.clone(), GroupField::Solo));
+            }
+            if let Some(ra) = track.record_arm.as_ref() {
+                if &ra.id == id {
+                    return Some((track.id.clone(), GroupField::Record));
+                }
+            }
+        }
+        None
+    }
+
+    /// Look up the group `track_id` belongs to *and* that's currently
+    /// linking the given field. Returns `None` if the track is
+    /// unaffiliated, the group is inactive, or the field's `link_*`
+    /// flag is off — i.e. any reason the gesture should NOT fan out.
+    fn find_active_group(&self, track_id: &EntityId, field: GroupField) -> Option<&Group> {
+        let track = self.session.tracks.iter().find(|t| &t.id == track_id)?;
+        let gid = track.group_id.as_ref()?;
+        let g = self.session.groups.iter().find(|g| &g.id == gid)?;
+        if !g.active {
+            return None;
+        }
+        let linked = match field {
+            GroupField::Gain => g.link_gain,
+            GroupField::Mute => g.link_mute,
+            GroupField::Solo => g.link_solo,
+            GroupField::Record => g.link_record,
+        };
+        if linked {
+            Some(g)
+        } else {
+            None
+        }
+    }
+
+    /// Resolve a sibling track's parameter id for `field`. Returns
+    /// `None` for buses/groups that don't expose `record_arm`.
+    fn member_param_id(&self, member: &EntityId, field: GroupField) -> Option<EntityId> {
+        let track = self.session.tracks.iter().find(|t| &t.id == member)?;
+        Some(match field {
+            GroupField::Gain => track.gain.id.clone(),
+            GroupField::Mute => track.mute.id.clone(),
+            GroupField::Solo => track.solo.id.clone(),
+            GroupField::Record => track.record_arm.as_ref()?.id.clone(),
+        })
+    }
+
+    pub(crate) fn create_group(
+        &mut self,
+        name: String,
+        color: Option<String>,
+        members: Vec<EntityId>,
+    ) -> Group {
+        // Mint a stable id from the name (slug + counter) so the UI's
+        // `_groups` reactive read picks it up on the next snapshot.
+        let mut slug: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if slug.is_empty() {
+            slug.push_str("group");
+        }
+        let mut id = format!("group.{slug}");
+        let mut suffix = 2;
+        while self.session.groups.iter().any(|g| g.id.as_str() == id) {
+            id = format!("group.{slug}_{suffix}");
+            suffix += 1;
+        }
+        let group = Group {
+            id: EntityId::new(id),
+            name,
+            color,
+            members: members.clone(),
+            active: true,
+            link_gain: true,
+            link_mute: true,
+            link_solo: true,
+            link_record: true,
+        };
+        // Mirror group_id onto every member track so `classify_track_field`
+        // can find the link without iterating the groups list every time.
+        for m in &members {
+            if let Some(t) = self.session.tracks.iter_mut().find(|t| &t.id == m) {
+                t.group_id = Some(group.id.clone());
+            }
+        }
+        self.session.groups.push(group.clone());
+        group
+    }
+
+    pub(crate) fn update_group(
+        &mut self,
+        id: &EntityId,
+        patch: &GroupPatch,
+    ) -> Result<(), BackendError> {
+        let group = self
+            .session
+            .groups
+            .iter_mut()
+            .find(|g| &g.id == id)
+            .ok_or_else(|| BackendError::UnknownId(id.clone()))?;
+        if let Some(name) = patch.name.as_ref() {
+            group.name = name.clone();
+        }
+        if let Some(color) = patch.color.as_ref() {
+            group.color = if color.is_empty() {
+                None
+            } else {
+                Some(color.clone())
+            };
+        }
+        if let Some(active) = patch.active {
+            group.active = active;
+        }
+        if let Some(v) = patch.link_gain {
+            group.link_gain = v;
+        }
+        if let Some(v) = patch.link_mute {
+            group.link_mute = v;
+        }
+        if let Some(v) = patch.link_solo {
+            group.link_solo = v;
+        }
+        if let Some(v) = patch.link_record {
+            group.link_record = v;
+        }
+        if let Some(members) = patch.members.as_ref() {
+            // Resync every track's `group_id` mirror — clear from any
+            // tracks that left, set on any tracks that joined.
+            let new_set: std::collections::HashSet<&EntityId> = members.iter().collect();
+            let gid = id.clone();
+            for t in &mut self.session.tracks {
+                let was_member = t.group_id.as_ref() == Some(&gid);
+                let is_member = new_set.contains(&t.id);
+                if was_member && !is_member {
+                    t.group_id = None;
+                } else if is_member {
+                    t.group_id = Some(gid.clone());
+                }
+            }
+            // Re-borrow `group` after the track loop dropped its mut
+            // borrow — `find` again because the previous handle was
+            // invalidated when we mutated `self.session.tracks`.
+            if let Some(group) = self.session.groups.iter_mut().find(|g| &g.id == id) {
+                group.members = members.clone();
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn delete_group(&mut self, id: &EntityId) -> Result<(), BackendError> {
+        let pos = self
+            .session
+            .groups
+            .iter()
+            .position(|g| &g.id == id)
+            .ok_or_else(|| BackendError::UnknownId(id.clone()))?;
+        self.session.groups.remove(pos);
+        // Detach any tracks that pointed at the deleted group.
+        for t in &mut self.session.tracks {
+            if t.group_id.as_ref() == Some(id) {
+                t.group_id = None;
+            }
+        }
+        Ok(())
     }
 
     fn sync_plugin_bypass(&mut self, id: &EntityId, value: &ControlValue) {
@@ -168,6 +456,35 @@ impl StubState {
         Some(t.clone())
     }
 
+    /// Apply a MIDI channel-mode change. Sets the chosen direction's
+    /// `mode` + `mask`. Returns the updated track or `None` if no track
+    /// matches `id`. Silently no-ops on non-MIDI tracks (the field set
+    /// stays `None`) — clients should gate the command on `kind` first.
+    pub(crate) fn set_track_midi_channel_mode(
+        &mut self,
+        id: &EntityId,
+        direction: &str,
+        mode: &str,
+        mask: u16,
+    ) -> Option<Track> {
+        let t = self.session.tracks.iter_mut().find(|t| &t.id == id)?;
+        if !matches!(t.kind, TrackKind::Midi) {
+            return Some(t.clone());
+        }
+        match direction {
+            "capture" => {
+                t.capture_channel_mode = Some(mode.to_string());
+                t.capture_channel_mask = Some(mask);
+            }
+            "playback" => {
+                t.playback_channel_mode = Some(mode.to_string());
+                t.playback_channel_mask = Some(mask);
+            }
+            _ => return Some(t.clone()),
+        }
+        Some(t.clone())
+    }
+
     fn find_param_mut(&mut self, id: &EntityId) -> Option<&mut Parameter> {
         // Transport first.
         let t = &mut self.session.transport;
@@ -182,6 +499,14 @@ impl StubState {
         ] {
             if p.id == *id {
                 // SAFETY-free rebinding to return the matching &mut.
+                return Some(p);
+            }
+        }
+        // Optional transport extras (only present on backends that
+        // surface them — `return_mode` is the first one wired through
+        // ControlSet, so its lookup has to live here too).
+        if let Some(p) = t.return_mode.as_mut() {
+            if p.id == *id {
                 return Some(p);
             }
         }

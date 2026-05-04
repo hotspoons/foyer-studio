@@ -143,7 +143,24 @@ flip into `jack-headless` mode with the privileged flags + JACK
 shm passthrough — full recipe in
 [docs/USAGE.md#path-2--docker](docs/USAGE.md#path-2--docker).
 
-### 3. From source — the dev container
+### 3. Snapshot a project — freeze it into a portable Docker image
+
+Already have a project and Ardour installed locally?  `foyer snapshot`
+captures the DAW, every plugin, and the session into a runnable OCI
+image:
+
+```bash
+foyer snapshot /path/to/MySong.ardour --build --tag mysong:latest
+docker run --rm -it -p 3838:3838 mysong:latest
+```
+
+The image layers the matching Debian base, the DAW, each discovered
+plugin, and the project — so two projects that share the same Ardour
+version reuse the same layer.  See
+[`crates/foyer-snapshot/README.md`](crates/foyer-snapshot/README.md)
+for details.
+
+### 4. From source — the dev container
 
 For hacking on Foyer itself: the C++ toolchain, Ardour's deps,
 JACK, Bun + Playwright, and every script the Justfile relies on

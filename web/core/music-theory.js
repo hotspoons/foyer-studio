@@ -26,6 +26,11 @@ export const SCALES = {
 
 export const PITCH_CLASS_LABELS = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 
+/** True when piano-roll / grid should show scale vs non-scale contrast. */
+export function isScaleHighlightEnabled(mode) {
+  return mode !== "chromatic" && !!SCALES[mode];
+}
+
 /** True if `pitch` (MIDI note number) is in the scale rooted at `root`
  *  (pitch class 0..11) using the named `mode`. */
 export function inScale(pitch, root, mode) {

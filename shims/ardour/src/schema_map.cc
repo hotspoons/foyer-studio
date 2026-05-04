@@ -5,9 +5,12 @@
 #include "schema_map.h"
 
 #include <sstream>
+#include <algorithm>
+#include <map>
 
 #include "ardour/audioregion.h"
 #include "ardour/file_source.h"
+#include "ardour/instrument_info.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
 #include "ardour/parameter_descriptor.h"
@@ -23,6 +26,8 @@
 #include "ardour/source.h"
 #include "ardour/stripable.h"
 #include "ardour/track.h"
+#include "ardour/unknown_processor.h"
+#include "midi++/midnam_patch.h"
 #include "pbd/controllable.h"
 #include "pbd/xml++.h"
 
@@ -243,6 +248,14 @@ plugin_insert_id_string (const PluginInsert& pi)
 }
 
 std::string
+processor_id_string (const Processor& p)
+{
+	std::ostringstream o;
+	o << p.id ();
+	return o.str ();
+}
+
+std::string
 scale_from_descriptor (const ParameterDescriptor& d)
 {
 	if (d.unit == ParameterDescriptor::DB)    return "decibels";
@@ -287,20 +300,76 @@ enumerate_plugins (std::shared_ptr<Route> route)
 	std::vector<PluginDesc> out;
 	if (!route) return out;
 
-	for (uint32_t i = 0; ; ++i) {
-		std::shared_ptr<Processor> proc = route->nth_plugin (i);
-		if (!proc) break;
+	// Walk every processor on the route — NOT `route->nth_plugin()`,
+	// which only yields PluginInserts. Ardour replaces missing
+	// plugins with `UnknownProcessor` stubs at session-load time
+	// (see libardour/route.cc::set_state), and those need to surface
+	// to the client so the missing-plugin banner shows up. The
+	// nth_plugin path silently skips them, which was the cause of
+	// "Ardour shows the missing-plugin dialog but Foyer's mixer
+	// strip looks empty."
+	route->foreach_processor ([&out] (std::weak_ptr<Processor> wp) {
+		std::shared_ptr<Processor> proc = wp.lock ();
+		if (!proc) return;
+
+		// Missing-plugin stub. Ardour preserves the original
+		// processor's name+state on the UnknownProcessor so we can
+		// at least show "{plugin name} — missing" in the strip.
+		auto unk = std::dynamic_pointer_cast<UnknownProcessor> (proc);
+		if (unk) {
+			PluginDesc pd;
+			pd.id       = "plugin." + processor_id_string (*proc);
+			pd.name     = proc->name ();
+			pd.missing  = true;
+			pd.bypassed = !proc->active ();
+			// Synthetic bypass param so the client-side panel doesn't
+			// crash on empty params (matches the Plugin::null branch
+			// below).
+			ParamDesc bypass;
+			bypass.id        = pd.id + ".bypass";
+			bypass.label     = "Bypass";
+			bypass.kind      = "trigger";
+			bypass.scale     = "linear";
+			bypass.has_range = false;
+			bypass.lower     = 0.0f;
+			bypass.upper     = 0.0f;
+			bypass.value     = pd.bypassed ? 1.0 : 0.0;
+			pd.params.push_back (std::move (bypass));
+			out.push_back (std::move (pd));
+			return;
+		}
+
 		std::shared_ptr<PluginInsert> pi = std::dynamic_pointer_cast<PluginInsert> (proc);
-		if (!pi) continue;
+		if (!pi) return;
 		std::shared_ptr<Plugin> plug = pi->plugin (0);
-		if (!plug) continue;
 
 		PluginDesc pd;
 		pd.id       = "plugin." + plugin_insert_id_string (*pi);
+		pd.bypassed = !pi->active ();
+
+		if (!plug) {
+			// Plugin insert exists but the binary/library is missing or
+			// unloadable. In practice Ardour converts these to
+			// `UnknownProcessor` (handled above), so this branch is
+			// the rare "PluginInsert constructed but plugin slot
+			// never got populated" case — keep it as a safety net.
+			pd.name    = pi->name ();
+			pd.missing = true;
+			ParamDesc bypass;
+			bypass.id        = pd.id + ".bypass";
+			bypass.label     = "Bypass";
+			bypass.kind      = "trigger";
+			bypass.scale     = "linear";
+			bypass.has_range = false;
+			bypass.lower     = 0.0f;
+			bypass.upper     = 0.0f;
+			bypass.value     = pd.bypassed ? 1.0 : 0.0;
+			pd.params.push_back (std::move (bypass));
+			out.push_back (std::move (pd));
+			return;
+		}
 		pd.name     = plug->name ();
 		pd.uri      = plug->unique_id ();
-		// Ardour treats "active" as "not bypassed"; invert for schema.
-		pd.bypassed = !pi->active ();
 		// `last_preset()` carries the most recently applied preset (or
 		// the saved preset if loaded from a session). Empty `uri` means
 		// "no preset active" — left as "" on the wire so the UI shows
@@ -379,7 +448,7 @@ enumerate_plugins (std::shared_ptr<Route> route)
 		}
 
 		out.push_back (std::move (pd));
-	}
+	});
 	return out;
 }
 
@@ -646,6 +715,17 @@ describe_region (const Region& r, const std::string& track_id)
 		}
 	}
 
+	if (auto const* ar = dynamic_cast<const ARDOUR::AudioRegion*> (&r)) {
+		d.emit_audio_envelope = true;
+		d.gain_linear         = ar->scale_amplitude ();
+		/* Ardour declares fade_in/out_length() non-const; reads are logically const. */
+		auto* ar_mut = const_cast<ARDOUR::AudioRegion*> (ar);
+		d.fade_in_samples =
+		    static_cast<std::uint64_t> (std::max<samplecnt_t> (ar_mut->fade_in_length ().samples (), 0));
+		d.fade_out_samples =
+		    static_cast<std::uint64_t> (std::max<samplecnt_t> (ar_mut->fade_out_length ().samples (), 0));
+	}
+
 	return d;
 }
 
@@ -848,6 +928,90 @@ list_plugin_presets (Session& session, const std::string& plugin_id)
 		d.is_factory = !pr.user;
 		out.push_back (std::move (d));
 	}
+	return out;
+}
+
+MidiPatchNamesDesc
+list_midi_patch_names (Session& session, const std::string& track_id, std::uint8_t channel)
+{
+	MidiPatchNamesDesc out;
+	out.track_id = track_id;
+	out.channel = static_cast<std::uint8_t> (std::min<int> (15, channel));
+	if (track_id.rfind ("track.", 0) != 0) return out;
+	const std::string sid = track_id.substr (6);
+
+	std::shared_ptr<Route> route;
+	{
+		std::shared_ptr<RouteList const> routes = safe_get_routes (session);
+		for (auto const& r : *routes) {
+			if (!r) continue;
+			std::ostringstream tmp;
+			tmp << r->id ();
+			if (tmp.str () != sid) continue;
+			route = r;
+			break;
+		}
+	}
+	if (!route) return out;
+
+	auto& info = route->instrument_info ();
+	if (!info.model ().empty ()) out.model = info.model ();
+	if (!info.mode ().empty ()) out.mode = info.mode ();
+
+	auto chan_set = info.get_patches (out.channel);
+	if (!chan_set) return out;
+	std::map<std::uint16_t, MidiPatchBankDesc> generic_banks;
+	for (auto const& bank : chan_set->patch_banks ()) {
+		if (!bank) continue;
+		if (bank->number () == UINT16_MAX) {
+			// Ardour's patch selector treats UINT16_MAX PatchBanks as
+			// "generic" name lists: the bank to send lives on each Patch
+			// primary key, not on the PatchBank itself. Mirror that shape
+			// on the wire so selecting e.g. SC-55 "Piano" sends the real
+			// 14-bit bank instead of 0xffff/16383.
+			for (auto const& patch : bank->patch_name_list ()) {
+				if (!patch) continue;
+				const std::uint16_t real_bank = patch->bank_number ();
+				auto& b = generic_banks[real_bank];
+				b.bank = real_bank;
+				if (b.name.empty ()) {
+					std::ostringstream name;
+					name << "Bank " << (static_cast<unsigned> (real_bank) + 1);
+					if (!bank->name ().empty ()) name << " (" << bank->name () << ")";
+					b.name = name.str ();
+				}
+				MidiPatchProgramDesc p;
+				p.program = patch->program_number ();
+				p.name = patch->name ();
+				b.programs.push_back (std::move (p));
+			}
+		} else {
+			MidiPatchBankDesc b;
+			b.bank = static_cast<std::uint16_t> (std::max<int> (0, bank->number ()));
+			b.name = bank->name ();
+			for (auto const& patch : bank->patch_name_list ()) {
+				if (!patch) continue;
+				MidiPatchProgramDesc p;
+				p.program = patch->program_number ();
+				p.name = patch->name ();
+				b.programs.push_back (std::move (p));
+			}
+			std::sort (b.programs.begin (), b.programs.end (), [] (auto const& a, auto const& z) {
+				return a.program < z.program;
+			});
+			out.banks.push_back (std::move (b));
+		}
+	}
+	for (auto& it : generic_banks) {
+		auto& b = it.second;
+		std::sort (b.programs.begin (), b.programs.end (), [] (auto const& a, auto const& z) {
+			return a.program < z.program;
+		});
+		out.banks.push_back (std::move (b));
+	}
+	std::sort (out.banks.begin (), out.banks.end (), [] (auto const& a, auto const& z) {
+		return a.bank < z.bank;
+	});
 	return out;
 }
 

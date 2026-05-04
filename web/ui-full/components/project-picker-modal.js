@@ -18,7 +18,7 @@ import { LitElement, html, css } from "lit";
 
 import "./session-view.js";
 import { icon } from "foyer-ui-core/icons.js";
-import { launchProjectGuarded } from "../session-launch.js";
+import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
 
 export class ProjectPickerModal extends LitElement {
   static properties = {
@@ -258,7 +258,7 @@ export class ProjectPickerModal extends LitElement {
           <button title="Close (Esc)" @click=${this._close}>${icon("x-mark", 14)}</button>
         </header>
         <div class="body">
-          <foyer-session-view @click=${this._onPick}></foyer-session-view>
+          <foyer-session-view .mode=${this.mode} @click=${this._onPick}></foyer-session-view>
         </div>
         ${this.mode === "new" ? html`
           <div class="create-row">

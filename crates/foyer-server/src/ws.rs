@@ -24,7 +24,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Extension, Query, State};
 use axum::response::IntoResponse;
 use foyer_schema::{
-    Command, ControlUpdate, Envelope, Event, TunnelProviderConfig, TunnelProviderKind,
+    Command, ControlUpdate, EntityId, Envelope, Event, TunnelProviderConfig, TunnelProviderKind,
     SCHEMA_VERSION,
 };
 use futures::{SinkExt, StreamExt};
@@ -32,6 +32,28 @@ use std::net::{IpAddr, SocketAddr};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{AppState, SharedState};
+
+/// Re-shape the orphan list into the jail-relative form that hits the
+/// wire. The on-disk `RegistryEntry.project_path` is whatever absolute
+/// path the shim recorded at startup — fine for server-side
+/// bookkeeping (the reattach path needs the absolute form to
+/// canonicalize against), but a leak when broadcast verbatim because
+/// every other UI-facing path on the wire is jail-relative
+/// (`SessionInfo.path`, `BackendSwapped.project_path`,
+/// `RecentEntry.path`). Without this stripper, the welcome-screen's
+/// "Unfinished sessions found" banner displayed
+/// `/workspaces/foyer-studio/sessions/asdf` while everything else
+/// next to it read `foyer-studio/sessions/asdf` — same project, two
+/// different labels, clearly an internal detail bleeding through.
+async fn orphans_for_wire(state: &std::sync::Arc<AppState>) -> Vec<foyer_schema::OrphanInfo> {
+    let mut orphans = state.orphans.read().await.clone();
+    for o in &mut orphans {
+        if !o.path.is_empty() {
+            o.path = state.sessions.jail_display_path(&o.path).await;
+        }
+    }
+    orphans
+}
 
 /// Marker inserted as a request extension by the tunnel-auth listener.
 /// Presence means "this request came in over the public tunnel"; absence
@@ -268,6 +290,7 @@ async fn handle(
         };
         let greeting = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -289,18 +312,7 @@ async fn handle(
                 // UI can gate surfaces for DAWs with narrower feature
                 // sets than Ardour (mixing/matching backends is a
                 // medium-term goal — see DECISION 40).
-                features: {
-                    // Backend's capability snapshot is the base; we
-                    // layer server-side flags on top. `native_plugin_gui`
-                    // is a SERVER property (xpra installed?), not a
-                    // backend property — backends like the stub never
-                    // know whether the host has xpra, and the same
-                    // backend can run on a host with xpra and one
-                    // without. Probed once at AppState construction.
-                    let mut feat = state.backend.read().await.features();
-                    feat.insert("native_plugin_gui".into(), state.xpra_available);
-                    feat
-                },
+                features: state.merged_feature_map().await,
                 // No host-level pin by default. An operator can set
                 // `Config::default_ui_variant` to force all browsers
                 // onto `touch`, `kids`, `lite`, or a third-party UI.
@@ -320,6 +332,7 @@ async fn handle(
             state.peers.read().await.values().cloned().collect();
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -344,6 +357,7 @@ async fn handle(
             .collect();
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -364,6 +378,7 @@ async fn handle(
     {
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
@@ -377,21 +392,25 @@ async fn handle(
     // Initial session roll-up: send the current list of open sessions
     // and any orphans discovered at sidecar startup, so the client's
     // welcome screen / switcher can paint immediately instead of
-    // waiting for the first ListSessions round-trip.
+    // waiting for the first ListSessions round-trip. RecentsList rides
+    // along on the same paint so the welcome screen has everything it
+    // needs before the user's first interaction.
     {
         let sessions = state.sessions.list().await;
         let sess_env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
             origin: Some("server".into()),
             session_id: None,
             body: Event::SessionList { sessions },
         };
         let _ = send_env(&mut tx_ws, &sess_env).await;
-        let orphans = state.orphans.read().await.clone();
+        let orphans = orphans_for_wire(&state).await;
         if !orphans.is_empty() {
             let orph_env = Envelope {
                 schema: SCHEMA_VERSION,
+                api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
                 seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
                 origin: Some("server".into()),
                 session_id: None,
@@ -399,6 +418,16 @@ async fn handle(
             };
             let _ = send_env(&mut tx_ws, &orph_env).await;
         }
+        let recents = crate::recents::load().await;
+        let rec_env = Envelope {
+            schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            session_id: None,
+            body: Event::RecentsList { recents },
+        };
+        let _ = send_env(&mut tx_ws, &rec_env).await;
     }
 
     // Initial catch-up: either replay from ring or send snapshot.
@@ -537,6 +566,7 @@ async fn handle(
     state.peers.write().await.remove(&peer_id);
     let env = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
         origin: Some("server".into()),
         session_id: None,
@@ -651,6 +681,8 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::ListActions => "list_actions",
         Command::InvokeAction { .. } => "invoke_action",
         Command::ListRegions { .. } => "list_regions",
+        Command::ListAudioPool => "list_audio_pool",
+        Command::ImportAudio { .. } => "import_audio",
         Command::ListPlugins => "list_plugins",
         Command::BrowsePath { .. } => "browse_path",
         Command::OpenSession { .. } => "open_session",
@@ -660,6 +692,8 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::CreateRegion { .. } => "create_region",
         Command::DuplicateRegion { .. } => "duplicate_region",
         Command::DuplicateRegionRange { .. } => "duplicate_region_range",
+        Command::StretchRegion { .. } => "stretch_region",
+        Command::SplitRegion { .. } => "split_region",
         Command::ListWaveform { .. } => "list_waveform",
         Command::ClearWaveformCache { .. } => "clear_waveform_cache",
         Command::ListBackends => "list_backends",
@@ -667,11 +701,16 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::ListSessions => "list_sessions",
         Command::SelectSession { .. } => "select_session",
         Command::CloseSession { .. } => "close_session",
+        Command::ShimQuit => "shim_quit",
         Command::ReattachOrphan { .. } => "reattach_orphan",
         Command::DismissOrphan { .. } => "dismiss_orphan",
+        Command::ListRecents => "list_recents",
+        Command::ForgetRecent { .. } => "forget_recent",
+        Command::ClearRecents => "clear_recents",
         Command::UpdateTrack { .. } => "update_track",
         Command::DeleteTrack { .. } => "delete_track",
         Command::ReorderTracks { .. } => "reorder_tracks",
+        Command::SetTrackMidiChannelMode { .. } => "set_track_midi_channel_mode",
         Command::CreateGroup { .. } => "create_group",
         Command::UpdateGroup { .. } => "update_group",
         Command::DeleteGroup { .. } => "delete_group",
@@ -679,6 +718,7 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::RemovePlugin { .. } => "remove_plugin",
         Command::MovePlugin { .. } => "move_plugin",
         Command::ListPluginPresets { .. } => "list_plugin_presets",
+        Command::ListMidiPatchNames { .. } => "list_midi_patch_names",
         Command::LoadPluginPreset { .. } => "load_plugin_preset",
         Command::SavePluginPreset { .. } => "save_plugin_preset",
         Command::OpenPluginGui { .. } => "open_plugin_gui",
@@ -690,6 +730,7 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::AddPatchChange { .. } => "add_patch_change",
         Command::UpdatePatchChange { .. } => "update_patch_change",
         Command::DeletePatchChange { .. } => "delete_patch_change",
+        Command::SetTrackMidiPatch { .. } => "set_track_midi_patch",
         Command::SetSequencerLayout { .. } => "set_sequencer_layout",
         Command::ClearSequencerLayout { .. } => "clear_sequencer_layout",
         Command::SetTrackInput { .. } => "set_track_input",
@@ -818,6 +859,7 @@ async fn dispatch_command(
             let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
             let out = Envelope {
                 schema: SCHEMA_VERSION,
+                api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
                 seq,
                 origin: Some("backend".to_string()),
                 session_id: None,
@@ -841,6 +883,7 @@ async fn dispatch_command(
             let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
             let out = Envelope {
                 schema: SCHEMA_VERSION,
+                api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
                 seq,
                 origin: origin.map(str::to_string),
                 session_id: None,
@@ -892,6 +935,39 @@ async fn dispatch_command(
                 },
             )
             .await;
+        }
+        Command::ListAudioPool => {
+            let Some(sid) = state.focus_session_id.read().await.clone() else {
+                broadcast_event(state, Event::AudioPoolListed { sources: vec![] }).await;
+                return Ok(());
+            };
+            let sources = state.backend().await.list_audio_pool(&sid).await?;
+            broadcast_event(state, Event::AudioPoolListed { sources }).await;
+        }
+        Command::ImportAudio { path } => {
+            let resolved = if let Some(jail) = state.jail.as_ref() {
+                let rel = crate::files::sanitize_relative_path(&path);
+                let abs = jail.root().join(rel);
+                let canon = abs.canonicalize().map_err(|e| {
+                    DispatchError::Backend(foyer_backend::BackendError::NoSuchPath(format!(
+                        "import_audio path: {e}"
+                    )))
+                })?;
+                let root = jail.root().canonicalize().map_err(|e| {
+                    DispatchError::Backend(foyer_backend::BackendError::Other(format!(
+                        "jail root: {e}"
+                    )))
+                })?;
+                if !canon.starts_with(&root) {
+                    return Err(DispatchError::Backend(
+                        foyer_backend::BackendError::OutsideJail(path),
+                    ));
+                }
+                canon.to_string_lossy().into_owned()
+            } else {
+                path
+            };
+            state.backend().await.import_audio(resolved).await?;
         }
         Command::ListPlugins => {
             let entries = state.backend().await.list_plugins().await?;
@@ -1151,12 +1227,33 @@ async fn dispatch_command(
                                 *state.focus_session_id.write().await = Some(existing_id.clone());
                                 *state.backend.write().await = be;
 
+                                // Promote in recents — re-clicking an
+                                // open project is still a "use" event
+                                // and should bump it to the top.
+                                // Normalize the path through the jail
+                                // canonicalizer so absolute and
+                                // jail-relative inputs collapse to
+                                // the same key (no duplicates) and
+                                // we never write a host-absolute
+                                // path back to the UI.
+                                let jail_root = state.sessions.jail_root.read().await.clone();
+                                let recents = crate::recents::touch(foyer_schema::RecentEntry {
+                                    path: crate::recents::normalize_path(raw, jail_root.as_deref()),
+                                    name: String::new(),
+                                    backend_id: backend_id.clone(),
+                                    opened_at: 0,
+                                })
+                                .await;
+                                broadcast_event(state, Event::RecentsList { recents }).await;
+
                                 // Emit a session list refresh + snapshot so the
                                 // client repaints without a round-trip.
                                 let sessions = state.sessions.list().await;
                                 broadcast_event(state, Event::SessionList { sessions }).await;
                                 let out = Envelope {
                                     schema: SCHEMA_VERSION,
+                                    api_version: foyer_schema::CONTROL_PLANE_API_VERSION
+                                        .to_string(),
                                     seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
                                     origin: Some("backend".into()),
                                     session_id: Some(existing_id),
@@ -1187,16 +1284,46 @@ async fn dispatch_command(
                 }
             }
             match spawner.launch(&backend_id, path).await {
-                Ok(new_backend) => {
+                Ok(launched) => {
                     // swap_backend synthesizes a session UUID when
                     // the caller doesn't supply one. Once the
                     // shim-side UUID plumbing lands (reading from
                     // the .ardour file's extra_xml on hello), the
                     // CLI spawner will set it on the backend before
                     // returning and we can pass it through here.
+                    let touch_path = project_path.clone();
+                    let touch_backend = backend_id.clone();
                     state
-                        .swap_backend(backend_id, project_path, new_backend, None, None)
+                        .swap_backend(
+                            backend_id,
+                            project_path,
+                            launched.backend,
+                            None,
+                            None,
+                            launched.process,
+                        )
                         .await;
+                    // Promote the just-opened project to the top of
+                    // recents. Persisted server-side so welcome
+                    // screens across browser profiles see the same
+                    // history.
+                    if let Some(p) = touch_path {
+                        // Same canonicalize-then-jail-strip we do on
+                        // the "already-open" focus path above —
+                        // without it a launch via `/abs/path` and a
+                        // launch via `jail-relative/path` for the
+                        // same project end up as two distinct
+                        // recents.json entries.
+                        let jail_root = state.sessions.jail_root.read().await.clone();
+                        let recents = crate::recents::touch(foyer_schema::RecentEntry {
+                            path: crate::recents::normalize_path(&p, jail_root.as_deref()),
+                            name: String::new(),
+                            backend_id: touch_backend,
+                            opened_at: 0,
+                        })
+                        .await;
+                        broadcast_event(state, Event::RecentsList { recents }).await;
+                    }
                 }
                 Err(e) => {
                     broadcast_event(
@@ -1261,6 +1388,39 @@ async fn dispatch_command(
                     },
                 )
                 .await;
+            }
+        }
+        Command::SetTrackMidiChannelMode {
+            track_id,
+            direction,
+            mode,
+            mask,
+        } => {
+            match state
+                .backend()
+                .await
+                .set_track_midi_channel_mode(track_id, direction, mode, mask)
+                .await
+            {
+                Ok(track) => {
+                    broadcast_event(
+                        state,
+                        Event::TrackUpdated {
+                            track: Box::new(track),
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "set_midi_channel_mode_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
             }
         }
         Command::SetTrackInput {
@@ -1671,6 +1831,28 @@ async fn dispatch_command(
                 .await;
             }
         }
+        Command::SetTrackMidiPatch {
+            track_id,
+            channel,
+            bank,
+            program,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_track_midi_patch(track_id, channel, bank, program)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "set_track_midi_patch_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
 
         Command::DuplicateRegion {
             source_region_id,
@@ -1714,6 +1896,49 @@ async fn dispatch_command(
                     state,
                     Event::Error {
                         code: "duplicate_region_range_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::StretchRegion {
+            id,
+            new_start_samples,
+            new_length_samples,
+            anchor,
+            preserve_pitch,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .stretch_region(
+                    id,
+                    new_start_samples,
+                    new_length_samples,
+                    anchor,
+                    preserve_pitch,
+                )
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "stretch_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::SplitRegion { id, at_samples } => {
+            if let Err(e) = state.backend().await.split_region(id, at_samples).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "split_region_failed".into(),
                         message: e.to_string(),
                     },
                 )
@@ -2011,6 +2236,28 @@ async fn dispatch_command(
                 }
             }
         }
+        Command::ListMidiPatchNames { track_id, channel } => {
+            match state
+                .backend()
+                .await
+                .list_midi_patch_names(track_id.clone(), channel)
+                .await
+            {
+                Ok(names) => {
+                    broadcast_event(state, Event::MidiPatchNamesListed { track_id, names }).await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "list_midi_patch_names_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
         Command::LoadPluginPreset {
             plugin_id,
             preset_id,
@@ -2065,7 +2312,7 @@ async fn dispatch_command(
         Command::ListSessions => {
             let sessions = state.sessions.list().await;
             broadcast_event(state, Event::SessionList { sessions }).await;
-            let orphans = state.orphans.read().await.clone();
+            let orphans = orphans_for_wire(state).await;
             if !orphans.is_empty() {
                 broadcast_event(state, Event::OrphansDetected { orphans }).await;
             }
@@ -2075,13 +2322,53 @@ async fn dispatch_command(
             // so subsequent commands without explicit session_id route
             // to this one's backend. A per-connection override could
             // layer on later for multi-browser-window scenarios.
-            *state.focus_session_id.write().await = Some(session_id.clone());
+            let prev = state
+                .focus_session_id
+                .write()
+                .await
+                .replace(session_id.clone());
+            // Mirror `state.backend` to match the new focus so plain
+            // (untagged) commands route to the right backend. Without
+            // this, the focus pointer says "session B" but
+            // `state.backend()` still resolves to A's backend until a
+            // new launch / swap touches it.
+            if let Some(be) = state.sessions.backend(&session_id).await {
+                *state.backend.write().await = be;
+            }
+            // Audio streams opened against the prior session's
+            // backend are now stale — their `pcm_rx` reads from a
+            // backend the user is no longer watching. Tear them all
+            // down so the client's listener gets `AudioEgressStopped`,
+            // resets, and re-opens against the new focus. (Without
+            // this, the listener kept playing audio from the old
+            // session until the user toggled Listen off+on.)
+            if prev.as_ref() != Some(&session_id) {
+                let stream_ids: Vec<u32> = state
+                    .audio_hub
+                    .list()
+                    .await
+                    .into_iter()
+                    .map(|(id, _, _)| id)
+                    .collect();
+                for stream_id in stream_ids {
+                    state.audio_hub.close_stream(stream_id).await;
+                    broadcast_event(state, Event::AudioEgressStopped { stream_id }).await;
+                }
+            }
+            broadcast_event(
+                state,
+                Event::SessionFocusChanged {
+                    session_id: Some(session_id.clone()),
+                },
+            )
+            .await;
             // Immediately re-snapshot against the newly-focused
             // backend so the browser sees the switched-to session's
             // tracks/regions.
             if let Ok(snap) = state.backend().await.snapshot().await {
                 let out = Envelope {
                     schema: SCHEMA_VERSION,
+                    api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
                     seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
                     origin: Some("backend".into()),
                     session_id: Some(session_id),
@@ -2102,17 +2389,48 @@ async fn dispatch_command(
                     // focus when there's nothing left). Also mirror
                     // the backend pointer so plain commands still
                     // land on a live backend.
-                    {
+                    let was_focused = {
                         let mut focus = state.focus_session_id.write().await;
                         if focus.as_ref() == Some(&session_id) {
                             *focus = None;
+                            true
+                        } else {
+                            false
                         }
-                    }
+                    };
+                    let mut new_focus: Option<EntityId> = None;
                     if let Some(fallback_id) = state.sessions.most_recent_id().await {
                         if let Some(be) = state.sessions.backend(&fallback_id).await {
                             *state.backend.write().await = be;
-                            *state.focus_session_id.write().await = Some(fallback_id);
+                            *state.focus_session_id.write().await = Some(fallback_id.clone());
+                            new_focus = Some(fallback_id);
                         }
+                    }
+                    if was_focused {
+                        // Same teardown as Command::SelectSession —
+                        // open audio streams were tied to the closed
+                        // session's PCM rx and won't deliver more
+                        // samples. Drop them so the client listener
+                        // resets against the new focus (or sits silent
+                        // if there's no fallback).
+                        let stream_ids: Vec<u32> = state
+                            .audio_hub
+                            .list()
+                            .await
+                            .into_iter()
+                            .map(|(id, _, _)| id)
+                            .collect();
+                        for stream_id in stream_ids {
+                            state.audio_hub.close_stream(stream_id).await;
+                            broadcast_event(state, Event::AudioEgressStopped { stream_id }).await;
+                        }
+                        broadcast_event(
+                            state,
+                            Event::SessionFocusChanged {
+                                session_id: new_focus,
+                            },
+                        )
+                        .await;
                     }
                 }
                 None => {
@@ -2128,26 +2446,18 @@ async fn dispatch_command(
             }
         }
         Command::ReattachOrphan { orphan_id } => {
-            let mut orphans = state.orphans.write().await;
-            if let Some(pos) = orphans.iter().position(|o| o.id == orphan_id) {
-                let info = orphans.remove(pos);
-                drop(orphans);
-                // Stub for now: without the spawner's "attach to
-                // existing socket" path we can't reach the orphan.
-                // Emit the error + clear it from the registry so the
-                // user can at least dismiss.
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "reattach_unimplemented".into(),
-                        message: format!(
-                            "reattach to orphan {} at {} is not yet wired; you can dismiss it for now",
-                            info.name, info.socket.as_deref().unwrap_or("?"),
-                        ),
-                    },
-                )
-                .await;
-            } else {
+            // Pull the orphan info out of the registry. We hold the
+            // write lock just long enough to remove it; the rest of
+            // the work happens with the lock dropped so a slow
+            // shim handshake can't block other commands.
+            let info = {
+                let mut orphans = state.orphans.write().await;
+                orphans
+                    .iter()
+                    .position(|o| o.id == orphan_id)
+                    .map(|pos| orphans.remove(pos))
+            };
+            let Some(info) = info else {
                 broadcast_event(
                     state,
                     Event::Error {
@@ -2156,6 +2466,142 @@ async fn dispatch_command(
                     },
                 )
                 .await;
+                return Ok(());
+            };
+
+            // Need a spawner to call into — without one we can't build
+            // a HostBackend (foyer-server stays adapter-agnostic). The
+            // CLI provides the concrete `CliSpawner::reattach`.
+            let Some(spawner) = state.spawner.clone() else {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "no_spawner".into(),
+                        message: "this sidecar has no spawner; cannot reattach".into(),
+                    },
+                )
+                .await;
+                // Put the orphan back so the user can dismiss it.
+                state.orphans.write().await.push(info);
+                return Ok(());
+            };
+            let Some(socket_path) = info.socket.as_deref() else {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "reattach_no_socket".into(),
+                        message: format!(
+                            "orphan {} has no socket path on disk; can't reattach. Use Dismiss + Reopen to relaunch.",
+                            info.name,
+                        ),
+                    },
+                )
+                .await;
+                state.orphans.write().await.push(info);
+                return Ok(());
+            };
+            let socket = std::path::Path::new(socket_path);
+
+            // Fast-path: if the CLI already auto-attached to this exact
+            // shim socket on startup, the implicit backend in
+            // `state.backend` IS this orphan — opening a second IPC
+            // connection would deadlock (the shim only services one
+            // client at a time, so the new connect would sit in the
+            // kernel's accept queue forever and silently break event
+            // flow). Adopt the existing backend by registering it in
+            // the sessions map with the orphan's metadata.
+            let attached = state.attached_socket.read().await.clone();
+            let already_attached = attached.as_ref().is_some_and(|p| p.as_path() == socket);
+            if already_attached && state.sessions.list().await.is_empty() {
+                let existing = state.backend.read().await.clone();
+                // Abort the legacy single-backend pump — the new
+                // per-session pump that `sessions.add` spawns will
+                // take over. Without this both pumps run and every
+                // event fans out twice.
+                if let Some(handle) = state.pump_handle.lock().await.take() {
+                    handle.abort();
+                }
+                state
+                    .sessions
+                    .clone()
+                    .add(
+                        info.id.clone(),
+                        info.backend_id.clone(),
+                        existing,
+                        info.path.clone(),
+                        if info.name.is_empty() {
+                            info.id.to_string()
+                        } else {
+                            info.name.clone()
+                        },
+                        None,
+                    )
+                    .await;
+                *state.focus_session_id.write().await = Some(info.id.clone());
+                let _ = crate::orphans::remove_entry(info.id.as_str()).await;
+                let remaining = orphans_for_wire(state).await;
+                broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
+                tracing::info!(
+                    "reattach: adopted existing auto-attached backend at {} as session {}",
+                    socket.display(),
+                    info.id
+                );
+                return Ok(());
+            }
+
+            match spawner.reattach(&info.backend_id, socket).await {
+                Ok(launched) => {
+                    // Reuse the orphan's session id so the .ardour
+                    // file's extra_xml UUID stays stable; the next
+                    // crash + reattach round trip lands on the same
+                    // identity.
+                    state
+                        .swap_backend(
+                            info.backend_id.clone(),
+                            if info.path.is_empty() {
+                                None
+                            } else {
+                                Some(info.path.clone())
+                            },
+                            launched.backend,
+                            Some(info.id.clone()),
+                            if info.name.is_empty() {
+                                None
+                            } else {
+                                Some(info.name.clone())
+                            },
+                            launched.process,
+                        )
+                        .await;
+                    // Remove the on-disk registry entry — the orphan
+                    // is now an attached session, not crash debris.
+                    let _ = crate::orphans::remove_entry(info.id.as_str()).await;
+                    // Refresh the orphan list for clients.
+                    let remaining = state.orphans.read().await.clone();
+                    broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
+                }
+                Err(e) => {
+                    // Don't include the full socket path in the
+                    // user-facing message — `/tmp/foyer/ardour-NNN.sock`
+                    // is a server-side coordination detail. The full
+                    // path lives in the server log if a developer
+                    // needs to debug.
+                    tracing::warn!(
+                        "reattach to {} (socket {}) failed: {e}",
+                        info.name,
+                        socket.display(),
+                    );
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "reattach_failed".into(),
+                            message: format!("reattach to {} failed: {e}", info.name,),
+                        },
+                    )
+                    .await;
+                    // Put the orphan back so the user can retry / dismiss.
+                    state.orphans.write().await.push(info);
+                }
             }
         }
         Command::DismissOrphan { orphan_id } => {
@@ -2166,9 +2612,38 @@ async fn dispatch_command(
                 let _ = crate::orphans::remove_entry(info.id.as_str()).await;
                 // Send an updated orphan list so UIs can tear down
                 // the "dismiss" chip.
-                let remaining = state.orphans.read().await.clone();
+                let remaining = orphans_for_wire(state).await;
                 broadcast_event(state, Event::OrphansDetected { orphans: remaining }).await;
             }
+        }
+
+        Command::ListRecents => {
+            let recents = crate::recents::load().await;
+            broadcast_event(state, Event::RecentsList { recents }).await;
+        }
+        Command::ForgetRecent { path } => {
+            // Normalize the inbound path the same way `touch` does so
+            // a Forget click from the UI lands on the canonical key
+            // even if the client cached an absolute or differently-
+            // resolved string. (Old recents files written before
+            // normalization may still hold non-canonical entries —
+            // the Forget click sees the displayed path, which IS
+            // canonical now, so this also matches new entries.)
+            let jail_root = state.sessions.jail_root.read().await.clone();
+            let normalized = crate::recents::normalize_path(&path, jail_root.as_deref());
+            let mut recents = crate::recents::forget(&normalized).await;
+            // Defensive: if the click came in pre-normalization shape
+            // (e.g. an old client tab that still has the absolute
+            // path cached), retry with the raw input so the user
+            // can actually evict the entry they're looking at.
+            if normalized != path {
+                recents = crate::recents::forget(&path).await;
+            }
+            broadcast_event(state, Event::RecentsList { recents }).await;
+        }
+        Command::ClearRecents => {
+            let recents = crate::recents::clear().await;
+            broadcast_event(state, Event::RecentsList { recents }).await;
         }
 
         Command::CreateGroup {
@@ -2404,6 +2879,16 @@ async fn dispatch_command(
             }
         }
 
+        Command::ShimQuit => {
+            // Direct sidecar-side dispatch is rare (we usually invoke
+            // request_quit via the registry close path), but expose it
+            // to the WS so a debugging client can trigger a graceful
+            // shim shutdown without going through CloseSession. The
+            // backend dispatches it to the active focus.
+            if let Err(e) = state.backend().await.request_quit().await {
+                tracing::warn!("shim_quit forwarded but backend errored: {e}");
+            }
+        }
         Command::SavePluginPreset { .. }
         | Command::AudioSdpAnswer { .. }
         | Command::AudioIceCandidate { .. } => {
@@ -2430,6 +2915,7 @@ async fn broadcast_event(state: &AppState, event: Event) {
     let is_snapshot = matches!(event, Event::SessionSnapshot { .. });
     let env = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq,
         origin: Some("backend".to_string()),
         session_id: None,

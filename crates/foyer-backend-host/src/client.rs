@@ -25,9 +25,10 @@ use foyer_ipc::{
     Control,
 };
 use foyer_schema::{
-    AudioFormat, AudioSource, Command, EnginePort, EntityId, Envelope, Event, LatencyReport,
-    MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, PluginCatalogEntry, PluginPreset,
-    Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch, SCHEMA_VERSION,
+    AudioFormat, AudioPoolSource, AudioSource, Command, EnginePort, EntityId, Envelope, Event,
+    LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch,
+    PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta,
+    Track, TrackPatch,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -110,6 +111,10 @@ struct Shared {
     /// In-flight list_plugin_presets requests, keyed by plugin id.
     /// Resolved by the reader task on `Event::PluginPresetsListed`.
     pending_presets: Mutex<HashMap<EntityId, Vec<oneshot::Sender<Vec<PluginPreset>>>>>,
+    /// In-flight list_midi_patch_names requests, keyed by
+    /// "<track_id>:<channel>" so concurrent requests for different
+    /// channels don't trample each other.
+    pending_midi_patch_names: Mutex<HashMap<String, Vec<oneshot::Sender<MidiPatchNames>>>>,
     /// In-flight list_plugins requests. The shim's PluginsList event
     /// has no correlation id — every pending awaiter resolves to
     /// the same catalog. Concurrent requests just share the same
@@ -120,6 +125,8 @@ struct Shared {
     /// correlation id, so every concurrent awaiter resolves to the
     /// same snapshot.
     pending_ports_list: Mutex<Vec<oneshot::Sender<Vec<EnginePort>>>>,
+    /// In-flight `list_audio_pool` requests — shared answer like plugins/ports.
+    pending_audio_pool_list: Mutex<Vec<oneshot::Sender<Vec<AudioPoolSource>>>>,
     /// Cache of known regions, keyed by region id. Populated from every
     /// `RegionsList` / `RegionUpdated` event; drained on `RegionRemoved`.
     /// Used to look up `source_path` when the sidecar needs to decode
@@ -172,8 +179,10 @@ impl HostClient {
             pending_delete_region: Mutex::new(HashMap::new()),
             pending_update_track: Mutex::new(HashMap::new()),
             pending_presets: Mutex::new(HashMap::new()),
+            pending_midi_patch_names: Mutex::new(HashMap::new()),
             pending_plugins_list: Mutex::new(Vec::new()),
             pending_ports_list: Mutex::new(Vec::new()),
+            pending_audio_pool_list: Mutex::new(Vec::new()),
             regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
             disconnected: AtomicBool::new(false),
@@ -207,13 +216,12 @@ impl HostClient {
     }
 
     pub async fn send_command(&self, cmd: Command) -> Result<(), ClientError> {
-        let env = Envelope {
-            schema: SCHEMA_VERSION,
-            seq: self.next_seq(),
-            origin: Some("sidecar".into()),
-            session_id: None,
-            body: Control::Command(cmd),
-        };
+        let env = Envelope::new(
+            self.next_seq(),
+            Some("sidecar".into()),
+            None,
+            Control::Command(cmd),
+        );
         self.shared
             .out_tx
             .send(WriteItem::Control(Box::new(env)))
@@ -393,6 +401,17 @@ impl HostClient {
         timeout(rx, "list_regions").await
     }
 
+    pub async fn list_audio_pool(&self) -> Result<Vec<AudioPoolSource>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared.pending_audio_pool_list.lock().await.push(tx);
+        self.send_command(Command::ListAudioPool).await?;
+        timeout(rx, "list_audio_pool").await
+    }
+
+    pub async fn import_audio(&self, path: String) -> Result<(), ClientError> {
+        self.send_command(Command::ImportAudio { path }).await
+    }
+
     pub async fn update_region(
         &self,
         id: EntityId,
@@ -442,6 +461,29 @@ impl HostClient {
             at_samples,
         })
         .await
+    }
+
+    pub async fn stretch_region(
+        &self,
+        id: EntityId,
+        new_start_samples: i64,
+        new_length_samples: u64,
+        anchor: String,
+        preserve_pitch: bool,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::StretchRegion {
+            id,
+            new_start_samples,
+            new_length_samples,
+            anchor,
+            preserve_pitch,
+        })
+        .await
+    }
+
+    pub async fn split_region(&self, id: EntityId, at_samples: i64) -> Result<(), ClientError> {
+        self.send_command(Command::SplitRegion { id, at_samples })
+            .await
     }
 
     pub async fn create_region(
@@ -605,6 +647,25 @@ impl HostClient {
         timeout(rx, "list_plugin_presets").await
     }
 
+    pub async fn list_midi_patch_names(
+        &self,
+        track_id: EntityId,
+        channel: u8,
+    ) -> Result<MidiPatchNames, ClientError> {
+        let key = format!("{}:{channel}", track_id.as_str());
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_midi_patch_names
+            .lock()
+            .await
+            .entry(key)
+            .or_default()
+            .push(tx);
+        self.send_command(Command::ListMidiPatchNames { track_id, channel })
+            .await?;
+        timeout(rx, "list_midi_patch_names").await
+    }
+
     pub async fn load_plugin_preset(
         &self,
         plugin_id: EntityId,
@@ -649,6 +710,22 @@ impl HostClient {
         self.send_command(Command::DeletePatchChange {
             region_id,
             patch_change_id,
+        })
+        .await
+    }
+
+    pub async fn set_track_midi_patch(
+        &self,
+        track_id: EntityId,
+        channel: u8,
+        bank: i32,
+        program: u8,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::SetTrackMidiPatch {
+            track_id,
+            channel,
+            bank,
+            program,
         })
         .await
     }
@@ -748,6 +825,31 @@ impl HostClient {
         })
         .await?;
         timeout(rx, "update_track").await
+    }
+
+    pub async fn set_track_midi_channel_mode(
+        &self,
+        track_id: EntityId,
+        direction: String,
+        mode: String,
+        mask: u16,
+    ) -> Result<Track, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_update_track
+            .lock()
+            .await
+            .entry(track_id.clone())
+            .or_default()
+            .push(tx);
+        self.send_command(Command::SetTrackMidiChannelMode {
+            track_id: track_id.clone(),
+            direction,
+            mode,
+            mask,
+        })
+        .await?;
+        timeout(rx, "set_track_midi_channel_mode").await
     }
 }
 
@@ -965,10 +1067,26 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                         let _ = w.send(ports.clone());
                     }
                 }
+                Event::AudioPoolListed { sources } => {
+                    let waiters: Vec<_> =
+                        std::mem::take(&mut *shared.pending_audio_pool_list.lock().await);
+                    for w in waiters {
+                        let _ = w.send(sources.clone());
+                    }
+                }
                 Event::PluginPresetsListed { plugin_id, presets } => {
                     if let Some(waiters) = shared.pending_presets.lock().await.remove(plugin_id) {
                         for w in waiters {
                             let _ = w.send(presets.clone());
+                        }
+                    }
+                }
+                Event::MidiPatchNamesListed { track_id, names } => {
+                    let key = format!("{}:{}", track_id.as_str(), names.channel);
+                    if let Some(waiters) = shared.pending_midi_patch_names.lock().await.remove(&key)
+                    {
+                        for w in waiters {
+                            let _ = w.send(names.clone());
                         }
                     }
                 }

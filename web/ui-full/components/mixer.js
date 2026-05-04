@@ -280,6 +280,7 @@ export class Mixer extends LitElement {
         ${window.__foyer?.store?.state?.rbac?.isTunnel
           ? null
           : html`<button class="listen-chip ${this._listening ? "on" : ""}"
+                    data-foyer-listen-toggle="1"
                     @click=${this._toggleListen}
                     title="${this._listening ? "Stop monitoring" : "Monitor the master bus in your browser"}">
               ${icon(this._listening ? "speaker-wave" : "speaker-x-mark", 12)}

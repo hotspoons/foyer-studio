@@ -104,22 +104,20 @@ export class VizPicker extends LitElement {
     this._open = false;
     this._prefs = getVizPrefs();
     this._refresh = () => { this._prefs = getVizPrefs(); };
-    this._onDocClick = (e) => {
-      if (!this._open) return;
-      if (!this.renderRoot.contains(e.composedPath?.()[0] || e.target)) {
-        this._open = false;
-      }
-    };
+    // The Viz menu used to auto-dismiss on outside-click — but tuning
+    // visualizations often requires touching other controls (toggling
+    // playback, scrubbing, switching tracks) to see how a setting
+    // looks under different scenarios. The popover snapping shut
+    // every time made that loop frustrating. Now only the toggle
+    // button closes it; the user opts back out explicitly.
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener("foyer:viz-prefs-changed", this._refresh);
-    document.addEventListener("pointerdown", this._onDocClick);
   }
   disconnectedCallback() {
     window.removeEventListener("foyer:viz-prefs-changed", this._refresh);
-    document.removeEventListener("pointerdown", this._onDocClick);
     super.disconnectedCallback();
   }
 
@@ -228,8 +226,18 @@ export class VizPicker extends LitElement {
           </div>
 
           <div class="row" style="border-top:1px solid var(--color-border);padding-top:10px;margin-top:4px">
-            <div class="label">Timeline grid colors</div>
-            <div class="slider-row" title="Color of the seconds-tick gridlines on the timeline">
+            <div class="label">Timeline grids</div>
+            <!-- Two visibility toggles + their colors. The top-level
+                 "Grid" checkbox on the timeline toolbar used to gate
+                 the quant grid only; folded here so both grid layers
+                 sit next to each other and the toolbar isn't
+                 cluttered with timeline-only chrome. -->
+            <label class="slider-row"
+                   title="Show seconds-tick gridlines on the timeline"
+                   style="cursor:pointer">
+              <input type="checkbox"
+                     .checked=${this._prefs.timeGridOn !== false}
+                     @change=${(e) => this._set("timeGridOn", e.currentTarget.checked)}>
               <span style="flex:1">Time grid</span>
               <input type="color"
                      .value=${this._prefs.timeGridColor || "#3a3a44"}
@@ -237,15 +245,21 @@ export class VizPicker extends LitElement {
               <button class="seg" style="flex:0;padding:2px 6px"
                       title="Reset to default"
                       @click=${() => { this._set("timeGridColor", "#3a3a44"); this._set("timeGridAlpha", 1.0); }}>↺</button>
-            </div>
+            </label>
             <div class="slider-row" title="Time-grid opacity">
               <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Opacity</span>
               <input type="range" min="0" max="1" step="0.05" style="flex:1"
+                     ?disabled=${this._prefs.timeGridOn === false}
                      .value=${String(this._prefs.timeGridAlpha ?? 1)}
                      @input=${(e) => this._set("timeGridAlpha", Number(e.currentTarget.value))}>
               <span class="num">${(this._prefs.timeGridAlpha ?? 1).toFixed(2)}</span>
             </div>
-            <div class="slider-row" title="Color of the BPM-quantized grid overlay" style="margin-top:6px">
+            <label class="slider-row"
+                   title="Show the BPM-quantized grid overlay (uses transport.tempo)"
+                   style="cursor:pointer;margin-top:6px">
+              <input type="checkbox"
+                     .checked=${this._prefs.quantGridOn === true}
+                     @change=${(e) => this._set("quantGridOn", e.currentTarget.checked)}>
               <span style="flex:1">Quant grid</span>
               <input type="color"
                      .value=${this._prefs.quantGridColor || "#7c5cff"}
@@ -253,10 +267,11 @@ export class VizPicker extends LitElement {
               <button class="seg" style="flex:0;padding:2px 6px"
                       title="Reset to default"
                       @click=${() => { this._set("quantGridColor", "#7c5cff"); this._set("quantGridAlpha", 0.5); }}>↺</button>
-            </div>
+            </label>
             <div class="slider-row" title="Quant-grid opacity">
               <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Opacity</span>
               <input type="range" min="0" max="1" step="0.05" style="flex:1"
+                     ?disabled=${this._prefs.quantGridOn !== true}
                      .value=${String(this._prefs.quantGridAlpha ?? 0.5)}
                      @input=${(e) => this._set("quantGridAlpha", Number(e.currentTarget.value))}>
               <span class="num">${(this._prefs.quantGridAlpha ?? 0.5).toFixed(2)}</span>

@@ -13,6 +13,8 @@
 #include "signal_bridge.h"
 
 #include <algorithm>
+#include <cctype>
+#include <csignal>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -20,17 +22,29 @@
 #include <vector>
 
 #include "ardour/audio_port.h"
+#include "ardour/audioregion.h"
 #include "ardour/automation_control.h"
 #include "ardour/delivery.h"
 #include "ardour/gain_control.h"
 #include "ardour/internal_send.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
+#include "ardour/midi_stretch.h"
+#include "ardour/stretch.h"
+
+#include "pbd/progress.h"
+#include <rubberband/RubberBandStretcher.h>
 #include "ardour/midi_source.h"
+#include "ardour/timefx_request.h"
+#include "ardour/midi_track.h"
+#include "ardour/types.h"
 #include "ardour/monitor_control.h"
 #include "ardour/location.h"
 #include "ardour/playlist.h"
 #include "ardour/region_factory.h"
+#include "ardour/source_factory.h"
+#include "ardour/audiofilesource.h"
+#include "ardour/file_source.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
 #include "ardour/plugin_manager.h"
@@ -44,6 +58,7 @@
 #include "ardour/track.h"
 #include "evoral/Note.h"
 #include "evoral/PatchChange.h"
+#include "evoral/midi_events.h"
 #include "ardour/automation_list.h"
 #include "pbd/controllable.h"
 #include "pbd/error.h"
@@ -51,6 +66,8 @@
 #include "pbd/stateful_diff_command.h"
 #include "temporal/beats.h"
 #include "temporal/timeline.h"
+
+#include <sndfile.h>
 
 #include "ipc.h"
 #include "master_tap.h"
@@ -65,6 +82,100 @@ using namespace PBD;
 namespace ArdourSurface {
 
 namespace {
+
+/// Playback channel 0..15 for region-embedded patch events, from the track's
+/// playback filter (Force / Filter use the first set bit; else 0).
+static std::uint8_t
+foyer_playback_wire_channel_for_patch (std::shared_ptr<MidiTrack> const& mt)
+{
+	if (!mt) {
+		return 0;
+	}
+	ChannelMode const  mode = mt->get_playback_channel_mode ();
+	std::uint16_t const mask = mt->get_playback_channel_mask ();
+	if (mode == ForceChannel || mode == FilterChannels) {
+		if (!mask) {
+			return 0;
+		}
+		for (std::uint8_t i = 0; i < 16; ++i) {
+			if (mask & (1u << i)) {
+				return i;
+			}
+		}
+	}
+	return 0;
+}
+
+/// RBEffect::run() requires a non-null `Progress*` (it calls
+/// `progress->set_progress()` with no guard). The editor passes
+/// `TimeFXDialog`; we use this stub on the control-surface thread.
+struct FoyerRBProgress final : PBD::Progress {
+private:
+	void set_overall_progress (float) override {}
+};
+
+/// New MIDI regions start with no patch-change rows; playback then never sends
+/// bank/program before notes. Seed tick 0 to match live track patch state.
+static void
+foyer_seed_default_region_patch_change (
+    Session&                         session,
+    std::shared_ptr<Track> const&   track,
+    std::shared_ptr<Region> const&  region)
+{
+	auto mr = std::dynamic_pointer_cast<MidiRegion> (region);
+	if (!mr) {
+		return;
+	}
+	auto model = mr->model ();
+	if (!model) {
+		return;
+	}
+	std::uint8_t ch      = 0;
+	int          bank    = -1;
+	std::uint8_t program = 0;
+	if (auto mt = std::dynamic_pointer_cast<MidiTrack> (track)) {
+		ch = foyer_playback_wire_channel_for_patch (mt);
+		auto bank_msb = mt->automation_control (
+		    Evoral::Parameter (MidiCCAutomation, ch, MIDI_CTL_MSB_BANK), true);
+		auto bank_lsb = mt->automation_control (
+		    Evoral::Parameter (MidiCCAutomation, ch, MIDI_CTL_LSB_BANK), true);
+		if (bank_msb && bank_lsb) {
+			bank = ((static_cast<int> (bank_msb->get_value ()) & 0x7f) << 7)
+			     | (static_cast<int> (bank_lsb->get_value ()) & 0x7f);
+		}
+		auto program_ctl = mt->automation_control (
+		    Evoral::Parameter (MidiPgmChangeAutomation, ch), true);
+		if (program_ctl) {
+			program = static_cast<std::uint8_t> (std::clamp (
+			    static_cast<int> (program_ctl->get_value ()), 0, 127));
+		}
+	}
+	auto pc = std::make_shared<Evoral::PatchChange<Temporal::Beats>> (
+	    Temporal::Beats::ticks (0), ch, program, bank);
+	auto* diff =
+	    model->new_patch_change_diff_command ("foyer default patch on new region");
+	diff->add (pc);
+	model->apply_diff_command_as_commit (session, diff);
+}
+
+/// Wire `fade_*_shape` strings → `ARDOUR::FadeShape` (matches `foyer_schema::FadeShape`).
+static FadeShape
+parse_fade_shape (std::string const& s)
+{
+	if (s == "fast") {
+		return FadeFast;
+	}
+	if (s == "slow") {
+		return FadeSlow;
+	}
+	if (s == "constant_power") {
+		return FadeConstantPower;
+	}
+	if (s == "symmetric") {
+		return FadeSymmetric;
+	}
+	return FadeLinear;
+}
 
 // ---- tiny msgpack reader (what we need for inbound commands) ----
 //
@@ -282,6 +393,8 @@ struct DecodedCmd
 		AudioStreamClose, // Command::AudioStreamClose { stream_id }
 		Latency,
 		ListRegions,
+		ListAudioPool,
+		ImportAudio,
 		UpdateRegion,
 		DeleteRegion,
 		UpdateTrack,
@@ -298,9 +411,11 @@ struct DecodedCmd
 		AddPatchChange,
 		UpdatePatchChange,
 		DeletePatchChange,
+		SetTrackMidiPatch,
 		Undo,
 		Redo,
 		ListPluginPresets,
+		ListMidiPatchNames,
 		LoadPluginPreset,
 		SetSequencerLayout,
 		ClearSequencerLayout,
@@ -308,6 +423,8 @@ struct DecodedCmd
 		AudioIngressClose,
 		DuplicateRegion,
 		DuplicateRegionRange,
+		StretchRegion,
+		SplitRegion,
 		CreateRegion,
 		ReplaceRegionNotes,
 		ListPlugins,
@@ -323,6 +440,8 @@ struct DecodedCmd
 		SetSendLevel,
 		DeleteTrack,
 		ReorderTracks,
+		SetTrackMidiChannelMode,
+		ShimQuit,
 		SetLoopRange,
 		CreateGroup,
 		UpdateGroup,
@@ -361,6 +480,17 @@ struct DecodedCmd
 	std::string   patch_name;
 	bool          has_patch_muted   = false;
 	bool          patch_muted       = false;
+	// Audio fades / region gain (`RegionPatch` — audio regions only).
+	bool          has_patch_fade_in = false;
+	std::uint64_t patch_fade_in     = 0;
+	bool          has_patch_fade_out = false;
+	std::uint64_t patch_fade_out    = 0;
+	bool          has_patch_fade_in_shape = false;
+	std::string   patch_fade_in_shape;
+	bool          has_patch_fade_out_shape = false;
+	std::string   patch_fade_out_shape;
+	bool          has_patch_gain_linear = false;
+	double        patch_gain_linear = 1.0;
 
 	// TrackPatch fields — only read for UpdateTrack. All optional; `name`
 	// is shared with RegionPatch (both store via has_patch_name / patch_name).
@@ -412,9 +542,13 @@ struct DecodedCmd
 	// schema_map::set_sequencer_layout.
 	schema_map::SequencerLayoutDesc seq_layout;
 
-	// DuplicateRegion payload.
+	// DuplicateRegion / CreateRegion / SplitRegion `at_samples` (signed on
+	// the wire so regions left of the timeline zero still decode).
+	bool          has_cmd_at_samples   = false;
+	std::int64_t  cmd_at_samples_i64   = 0;
+
+	// DuplicateRegion payload (reuses cmd_at_samples_i64 via has_cmd_at_samples).
 	std::string   dup_source_id;
-	std::uint64_t dup_at_samples = 0;
 	bool          dup_has_length = false;
 	std::uint64_t dup_length_samples = 0;
 	// DuplicateRegionRange payload — same source_id + at_samples as
@@ -428,6 +562,17 @@ struct DecodedCmd
 	// RegionPatch; `create_kind` is the region's media type ("midi" is
 	// the only wired variant).
 	std::string   create_kind;
+
+	// StretchRegion payload.
+	bool          has_stretch_new_start   = false;
+	std::int64_t  stretch_new_start_i64 = 0;
+	bool          has_stretch_new_length = false;
+	std::uint64_t stretch_new_length_u64 = 0;
+	std::string   stretch_anchor;
+	bool          stretch_preserve_pitch = true;
+
+	// ImportAudio payload — absolute path on the host.
+	std::string   import_audio_path;
 
 	// ReplaceRegionNotes payload — parsed into a vector so the
 	// handler can feed it straight into a single NoteDiffCommand.
@@ -466,6 +611,26 @@ struct DecodedCmd
 	std::string   group_patch_color;
 	bool          has_group_patch_members = false;
 	std::vector<std::string> group_patch_members;
+	bool          has_group_patch_active = false;
+	bool          group_patch_active = true;
+	bool          has_group_patch_link_gain = false;
+	bool          group_patch_link_gain = true;
+	bool          has_group_patch_link_mute = false;
+	bool          group_patch_link_mute = true;
+	bool          has_group_patch_link_solo = false;
+	bool          group_patch_link_solo = true;
+	bool          has_group_patch_link_record = false;
+	bool          group_patch_link_record = true;
+
+	// SetTrackMidiChannelMode { track_id, direction, mode, mask }.
+	// `direction` is "capture" | "playback" (reuses `ports_direction`);
+	// `mode` is "all" | "filter" | "force" (reuses `auto_mode`); `mask`
+	// is a 16-bit channel bitmask (bit 0 = ch 1) — its own field since
+	// no other command carries a u16 mask.
+	std::uint16_t midi_chan_mask = 0;
+	// ListMidiPatchNames { track_id, channel } and
+	// SetTrackMidiPatch { track_id, channel, bank, program }.
+	std::uint8_t  midi_channel = 0;
 
 	// Automation lane edit payloads (Phase B).
 	std::string   lane_id;
@@ -880,12 +1045,63 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 		} else if (pk == "name") {
 			if (!in.read_str (out.patch_name)) return false;
 			out.has_patch_name = true;
+			out.group_patch_name = out.patch_name;
+			out.has_group_patch_name = true;
 		} else if (pk == "muted") {
 			if (!in.read_bool (out.patch_muted)) return false;
 			out.has_patch_muted = true;
+		} else if (pk == "fade_in_samples") {
+			if (!in.read_u64 (out.patch_fade_in)) return false;
+			out.has_patch_fade_in = true;
+		} else if (pk == "fade_out_samples") {
+			if (!in.read_u64 (out.patch_fade_out)) return false;
+			out.has_patch_fade_out = true;
+		} else if (pk == "fade_in_shape") {
+			if (!in.read_str (out.patch_fade_in_shape)) return false;
+			out.has_patch_fade_in_shape = true;
+		} else if (pk == "fade_out_shape") {
+			if (!in.read_str (out.patch_fade_out_shape)) return false;
+			out.has_patch_fade_out_shape = true;
+		} else if (pk == "gain_linear") {
+			if (!in.read_f64 (out.patch_gain_linear)) return false;
+			out.has_patch_gain_linear = true;
 		} else if (pk == "color") {
 			if (!in.read_str (out.patch_color)) return false;
 			out.has_patch_color = true;
+			out.group_patch_color = out.patch_color;
+			out.has_group_patch_color = true;
+		} else if (pk == "members") {
+			std::size_t n = 0;
+			std::uint8_t b = in.peek ();
+			if ((b & 0xf0) == 0x90) { in.take_u8 (); n = b & 0x0f; }
+			else if (b == 0xdc)     { in.take_u8 (); n = in.take_be16 (); }
+			else if (b == 0xdd)     { in.take_u8 (); n = in.take_be32 (); }
+			else return false;
+			if (!in.ok ()) return false;
+			n = in.cap_count (n);
+			out.group_patch_members.clear ();
+			out.group_patch_members.reserve (n);
+			for (std::size_t i = 0; i < n; ++i) {
+				std::string tid;
+				if (!in.read_str (tid)) return false;
+				out.group_patch_members.push_back (tid);
+			}
+			out.has_group_patch_members = true;
+		} else if (pk == "active") {
+			if (!in.read_bool (out.group_patch_active)) return false;
+			out.has_group_patch_active = true;
+		} else if (pk == "link_gain") {
+			if (!in.read_bool (out.group_patch_link_gain)) return false;
+			out.has_group_patch_link_gain = true;
+		} else if (pk == "link_mute") {
+			if (!in.read_bool (out.group_patch_link_mute)) return false;
+			out.has_group_patch_link_mute = true;
+		} else if (pk == "link_solo") {
+			if (!in.read_bool (out.group_patch_link_solo)) return false;
+			out.has_group_patch_link_solo = true;
+		} else if (pk == "link_record") {
+			if (!in.read_bool (out.group_patch_link_record)) return false;
+			out.has_group_patch_link_record = true;
 		} else if (pk == "group_id") {
 			if (!in.read_str (out.patch_group_id)) return false;
 			out.has_patch_group_id = true;
@@ -926,14 +1142,33 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 	return true;
 }
 
+static std::uint64_t
+cmd_at_u64 (DecodedCmd const& snap)
+{
+	if (!snap.has_cmd_at_samples || snap.cmd_at_samples_i64 < 0) {
+		return 0;
+	}
+	return static_cast<std::uint64_t> (snap.cmd_at_samples_i64);
+}
+
+static Temporal::samplepos_t
+cmd_at_samplepos (DecodedCmd const& snap)
+{
+	if (!snap.has_cmd_at_samples) {
+		return static_cast<Temporal::samplepos_t> (0);
+	}
+	return static_cast<Temporal::samplepos_t> (snap.cmd_at_samples_i64);
+}
+
 DecodedCmd
 decode (const std::vector<std::uint8_t>& buf)
 {
 	DecodedCmd out;
 	In in { buf.data (), buf.data () + buf.size () };
 
-	// Envelope { schema, seq, origin, body } — we only care about body, but
-	// we walk the map so future field additions don't break us.
+	// Envelope { schema, api_version, seq, origin, body } — we only decode `body`
+	// in depth, but we read api_version for forward compatibility.
+	std::string wire_api_version;
 	std::size_t n = 0;
 	if (!in.read_map_header (n)) return out;
 
@@ -966,6 +1201,7 @@ decode (const std::vector<std::uint8_t>& buf)
 				} else if (k == "note") {
 					if (!read_note_fields (in, out)) return out;
 				} else if (k == "patch_change") {
+					// AddPatchChange — nested bank/program/start_ticks map.
 					if (!read_pc_fields (in, out)) return out;
 				} else if (k == "patch_change_id") {
 					if (!in.read_str (out.id)) return out;
@@ -978,11 +1214,44 @@ decode (const std::vector<std::uint8_t>& buf)
 				out.group_name = v;
 				out.patch_name = v;
 				out.has_patch_name = true;
+				out.group_patch_name = v;
+				out.has_group_patch_name = true;
+				} else if (k == "color") {
+					if (!in.read_str (out.group_color)) return out;
+				} else if (k == "members") {
+					std::size_t n = 0;
+					std::uint8_t b = in.peek ();
+					if ((b & 0xf0) == 0x90) { in.take_u8 (); n = b & 0x0f; }
+					else if (b == 0xdc)     { in.take_u8 (); n = in.take_be16 (); }
+					else if (b == 0xdd)     { in.take_u8 (); n = in.take_be32 (); }
+					else return out;
+					if (!in.ok ()) return out;
+					n = in.cap_count (n);
+					out.group_members.clear ();
+					out.group_members.reserve (n);
+					for (std::size_t i = 0; i < n; ++i) {
+						std::string tid;
+						if (!in.read_str (tid)) return out;
+						out.group_members.push_back (tid);
+					}
 				} else if (k == "kind") {
 					// CreateRegion's media-type selector ("midi" | "audio").
 					if (!in.read_str (out.create_kind)) return out;
 				} else if (k == "at_samples") {
-					if (!in.read_u64 (out.dup_at_samples)) return out;
+					if (!read_i64 (in, out.cmd_at_samples_i64)) return out;
+					out.has_cmd_at_samples = true;
+				} else if (k == "new_start_samples") {
+					if (!read_i64 (in, out.stretch_new_start_i64)) return out;
+					out.has_stretch_new_start = true;
+				} else if (k == "new_length_samples") {
+					if (!in.read_u64 (out.stretch_new_length_u64)) return out;
+					out.has_stretch_new_length = true;
+				} else if (k == "anchor") {
+					if (!in.read_str (out.stretch_anchor)) return out;
+				} else if (k == "preserve_pitch") {
+					if (!in.read_bool (out.stretch_preserve_pitch)) return out;
+				} else if (k == "path") {
+					if (!in.read_str (out.import_audio_path)) return out;
 				} else if (k == "source_offset_samples") {
 					// DuplicateRegionRange's slice anchor — offset
 					// INTO the source region's content.
@@ -1009,14 +1278,18 @@ decode (const std::vector<std::uint8_t>& buf)
 				} else if (k == "value") {
 					if (!in.read_f64 (out.value)) return out;
 				} else if (k == "patch") {
-					// RegionPatch and MidiNotePatch have disjoint keys,
-					// so a single reader is safe — unknown keys fall
-					// through the opposite path. But structurally: try
-					// MIDI-note fields first if the current command kind
-					// is a note cmd. For simplicity we read both: the
-					// decoder is a forward-only walk and unknown-key
-					// skipping is cheap.
-					if (!read_region_patch_or_note (in, out)) return out;
+					// Overloaded key: UpdateRegion / UpdateTrack / UpdateNote /
+					// UpdateGroup share `read_region_patch_or_note`; only
+					// UpdatePatchChange uses PatchChangePatch keys parsed by
+					// `read_pc_fields`.  Do NOT route every `patch` through
+					// read_pc_fields — it skips `start_samples` / length and
+					// made UpdateRegion a silent no-op (regions "snapped back").
+					// serde's tag="type" normally emits `type` before `patch`.
+					if (cmd_type == "update_patch_change") {
+						if (!read_pc_fields (in, out)) return out;
+					} else {
+						if (!read_region_patch_or_note (in, out)) return out;
+					}
 				} else if (k == "plugin_uri") {
 					if (!in.read_str (out.plugin_uri)) return out;
 				} else if (k == "plugin_id") {
@@ -1038,6 +1311,20 @@ decode (const std::vector<std::uint8_t>& buf)
 				} else if (k == "direction") {
 					// ListPorts { direction: Option<String> }
 					if (!in.read_str (out.ports_direction)) return out;
+				} else if (k == "channel") {
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.midi_channel = static_cast<std::uint8_t> (std::min<std::uint64_t> (15, v));
+				} else if (k == "bank") {
+					std::int64_t v = 0;
+					if (!read_i64 (in, v)) return out;
+					out.pc_bank = static_cast<std::int32_t> (v);
+					out.has_pc_bank = true;
+				} else if (k == "program") {
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.pc_program = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
+					out.has_pc_program = true;
 				} else if (k == "target_track_id") {
 					// AddSend { track_id, target_track_id, pre_fader }
 					if (!in.read_str (out.send_target_track)) return out;
@@ -1140,6 +1427,12 @@ decode (const std::vector<std::uint8_t>& buf)
 					out.id = p;
 				} else if (k == "lane_id") {
 					if (!in.read_str (out.lane_id)) return out;
+				} else if (k == "mask") {
+					// SetTrackMidiChannelMode { ..., mask: u16 } — msgpack
+					// encodes small u16s as positive fixints / u8 / u16.
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.midi_chan_mask = static_cast<std::uint16_t> (v & 0xffff);
 				} else if (k == "mode") {
 					if (!in.read_str (out.auto_mode)) return out;
 				} else if (k == "point") {
@@ -1201,6 +1494,8 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "request_snapshot")   out.kind = DecodedCmd::Kind::RequestSnapshot;
 			else if (cmd_type == "control_set")        out.kind = DecodedCmd::Kind::ControlSet;
 			else if (cmd_type == "list_regions")       out.kind = DecodedCmd::Kind::ListRegions;
+			else if (cmd_type == "list_audio_pool")    out.kind = DecodedCmd::Kind::ListAudioPool;
+			else if (cmd_type == "import_audio")        out.kind = DecodedCmd::Kind::ImportAudio;
 			else if (cmd_type == "update_region")      out.kind = DecodedCmd::Kind::UpdateRegion;
 			else if (cmd_type == "delete_region")      out.kind = DecodedCmd::Kind::DeleteRegion;
 			else if (cmd_type == "update_track")       out.kind = DecodedCmd::Kind::UpdateTrack;
@@ -1217,9 +1512,11 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "add_patch_change")    out.kind = DecodedCmd::Kind::AddPatchChange;
 			else if (cmd_type == "update_patch_change") out.kind = DecodedCmd::Kind::UpdatePatchChange;
 			else if (cmd_type == "delete_patch_change") out.kind = DecodedCmd::Kind::DeletePatchChange;
+			else if (cmd_type == "set_track_midi_patch") out.kind = DecodedCmd::Kind::SetTrackMidiPatch;
 			else if (cmd_type == "undo")               out.kind = DecodedCmd::Kind::Undo;
 			else if (cmd_type == "redo")               out.kind = DecodedCmd::Kind::Redo;
 			else if (cmd_type == "list_plugin_presets") out.kind = DecodedCmd::Kind::ListPluginPresets;
+			else if (cmd_type == "list_midi_patch_names") out.kind = DecodedCmd::Kind::ListMidiPatchNames;
 			else if (cmd_type == "load_plugin_preset") out.kind = DecodedCmd::Kind::LoadPluginPreset;
 			else if (cmd_type == "set_sequencer_layout")   out.kind = DecodedCmd::Kind::SetSequencerLayout;
 			else if (cmd_type == "clear_sequencer_layout") out.kind = DecodedCmd::Kind::ClearSequencerLayout;
@@ -1227,6 +1524,8 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "audio_ingress_close") out.kind = DecodedCmd::Kind::AudioIngressClose;
 			else if (cmd_type == "duplicate_region")    out.kind = DecodedCmd::Kind::DuplicateRegion;
 			else if (cmd_type == "duplicate_region_range") out.kind = DecodedCmd::Kind::DuplicateRegionRange;
+			else if (cmd_type == "stretch_region")       out.kind = DecodedCmd::Kind::StretchRegion;
+			else if (cmd_type == "split_region")         out.kind = DecodedCmd::Kind::SplitRegion;
 			else if (cmd_type == "create_region")       out.kind = DecodedCmd::Kind::CreateRegion;
 			else if (cmd_type == "replace_region_notes") out.kind = DecodedCmd::Kind::ReplaceRegionNotes;
             else if (cmd_type == "list_plugins")        out.kind = DecodedCmd::Kind::ListPlugins;
@@ -1242,6 +1541,8 @@ decode (const std::vector<std::uint8_t>& buf)
             else if (cmd_type == "set_send_level")       out.kind = DecodedCmd::Kind::SetSendLevel;
             else if (cmd_type == "delete_track")         out.kind = DecodedCmd::Kind::DeleteTrack;
             else if (cmd_type == "reorder_tracks")       out.kind = DecodedCmd::Kind::ReorderTracks;
+            else if (cmd_type == "set_track_midi_channel_mode") out.kind = DecodedCmd::Kind::SetTrackMidiChannelMode;
+            else if (cmd_type == "shim_quit")            out.kind = DecodedCmd::Kind::ShimQuit;
             else if (cmd_type == "set_loop_range")       out.kind = DecodedCmd::Kind::SetLoopRange;
             else if (cmd_type == "create_group")         out.kind = DecodedCmd::Kind::CreateGroup;
             else if (cmd_type == "update_group")         out.kind = DecodedCmd::Kind::UpdateGroup;
@@ -1254,9 +1555,19 @@ decode (const std::vector<std::uint8_t>& buf)
 			    ||   cmd_type == "audio_egress_stop")   out.kind = DecodedCmd::Kind::AudioStreamClose;
 			else if (cmd_type.rfind ("audio_", 0) == 0) out.kind = DecodedCmd::Kind::Audio;
 			else if (cmd_type == "latency_probe")      out.kind = DecodedCmd::Kind::Latency;
+		} else if (key == "api_version") {
+			if (!in.read_str (wire_api_version)) return out;
 		} else {
 			if (!in.skip_value ()) return out;
 		}
+	}
+	if (!wire_api_version.empty () &&
+	    wire_api_version != msgpack_out::CONTROL_PLANE_API_VERSION) {
+		PBD::warning << "foyer_shim: unsupported control plane api_version "
+		             << wire_api_version << " (only "
+		             << msgpack_out::CONTROL_PLANE_API_VERSION
+		             << " is supported)" << endmsg;
+		return DecodedCmd ();
 	}
 	return out;
 }
@@ -1450,9 +1761,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// Wire pan format is [-1, 1]; Ardour's
 				// pan_azimuth_control wants [0, 1]. Convert
 				// before set_value (no-op for non-pan ids).
+				// Gain controls round-trip through dB ↔ linear —
+				// the wire schema is dB but Ardour's GainControl
+				// stores the linear coefficient. Without this the
+				// "-6 dB" the user requested ends up as a -6
+				// linear coefficient (clamped to 0 = silence).
 				double write_value = snap.value;
 				if (schema_map::is_pan_id (snap.id)) {
 					write_value = schema_map::pan_wire_to_ardour (write_value);
+				} else if (schema_map::is_gain_id (snap.id)) {
+					write_value = schema_map::gain_wire_to_ardour (write_value);
 				}
 				ctrl->set_value (write_value, Controllable::UseGroup);
 				if (alist && before) {
@@ -1476,6 +1794,67 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			// properly registered.)
 			auto bytes = msgpack_out::encode_regions_list (_shim.session (), cmd.track_id);
 			_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			break;
+		}
+		case DecodedCmd::Kind::ListAudioPool: {
+			std::vector<msgpack_out::AudioPoolListRow> rows;
+			auto& session = _shim.session ();
+			session.foreach_source ([&] (std::shared_ptr<Source> s) {
+				auto afs = std::dynamic_pointer_cast<AudioFileSource> (s);
+				if (!afs) {
+					return;
+				}
+				auto fs = std::dynamic_pointer_cast<FileSource> (afs);
+				msgpack_out::AudioPoolListRow row;
+				{
+					std::ostringstream oid;
+					oid << "source." << afs->id ();
+					row.id = oid.str ();
+				}
+				row.name = afs->name ();
+				row.path = fs ? fs->path () : std::string ();
+				row.channel = static_cast<std::uint16_t> (afs->channel ());
+				row.length_samples =
+				    static_cast<std::uint64_t> (afs->readable_length_samples ());
+				row.sample_rate =
+				    static_cast<std::uint32_t> (afs->sample_rate ());
+				rows.push_back (std::move (row));
+			});
+			auto bytes = msgpack_out::encode_audio_pool_listed (rows);
+			_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			break;
+		}
+		case DecodedCmd::Kind::ImportAudio: {
+			if (cmd.import_audio_path.empty ()) {
+				break;
+			}
+			const std::string path = cmd.import_audio_path;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, path] () {
+				SF_INFO info;
+				std::memset (&info, 0, sizeof (info));
+				SNDFILE* f = sf_open (path.c_str (), SFM_READ, &info);
+				if (!f) {
+					PBD::warning << "foyer_shim: import_audio: sf_open failed for "
+					             << path << endmsg;
+					return;
+				}
+				const int nch = std::max (0, info.channels);
+				sf_close (f);
+				auto& session = shim->session ();
+				for (int ch = 0; ch < nch; ++ch) {
+					try {
+						(void)SourceFactory::createExternal (
+						    DataType::AUDIO, session, path, ch,
+						    Source::Flag (0), true, false);
+					} catch (...) {
+						PBD::warning << "foyer_shim: import_audio: createExternal failed ch="
+						             << ch << " path=" << path << endmsg;
+						return;
+					}
+				}
+				session.set_dirty ();
+			});
 			break;
 		}
 		case DecodedCmd::Kind::UpdateRegion: {
@@ -1525,6 +1904,39 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				if (snap.has_patch_muted) {
 					hit.region->set_muted (snap.patch_muted);
+				}
+				if (auto ar = std::dynamic_pointer_cast<AudioRegion> (hit.region)) {
+					if (snap.has_patch_gain_linear) {
+						ar->set_scale_amplitude (static_cast<gain_t> (snap.patch_gain_linear));
+					}
+					if (snap.has_patch_fade_in) {
+						if (snap.patch_fade_in == 0) {
+							ar->set_fade_in_active (false);
+						} else {
+							FadeShape sh_in = FadeLinear;
+							if (snap.has_patch_fade_in_shape) {
+								sh_in = parse_fade_shape (snap.patch_fade_in_shape);
+							}
+							ar->set_fade_in_active (true);
+							ar->set_fade_in (sh_in, static_cast<samplecnt_t> (snap.patch_fade_in));
+						}
+					} else if (snap.has_patch_fade_in_shape) {
+						ar->set_fade_in_shape (parse_fade_shape (snap.patch_fade_in_shape));
+					}
+					if (snap.has_patch_fade_out) {
+						if (snap.patch_fade_out == 0) {
+							ar->set_fade_out_active (false);
+						} else {
+							FadeShape sh_out = FadeLinear;
+							if (snap.has_patch_fade_out_shape) {
+								sh_out = parse_fade_shape (snap.patch_fade_out_shape);
+							}
+							ar->set_fade_out_active (true);
+							ar->set_fade_out (sh_out, static_cast<samplecnt_t> (snap.patch_fade_out));
+						}
+					} else if (snap.has_patch_fade_out_shape) {
+						ar->set_fade_out_shape (parse_fade_shape (snap.patch_fade_out_shape));
+					}
 				}
 				session.add_command (new PBD::StatefulDiffCommand (hit.region));
 				if (own_txn) session.commit_reversible_command ();
@@ -1891,7 +2303,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				playlist->clear_changes ();
 				playlist->add_region (clone, Temporal::timepos_t (
-					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+					static_cast<Temporal::samplepos_t> (cmd_at_u64 (snap))));
 				session.add_command (new PBD::StatefulDiffCommand (playlist));
 				if (own_txn) session.commit_reversible_command ();
 				session.set_dirty ();
@@ -1976,7 +2388,183 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				playlist->clear_changes ();
 				playlist->add_region (clone, Temporal::timepos_t (
-					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+					static_cast<Temporal::samplepos_t> (cmd_at_u64 (snap))));
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SplitRegion: {
+			if (cmd.id.empty ()) break;
+			if (!cmd.has_cmd_at_samples) {
+				PBD::warning << "foyer_shim: split_region: missing at_samples" << endmsg;
+				break;
+			}
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: split_region: unknown region: " << snap.id << endmsg;
+					return;
+				}
+				std::shared_ptr<ARDOUR::Playlist> playlist;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					auto track = std::dynamic_pointer_cast<Track> (r);
+					if (!track) continue;
+					auto pl = track->playlist ();
+					if (pl && pl->region_by_id (hit.region->id ())) {
+						playlist = pl;
+						break;
+					}
+				}
+				if (!playlist) {
+					PBD::warning << "foyer_shim: split_region: region not on any playlist" << endmsg;
+					return;
+				}
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer split region");
+				playlist->clear_changes ();
+				playlist->split_region (
+					hit.region,
+					Temporal::timepos_t (cmd_at_samplepos (snap)));
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
+			});
+			break;
+		}
+		case DecodedCmd::Kind::StretchRegion: {
+			if (cmd.id.empty ()) break;
+			if (!cmd.has_stretch_new_start || !cmd.has_stretch_new_length ||
+			    cmd.stretch_new_length_u64 == 0) {
+				PBD::warning << "foyer_shim: stretch_region: incomplete geometry" << endmsg;
+				break;
+			}
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: stretch_region: unknown region: " << snap.id << endmsg;
+					return;
+				}
+				const DataType rdt = hit.region->data_type ();
+				if (rdt != DataType::MIDI && rdt != DataType::AUDIO) {
+					PBD::warning << "foyer_shim: stretch_region: unsupported region type" << endmsg;
+					return;
+				}
+				std::shared_ptr<ARDOUR::Playlist> playlist;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					auto track = std::dynamic_pointer_cast<Track> (r);
+					if (!track) continue;
+					auto pl = track->playlist ();
+					if (pl && pl->region_by_id (hit.region->id ())) {
+						playlist = pl;
+						break;
+					}
+				}
+				if (!playlist) {
+					PBD::warning << "foyer_shim: stretch_region: region not on any playlist" << endmsg;
+					return;
+				}
+				const Temporal::samplecnt_t old_len_samples = hit.region->length ().samples ();
+				if (old_len_samples == 0) {
+					return;
+				}
+				std::string anchor = snap.stretch_anchor.empty () ? "start" : snap.stretch_anchor;
+				for (char& c : anchor) {
+					c = static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+				}
+				const Temporal::samplepos_t old_pos_samples = hit.region->position ().samples ();
+				const Temporal::samplepos_t old_end_samples =
+					old_pos_samples + static_cast<Temporal::samplepos_t> (old_len_samples);
+				const Temporal::samplepos_t new_start_sp =
+					static_cast<Temporal::samplepos_t> (snap.stretch_new_start_i64);
+				const Temporal::samplecnt_t new_len_u =
+					static_cast<Temporal::samplecnt_t> (snap.stretch_new_length_u64);
+				if (anchor == "start") {
+					if (new_start_sp != old_pos_samples) {
+						PBD::warning << "foyer_shim: stretch_region: start anchor mismatch" << endmsg;
+						return;
+					}
+				} else if (anchor == "end") {
+					const Temporal::samplepos_t expect_start =
+						old_end_samples - static_cast<Temporal::samplepos_t> (new_len_u);
+					if (new_start_sp != expect_start) {
+						PBD::warning << "foyer_shim: stretch_region: end anchor mismatch" << endmsg;
+						return;
+					}
+				} else {
+					PBD::warning << "foyer_shim: stretch_region: bad anchor" << endmsg;
+					return;
+				}
+				const Temporal::ratio_t ratio (
+					static_cast<std::int64_t> (new_len_u),
+					static_cast<std::int64_t> (old_len_samples));
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer stretch region");
+				playlist->clear_changes ();
+				ARDOUR::TimeFXRequest request;
+				request.time_fraction = ratio;
+				std::shared_ptr<Region> stretched;
+				if (rdt == DataType::MIDI) {
+					request.pitch_fraction = 1.0f;
+					MidiStretch ms (session, request);
+					if (ms.run (hit.region) != 0 ||
+					    ms.results.empty () ||
+					    !ms.results[0]) {
+						PBD::warning << "foyer_shim: stretch_region: MidiStretch failed" << endmsg;
+						if (own_txn) session.commit_reversible_command ();
+						return;
+					}
+					stretched = ms.results[0];
+				} else {
+					if (snap.stretch_preserve_pitch) {
+						/* Editor Time Stretch dialog: pitch-preserving elastic stretch. */
+						request.pitch_fraction = 1.0f;
+					} else {
+						/* editor_timefx.cc mode 6: duration changes, pitch tracks
+						 * inversely (varispeed / “no pitch preserve”). */
+						const double tf = ratio.to_double ();
+						request.pitch_fraction = tf > 0.0
+						    ? static_cast<float> (1.0 / tf)
+						    : 1.0f;
+					}
+					if (request.pitch_fraction <= 0.f) {
+						request.pitch_fraction = 1.0f;
+					}
+					/* Match gtk2_ardour/editor_timefx.cc default Rubber Band mode
+					 * (OptionTransientsCrisp is 0; R3 builds add OptionEngineFiner). */
+					request.opts = static_cast<int> (
+					    RubberBand::RubberBandStretcher::OptionEngineFiner);
+					FoyerRBProgress rb_progress;
+					RBStretch rb (session, request);
+					if (rb.run (hit.region, &rb_progress) != 0 ||
+					    rb.results.empty () ||
+					    !rb.results[0]) {
+						PBD::warning << "foyer_shim: stretch_region: RBStretch failed" << endmsg;
+						if (own_txn) session.commit_reversible_command ();
+						return;
+					}
+					stretched = rb.results[0];
+				}
+				timepos_t newpos;
+				if (anchor == "end") {
+					newpos = hit.region->end ().earlier (stretched->length ());
+				} else {
+					newpos = hit.region->position ();
+				}
+				playlist->replace_region (hit.region, stretched, newpos);
 				session.add_command (new PBD::StatefulDiffCommand (playlist));
 				if (own_txn) session.commit_reversible_command ();
 				session.set_dirty ();
@@ -2058,7 +2646,8 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					return;
 				}
 				playlist->add_region (region, Temporal::timepos_t (
-					static_cast<Temporal::samplepos_t> (snap.dup_at_samples)));
+					static_cast<Temporal::samplepos_t> (cmd_at_u64 (snap))));
+				foyer_seed_default_region_patch_change (shim->session (), track, region);
 				shim->session ().set_dirty ();
 				// Playlist's RegionAdded signal fires an echo back
 				// to the sidecar, which forwards RegionsList.
@@ -2136,6 +2725,72 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			FoyerShim* shim = &_shim;
 			_shim.call_slot (MISSING_INVALIDATOR, [shim, plugin_id] () {
 				auto bytes = msgpack_out::encode_plugin_presets_listed (shim->session (), plugin_id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ListMidiPatchNames: {
+			if (cmd.track_id.empty ()) break;
+			const std::string track_id = cmd.track_id;
+			const std::uint8_t channel = static_cast<std::uint8_t> (std::min<int> (15, cmd.midi_channel));
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, track_id, channel] () {
+				auto bytes = msgpack_out::encode_midi_patch_names_listed (shim->session (), track_id, channel);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SetTrackMidiPatch: {
+			if (cmd.track_id.empty () || !cmd.has_pc_program) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				if (snap.track_id.rfind ("track.", 0) != 0) return;
+				const std::string sid = snap.track_id.substr (6);
+				auto& session = shim->session ();
+				std::shared_ptr<Route> route;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (session);
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp;
+					tmp << r->id ();
+					if (tmp.str () == sid) { route = r; break; }
+				}
+				if (!route) return;
+				const std::uint8_t chn = static_cast<std::uint8_t> (std::min<int> (15, snap.midi_channel));
+				const std::uint8_t pgm = snap.pc_program;
+				const int bank = snap.has_pc_bank ? snap.pc_bank : -1;
+
+				if (std::shared_ptr<MidiTrack> mt = std::dynamic_pointer_cast<MidiTrack> (route)) {
+					if (bank >= 0) {
+						auto bank_msb = mt->automation_control (
+							Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_MSB_BANK), true);
+						auto bank_lsb = mt->automation_control (
+							Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_LSB_BANK), true);
+						if (bank_msb) bank_msb->set_value ((bank >> 7) & 0x7f, PBD::Controllable::NoGroup);
+						if (bank_lsb) bank_lsb->set_value (bank & 0x7f, PBD::Controllable::NoGroup);
+					}
+					auto program = mt->automation_control (
+						Evoral::Parameter (MidiPgmChangeAutomation, chn), true);
+					if (program) program->set_value (pgm, PBD::Controllable::NoGroup);
+				} else if (std::shared_ptr<PluginInsert> pi =
+				           std::dynamic_pointer_cast<PluginInsert> (route->the_instrument ())) {
+					if (bank >= 0) {
+						uint8_t event[3];
+						event[0] = (MIDI_CMD_CONTROL | chn);
+						event[1] = MIDI_CTL_MSB_BANK;
+						event[2] = (bank >> 7) & 0x7f;
+						pi->write_immediate_event (Evoral::MIDI_EVENT, 3, event);
+						event[1] = MIDI_CTL_LSB_BANK;
+						event[2] = bank & 0x7f;
+						pi->write_immediate_event (Evoral::MIDI_EVENT, 3, event);
+					}
+					uint8_t event[2];
+					event[0] = (MIDI_CMD_PGM_CHANGE | chn);
+					event[1] = pgm;
+					pi->write_immediate_event (Evoral::MIDI_EVENT, 2, event);
+				}
+				auto bytes = msgpack_out::encode_track_updated (session, snap.track_id);
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;
@@ -2270,6 +2925,67 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 				}
 			});
+			break;
+		}
+		case DecodedCmd::Kind::SetTrackMidiChannelMode: {
+			if (cmd.track_id.empty () || cmd.ports_direction.empty ()
+			    || cmd.auto_mode.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				if (snap.track_id.rfind ("track.", 0) != 0) return;
+				const std::string sid = snap.track_id.substr (6);
+				std::shared_ptr<Route> route;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					std::ostringstream tmp;
+					tmp << r->id ();
+					if (tmp.str () == sid) { route = r; break; }
+				}
+				auto mt = std::dynamic_pointer_cast<ARDOUR::MidiTrack> (route);
+				if (!mt) {
+					PBD::warning << "foyer_shim: set_track_midi_channel_mode: not a MIDI track: "
+					             << snap.track_id << endmsg;
+					return;
+				}
+				ARDOUR::ChannelMode m;
+				if      (snap.auto_mode == "all")    m = ARDOUR::AllChannels;
+				else if (snap.auto_mode == "filter") m = ARDOUR::FilterChannels;
+				else if (snap.auto_mode == "force")  m = ARDOUR::ForceChannel;
+				else {
+					PBD::warning << "foyer_shim: set_track_midi_channel_mode: bad mode: "
+					             << snap.auto_mode << endmsg;
+					return;
+				}
+				if (snap.ports_direction == "capture") {
+					mt->set_capture_channel_mode (m, snap.midi_chan_mask);
+				} else if (snap.ports_direction == "playback") {
+					mt->set_playback_channel_mode (m, snap.midi_chan_mask);
+				} else {
+					PBD::warning << "foyer_shim: set_track_midi_channel_mode: bad direction: "
+					             << snap.ports_direction << endmsg;
+					return;
+				}
+				auto bytes = msgpack_out::encode_track_updated (shim->session (), snap.track_id);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ShimQuit: {
+			// Sidecar asked us to exit. Raise SIGTERM on our own pid
+			// so Ardour's own signal handler runs the normal save-
+			// and-exit path (with the user's "save before quit"
+			// preferences honored). The sidecar follows up with a
+			// SIGTERM/SIGKILL escalation against the child PID if we
+			// don't exit within ~5s, so we don't need a wait loop
+			// here. Raised from the dispatcher thread; Ardour's
+			// signal handlers are async-signal-safe and route the
+			// shutdown through the GUI mainloop.
+			PBD::warning << "foyer_shim: shim_quit received — raising SIGTERM" << endmsg;
+			std::raise (SIGTERM);
 			break;
 		}
 		case DecodedCmd::Kind::ListPorts: {
@@ -2709,6 +3425,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
                     PBD::warning << "foyer_shim: create_group failed for '" << snap.group_name << "'" << endmsg;
                     return;
                 }
+				bool already_added = false;
+				for (auto const& existing : session.route_groups ()) {
+					if (existing == rg) {
+						already_added = true;
+						break;
+					}
+				}
+				if (!already_added) {
+					session.add_route_group (rg);
+				}
                 if (!snap.group_color.empty ()) {
                     // Convert #RRGGBB[AA] hex string to uint32_t rgba.
                     uint32_t rgba = 0;
@@ -2779,6 +3505,21 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
                         }
                     }
                 }
+				if (snap.has_group_patch_active) {
+					rg->set_active (snap.group_patch_active, nullptr);
+				}
+				if (snap.has_group_patch_link_gain) {
+					rg->set_gain (snap.group_patch_link_gain);
+				}
+				if (snap.has_group_patch_link_mute) {
+					rg->set_mute (snap.group_patch_link_mute);
+				}
+				if (snap.has_group_patch_link_solo) {
+					rg->set_solo (snap.group_patch_link_solo);
+				}
+				if (snap.has_group_patch_link_record) {
+					rg->set_recenable (snap.group_patch_link_record);
+				}
                 auto bytes = msgpack_out::encode_patch_reload ();
                 shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
             });
@@ -2892,7 +3633,7 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					// 1-channel MIDI track, no instrument plugin yet
 					// (user picks one via the MIDI manager). strict_io
 					// off so the user can chain effects post-instrument.
-					session.new_midi_track (
+					auto added = session.new_midi_track (
 					    ARDOUR::ChanCount (ARDOUR::DataType::MIDI, 1),
 					    ARDOUR::ChanCount (ARDOUR::DataType::AUDIO, 2),
 					    false /* strict_io */,
@@ -2903,6 +3644,20 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					    ARDOUR::PresentationInfo::max_order,
 					    ARDOUR::Normal,
 					    true  /* input_auto_connect */);
+					// Default to ForceChannel @ ch 1 on both capture and
+					// playback. Ardour's stock default is AllChannels,
+					// which makes the channel selector permanently
+					// relevant; the Foyer UX is "single-channel by
+					// default, surface the selector only when the user
+					// has opted into multi-channel" — see TODO #270 +
+					// Decision: defaulting to ForceChannel keeps new
+					// tracks compatible with single-channel synths and
+					// hides the selector unless the user changes it.
+					for (auto const& mt : added) {
+						if (!mt) continue;
+						mt->set_capture_channel_mode  (ARDOUR::ForceChannel, 0x0001);
+						mt->set_playback_channel_mode (ARDOUR::ForceChannel, 0x0001);
+					}
 				}
 				else if (id == "track.freeze") {
 					PBD::warning << "foyer_shim: track.freeze not yet wired" << endmsg;
@@ -3047,17 +3802,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				std::shared_ptr<Processor> target_proc;
 				for (auto const& r : *routes) {
 					if (!r) continue;
-					for (uint32_t i = 0; ; ++i) {
-						auto proc = r->nth_plugin (i);
-						if (!proc) break;
-						auto pi = std::dynamic_pointer_cast<PluginInsert> (proc);
-						if (!pi) continue;
-						std::ostringstream os; os << pi->id ();
-						if (os.str () != pid) continue;
+					r->foreach_processor ([&] (std::weak_ptr<Processor> wp) {
+						if (target_proc) return;
+						auto proc = wp.lock ();
+						if (!proc) return;
+						std::ostringstream os;
+						os << proc->id ();
+						if (os.str () != pid) return;
 						target_route = r;
 						target_proc = proc;
-						break;
-					}
+					});
 					if (target_proc) break;
 				}
 				if (!target_route || !target_proc) {

@@ -33,21 +33,71 @@ export const RETURN_MODE_TITLES = {
   play_start: "Return to where play was pressed",
 };
 
-/** Read the current mode; migrates the legacy boolean pref on first call. */
+/// Coerce a backend-emitted ControlValue (object or primitive) into
+/// the bare mode string we operate on. The wire encoding wraps strings
+/// as `{ String: "..." }`, but local store mutations may have already
+/// unwrapped to a plain string; tolerate both shapes.
+function unwrapMode(raw) {
+  if (typeof raw === "string") return raw;
+  if (raw && typeof raw === "object" && typeof raw.String === "string") {
+    return raw.String;
+  }
+  return null;
+}
+
+/// Read the current mode. Server-authoritative — the backend stores
+/// the mode in `transport.return_mode` so a host's choice travels to
+/// every connected client (a phone-only toggle would silently disagree
+/// with the desktop). The localStorage cache is a fallback for the
+/// pre-snapshot window (cold boot, before the store has any controls)
+/// and for backends that don't yet emit `transport.return_mode`
+/// (legacy snapshots, shims still on the old schema).
 export function getReturnMode() {
+  // Authoritative path: the live store value.
+  const store = (typeof window !== "undefined" ? window : globalThis)
+    ?.__foyer?.store;
+  const live = store?.state?.controls?.get?.("transport.return_mode");
+  const wireMode = unwrapMode(live);
+  if (wireMode && RETURN_MODES.includes(wireMode)) return wireMode;
+  // Fallback: cached preference, with the legacy boolean migration.
   const cur = getTransportPref("returnMode");
   if (RETURN_MODES.includes(cur)) return cur;
-  // Legacy migration: a `true` boolean on `returnOnStop` maps to "zero",
-  // anything else to "leave". Overwrite once so subsequent reads are clean.
   const legacy = getTransportPref("returnOnStop");
   const migrated = legacy ? "zero" : "leave";
   setTransportPref("returnMode", migrated);
   return migrated;
 }
 
+/// Change the mode. Sends `control_set` so the backend records it and
+/// broadcasts to every other client (this is the bit that was a
+/// localStorage-only side-effect before — a desktop click never
+/// reached the phone, and vice versa). The localStorage cache is
+/// kept in sync so reload before the first snapshot still picks the
+/// right mode.
 export function setReturnMode(mode) {
   if (!RETURN_MODES.includes(mode)) return;
   setTransportPref("returnMode", mode);
+  const root = (typeof window !== "undefined" ? window : globalThis)
+    ?.__foyer;
+  // Optimistic local write so the button re-renders immediately
+  // instead of waiting for the WS round trip. The pinned value in
+  // `_pendingControls` (set by ws.controlSet's control_set_request
+  // dispatch) holds against any in-flight stale snapshot, so a slow
+  // server echo can't roll us back to the previous mode.
+  const store = root?.store;
+  if (store?.state?.controls) {
+    store.state.controls.set("transport.return_mode", mode);
+    store.dispatchEvent(
+      new CustomEvent("control", { detail: "transport.return_mode" }),
+    );
+  }
+  if (root?.ws) {
+    try {
+      root.ws.controlSet("transport.return_mode", mode);
+    } catch {
+      // Best-effort — caching above already kept the local state.
+    }
+  }
 }
 
 export function cycleReturnMode() {
@@ -137,9 +187,24 @@ export function installTransportReturn({ store, ws }) {
       const pos = Number(store.state.controls.get("transport.position") || 0);
       playStartSample = pos;
     } else if (!now && wasPlaying) {
-      const mode = getReturnMode();
-      if (mode === "zero") applyReturn(0);
-      else if (mode === "play_start") applyReturn(playStartSample);
+      // Only the client whose user actually pressed Stop runs the
+      // return seek. Without this gate, every connected client reacts
+      // to the playing→stopped echo and fires its own
+      // `controlSet("transport.position", target)` — N clients
+      // produces an N-way position storm that locks each client's
+      // `transportPositionLock`, fights the engine's natural ticks,
+      // and (on a multi-client session) fans out as the play/pause
+      // thrashing the user reported. The originating client's echo
+      // carries `ev.local === true` because its `_pendingControls`
+      // pin matched on confirmation; peers see `ev.local === false`
+      // and skip the return — they'll receive the position seek the
+      // active client issues, the same way they receive any other
+      // peer-originated transport seek.
+      if (ev.local) {
+        const mode = getReturnMode();
+        if (mode === "zero") applyReturn(0);
+        else if (mode === "play_start") applyReturn(playStartSample);
+      }
     }
     wasPlaying = now;
   };

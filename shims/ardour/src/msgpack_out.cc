@@ -20,6 +20,7 @@
  */
 #include "msgpack_out.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -39,6 +40,7 @@
 #include "ardour/port_manager.h"
 #include "ardour/processor.h"
 #include "ardour/region.h"
+#include "ardour/midi_track.h"
 #include "ardour/route.h"
 #include "ardour/route_group.h"
 #include "ardour/send.h"
@@ -48,6 +50,7 @@
 #include "ardour/track.h"
 #include "ardour/types.h"
 #include "evoral/ControlList.h"
+#include "evoral/midi_events.h"
 #include "pbd/controllable.h"
 #include "temporal/tempo.h"
 #include "temporal/timeline.h"
@@ -179,6 +182,18 @@ const char* automation_mode_str (ARDOUR::AutoState s)
 	}
 }
 
+// Convert Ardour's ChannelMode enum to the lowercase strings the Rust
+// schema serializes for `Track.{capture,playback}_channel_mode`.
+const char* channel_mode_str (ARDOUR::ChannelMode m)
+{
+	switch (m) {
+		case ARDOUR::AllChannels:    return "all";
+		case ARDOUR::FilterChannels: return "filter";
+		case ARDOUR::ForceChannel:   return "force";
+		default:                     return "all";
+	}
+}
+
 // ---------------- low-level msgpack primitives ----------------
 
 struct Out
@@ -271,9 +286,10 @@ envelope_event (BodyFn write_body)
 {
 	std::vector<std::uint8_t> buf;
 	Out o { buf };
-	// Envelope { schema, seq, origin, body }
-	o.map (4);
+	// Envelope { schema, api_version, seq, origin, body }
+	o.map (5);
 	o.str ("schema"); o.array (2); o.u (0); o.u (1);
+	o.str ("api_version"); o.str (CONTROL_PLANE_API_VERSION);
 	o.str ("seq");    o.u (next_seq ());
 	o.str ("origin"); o.str ("shim");
 	o.str ("body");
@@ -313,6 +329,16 @@ encode_control_update (Session& session, const Controllable& c)
 	if (schema_map::is_pan_id (id)) {
 		val = schema_map::pan_ardour_to_wire (val);
 	}
+	// Ardour's gain controls store a LINEAR coefficient (1.0 unity);
+	// the wire format declares track/bus gain in dB. Without this
+	// every fader reads ~1 dB at unity and pulling below 0 dB
+	// collapses to silence (Ardour clamps negative coefficients).
+	// schema_map::is_gain_id matches only `track.<x>.gain` and
+	// `bus.<x>.gain` so plugin params that happen to end in `.gain`
+	// (with their own arbitrary scaling) are NOT touched.
+	if (schema_map::is_gain_id (id)) {
+		val = schema_map::gain_ardour_to_wire (val);
+	}
 
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
@@ -340,6 +366,34 @@ emit_named_param (Out& o, const std::string& id, const char* label,
 	o.str ("scale"); o.str ("linear");
 	o.str ("value");
 	if (is_bool) o.b (bool_val); else o.f64 (num_val);
+}
+
+void
+emit_midi_patch_states (Out& o, std::shared_ptr<ARDOUR::MidiTrack> mt)
+{
+	o.array (16);
+	for (std::uint8_t chn = 0; chn < 16; ++chn) {
+		int bank = -1;
+		std::uint8_t program = 0;
+		auto bank_msb = mt->automation_control (
+			Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_MSB_BANK), true);
+		auto bank_lsb = mt->automation_control (
+			Evoral::Parameter (MidiCCAutomation, chn, MIDI_CTL_LSB_BANK), true);
+		if (bank_msb && bank_lsb) {
+			bank = ((static_cast<int> (bank_msb->get_value ()) & 0x7f) << 7)
+			     | (static_cast<int> (bank_lsb->get_value ()) & 0x7f);
+		}
+		auto program_ctl = mt->automation_control (
+			Evoral::Parameter (MidiPgmChangeAutomation, chn), true);
+		if (program_ctl) {
+			program = static_cast<std::uint8_t> (
+				std::max<int> (0, std::min<int> (127, static_cast<int> (program_ctl->get_value ()))));
+		}
+		o.map (3);
+		o.str ("channel"); o.u (chn);
+		o.str ("bank");    o.i (bank);
+		o.str ("program"); o.u (program);
+	}
 }
 
 // Plugin-param emitter — variable map shape that includes range, unit,
@@ -396,6 +450,7 @@ emit_plugin_desc (Out& o, const schema_map::PluginDesc& pd)
 	if (emit_preset)        ++n;
 	if (pd.has_native_gui)  ++n;
 	if (emit_gui_kind)      ++n;
+	if (pd.missing)         ++n;
 	o.map (n);
 	o.str ("id");       o.str (pd.id);
 	o.str ("name");     o.str (pd.name);
@@ -412,6 +467,10 @@ emit_plugin_desc (Out& o, const schema_map::PluginDesc& pd)
 	if (emit_gui_kind) {
 		o.str ("native_gui_kind");
 		o.str (pd.native_gui_kind);
+	}
+	if (pd.missing) {
+		o.str ("missing");
+		o.b (true);
 	}
 	o.str ("params");
 	o.array (pd.params.size ());
@@ -600,11 +659,21 @@ encode_session_snapshot (Session& session,
 		o.array (session.route_groups ().size ());
 		for (auto const& g : session.route_groups ()) {
 			if (!g) {
-				o.map (4);
+				// Defensive: a null shared_ptr from route_groups() is
+				// pathological but cheap to guard. Emit a placeholder
+				// shaped like a real group entry so the UI doesn't
+				// crash on a missing field. Link flags default to true
+				// to match the schema defaults.
+				o.map (9);
 				o.str ("id"); o.str ("group.unknown");
 				o.str ("name"); o.str ("Group");
 				o.str ("color"); o.nil ();
 				o.str ("members"); o.array (0);
+				o.str ("active");      o.b (true);
+				o.str ("link_gain");   o.b (true);
+				o.str ("link_mute");   o.b (true);
+				o.str ("link_solo");   o.b (true);
+				o.str ("link_record"); o.b (true);
 				continue;
 			}
 			std::ostringstream gid;
@@ -616,7 +685,16 @@ encode_session_snapshot (Session& session,
 				rid << r->id ();
 				members.push_back ("track." + rid.str ());
 			});
-			o.map (4);
+			// Mirror Ardour's RouteGroup link properties onto our
+			// schema's `link_*` flags. `is_*()` accessors return the
+			// current value of each property bag entry; `is_active()`
+			// is the master gate (matches our `active`).
+			const bool g_active = g->is_active ();
+			const bool g_gain   = g->is_gain ();
+			const bool g_mute   = g->is_mute ();
+			const bool g_solo   = g->is_solo ();
+			const bool g_rec    = g->is_recenable ();
+			o.map (9);
 			o.str ("id"); o.str ("group." + gid.str ());
 			o.str ("name"); o.str (g->name ());
 			const std::uint32_t c = g->rgba ();
@@ -631,6 +709,11 @@ encode_session_snapshot (Session& session,
 			o.str ("members");
 			o.array (members.size ());
 			for (auto const& m : members) o.str (m);
+			o.str ("active");      o.b (g_active);
+			o.str ("link_gain");   o.b (g_gain);
+			o.str ("link_mute");   o.b (g_mute);
+			o.str ("link_solo");   o.b (g_solo);
+			o.str ("link_record"); o.b (g_rec);
 		}
 
 		o.str ("tracks");
@@ -687,6 +770,15 @@ encode_session_snapshot (Session& session,
 				if (l.ac && l.ac->alist ()) ++lane_count;
 			}
 
+			// MIDI channel mode/mask — only emitted for MidiTracks. A
+			// non-MidiTrack route has no concept of these so the
+			// fields stay absent (the schema serde-skips `None`).
+			std::shared_ptr<ARDOUR::MidiTrack> mt_self;
+			if (it != route_by_id.end ()) {
+				mt_self = std::dynamic_pointer_cast<ARDOUR::MidiTrack> (it->second);
+			}
+			const bool emit_midi_channels = static_cast<bool> (mt_self);
+
 			// Base track shape is 9 fields (id, name, kind, color,
 			// gain, pan, mute, solo, peak_meter). `record_arm` and
 			// `plugins` are both skip-when-missing in the schema,
@@ -701,6 +793,7 @@ encode_session_snapshot (Session& session,
 			if (!sends.empty ()) ++track_fields;
 			if (!bus_assign.empty ()) ++track_fields;
 			if (!group_id.empty ()) ++track_fields;
+			if (emit_midi_channels) track_fields += 5;
 
 			o.map (track_fields);
 			o.str ("id");   o.str (s.self_id);
@@ -721,7 +814,13 @@ encode_session_snapshot (Session& session,
 			bool   solo_v = false;
 			if (it != route_by_id.end ()) {
 				auto const& r = it->second;
-				if (auto gc = r->gain_control ())          gain_v = gc->get_value ();
+				// Linear coefficient → dB. The wire format declares
+				// track gain in dB (`unit: "dB"`); without this
+				// conversion Ardour's unity (1.0 linear) surfaces
+				// as "1.0 dB" on the slider — visibly above unity
+				// and the source of "everything defaults blown
+				// out" + "below 0 dB goes to silence" reports.
+				if (auto gc = r->gain_control ())          gain_v = schema_map::gain_ardour_to_wire (gc->get_value ());
 				if (auto pc = r->pan_azimuth_control ())
 					pan_v = schema_map::pan_ardour_to_wire (pc->get_value ());
 				if (auto mc = r->mute_control ())          mute_v = mc->get_value () >= 0.5;
@@ -803,6 +902,19 @@ encode_session_snapshot (Session& session,
 				for (auto const& pd : plugins) {
 					emit_plugin_desc (o, pd);
 				}
+			}
+
+			if (emit_midi_channels) {
+				o.str ("capture_channel_mode");
+				o.str (channel_mode_str (mt_self->get_capture_channel_mode ()));
+				o.str ("capture_channel_mask");
+				o.u (static_cast<std::uint32_t> (mt_self->get_capture_channel_mask ()));
+				o.str ("playback_channel_mode");
+				o.str (channel_mode_str (mt_self->get_playback_channel_mode ()));
+				o.str ("playback_channel_mask");
+				o.u (static_cast<std::uint32_t> (mt_self->get_playback_channel_mask ()));
+				o.str ("midi_patches");
+				emit_midi_patch_states (o, mt_self);
 			}
 
 			// Automation lanes for the well-known track controls. Each
@@ -1029,12 +1141,16 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	const bool emit_notes       = !r.notes.empty ();
 	const bool emit_patches     = !r.patch_changes.empty ();
 	const bool emit_sequencer   = r.sequencer.present;
+	const bool emit_audio_env   = r.emit_audio_envelope;
 	if (emit_color)       ++n;
 	if (emit_source_path) ++n;
 	if (emit_source_off)  ++n;
 	if (emit_notes)       ++n;
 	if (emit_patches)     ++n;
 	if (emit_sequencer)   ++n;
+	if (emit_audio_env) {
+		n += 3; // gain_linear, fade_in_samples, fade_out_samples
+	}
 
 	o.map (n);
 	o.str ("id");             o.str (r.id);
@@ -1137,6 +1253,14 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 			o.str ("step");     o.u (c.step);
 			o.str ("velocity"); o.u (c.velocity);
 		}
+	}
+	if (r.emit_audio_envelope) {
+		o.str ("gain_linear");
+		o.f64 (r.gain_linear);
+		o.str ("fade_in_samples");
+		o.u (r.fade_in_samples);
+		o.str ("fade_out_samples");
+		o.u (r.fade_out_samples);
 	}
 }
 
@@ -1312,6 +1436,42 @@ encode_plugin_presets_listed (Session& session, const std::string& plugin_id)
 }
 
 std::vector<std::uint8_t>
+encode_midi_patch_names_listed (Session& session, const std::string& track_id, std::uint8_t channel)
+{
+	auto d = schema_map::list_midi_patch_names (session, track_id, channel);
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");      o.str ("event");
+		o.str ("type");     o.str ("midi_patch_names_listed");
+		o.str ("track_id"); o.str (track_id);
+		o.str ("names");
+		std::size_t n = 2; // channel, banks
+		const bool emit_model = !d.model.empty ();
+		const bool emit_mode  = !d.mode.empty ();
+		if (emit_model) ++n;
+		if (emit_mode)  ++n;
+		o.map (n);
+		o.str ("channel"); o.u (d.channel);
+		if (emit_model) { o.str ("model"); o.str (d.model); }
+		if (emit_mode)  { o.str ("mode");  o.str (d.mode); }
+		o.str ("banks");
+		o.array (d.banks.size ());
+		for (auto const& b : d.banks) {
+			o.map (3);
+			o.str ("bank"); o.u (b.bank);
+			o.str ("name"); o.str (b.name);
+			o.str ("programs");
+			o.array (b.programs.size ());
+			for (auto const& p : b.programs) {
+				o.map (2);
+				o.str ("program"); o.u (p.program);
+				o.str ("name");    o.str (p.name);
+			}
+		}
+	});
+}
+
+std::vector<std::uint8_t>
 encode_region_removed (const std::string& track_id, const std::string& region_id)
 {
 	return envelope_event ([&] (Out& o) {
@@ -1411,6 +1571,9 @@ encode_track_updated (Session& session, const std::string& track_id)
 		o.str ("type");  o.str ("track_updated");
 		o.str ("track");
 
+		auto mt_self = std::dynamic_pointer_cast<ARDOUR::MidiTrack> (route);
+		const bool emit_midi_channels = static_cast<bool> (mt_self);
+
 		std::size_t track_fields = 9; // +1 for peak_meter
 		if (rec_ctl) ++track_fields;
 		if (mon_ctl) ++track_fields;
@@ -1420,6 +1583,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 		if (!sends.empty ()) ++track_fields;
 		if (!bus_assign.empty ()) ++track_fields;
 		if (!group_id.empty ()) ++track_fields;
+		if (emit_midi_channels) track_fields += 5;
 
 		o.map (track_fields);
 		o.str ("id");   o.str (matched.self_id);
@@ -1429,7 +1593,7 @@ encode_track_updated (Session& session, const std::string& track_id)
 		else                         { o.str ("color"); o.nil (); }
 		// Values echo the snapshot shape; the client overwrites them from
 		// ControlUpdate events, so exact numerical accuracy isn't required.
-		o.str ("gain"); emit_named_param (o, matched.self_id + ".gain", "Gain", "continuous", false, route->gain_control () ? route->gain_control ()->get_value () : 0.0, false);
+		o.str ("gain"); emit_named_param (o, matched.self_id + ".gain", "Gain", "continuous", false, route->gain_control () ? schema_map::gain_ardour_to_wire (route->gain_control ()->get_value ()) : schema_map::kSilenceDb, false);
 		o.str ("pan");  emit_named_param (o, matched.self_id + ".pan",  "Pan",  "continuous", false, route->pan_azimuth_control () ? schema_map::pan_ardour_to_wire (route->pan_azimuth_control ()->get_value ()) : 0.0, false);
 		o.str ("mute"); emit_named_param (o, matched.self_id + ".mute", "Mute", "trigger", true, 0.0, route->mute_control () && route->mute_control ()->get_value () >= 0.5);
 		o.str ("solo"); emit_named_param (o, matched.self_id + ".solo", "Solo", "trigger", true, 0.0, route->solo_control () && route->solo_control ()->get_value () >= 0.5);
@@ -1456,6 +1620,19 @@ encode_track_updated (Session& session, const std::string& track_id)
 			for (auto const& pd : plugins) {
 				emit_plugin_desc (o, pd);
 			}
+		}
+
+		if (emit_midi_channels) {
+			o.str ("capture_channel_mode");
+			o.str (channel_mode_str (mt_self->get_capture_channel_mode ()));
+			o.str ("capture_channel_mask");
+			o.u (static_cast<std::uint32_t> (mt_self->get_capture_channel_mask ()));
+			o.str ("playback_channel_mode");
+			o.str (channel_mode_str (mt_self->get_playback_channel_mode ()));
+			o.str ("playback_channel_mask");
+			o.u (static_cast<std::uint32_t> (mt_self->get_playback_channel_mask ()));
+			o.str ("midi_patches");
+			emit_midi_patch_states (o, mt_self);
 		}
 
 		if (!input_ports.empty ()) {
@@ -1527,6 +1704,27 @@ encode_track_updated (Session& session, const std::string& track_id)
 					o.str ("value");        o.f64 (p.second);
 				}
 			}
+		}
+	});
+}
+
+std::vector<std::uint8_t>
+encode_audio_pool_listed (const std::vector<AudioPoolListRow>& rows)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");  o.str ("event");
+		o.str ("type"); o.str ("audio_pool_listed");
+		o.str ("sources");
+		o.array (rows.size ());
+		for (auto const& r : rows) {
+			o.map (6);
+			o.str ("id");             o.str (r.id);
+			o.str ("name");           o.str (r.name);
+			o.str ("path");           o.str (r.path);
+			o.str ("channel");        o.u (static_cast<std::uint32_t> (r.channel));
+			o.str ("length_samples"); o.u (r.length_samples);
+			o.str ("sample_rate");    o.u (r.sample_rate);
 		}
 	});
 }

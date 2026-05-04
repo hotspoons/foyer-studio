@@ -8,6 +8,7 @@ description = "WebSocket server + client fan-out. Library entrypoint is Server::
 
 [dependencies]
 foyer-schema.workspace = true
+foyer-capabilities.workspace = true
 foyer-backend.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -44,6 +44,11 @@ export class Store extends EventTarget {
       // reattach to, or crashed shims the user can dismiss / reopen.
       // One-shot list (cleared as the user resolves each).
       orphans: [],
+      // Server-tracked "recently opened" projects. Populated from
+      // `Event::RecentsList` on attach and after every touch / forget
+      // / clear. Replaces the per-browser localStorage list that went
+      // stale when the sidecar moved between containers.
+      recents: [],
       // Set of track ids whose regions include at least one active
       // beat-sequencer layout (`foyer_sequencer.active !== false`).
       // Populated from `regions_list` / `region_updated` events so
@@ -55,6 +60,8 @@ export class Store extends EventTarget {
       // don't own their own region state (mixer strip chips,
       // agent tools) can query without a dedicated subscription.
       regionsByTrack: new Map(),
+      // Latest `Event::AudioPoolListed.sources` for the focused session.
+      audioPoolSources: [],
       // track_id → peer_id, mirrors the server's routing table. The
       // host sets an entry by choosing a user in the track editor;
       // the named browser then shows a mic toolbar affordance. Used
@@ -83,6 +90,15 @@ export class Store extends EventTarget {
     this._lastTransportPos = 0;
     this._lastTransportSeekAt = 0;
     this._transportDropStats = { stale_seq: 0, backward_jump: 0 };
+    // Self-echo guard: control id → { value, at_ms }. When this
+    // client sends a `control_set`, the ws layer dispatches
+    // `control_set_request`; we pin {value, now} here and `_applyControl`
+    // refuses to overwrite it for `_PIN_TTL_MS` so a stale broadcast
+    // (snapshot loaded before our command, backend echo from a
+    // different control with the same id, etc.) can't roll us back.
+    // The pin clears on first matching echo (server confirmed) or
+    // on TTL expiry, whichever comes first.
+    this._pendingControls = new Map();
     this._peerPruneInterval = null;
     if (typeof window !== "undefined") {
       this._peerPruneInterval = setInterval(() => this._prunePeers(), 3000);
@@ -236,6 +252,7 @@ export class Store extends EventTarget {
     const changed = this.state.currentSessionId !== id;
     if (changed) {
       this.state.currentSessionId = id;
+      this.state.audioPoolSources = [];
       // Drop the snapshot so views re-render their loading state
       // while the next SessionSnapshot arrives from the selected
       // session's pump.
@@ -280,13 +297,23 @@ export class Store extends EventTarget {
       const target = Number(ev?.detail?.value);
       if (Number.isFinite(target)) this._lastTransportPos = target;
     };
+    const onControlSetRequest = (ev) => {
+      const id = ev?.detail?.id;
+      if (typeof id !== "string" || id.length === 0) return;
+      this._pendingControls.set(id, {
+        value: ev.detail.value,
+        at_ms: Number(ev.detail.at_ms) || Date.now(),
+      });
+    };
     ws.addEventListener("status", onStatus);
     ws.addEventListener("envelope", onEnvelope);
     ws.addEventListener("transport_seek_request", onSeekRequest);
+    ws.addEventListener("control_set_request", onControlSetRequest);
     return () => {
       ws.removeEventListener("status", onStatus);
       ws.removeEventListener("envelope", onEnvelope);
       ws.removeEventListener("transport_seek_request", onSeekRequest);
+      ws.removeEventListener("control_set_request", onControlSetRequest);
       if (this._ws === ws) this._ws = null;
     };
   }
@@ -305,7 +332,8 @@ export class Store extends EventTarget {
       || body.type === "session_dirty_changed"
       || body.type === "regions_list"
       || body.type === "region_updated"
-      || body.type === "region_removed";
+      || body.type === "region_removed"
+      || body.type === "audio_pool_listed";
     if (
       isSessionScoped
       && activeSessionId
@@ -406,6 +434,22 @@ export class Store extends EventTarget {
             for (const p of pi.params || []) walk(p);
           }
         }
+        // Overlay still-fresh self-set pins so a snapshot that lands
+        // AFTER the user just hit a transport button (or moved a
+        // fader) doesn't silently revert their optimistic local
+        // state. Without this, the user-visible symptom is
+        // "occasionally hitting record bounces back to off" —
+        // exactly the race we got bug-reported about. TTL semantics
+        // match `_applyControl`'s pin handling: confirm-on-equal,
+        // drop-on-stale, otherwise reassert.
+        const now = Date.now();
+        for (const [pinId, pin] of this._pendingControls) {
+          if (now - pin.at_ms > Store._PIN_TTL_MS) {
+            this._pendingControls.delete(pinId);
+            continue;
+          }
+          c.set(pinId, pin.value);
+        }
         this.state.controls = c;
         this._lastTransportSeq = Number(env?.seq || 0);
         this._lastTransportPos = Number(c.get("transport.position") || 0);
@@ -414,12 +458,14 @@ export class Store extends EventTarget {
       }
       case "control_update": {
         if (body.update?.id === "transport.position") {
-          if (this._applyTransportPosition(body.update.value, Number(env?.seq || 0))) {
-            this._emitControl("transport.position");
+          const r = this._applyTransportPosition(body.update.value, Number(env?.seq || 0));
+          if (r.changed) {
+            this._emitControl("transport.position", r.local);
           }
         } else if (body.update?.id) {
-          if (this._applyControl(body.update.id, body.update.value)) {
-            this._emitControl(body.update.id);
+          const r = this._applyControl(body.update.id, body.update.value);
+          if (r.changed) {
+            this._emitControl(body.update.id, r.local);
           }
         }
         break;
@@ -427,13 +473,15 @@ export class Store extends EventTarget {
       case "meter_batch": {
         for (const u of body.values || []) {
           if (u?.id === "transport.position") {
-            if (this._applyTransportPosition(u.value, Number(env?.seq || 0))) {
-              this._emitControl("transport.position");
+            const r = this._applyTransportPosition(u.value, Number(env?.seq || 0));
+            if (r.changed) {
+              this._emitControl("transport.position", r.local);
             }
             continue;
           }
-          if (this._applyControl(u.id, u.value)) {
-            this._emitControl(u.id);
+          const r = this._applyControl(u.id, u.value);
+          if (r.changed) {
+            this._emitControl(u.id, r.local);
           }
         }
         break;
@@ -495,10 +543,12 @@ export class Store extends EventTarget {
             && !this.state.sessions.some((s) => s.id === this.state.currentSessionId)) {
           this.state.currentSessionId =
             this.state.sessions[this.state.sessions.length - 1]?.id || null;
+          this.state.audioPoolSources = [];
         } else if (!this.state.currentSessionId && this.state.sessions.length > 0) {
           // Auto-focus the first (or most recently opened) session.
           this.state.currentSessionId =
             this.state.sessions[this.state.sessions.length - 1]?.id || null;
+          this.state.audioPoolSources = [];
         }
         this.dispatchEvent(new CustomEvent("sessions"));
         this._emit();
@@ -516,18 +566,13 @@ export class Store extends EventTarget {
           // via the switcher (which sets currentSessionId without
           // triggering a new Open).
           this.state.currentSessionId = info.id;
-          // Lazily touch the browser-local recents list so the next
-          // welcome screen visit sees this path at the top. Import
-          // inline to avoid a hard dependency cycle at module load.
-          if (info.path) {
-            import("./recents.js").then((m) => {
-              m.touch({
-                path: info.path,
-                name: info.name,
-                backend_id: info.backend_id,
-              });
-            }).catch(() => {});
-          }
+          this.state.audioPoolSources = [];
+          // Recents are server-tracked now; the sidecar's
+          // LaunchProject handler bumps the entry and broadcasts a
+          // fresh `recents_list` envelope on its own. We used to
+          // optimistically touch here from the browser side, but with
+          // the persistent file living next to the sidecar that just
+          // duplicated the work.
           this.dispatchEvent(new CustomEvent("sessions"));
           this._emit();
         }
@@ -539,6 +584,7 @@ export class Store extends EventTarget {
         if (this.state.currentSessionId === id) {
           this.state.currentSessionId =
             this.state.sessions[this.state.sessions.length - 1]?.id || null;
+          this.state.audioPoolSources = [];
           // Drop the stale snapshot so the UI repaints to welcome
           // (or the next session's snapshot once it arrives).
           if (!this.state.currentSessionId) this.state.session = null;
@@ -553,10 +599,22 @@ export class Store extends EventTarget {
         this._emit();
         break;
       }
+      case "recents_list": {
+        this.state.recents = Array.isArray(body.recents) ? body.recents : [];
+        this.dispatchEvent(new CustomEvent("recents"));
+        this._emit();
+        break;
+      }
       case "regions_list": {
         const list = Array.isArray(body.regions) ? body.regions : [];
         this.state.regionsByTrack.set(body.track_id, list);
         this._recomputeSequencerTracks();
+        this._emit();
+        break;
+      }
+      case "audio_pool_listed": {
+        this.state.audioPoolSources = Array.isArray(body.sources) ? body.sources : [];
+        this.dispatchEvent(new CustomEvent("audio-pool"));
         this._emit();
         break;
       }
@@ -595,15 +653,49 @@ export class Store extends EventTarget {
   _emit() {
     this.dispatchEvent(new CustomEvent("change"));
   }
-  _emitControl(id) {
-    this.dispatchEvent(new CustomEvent("control", { detail: id }));
+  /// Dispatch a `control` event. `detail` stays a bare id string so the
+  /// many existing `if (ev.detail === "transport.playing")` consumers
+  /// keep working unchanged. The `local` flag tags whether the update
+  /// originated from THIS client's own gesture (matched a fresh entry
+  /// in `_pendingControls`). Listeners that need to distinguish "I did
+  /// this" from "a peer did this" — most importantly transport-return,
+  /// which would otherwise re-seek on every peer's stop event and
+  /// produce an N-client position storm — read `ev.local`.
+  _emitControl(id, local = false) {
+    const ev = new CustomEvent("control", { detail: id });
+    ev.local = local;
+    this.dispatchEvent(ev);
   }
+
+  /// How long a self-set control stays pinned against incoming
+  /// echoes/snapshots. Bigger than a typical WS round trip (LAN ≈ 5
+  /// ms, tunnel ≈ 100–400 ms) but small enough that a server-driven
+  /// reset (someone else flipped the control) lands within a tick or
+  /// two. 800 ms is the same window the existing transport-position
+  /// `seekRecent` check uses, so the eyeball calibration matches.
+  static _PIN_TTL_MS = 800;
 
   /**
    * Apply an incoming control value, honoring any active front-end lock.
    * Returns `true` if the store actually changed and listeners should be
-   * notified. Right now only `transport.position` has a lock (installed
-   * by `transport-return.js`); the pattern is generic enough to reuse.
+   * notified.
+   *
+   * Two locks layer here:
+   *   1. The legacy `transportPositionLock()` callback (installed by
+   *      `transport-return.js`) — pins `transport.position` to a
+   *      specific value while the user is in a "stop, return to zero"
+   *      gesture. Function-based because the lock value is computed.
+   *   2. The generic self-set pin (`_pendingControls`). When this
+   *      client just sent a `control_set` for `id` and the incoming
+   *      echo carries a DIFFERENT value, we suppress the echo for up
+   *      to `_PIN_TTL_MS`. Cleared as soon as the server confirms
+   *      our value, or when the TTL expires.
+   *
+   * The self-set pin is what stops the "phone hits record while
+   * desktop is open → record briefly turns on, then resets to off"
+   * race: the desktop's slightly-stale snapshot or the backend's
+   * echo arrives carrying `record=0`, but our pin still has
+   * `record=1` from <800ms ago, so we ignore it.
    */
   _applyControl(id, value) {
     if (id === "transport.position") {
@@ -616,11 +708,39 @@ export class Store extends EventTarget {
         // the backend thinks. We still emit so UI listeners redraw
         // to the pinned value (useful when the user just seeked).
         this.state.controls.set(id, pinned);
-        return true;
+        return { changed: true, local: true };
+      }
+    }
+    const pending = this._pendingControls.get(id);
+    let local = false;
+    if (pending) {
+      const fresh = Date.now() - pending.at_ms <= Store._PIN_TTL_MS;
+      if (!fresh) {
+        // TTL expired without confirmation — drop the pin and accept
+        // whatever the wire says. Possible cause: the server never
+        // got our command (offline blip), so the control state is
+        // genuinely whatever the rest of the world thinks.
+        this._pendingControls.delete(id);
+      } else if (Object.is(value, pending.value)) {
+        // Server confirmed the value we sent — release the pin so a
+        // FUTURE remote write can update us cleanly. Apply normally.
+        // Locality: yes — the wire just confirmed *our* gesture.
+        this._pendingControls.delete(id);
+        local = true;
+      } else {
+        // Pin still active and the incoming value disagrees with our
+        // self-set. Treat this as a stale broadcast (snapshot from
+        // before our command, etc.) and reassert the pin instead of
+        // accepting it. We still write the pinned value into the
+        // controls map so any new subscriber gets the right state,
+        // and return true so the existing UI listeners repaint.
+        // Locality: still ours — we're holding our own value.
+        this.state.controls.set(id, pending.value);
+        return { changed: true, local: true };
       }
     }
     this.state.controls.set(id, value);
-    return true;
+    return { changed: true, local };
   }
 
   /**
@@ -632,7 +752,7 @@ export class Store extends EventTarget {
     const next = Number(value) || 0;
     if (seq && seq < this._lastTransportSeq) {
       this._noteTransportDrop("stale_seq");
-      return false;
+      return { changed: false, local: false };
     }
 
     const now = Date.now();
@@ -649,15 +769,15 @@ export class Store extends EventTarget {
 
     if (playing && !looping && backwardsBy > jitterThreshold && !seekRecent) {
       this._noteTransportDrop("backward_jump");
-      return false;
+      return { changed: false, local: false };
     }
 
-    const changed = this._applyControl("transport.position", next);
-    if (changed) {
+    const r = this._applyControl("transport.position", next);
+    if (r.changed) {
       if (seq) this._lastTransportSeq = seq;
       this._lastTransportPos = next;
     }
-    return changed;
+    return r;
   }
 
   _noteTransportDrop(reason) {

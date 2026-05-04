@@ -15,16 +15,19 @@ mod archive;
 mod audio;
 mod audio_opus;
 mod audio_ws;
+mod capabilities;
 pub(crate) mod chat;
 mod cloudflare_api;
 mod cloudflare_provider;
 mod cloudflared_dl;
 mod dev;
 mod files;
+mod import_audio;
 mod ingress_ws;
 mod jail;
 pub mod orphans;
 mod plugin_gui_ws;
+mod recents;
 mod ring;
 mod session_scrub;
 mod sessions;
@@ -74,7 +77,66 @@ pub trait BackendSpawner: Send + Sync + 'static {
         &self,
         backend_id: &str,
         project_path: Option<&Path>,
-    ) -> anyhow::Result<Arc<dyn Backend>>;
+    ) -> anyhow::Result<LaunchedBackend>;
+
+    /// Connect to an existing host process by its IPC socket — the
+    /// orphan-reattach path. Used when the server detects an Ardour
+    /// shim still listening on a registry-recorded socket but with no
+    /// matching session in our map (Foyer crashed; Ardour didn't).
+    /// Default impl bails so spawners that have nothing to attach to
+    /// (the stub) don't have to override.
+    ///
+    /// `process: None` on the returned `LaunchedBackend` is intentional
+    /// for reattach — Foyer didn't fork this Ardour, so we have no
+    /// authority to SIGTERM/SIGKILL it on close. The user can quit
+    /// Ardour manually if they want; closing the foyer session just
+    /// drops the IPC channel.
+    async fn reattach(&self, _backend_id: &str, _socket: &Path) -> anyhow::Result<LaunchedBackend> {
+        anyhow::bail!("this spawner does not implement reattach")
+    }
+}
+
+/// Result of `BackendSpawner::launch`. `process` is `Some` when the
+/// spawner forked a child whose lifetime is tied to this session —
+/// the registry holds it and runs the graceful-quit / SIGTERM /
+/// SIGKILL escalation on close. `None` for in-process backends (stub).
+pub struct LaunchedBackend {
+    pub backend: Arc<dyn Backend>,
+    pub process: Option<Box<dyn ProcessHandle>>,
+}
+
+impl LaunchedBackend {
+    pub fn new(backend: Arc<dyn Backend>) -> Self {
+        Self {
+            backend,
+            process: None,
+        }
+    }
+
+    pub fn with_process(backend: Arc<dyn Backend>, p: Box<dyn ProcessHandle>) -> Self {
+        Self {
+            backend,
+            process: Some(p),
+        }
+    }
+}
+
+/// Handle to a spawned host process so the registry can wait on it
+/// and signal it during the close-session escalation. Defined here
+/// (not in `tokio::process` directly) so foyer-server stays
+/// process-runtime-agnostic; the CLI's `CliSpawner` provides the
+/// concrete impl.
+#[async_trait::async_trait]
+pub trait ProcessHandle: Send + Sync {
+    /// Wait up to `timeout` for the process to exit on its own.
+    /// Returns `true` if it exited within the window, `false` on
+    /// timeout. Implementations must be idempotent on repeated calls
+    /// after exit.
+    async fn wait(&mut self, timeout: std::time::Duration) -> bool;
+    /// Send SIGTERM (or platform equivalent). No-op if already exited.
+    async fn sigterm(&mut self);
+    /// Send SIGKILL. No-op if already exited.
+    async fn sigkill(&mut self);
 }
 
 /// Capacity of the server-wide broadcast channel. Bounds how far a slow client can lag
@@ -175,6 +237,17 @@ pub(crate) struct AppState {
     pub(crate) pump_handle: Mutex<Option<JoinHandle<()>>>,
     /// Optional filesystem jail for the session picker.
     pub(crate) jail: Option<Jail>,
+    /// Socket path of the shim the *initial* (auto-attached) backend
+    /// is talking to, when applicable. The CLI sets this when it
+    /// boots and auto-attaches to an already-running Ardour shim
+    /// (`adv.socket` from discovery). Used by `Command::ReattachOrphan`
+    /// to detect "the orphan you're trying to reattach is already
+    /// the implicit backend" and adopt the existing connection
+    /// instead of opening a second IPC channel — the shim only
+    /// services one client at a time, so a second connect would sit
+    /// in the kernel's accept queue forever and silently break event
+    /// flow.
+    pub(crate) attached_socket: RwLock<Option<PathBuf>>,
     /// Port this server is listening on — snapshotted from `Config::listen`
     /// at `run()` time so the WS handler can include it in the client
     /// greeting for share-session URLs.
@@ -309,6 +382,7 @@ impl AppState {
     pub(crate) fn envelope(&self, body: Event, session_id: Option<EntityId>) -> Envelope<Event> {
         Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq: self.next_seq(),
             origin: Some("server".into()),
             session_id,
@@ -338,6 +412,14 @@ impl AppState {
         self.backend.read().await.clone()
     }
 
+    /// Same key set as [`Event::ClientGreeting`]: backend [`Backend::features`]
+    /// merged with server-only flags (e.g. `native_plugin_gui`).
+    pub(crate) async fn merged_feature_map(&self) -> std::collections::BTreeMap<String, bool> {
+        let mut feat = self.backend().await.features();
+        feat.insert("native_plugin_gui".into(), self.xpra_available);
+        feat
+    }
+
     /// Swap the active backend. Aborts the old event pump, starts a new
     /// one subscribed to `next`, drops the cached snapshot (so the next
     /// `SessionSnapshot` from the new backend re-seeds it), and emits a
@@ -357,6 +439,7 @@ impl AppState {
         next: Arc<dyn Backend>,
         session_id: Option<EntityId>,
         session_name: Option<String>,
+        process: Option<Box<dyn ProcessHandle>>,
     ) {
         *self.backend.write().await = next.clone();
         *self.active_backend_id.write().await = Some(backend_id.clone());
@@ -406,7 +489,7 @@ impl AppState {
             .unwrap_or_default();
         self.sessions
             .clone()
-            .add(sid.clone(), backend_id.clone(), next, path, name)
+            .add(sid.clone(), backend_id.clone(), next, path, name, process)
             .await;
         // Newly-opened session automatically becomes the focus
         // target so untagged commands flow to it. User can switch
@@ -477,6 +560,7 @@ impl Server {
             spawner,
             pump_handle: Mutex::new(None),
             jail: None,
+            attached_socket: RwLock::new(None),
             listen_port: std::sync::atomic::AtomicU16::new(0),
             tls_enabled: std::sync::atomic::AtomicBool::new(false),
             audio_hub: Arc::new(audio::AudioHub::new()),
@@ -534,6 +618,16 @@ impl Server {
     /// knows what's active.
     pub async fn set_active_backend(&self, backend_id: impl Into<String>) {
         *self.state.active_backend_id.write().await = Some(backend_id.into());
+    }
+
+    /// Record the socket path that the initial (auto-attached) backend
+    /// is talking to, when applicable. Set by the CLI when its boot
+    /// path discovers an already-running shim and connects via
+    /// `HostBackend::connect`. The orphan-reattach path consults this
+    /// to avoid opening a duplicate IPC connection to the same shim
+    /// (the shim only services one client at a time).
+    pub async fn set_attached_socket(&self, path: PathBuf) {
+        *self.state.attached_socket.write().await = Some(path);
     }
 
     /// Populate the orphan list from the session registry directory.
@@ -683,6 +777,11 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
             "/sessions/upload",
             post(archive::upload).layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)),
         )
+        .route(
+            "/sessions/import_audio",
+            post(import_audio::import_audio)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
         .route("/sessions/export", get(archive::export))
         .route("/console", get(console_tail))
         .route("/qr", get(qr_svg))
@@ -699,7 +798,12 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
         // this to learn which `ui-*/package.js` packages are available
         // under the served web_root, so users can drop a new variant
         // folder without editing the index.html's import map.
-        .route("/variants.json", get(variants_json));
+        .route("/variants.json", get(variants_json))
+        .route("/capabilities", get(capabilities::get_capabilities))
+        .route(
+            "/capabilities/diff",
+            post(capabilities::post_capabilities_diff),
+        );
 
     // Dev-only integration probe harness. Gated on FOYER_DEV=1 so
     // production runs don't expose a side-channel for backend
@@ -833,6 +937,7 @@ async fn event_pump(
         let seq = state.next_seq();
         let env = Envelope {
             schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
             seq,
             origin: Some("backend".to_string()),
             // Legacy bootstrap pump — the initial stub/launcher
@@ -882,6 +987,7 @@ async fn emit_backend_lost(state: &Arc<AppState>, backend_id: &str, reason: Stri
     );
     let env = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq: state.next_seq(),
         origin: Some("server".into()),
         session_id: None,

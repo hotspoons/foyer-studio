@@ -29,6 +29,22 @@ class Controllable;
 
 namespace ArdourSurface::msgpack_out {
 
+/// Kubernetes-style control-plane API version (must match Rust `CONTROL_PLANE_API_VERSION`).
+inline constexpr char CONTROL_PLANE_API_VERSION[] = "foyer.sh/v1alpha1";
+
+/// One row for `Event::AudioPoolListed` (matches `fo.schema.AudioPoolSource`).
+struct AudioPoolListRow {
+	std::string id;
+	std::string name;
+	std::string path;
+	std::uint16_t     channel = 0;
+	std::uint64_t     length_samples = 0;
+	std::uint32_t     sample_rate = 0;
+};
+
+std::vector<std::uint8_t> encode_audio_pool_listed (
+	const std::vector<AudioPoolListRow>& rows);
+
 /// Encode `session.snapshot` from the current session state. The
 /// `routes` list must come from the caller's own weak_ptr tracking
 /// (see `SignalBridge::snapshot_tracked_routes`) — we do NOT touch
@@ -90,6 +106,11 @@ std::vector<std::uint8_t> encode_track_meters_from_routes (
 /// a `Command::ListPluginPresets` request.
 std::vector<std::uint8_t> encode_plugin_presets_listed (
     ARDOUR::Session&, const std::string& plugin_id);
+
+/// Encode `Event::MidiPatchNamesListed { track_id, names }` answering
+/// `Command::ListMidiPatchNames`.
+std::vector<std::uint8_t> encode_midi_patch_names_listed (
+    ARDOUR::Session&, const std::string& track_id, std::uint8_t channel);
 
 /// Encode `Event::PluginsList { entries }` — the catalog of every
 /// plugin Ardour's PluginManager has scanned. Answers

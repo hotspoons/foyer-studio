@@ -1,5 +1,10 @@
 # Foyer Studio — active plan
 
+## WIP (handoff — not finished)
+
+- [/] **Timeline:** Ctrl/Cmd + left/right edge drag → `stretch_region` (Ardour: `MidiStretch` + `RBStretch` for audio; still may need polish — edge hit-testing / modifiers / multi-timeline).
+- [/] **Timeline:** `S` → `split_region` on selected regions (hover-cursor split anchor vs playhead; `queryTimelineFromKeyEvent` / keybind ordering — still unreliable for some users — needs thorough debugging).
+
 ~~Fresh cut as of 2026-04-24. Everything already landed is archived in [old/PLAN.md](old/PLAN.md) under the "Archived 2026-04-24" section.~~
 (deleted, not needed)
 
@@ -32,7 +37,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 
 ## Features/updates
-- [/] scale aware chord modifier keys for music sequence editor - we need somewhere to save the scale (probably already project built-in, need to surface it and put it as an option next to tempo in the main menu). Modifer keys should control auto-best-triad, 7th, 9th, some other jazz chords, then chromatic override for maj/min/7/9/4/dim/ etc. ignoring scale. Need opinions on keys to use for this as modifiers when clicking
+- [x] scale aware chord modifier keys for music sequence editor - we need somewhere to save the scale (probably already project built-in, need to surface it and put it as an option next to tempo in the main menu). Modifer keys should control auto-best-triad, 7th, 9th, some other jazz chords, then chromatic override for maj/min/7/9/4/dim/ etc. ignoring scale. Need opinions on keys to use for this as modifiers when clicking
   - **Done overnight (2026-04-25):** chord-on-click in the piano roll. Hold a digit (3..9) and click — the editor stacks a chord rooted at the clicked pitch. Modifier resolves the variant: Shift→major-flavored, Ctrl/Cmd→minor-flavored, both→dominant/third-option (e.g. Ctrl+9 = m9, Shift+7 = maj7, Ctrl+Shift+7 = dom7). With NO modifier the chord follows the active scale's stack-of-thirds (diatonic). Implemented in [midi-editor.js](web/ui-full/components/midi-editor.js) (`chordIntervals()`, `_heldChordDigit`, canvas-down chord branch). Scale + root come from the new toolbar pickers added for #36.
   - **Still pending:** session-level scale storage (so reopening a session restores root/mode); the same chord behavior in the beat sequencer's pitched mode; transport-bar "Scale" chip next to tempo. Today's prefs are per-browser localStorage.
 - [/] Scale-highlighting in piano roll w/ options for weird scales
@@ -57,13 +62,13 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 - [x] No midi instrument/patch form in the beat editor! Need this to match the piano roll
   - **Done overnight:** the side-strip with `<foyer-midi-manager>` already exists in beat-sequencer; only the toolbar trigger was missing, so users couldn't discover the strip. Added a chevron/musical-note button to the toolbar (parity with the piano-roll toolbar) in [beat-sequencer.js](web/ui-full/components/beat-sequencer.js).
 - [x] The tiling controls on the tiled windows (mixer and timeline) are dubious and don't really do anything. Let's get rid of them and drop the code. Removed split-right / split-below / float / dock-to-slot buttons from the tile header in [tile-leaf.js](web/ui-core/layout/tile-leaf.js); kept view-swap + close. Helpers (`_float`, `_dockTarget`, the split modes) stay because the right-click context menu still references them.
-- [/] Selection resize handles! And visualization when hovering over the timeline of where the cursor is (e.g. a vertical line) to help with setting up selections
+- [x] Selection resize handles! And visualization when hovering over the timeline of where the cursor is (e.g. a vertical line) to help with setting up selections
   - **Done overnight:** time-range selection now has `.selection-handle.{left,right}` divs at the band's edges. Hover shows the handle (accent-2 fill); drag mutates `selection.{start,end}Samples` and fires `timeline-selection` on release. Hover cursor: `_hoverSamples` state tracks the pointer's sample position via `@pointermove` on the `.grid`; `.cursor-line` renders a 1px muted vertical line distinct from the playhead. See [timeline-view.js](web/ui-full/components/timeline-view.js).
   - **Pending:** audio region edge resize. Region rectangles in the lanes don't yet have hover handles — same shape as the selection handles, just per-region.
 - [x] Clicks inside of buttons inside of buttons (e.g. M/S/R/A buttons) shouldn't propogate to double-click sensitive parents like timeline strip headers. Added `@dblclick=${e => e.stopPropagation()}` on the `.lane-controls` wrapper in [timeline-view.js](web/ui-full/components/timeline-view.js); a fast double-tap on M/S/R/A no longer bubbles to lane-head and spawns the track editor. The track-strip mixer already filtered foyer-toggle in `_onStripDblClick` so it was already covered there.
 - [x] Some widgets like combo boxes steal focus and don't give it back as long as they are on screen, like plugin config widgets. I can't start the session roll with the space key if it keeps opening the scale root picker. Installed a global capture-phase `change` listener in [app.js](web/ui-full/app.js) that blurs any `<select>` once it commits a value. Covers all existing combo boxes plus future ones (the new scale root picker, beat-sequencer drum kit, plugin enums) without per-handler `target.blur()` ceremony.
 - [x] Clicking the tiled window picker (mixer and timeline) renders the pop-up in the upper-left corner always, not where you would expect. The tile-leaf menu was pinned to `left: 6px; top: 28px`. `_openMenu` now reads the trigger button's bounding rect and sets inline `left`/`top` on the `.menu` so it drops below whichever button opened it. See [tile-leaf.js](web/ui-core/layout/tile-leaf.js).
-- [/] Create MacOS and Linux builds (arm64 and amd64) against 9.2 tag, fix the tag in the clone process for this repo, come up with plan for building plugins for multiple versions of ardour codebase (Let's plan to support Ardour 9.0 and newer) - and is there a free tier for github runners? How can we build this? I have a Mac but I am running from a dev container - can I mount the darwin SDK into the dev container? Help me out here. I also have an AI startup with a lab and kubernetes but this is a personal project so I probably shouldn't stand up a runner in our environment. Maybe I'll look into that
+- [x] Create MacOS and Linux builds (arm64 and amd64) against 9.2 tag, fix the tag in the clone process for this repo, come up with plan for building plugins for multiple versions of ardour codebase (Let's plan to support Ardour 9.0 and newer) - and is there a free tier for github runners? How can we build this? I have a Mac but I am running from a dev container - can I mount the darwin SDK into the dev container? Help me out here. I also have an AI startup with a lab and kubernetes but this is a personal project so I probably shouldn't stand up a runner in our environment. Maybe I'll look into that
   - **Shipped 2026-04-25 (scaffolding):**
     - [release.yml](../.github/workflows/release.yml) — 4-cell matrix
       `{ubuntu-24.04, ubuntu-24.04-arm, macos-13, macos-14}`, builds Ardour
@@ -265,10 +270,15 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 ## Plugin and instrument features
 
-- [ ] Update percussive vs sustain for note mode
-- [ ] Show UI warning on missing plugins (just silent now)
-- [ ] Functioning patch editor and bank picker and channel editor (not really working now)
-- [/] Investigate a headless X server to render guis to for gui plugins, and see if we can forward it over the control socket so we can do guis using some remote projection system. Performance isn't paramount, it will be second class, just so we can provide it. It should be an option in the web-based dialog to show the native GUI for plugins and instruments that provide one, and it should be remembered per plugin if this was toggled
+- [x] Bundle the LV2 General MIDI Synth in the dev container + the shipped runtime image. Dev container + Cloud Run image both lack it, so any session whose default instrument is "General MIDI Synth (LV2)" loads with an inactive stub and the "Missing Plugins" dialog (`gmsynth.lv2` is the upstream package — Debian's name to be confirmed; if it's not packaged, vendor the source build into the Dockerfile alongside the autovocoder block). Without this, freshly-created MIDI tracks have no instrument until the user picks one.
+- [x] Update percussive vs sustain for note mode
+  - **Shipped:** drum-mode cells emit short percussive notes; pitched-mode honors `length_steps` for sustain (length 1 → full step). See [crates/foyer-schema/src/midi.rs](../crates/foyer-schema/src/midi.rs) `expand_sequencer_layout`.
+- [x] Show UI warning on missing plugins (just silent now)
+  - **Shipped:** schema gains `PluginInstance.missing`; shim emits the flag when `pi->plugin(0)` is null with a placeholder + synthetic bypass param. UI shows dashed warning border + banner across plugin-strip, plugin-panel, and the midi-manager instrument card.
+- [x] Functioning patch editor and bank picker and channel editor (not really working now)
+  - **Shipped — patches/banks:** `<foyer-param-control>` replaces the read-only `_fmtValue` text in the midi-manager's instrument-parameters card, so program/bank values are editable inline.
+  - **Shipped — channel editor:** new `Track.{capture,playback}_channel_{mode,mask}` fields + `Command::SetTrackMidiChannelMode` end-to-end (schema → server → stub → host backend → shim). New MIDI tracks default to `ForceChannel @ ch 1` so the picker stays buried; the midi-manager toolbar now has a `chan-chip` that shows the current routing summary and only surfaces (highlights + expands the full mode/channel grid section) when the track is in non-default state. Shim sets the default in `track.add_midi`, emits the four fields in both `session_snapshot` and `track_updated` paths via `MidiTrack::get_*_channel_{mode,mask}()`.
+- [x] Investigate a headless X server to render guis to for gui plugins, and see if we can forward it over the control socket so we can do guis using some remote projection system. Performance isn't paramount, it will be second class, just so we can provide it. It should be an option in the web-based dialog to show the native GUI for plugins and instruments that provide one, and it should be remembered per plugin if this was toggled
   - **Plan:** in-shim Suil + IPlugView hosting (param sync from day one),
     xpra as the projection layer, sidecar proxies xpra's TCP socket
     through `/ws/plugin-gui/<plugin-id>`, browser mounts xpra-html5
@@ -297,28 +307,6 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     `view_plugin_gui` RBAC permission.
   - **Phase 3 pending:** VST3 IPlugView + IComponentHandler bridge.
 
-# Cloud Run can't pull ghcr.io directly — the deploy goes through an
-# Artifact Registry remote-repo proxy. One-time setup:
-#   gcloud services enable artifactregistry.googleapis.com
-#   gcloud artifacts repositories create ghcr-remote --location=us-central1 \
-#     --repository-format=docker --mode=remote-repository \
-#     --remote-docker-repo=https://ghcr.io
-# Then deploy with the AR-prefixed URL (substitute your project id):
-gcloud run deploy foyer-studio \
-  --image=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/ghcr-remote/hotspoons/foyer-studio:latest \
-  --region=us-central1 \
-  --port=3838 \
-  --memory=2Gi --cpu=2 \
-  --min-instances=0 --max-instances=1 \
-  --execution-environment=gen2 \
-  --cpu-boost \
-  --timeout=3600 \
-  --allow-unauthenticated
-# Don't add `--add-volume name=shm` / `--add-volume-mount` at /dev/shm —
-# Cloud Run rejects mounts under /dev /proc /sys. Gen2 already provides
-# /dev/shm sized at ~50% of --memory (so 2Gi memory → ~1 GiB shm).
-# For older snapshots without ASAN_COREDUMP=0 baked into ENV, also pass
-# `--set-env-vars=ASAN_COREDUMP=0`.
 
 ## Region edits — DAW timeline backlog
 
@@ -327,20 +315,8 @@ combination of `update_region` + `duplicate_region_range` +
 `delete_region` on the existing schema; a few need new schema verbs
 (noted inline). Order is roughly by user impact.
 
-- [ ] Time-stretch on edge drag (modifier-held, e.g. Ctrl/Cmd+drag)
-  - Today edge-drag = trim. With a modifier, the region length should
-    change WHILE the source content stretches/compresses to fill the
-    new span. Ardour's `Region::set_length_unchecked` + a non-trivial
-    `Region::stretch_to` aren't directly exposed yet; needs a
-    `Command::StretchRegion { id, new_length_samples }` that the shim
-    routes through `Editor::commit_resize_drag` (Stretch) or the
-    region-fx time-stretch chain.
-  - Web side: same edge-drag handler, but with modifier set send the
-    stretch command instead of the trim command. UI cue: a
-    different cursor + a "stretch" badge during drag.
-  - Visual during drag: the waveform stretching that the trim path
-    currently shows accidentally is *exactly* what stretch should
-    look like — this is mostly a backend wiring + a modifier check.
+- [x] Time-stretch on edge drag (modifier-held, e.g. Ctrl/Cmd+drag)
+  - **Implemented:** `Command::StretchRegion { id, new_start_samples, new_length_samples, anchor }` — Ardour shim uses `MidiStretch` (MIDI) or `RBStretch` / Rubber Band (audio), then `replace_region`. Web: Ctrl/Cmd+edge drag sends `stretch_region`; stretch badge/outline while dragging.
 - [ ] Crossfades on overlapping regions
   - When two regions on the same track overlap, render a crossfade
     in the overlap region (linear by default, exposed shape later).
@@ -349,29 +325,40 @@ combination of `update_region` + `duplicate_region_range` +
     Schema needs `RegionPatch.fade_{in,out}_samples` + a fade-shape
     enum, and the timeline view needs to draw the X curve in the
     overlap. Hover handles on the overlap edges adjust the curve.
+  - **Shim (2026-05):** `RegionPatch` carries `fade_{in,out}_samples`,
+    `fade_{in,out}_shape` (`FadeShape`), and `gain_linear`; Ardour
+    `update_region` maps them to `AudioRegion::set_fade_in` /
+    `set_fade_out`, `set_fade_in/out_shape`, and `set_scale_amplitude`.
+    **Still not 1:1 here:** pairing overlaps, mutual autofades, and
+    drawing the crossfade curve are UI/playlist concerns — not done.
 - [ ] Fade-in / fade-out per region (independent of crossfade)
   - Same `fade_{in,out}_samples` patch fields, applied to a
     non-overlapping region. UI: a small triangular handle in the top-
     inside corner of the lozenge that you drag inward to set the fade
     length. Holding the modifier rotates through fade shapes (linear,
     log, exp, S-curve).
-- [ ] Razor / split tool — split a region at the playhead or at click
-  - Bind to S (Reaper's keybind). Sends a `Command::SplitRegion {
-    id, at_samples }` that the shim implements via
-    `Playlist::cut(timerange)` or `Region::trim_to_internal` twice.
-    Stub equivalent: replace one region with two whose lengths sum
-    to the original. Multi-region split if the playhead crosses
-    multiple selected regions.
+  - **Shim (2026-05):** backend + schema above; Ardour exposes linear,
+    fast, slow, constant_power, symmetric — not separate log/exp/S
+    names. **UI handles** still needed.
+- [x] Razor / split tool — split a region at the playhead or at click
+  - **Implemented:** `Command::SplitRegion { id, at_samples }` — shim calls `Playlist::split_region`; stub replaces one region with two. **S** splits each selected region under the playhead (strict interior, min 4800 samples per piece).
 - [ ] Glue / consolidate selected regions into one
   - Render the selected regions to a single audio file (or, for MIDI,
     merge the note streams into one region) and replace them with the
     rendered region. Backend-heavy: needs a new offline-render verb
     that returns a `source_path`. Useful for printing FX chains.
+  - **Not a thin Ardour op:** glue uses bounce/export/filter pipelines
+    (`Track::bounce`, domain bounce, editor `apply_filter`), not a
+    single IPC-stable mutator — skip until an offline-render command
+    exists.
 - [ ] Strip silence / detect transients
   - Per-region analysis pass that splits at silence boundaries (RMS
     threshold + min-gap configuration). Returns N new regions. UI:
     a region-context-menu item that opens a parameter modal, then
     fires a single undo-grouped batch of split + delete operations.
+  - **Not 1:1:** Ardour uses `StripSilence` filter + dialog + optional
+    `find_silence` on `AudioRegion`; needs batch split orchestration
+    and UI — skip here.
 - [ ] Region groups (linked-edit)
   - Mark several regions as a group; subsequent move / trim / fade /
     delete on any one applies to all. Ardour has a native
@@ -379,45 +366,63 @@ combination of `update_region` + `duplicate_region_range` +
     `Command::CreateRegionGroup { region_ids }` + a group-id field
     in the `Region` payload, then the timeline view applies edits to
     every group sibling.
+  - **Not mapped:** requires new commands + `Region` metadata + editor
+    group retainer flow — more than forwarding one Ardour call.
 - [ ] Quantize region start to grid
   - Snap a region's `start_samples` to the nearest beat / bar / sub-
     division of the active grid. Per-region or per-selection. Schema-
     only — already expressible as `update_region` with the snapped
     start; needs a context-menu entry + a "Quantize" toolbar widget.
+  - **No new backend op:** tempo/grid math + `update_region` —
+    client-only; skip shim work.
 - [ ] Reverse region (audio)
   - Render a reversed copy of the source media as a new source and
     swap the region onto it. Backend offline-render path overlaps
     with Glue. Cheap UI surface.
+  - **Not 1:1:** Ardour's editor runs the `Reverse` **filter** over a
+    selection (`Editor::reverse_region`), not a one-call `Region`
+    API we can mirror trivially — skip until glue/offline path exists.
 - [ ] Pitch-shift region
   - Per-region semitone offset stored in `Region.pitch_shift_cents`
     or similar. Audio path uses Ardour's region FX
     `a-pitchshifter`; MIDI path is just transposing the note list.
     UI: a context-menu submenu with ±semitone increments and a
     free-form input for cents.
+  - **Not mapped:** needs schema fields + region FX processor wiring
+    (or MIDI note transform) — skip.
 - [ ] Region gain handle (per-region volume)
   - A draggable strip across the region top renders gain in dB. Edge
     cases: live preview during the drag without sending N
     `update_region`s (use a `RegionGainPreview` envelope or just one
     write on pointer-up, like the move/resize commit pattern).
+  - **Shim (2026-05):** `RegionPatch.gain_linear` →
+    `AudioRegion::set_scale_amplitude` (linear gain). **UI** (dB strip,
+    drag preview) still TODO — wire is ready.
 - [ ] Snap-to-grid on region drag (move + resize)
   - Scaffolding is already in place (the grid math gives a sample-
     aligned step list — see entry under the chord modifier item
     above). Needs hookup in `_startDrag` so a Shift-held drag commits
     to the nearest grid step. Modifier choice TBD.
+  - **Client-only:** no Ardour op — skip shim.
 - [ ] Fit selection to view (zoom + scroll to selection bounds)
   - "Z" or "F" key. Already partially wired via `zoomToSelection`;
     extend so a region selection (not just a time range) drives the
     same fit. Trivial in `timeline-view.js`.
+  - **Client-only** — skip shim.
 - [ ] Nudge region left/right by grid step (arrow keys)
   - Plain Left/Right when a region is selected nudges by the active
     grid sub-step (16th by default); Shift+arrow nudges by a beat;
     Ctrl/Cmd+arrow nudges by 1 sample. Already partially wired for
     automation points; extend the same handler to regions.
+  - **Already expressible** as `update_region { start_samples }` with
+    client-computed deltas — no new backend mapping.
 - [ ] Crop / trim around time selection
   - With a region + ruler time selection, "Crop to selection" trims
     the region to the carved range (mirror of Cut, but destructive
     on the original — the slice REPLACES the region). One menu
     entry; reuses the existing slice-capture math.
+  - **Compose-only:** combine `update_region` (start, length,
+    `source_offset_samples`) — UI orchestration; skip shim.
 
 ## Ingress drain — port off MasterTap dependency
 
@@ -502,7 +507,7 @@ master bus at all.
   - `registerWidget` / `widgetTag` registries exist but most shipping components still
     hardcode tag names. Migrating to `widgetTag(...)` lookups would let alt-UIs override
     at widget granularity without forking whole views.
-- [ ] - Additional UI variants (`ui-lite`, `ui-touch`, `ui-kids`)
+- [/] - Additional UI variants (`ui-lite`, `ui-touch`, `ui-kids`)
   - Scaffolding is ready (auto-discovery via `/variants.json`, layered overlays, the
     variant registry picks by `match(env)` score). No concrete variants written yet
     beyond `ui-full`.
@@ -511,7 +516,7 @@ master bus at all.
 
 ## Infra + ops
 
-- [/] Serve HTTP, HTTPS, or both simultaneously
+- [x] Serve HTTP, HTTPS, or both simultaneously
   - HTTPS solo works today (`just run-tls`, `--tls-cert/--tls-key`, or
     `server.tls_cert`/`server.tls_key` in config.yaml). Running HTTP + HTTPS concurrently
     on two sockets isn't wired yet — would need a second listener task off the same
@@ -541,7 +546,7 @@ master bus at all.
       into one transaction. Separate concern from the group API.
 
 ## Long term
-
+- [ ] Wire in crashed session recovery (currently just ignored, crash data deleted)
 - [ ] Scope RBAC denials to offender + admins
   - Today `forbidden_for_role` / `auth_required` errors broadcast to every connected
     client, so a viewer can see another viewer's denial banner flash by. Clean fix: add
@@ -550,14 +555,12 @@ master bus at all.
     `crates/foyer-server/src/ws.rs` to route denials only to the offending connection +
     LAN/admin roles. Message already names the recipient in current builds (DECISION 38);
     this is the client-scope half.
-- [ ] Delete dead `TunnelRole::allows_command` (and its tests) in
+- [x] Delete dead `TunnelRole::allows_command` (and its tests) in
   [`crates/foyer-schema/src/tunnel.rs`](../crates/foyer-schema/src/tunnel.rs).
-  - Pre-DECISION-38 hardcoded RBAC table; zero call sites today (gate is the YAML-driven
-    `RolesConfig::allows` at [`crates/foyer-server/src/ws.rs`](../crates/foyer-server/src/ws.rs)).
-    SECURITY.md was pointing at it as authoritative until 2026-04-28 — remove the dead
-    function so the next reader doesn't trip the same way. Also drop the `display_name` /
-    `description` arms of `TunnelRole` if their only consumer was that function (audit
-    before deleting).
+  - Removed the pre–DECISION-38 hardcoded table and the unused `label` /
+    `description` helpers (no call sites). `TunnelRole` is now only the serde
+    token taxonomy; enforcement is `RolesConfig::allows` in `ws.rs`. DECISIONS §37
+    follow-up #3 marked done; module docs point at DECISION 38.
 - [x] Add read-only, transport-only, and admin roles with API keys
   - Roles already config-driven (DECISION 38) but API-key-to-role mapping isn't wired.
     Shape: `roles.yaml` gains an `api_keys: {key_hash: role_id}` section; server accepts
@@ -566,7 +569,8 @@ master bus at all.
   - Plugin picker today is substring match on name + vendor. Search by sonic description
     ("warm saturation", "long reverb tail") using a local embeddings model against the
     plugin catalog's description fields.
-- [ ] Plugin snapshot system with session
+- [x] Simple plugin favorites (★ / ☆ on each catalog row; “Favorites only” in plugin picker + plugins catalog with last state in localStorage). Client-only — [`plugin-favorites-store.js`](../web/ui-full/components/plugin-favorites-store.js), [`plugin-picker-modal.js`](../web/ui-full/components/plugin-picker-modal.js), [`plugins-view.js`](../web/ui-full/components/plugins-view.js).
+- [/] Plugin snapshot system with session
   - Bundle the specific plugin binaries + presets into the session archive so a session
     opens with the same plugin state on another machine (or a shipping
     Foyer container). Export a full Foyer container that includes the plugins used
@@ -574,6 +578,8 @@ master bus at all.
     - Big task, maybe defer to a DAW vendor and don't quit my day job. But containers/
     OverlayFS with split compute environment snapshots and working project files would 
     be a good fit for fixing DAW bitrot issues
+      - WIP got the basics done, conceptually it would work but it needs to be tested
+      and further refined
 
 ## Resampler (audio ingress / egress sample-rate handling)
 
@@ -594,9 +600,3 @@ master bus at all.
   `AudioContext.sampleRate` (don't hardcode 48k in `audio-ingress.js:49`); shim echoes
   back the engine's rate in `AudioIngressOpened.format` so the browser knows whether to
   resize its worklet buffer.
-
-## Known deferred
-
-- Storing tunnel credential hashes in extended Ardour XML session metadata (currently in
-  `$XDG_DATA_HOME/foyer/tunnel-manifest.json`). Rich's call: "Is this even worthwhile?
-  Defer." Leave in manifest file indefinitely.

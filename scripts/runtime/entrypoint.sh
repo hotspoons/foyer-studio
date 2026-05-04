@@ -118,7 +118,7 @@ log "runtime mode: ${FOYER_RUNTIME_MODE} (rtprio_max=${rtprio_max})"
 #     Xvfb. Same socket the foyer-server's `/ws/plugin-gui` proxy
 #     connects to, so plugin GUI projection lights up automatically
 #     when a user clicks the toggle in the schema panel. Mirrors
-#     the dev-mode flags from the `just run-dummy` recipe.
+#     the dev-mode flags from the `just run` recipe.
 #   * xpra missing  → bare Xvfb fallback. Foyer's xpra capability
 #     probe will return false at startup so the UI hides the toggle
 #     entirely; Ardour itself still paints onto :99 fine.
@@ -181,7 +181,7 @@ start_x_session() {
         # paranoid AND using `--network=host`.
         xpra_bind="${FOYER_XPRA_BIND:-0.0.0.0:14500}"
         log "starting xpra on :99 (HTML5 client at http://<host>:14500, bind=${xpra_bind})"
-        # Flag rationale (mirrors `just run-dummy`):
+        # Flag rationale (mirrors `just run`):
         #   --auth=none --tcp-auth=none --ws-auth=none — xpra 19+
         #     defaults to credential prompts; the HTML5 client
         #     uses the WS path so --ws-auth is the load-bearing

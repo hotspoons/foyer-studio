@@ -41,6 +41,12 @@ unset __foyer_env_already_set
 # with the user's installed Ardour matters more than master parity.
 ARDOUR_TAG="${ARDOUR_TAG:-9.2}"
 
+# When non-empty AND equal to ARDOUR_TAG, `ensure` apt-installs Ardour
+# from Debian sid instead of running the 25-min `waf build`. Source
+# tree is still cloned + `waf configure`-d for shim headers. See `.env`
+# for the rationale and the production Dockerfile for the same trick.
+DEBIAN_SID_ARDOUR_VER="${DEBIAN_SID_ARDOUR_VER:-}"
+
 usage() {
     cat <<EOF
 ardour subcommands:
@@ -55,8 +61,99 @@ ardour subcommands:
 
 Current ARDOUR_DIR: $ARDOUR_DIR
 Current ARDOUR_TAG: $ARDOUR_TAG
+Current DEBIAN_SID_ARDOUR_VER: ${DEBIAN_SID_ARDOUR_VER:-(unset — full source build)}
 Override with: FOYER_ARDOUR_DIR=/path/to/ardour, ARDOUR_TAG=9.2
 EOF
+}
+
+# Whether to short-circuit the source build by apt-installing Ardour
+# from Debian sid. True only when:
+#   * DEBIAN_SID_ARDOUR_VER is set and equals ARDOUR_TAG (.env opts in)
+#   * the host has apt-get + dpkg (Debian-derived)
+#   * we can become root (already root, or sudo -n succeeds)
+# Returns 1 silently otherwise — caller falls through to waf build.
+apt_path_applicable() {
+    local ver="${DEBIAN_SID_ARDOUR_VER:-}"
+    [ -n "$ver" ] || return 1
+    [ "$ARDOUR_TAG" = "$ver" ] || return 1
+    command -v apt-get >/dev/null 2>&1 || return 1
+    [ -f /etc/debian_version ] || return 1
+    if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+sudo_run() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+# Apt-install Ardour from Debian sid. Mirrors the runtime Dockerfile's
+# trick (search for "Ardour 9.2 from sid" in the repo Dockerfile):
+# add sid as a low-priority source so apt only pulls from it on the
+# explicit `-t sid` request. Idempotent — re-runs are ~1 s no-ops.
+do_apt_install_from_sid() {
+    local sid_list=/etc/apt/sources.list.d/sid.list
+    local sid_pref=/etc/apt/preferences.d/sid-pin
+    if [ ! -f "$sid_list" ] || ! grep -q '^deb .* sid main' "$sid_list" 2>/dev/null; then
+        echo "ardour: enabling Debian sid as low-priority apt source"
+        echo "deb http://deb.debian.org/debian sid main" \
+            | sudo_run tee "$sid_list" >/dev/null
+    fi
+    if [ ! -f "$sid_pref" ]; then
+        printf '%s\n' \
+            'Package: *' \
+            'Pin: release a=unstable' \
+            'Pin-Priority: 100' \
+            | sudo_run tee "$sid_pref" >/dev/null
+    fi
+    # Already installed at the right major.minor? Skip the install.
+    # `dpkg-query` prints e.g. `install ok installed 1:9.2.0+ds-1`; we
+    # strip the Debian epoch (`1:`) and revision/+ds/+~ suffixes, then
+    # prefix-match against ARDOUR_TAG so "9.2" matches "9.2.0".
+    local installed
+    installed="$(dpkg-query -W -f='${Status} ${Version}\n' ardour 2>/dev/null \
+                 | awk '/^install ok installed/ { sub(/^[0-9]+:/, "", $4); print $4 }')"
+    if [ -n "$installed" ]; then
+        local trimmed="${installed%%+*}"
+        trimmed="${trimmed%%~*}"
+        trimmed="${trimmed%%-*}"
+        case "$trimmed" in
+            "$ARDOUR_TAG"|"$ARDOUR_TAG".*)
+                echo "ardour: apt package already at $installed (matches $ARDOUR_TAG) — skipping install"
+                return 0
+                ;;
+        esac
+    fi
+    echo "ardour: installing ardour $ARDOUR_TAG from sid (one-time, ~5 min)"
+    # Always refresh apt's lists — sid moves daily and "the sid line
+    # is already there" doesn't prove the index carries the version
+    # we want.
+    sudo_run apt-get update
+    sudo_run apt-get install -y --no-install-recommends -t sid ardour
+}
+
+# Lightweight runtime probe of the apt-installed Ardour. Replaces
+# `do_check` on the apt path — there's no `build/headless/hardour-*`
+# to point at; the binary lives at /usr/bin/ardour (a wrapper that
+# sets LD_LIBRARY_PATH then exec's /usr/lib/ardour9/ardour-X.Y.Z).
+apt_check() {
+    local bin
+    bin="$(command -v ardour 2>/dev/null || true)"
+    if [ -z "$bin" ]; then
+        echo "ardour: no ardour on \$PATH (apt install failed?)"
+        return 1
+    fi
+    if ! "$bin" --version >/tmp/foyer-hardour-check.log 2>&1; then
+        echo "ardour: --version probe failed"
+        sed -n '1,20p' /tmp/foyer-hardour-check.log
+        return 1
+    fi
+    echo "ardour: ok ($bin)"
 }
 
 do_clone() {
@@ -289,83 +386,134 @@ case "$cmd" in
         # bootstrap:
         #   1. clone into ext/ardour if source tree missing (~1 GB)
         #   2. configure + build if the headless binary isn't there
+        #      (or apt-install from sid when DEBIAN_SID_ARDOUR_VER
+        #      matches ARDOUR_TAG — see `apt_path_applicable` above)
         #   3. write the resulting executable path into
         #      `$XDG_DATA_HOME/foyer/config.yaml` via
         #      `foyer configure --backend ardour --force`
         # Idempotent — once everything is in place this short-circuits
-        # in < 1 s. The one-time slow path clones + builds Ardour, so
-        # fresh-clone devs get a real DAW on `just run` without having
-        # to remember separate setup steps.
-        if [ ! -d "$ARDOUR_DIR" ]; then
-            echo "ardour: source tree missing at $ARDOUR_DIR — cloning (large, one-time)"
-            do_clone
-        fi
-        ensure_tags
-        # Switch the working tree to $ARDOUR_TAG when it doesn't
-        # match. Skip if there are local modifications — user may be
-        # mid-hack and we don't want to clobber. Triggers a rebuild
-        # below since the .so files will be stale for the new ref.
-        current_ref="$(git -C "$ARDOUR_DIR" describe --tags --always 2>/dev/null || echo unknown)"
-        if [ "$current_ref" != "$ARDOUR_TAG" ]; then
-            if [ -n "$(git -C "$ARDOUR_DIR" status --porcelain)" ]; then
-                echo "ardour: ⚠ uncommitted changes — staying on $current_ref (target: $ARDOUR_TAG)"
-            else
-                echo "ardour: switching $current_ref → $ARDOUR_TAG"
-                git -C "$ARDOUR_DIR" -c advice.detachedHead=false checkout "$ARDOUR_TAG"
-                # `waf` incremental builds can leave stale objects when
-                # source moves a lot (e.g. removed classes like
-                # PBD::Mutex/RWLock between master ↔ tag). The headless
-                # binary was the symptom: it kept its old name
-                # (`hardour-9.2.591`) and stale undefined-symbol refs
-                # because not every .o was rebuilt. Clean wipe of
-                # generated outputs forces a fresh build, ~30 min, but
-                # only once per ref switch.
-                echo "ardour: cleaning stale build outputs for ref switch"
-                ( cd "$ARDOUR_DIR" && python3 waf clean >/dev/null 2>&1 || true )
-                rm -f "$ARDOUR_DIR/build/gtk2_ardour/ardev_common_waf.sh"
-                rm -rf "$ARDOUR_DIR"/build/headless "$ARDOUR_DIR"/build/gtk2_ardour
+        # in < 1 s. The cold-cache slow path is either ~25 min (waf
+        # build) or ~5 min (apt install + waf configure for headers).
+        if apt_path_applicable; then
+            # Apt path: pre-built Ardour from sid + just enough source
+            # for the shim's CMake to find generated headers under
+            # build/libs/. Skips the 25 min `waf build` step entirely.
+            do_apt_install_from_sid
+            if [ ! -d "$ARDOUR_DIR" ]; then
+                echo "ardour: source tree missing at $ARDOUR_DIR — cloning (for shim headers)"
+                do_clone
             fi
-        fi
-        need_build=0
-        bin="$(latest_bin)"
-        if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-            need_build=1
-        fi
-        if [ ! -f "$ARDOUR_DIR/build/gtk2_ardour/ardev_common_waf.sh" ]; then
-            need_build=1
-        fi
-        if [ "$need_build" -eq 1 ]; then
-            echo "ardour: bootstrapping build (slow path — ~15 min)"
-            do_configure
-            do_build
-        fi
-        if ! do_check; then
-            echo "ardour: retrying incremental build after failed probe..."
-            do_build
-            do_check
-        fi
-        # Write the resolved executable path into config.yaml so the
-        # sidecar (and the UI's backend launcher) can spawn it. Uses
-        # `foyer configure --backend ardour --force` with
-        # FOYER_ARDOUR_BUILD_ROOT pinned to the resolved ARDOUR_DIR
-        # so detection finds the binary deterministically.
-        #
-        # Fast path: if config.yaml already contains the resolved
-        # executable line, skip the `cargo run` entirely. Even with
-        # `--quiet` and a warm target dir, cargo pays a couple seconds
-        # for workspace lock + dep graph rebuild. `just prep` runs on
-        # every `just run`, so that overhead lands on every dev tick.
-        bin="$(latest_bin)"
-        config_yaml="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/config.yaml"
-        if [ -n "$bin" ] && [ -f "$config_yaml" ] \
-             && grep -qF "  executable: $bin" "$config_yaml"; then
-            echo "  id=ardour exec=$bin (config up-to-date, skipped configure)"
-        else
-            (
-                cd "$REPO_ROOT"
-                FOYER_ARDOUR_BUILD_ROOT="$ARDOUR_DIR" \
+            ensure_tags
+            current_ref="$(git -C "$ARDOUR_DIR" describe --tags --always 2>/dev/null || echo unknown)"
+            if [ "$current_ref" != "$ARDOUR_TAG" ]; then
+                if [ -n "$(git -C "$ARDOUR_DIR" status --porcelain)" ]; then
+                    echo "ardour: ⚠ uncommitted changes — staying on $current_ref (target: $ARDOUR_TAG)"
+                else
+                    echo "ardour: switching $current_ref → $ARDOUR_TAG"
+                    git -C "$ARDOUR_DIR" -c advice.detachedHead=false checkout "$ARDOUR_TAG"
+                    # Wipe build/ on ref switch so `waf configure` re-
+                    # runs against the new tree (mirrors the source-build
+                    # branch — same staleness concern applies to the
+                    # generated headers, just at smaller scale).
+                    rm -rf "$ARDOUR_DIR/build"
+                fi
+            fi
+            # Run waf configure if the build dir or its key generated
+            # header is missing. Mirrors the production Dockerfile —
+            # the shim's CMakeLists requires `<src>/build/` to exist
+            # for `libardour-config.h` and friends. ~30 s vs the 25 min
+            # `waf build` we're skipping.
+            if [ ! -f "$ARDOUR_DIR/build/libs/ardour/libardour-config.h" ]; then
+                echo "ardour: waf configure (one-time, ~30s — for shim headers, no full build)"
+                do_configure
+            fi
+            apt_check
+            # Write the apt path into config.yaml. Same fast-path skip
+            # as the source-build branch — `cargo run --quiet` still
+            # costs a couple seconds per `just prep` tick.
+            bin="$(command -v ardour 2>/dev/null || true)"
+            config_yaml="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/config.yaml"
+            if [ -n "$bin" ] && [ -f "$config_yaml" ] \
+                 && grep -qF "  executable: $bin" "$config_yaml"; then
+                echo "  id=ardour exec=$bin (config up-to-date, skipped configure)"
+            else
+                (
+                    cd "$REPO_ROOT"
                     cargo run --quiet --bin foyer -- configure --backend ardour --force
-            )
+                )
+            fi
+        else
+            if [ ! -d "$ARDOUR_DIR" ]; then
+                echo "ardour: source tree missing at $ARDOUR_DIR — cloning (large, one-time)"
+                do_clone
+            fi
+            ensure_tags
+            # Switch the working tree to $ARDOUR_TAG when it doesn't
+            # match. Skip if there are local modifications — user may be
+            # mid-hack and we don't want to clobber. Triggers a rebuild
+            # below since the .so files will be stale for the new ref.
+            current_ref="$(git -C "$ARDOUR_DIR" describe --tags --always 2>/dev/null || echo unknown)"
+            if [ "$current_ref" != "$ARDOUR_TAG" ]; then
+                if [ -n "$(git -C "$ARDOUR_DIR" status --porcelain)" ]; then
+                    echo "ardour: ⚠ uncommitted changes — staying on $current_ref (target: $ARDOUR_TAG)"
+                else
+                    echo "ardour: switching $current_ref → $ARDOUR_TAG"
+                    git -C "$ARDOUR_DIR" -c advice.detachedHead=false checkout "$ARDOUR_TAG"
+                    # `waf` incremental builds can leave stale objects when
+                    # source moves a lot (e.g. removed classes like
+                    # PBD::Mutex/RWLock between master ↔ tag). The headless
+                    # binary was the symptom: it kept its old name
+                    # (`hardour-9.2.591`) and stale undefined-symbol refs
+                    # because not every .o was rebuilt. Clean wipe of
+                    # generated outputs forces a fresh build, ~30 min, but
+                    # only once per ref switch.
+                    echo "ardour: cleaning stale build outputs for ref switch"
+                    ( cd "$ARDOUR_DIR" && python3 waf clean >/dev/null 2>&1 || true )
+                    rm -f "$ARDOUR_DIR/build/gtk2_ardour/ardev_common_waf.sh"
+                    rm -rf "$ARDOUR_DIR"/build/headless "$ARDOUR_DIR"/build/gtk2_ardour
+                fi
+            fi
+            need_build=0
+            bin="$(latest_bin)"
+            if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+                need_build=1
+            fi
+            if [ ! -f "$ARDOUR_DIR/build/gtk2_ardour/ardev_common_waf.sh" ]; then
+                need_build=1
+            fi
+            if [ "$need_build" -eq 1 ]; then
+                echo "ardour: bootstrapping build (slow path — ~15 min)"
+                do_configure
+                do_build
+            fi
+            if ! do_check; then
+                echo "ardour: retrying incremental build after failed probe..."
+                do_build
+                do_check
+            fi
+            # Write the resolved executable path into config.yaml so the
+            # sidecar (and the UI's backend launcher) can spawn it. Uses
+            # `foyer configure --backend ardour --force` with
+            # FOYER_ARDOUR_BUILD_ROOT pinned to the resolved ARDOUR_DIR
+            # so detection finds the binary deterministically.
+            #
+            # Fast path: if config.yaml already contains the resolved
+            # executable line, skip the `cargo run` entirely. Even with
+            # `--quiet` and a warm target dir, cargo pays a couple seconds
+            # for workspace lock + dep graph rebuild. `just prep` runs on
+            # every `just run`, so that overhead lands on every dev tick.
+            bin="$(latest_bin)"
+            config_yaml="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/config.yaml"
+            if [ -n "$bin" ] && [ -f "$config_yaml" ] \
+                 && grep -qF "  executable: $bin" "$config_yaml"; then
+                echo "  id=ardour exec=$bin (config up-to-date, skipped configure)"
+            else
+                (
+                    cd "$REPO_ROOT"
+                    FOYER_ARDOUR_BUILD_ROOT="$ARDOUR_DIR" \
+                        cargo run --quiet --bin foyer -- configure --backend ardour --force
+                )
+            fi
         fi
         ;;
     clean)

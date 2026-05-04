@@ -6,6 +6,12 @@
 //   - Playhead rendered from transport.position, click ruler to seek
 //   - Major (every 5s) + minor (every 1s) grid lines
 //   - Drag region body to move; drag edges to resize — optimistic + UpdateRegion
+//   - Ctrl/Cmd + edge drag: time-stretch via StretchRegion (Ardour: MidiStretch /
+//     RBStretch). Overlay: "elastic" with no modifier (pitch-preserving); "tape" while
+//     Shift is held (varispeed). `preserve_pitch` is the inverse of Shift on pointer-up.
+//     MIDI ignores preserve_pitch.
+//   - S: split selected regions at the hover cursor line when the pointer
+//        is over the grid, else at the playhead (SplitRegion)
 //   - Waveforms via WaveformCache; resolution picked from current zoom level
 //
 // All sample-math uses `sample_rate` from the TimelineMeta payload so
@@ -17,7 +23,7 @@ import "foyer-ui-core/viz/waveform-gl.js";
 import "./midi-strip.js";
 import "./automation-lane.js";
 import "foyer-ui-core/viz/viz-picker.js";
-import { getVizPrefs } from "foyer-ui-core/viz/viz-settings.js";
+import { getVizPref, getVizPrefs, setVizPref } from "foyer-ui-core/viz/viz-settings.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { toast } from "foyer-ui-core/widgets/toast.js";
@@ -335,6 +341,27 @@ export class TimelineView extends LitElement {
     }
     .region .edge.left  { left: 0; }
     .region .edge.right { right: 0; }
+    .region.stretch-active {
+      outline: 1px dashed color-mix(in oklab, var(--color-accent) 70%, transparent);
+      z-index: 1;
+    }
+    .region.stretch-active::after {
+      content: attr(data-stretch-mode);
+      position: absolute;
+      top: 4px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: color-mix(in oklab, var(--color-accent) 35%, transparent);
+      color: var(--color-text);
+      pointer-events: none;
+      z-index: 4;
+    }
 
     .playhead {
       position: absolute;
@@ -526,12 +553,16 @@ export class TimelineView extends LitElement {
     this._transportDropStats = { stale_seq: 0, backward_jump: 0 };
     // Quantization grid prefs persist per-browser. Default off so a
     // first-time user doesn't see extra lines they didn't ask for.
+    // Visibility (`_quantOn`) is now mirrored to the viz prefs
+    // (`quantGridOn`) so the Viz menu can toggle it alongside the
+    // time-grid toggle. Subdivision (`_quantDiv`) stays in its own
+    // localStorage key — it's a per-timeline setting that doesn't
+    // belong in the broader viz prefs blob.
+    this._quantOn = getVizPref("quantGridOn") === true;
     try {
-      this._quantOn = localStorage.getItem("foyer.timeline.quant.on") === "1";
       const d = parseInt(localStorage.getItem("foyer.timeline.quant.div") || "16", 10);
       this._quantDiv = [4, 8, 16, 32, 6, 12].includes(d) ? d : 16;
     } catch {
-      this._quantOn = false;
       this._quantDiv = 16;
     }
   }
@@ -587,7 +618,20 @@ export class TimelineView extends LitElement {
     // existing rules on `.lane-gridlines .gl` and `.quant-line` read
     // them via `var(--foyer-time-grid)` / `var(--foyer-quant-grid)`.
     this._applyGridColors();
-    this._onVizPrefsChanged = () => this._applyGridColors();
+    this._onVizPrefsChanged = () => {
+      // Mirror the quant-on toggle from the Viz menu so the timeline
+      // re-renders when the user flips it from over there. Without
+      // this the menu writes the pref but the timeline holds its
+      // own stale `_quantOn` until something else triggers an
+      // update. The time-grid render path reads `getVizPref` live
+      // each render so it doesn't need a mirrored property.
+      const next = getVizPref("quantGridOn") === true;
+      if (next !== this._quantOn) {
+        this._quantOn = next;
+      }
+      this._applyGridColors();
+      this.requestUpdate();
+    };
     window.addEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
   }
 
@@ -618,6 +662,39 @@ export class TimelineView extends LitElement {
     );
     this.style.setProperty("--foyer-quant-grid", rgba(quant, quantA));
   }
+
+  /**
+   * Sample position for split-at-playhead / split-at-cursor: the pointer-
+   * tracked hover line when `_hoverSamples` is set (mouse over grid), else
+   * transport playhead.
+   */
+  _splitAnchorSamples() {
+    if (this._hoverSamples != null && Number.isFinite(Number(this._hoverSamples))) {
+      return Math.round(Number(this._hoverSamples));
+    }
+    return Math.round(Number(this._playheadSamples) || 0);
+  }
+
+  /** Reaper-style: S splits each selected region at `_splitAnchorSamples()`. */
+  splitSelectedRegionsAtPlayhead() {
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    const ph = this._splitAnchorSamples();
+    const minPiece = 4800;
+    for (const id of [...this._selectedRegionIds]) {
+      const r = this._regionForId(id);
+      if (!r) continue;
+      const start = Number(r.start_samples) || 0;
+      const len = Number(r.length_samples) || 0;
+      const end = start + len;
+      if (ph <= start || ph >= end) continue;
+      const leftLen = ph - start;
+      const rightLen = end - ph;
+      if (leftLen < minPiece || rightLen < minPiece) continue;
+      ws.send({ type: "split_region", id: r.id, at_samples: ph });
+    }
+  }
+
   disconnectedCallback() {
     if (this._onVizPrefsChanged) window.removeEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
@@ -1632,12 +1709,8 @@ export class TimelineView extends LitElement {
           >Loop selection</button>
         ` : null}
         <span style="flex:1"></span>
-        <label title="BPM-quantized grid overlay (uses transport.tempo)">
-          <input type="checkbox" .checked=${!!this._quantOn} @change=${() => this._toggleQuantOn()}>
-          Grid
-        </label>
         ${this._quantOn ? html`
-          <select title="Grid subdivision per quarter note"
+          <select title="Grid subdivision per quarter note (toggle visibility from the Viz menu)"
                   @change=${(e) => this._setQuantDiv(Number(e.currentTarget.value))}>
             <option value="4"  ?selected=${this._quantDiv === 4}>1/4</option>
             <option value="8"  ?selected=${this._quantDiv === 8}>1/8</option>
@@ -1648,7 +1721,6 @@ export class TimelineView extends LitElement {
           </select>
         ` : null}
         <foyer-viz-picker></foyer-viz-picker>
-        <span>${totalSec.toFixed(1)}s · ${sr} Hz · wheel to zoom · Alt-wheel for lane height</span>
         ${this._diagEnabled() ? html`
           <span>
             drops: seq=${this._transportDropStats.stale_seq || 0}
@@ -1671,11 +1743,13 @@ export class TimelineView extends LitElement {
               </span>
             `)}
           </div>
-          <div class="lane-gridlines" style="width:${widthPx}px">
-            ${ticks.map(({ t, major }) => html`
-              <span class="gl ${major ? 'major' : ''}" style="left:${t * this._zoom}px"></span>
-            `)}
-          </div>
+          ${getVizPref("timeGridOn") !== false ? html`
+            <div class="lane-gridlines" style="width:${widthPx}px">
+              ${ticks.map(({ t, major }) => html`
+                <span class="gl ${major ? 'major' : ''}" style="left:${t * this._zoom}px"></span>
+              `)}
+            </div>
+          ` : null}
           ${this._renderQuantGrid()}
           ${tracks.map(t => this._renderLane(t))}
           ${this._renderSelection()}
@@ -1783,7 +1857,13 @@ export class TimelineView extends LitElement {
 
   _toggleQuantOn() {
     this._quantOn = !this._quantOn;
-    try { localStorage.setItem("foyer.timeline.quant.on", this._quantOn ? "1" : "0"); } catch {}
+    // Mirror to the viz prefs so the Viz menu's checkbox reflects the
+    // change. The legacy `foyer.timeline.quant.on` localStorage key
+    // is no longer the source of truth — kept only as fallback for
+    // anything that hasn't been migrated. setVizPref dispatches
+    // `foyer:viz-prefs-changed`, which the timeline already listens
+    // for via `_onVizPrefsChanged`.
+    setVizPref("quantGridOn", this._quantOn);
   }
   _setQuantDiv(d) {
     this._quantDiv = d;
@@ -1835,6 +1915,14 @@ export class TimelineView extends LitElement {
             detail: { startSamples: lo, endSamples: hi },
             bubbles: true, composed: true,
           }));
+          // Loop-follows-selection: if the transport is actively looping
+          // when the user finishes resizing the selection, push the new
+          // range to the engine so the loop tracks the visible band.
+          // Scoped to *resize* (not initial selection drag) so an
+          // unrelated selection gesture doesn't yank the loop.
+          if (window.__foyer?.store?.state?.controls?.get?.("transport.looping")) {
+            this._setLoopToSelection();
+          }
         }
       }
     };
@@ -2592,8 +2680,8 @@ export class TimelineView extends LitElement {
     for (const id of movingIds) {
       const r = this._regionForId(id);
       if (r) origs.set(id, {
-        start: r.start_samples,
-        len: r.length_samples,
+        start: Number(r.start_samples) || 0,
+        len: Number(r.length_samples) || 0,
         offset: Number(r.source_offset_samples || 0),
       });
     }
@@ -2607,26 +2695,9 @@ export class TimelineView extends LitElement {
     // right and surfaces a striped placeholder in the gap, since we
     // don't have peaks for the source span we just exposed. The
     // freeze is reverted in `up` so the post-RegionUpdated peak
-    // refetch repaints normally.
+    // refetch repaints normally. Initialized on first real drag motion
+    // when the mode is left-trim (not stretch); see `move` below.
     let resizeLeftPreview = null;
-    if (mode === "resize-left") {
-      const o = origs.get(region.id);
-      const regionEl = this.renderRoot.querySelector(`.region[data-id="${region.id}"]`);
-      const wfEl = regionEl?.querySelector("foyer-waveform-gl");
-      if (o && regionEl && wfEl) {
-        const origPeaksPx = (o.len / sr) * pxPerSec;
-        wfEl.freezeViewport(origPeaksPx);
-        // Placeholder div lives inside the region. Sized inline as
-        // the drag progresses; hidden when dx >= 0.
-        const placeholder = document.createElement("div");
-        placeholder.className = "resize-preview-placeholder";
-        placeholder.style.left = "0px";
-        placeholder.style.width = "0px";
-        placeholder.style.display = "none";
-        regionEl.appendChild(placeholder);
-        resizeLeftPreview = { wfEl, placeholder, origPeaksPx };
-      }
-    }
 
     // During the drag we only update the local preview — no
     // `update_region` commands are sent until pointer-up. Why: each
@@ -2644,6 +2715,29 @@ export class TimelineView extends LitElement {
     // 3 px threshold matches typical OS drag-start hysteresis.
     let didDrag = false;
     const DRAG_PX_THRESHOLD = 3;
+    const teardownLeftTrimPreview = () => {
+      if (!resizeLeftPreview) return;
+      resizeLeftPreview.wfEl.unfreezeViewport();
+      resizeLeftPreview.placeholder.remove();
+      resizeLeftPreview = null;
+    };
+    const ensureLeftTrimPreview = () => {
+      if (resizeLeftPreview || mode !== "resize-left") return;
+      const o = origs.get(region.id);
+      const regionEl = this.renderRoot.querySelector(`.region[data-id="${region.id}"]`);
+      const wfEl = regionEl?.querySelector("foyer-waveform-gl");
+      if (o && regionEl && wfEl) {
+        const origPeaksPx = (o.len / sr) * pxPerSec;
+        wfEl.freezeViewport(origPeaksPx);
+        const placeholder = document.createElement("div");
+        placeholder.className = "resize-preview-placeholder";
+        placeholder.style.left = "0px";
+        placeholder.style.width = "0px";
+        placeholder.style.display = "none";
+        regionEl.appendChild(placeholder);
+        resizeLeftPreview = { wfEl, placeholder, origPeaksPx };
+      }
+    };
     const move = (e) => {
       const dxPx = e.clientX - startX;
       const dxSamples = Math.round((dxPx / pxPerSec) * sr);
@@ -2651,6 +2745,21 @@ export class TimelineView extends LitElement {
         didDrag = true;
         // Real drag started — keep the multi-selection; demote is off.
         this._pendingDemoteRegionId = null;
+      }
+      const edgeResize = mode === "resize-left" || mode === "resize-right";
+      const stretchResize =
+        didDrag && edgeResize && !!(e.ctrlKey || e.metaKey);
+      if (didDrag && mode === "resize-left") {
+        if (stretchResize) teardownLeftTrimPreview();
+        else ensureLeftTrimPreview();
+      }
+      for (const el of els) {
+        el.classList.toggle("stretch-active", stretchResize);
+        if (stretchResize) {
+          el.dataset.stretchMode = e.shiftKey ? "tape" : "elastic";
+        } else {
+          delete el.dataset.stretchMode;
+        }
       }
       for (const id of movingIds) {
         const o = origs.get(id);
@@ -2667,6 +2776,14 @@ export class TimelineView extends LitElement {
         } else if (mode === "resize-right") {
           preview.length_samples = Math.max(4800, o.len + dxSamples);
         } else if (mode === "resize-left") {
+          if (stretchResize) {
+            const minDx = -o.offset;
+            const maxDx = o.len - 4_800;
+            const dx = Math.max(minDx, Math.min(maxDx, dxSamples));
+            preview.start_samples = o.start + dx;
+            preview.length_samples = o.len - dx;
+            preview.source_offset_samples = o.offset;
+          } else {
           // Trim from the start: advance the source-media offset by
           // the same amount the timeline edge moves, so the lozenge
           // shrinks AND the underlying content slides forward (rather
@@ -2701,19 +2818,24 @@ export class TimelineView extends LitElement {
               ph.style.display = "none";
             }
           }
+          }
         }
         this._patchRegionLocally(preview);
       }
     };
-    const up = () => {
-      for (const el of els) el.classList.remove("dragging");
+    const up = (upEv) => {
+      for (const el of els) {
+        el.classList.remove("dragging");
+        el.classList.remove("stretch-active");
+        delete el.dataset.stretchMode;
+      }
       // Drop the waveform freeze + placeholder. The post-commit
       // RegionUpdated event will invalidate the wf cache and the
       // next ensure() call refetches peaks for the new offset+length.
-      if (resizeLeftPreview) {
-        resizeLeftPreview.wfEl.unfreezeViewport();
-        resizeLeftPreview.placeholder.remove();
-      }
+      teardownLeftTrimPreview();
+      const edgeResize = mode === "resize-left" || mode === "resize-right";
+      const commitStretch =
+        didDrag && edgeResize && !!(upEv.ctrlKey || upEv.metaKey);
       // Click without drag on a member of a multi-selection collapses
       // the selection to just that member — standard "click is a
       // single-select; drag preserves multi" behavior.
@@ -2734,6 +2856,21 @@ export class TimelineView extends LitElement {
         if (!r) continue;
         const o = origs.get(id);
         if (!o) continue;
+        if (commitStretch) {
+          if (
+            r.start_samples === o.start
+            && r.length_samples === o.len
+          ) continue;
+          window.__foyer?.ws?.send({
+            type: "stretch_region",
+            id: r.id,
+            new_start_samples: r.start_samples,
+            new_length_samples: r.length_samples,
+            anchor: mode === "resize-left" ? "end" : "start",
+            preserve_pitch: !upEv.shiftKey,
+          });
+          continue;
+        }
         const newOffset = Number(r.source_offset_samples || 0);
         const offsetMoved = newOffset !== o.offset;
         // Skip the round-trip if nothing actually moved (e.g. the

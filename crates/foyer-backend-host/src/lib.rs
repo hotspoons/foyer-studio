@@ -16,6 +16,7 @@
 
 mod client;
 pub mod discovery;
+mod media_staging;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,9 +25,9 @@ use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmRx, PcmTx};
 use foyer_schema::{
     AudioFormat, AudioSource, AutomationMode, AutomationPoint, Command, ControlValue, EnginePort,
-    EntityId, LatencyReport, MidiNote, MidiNotePatch, PatchChange, PatchChangePatch,
-    PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta,
-    Track, TrackPatch, WaveformPeaks,
+    EntityId, LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange,
+    PatchChangePatch, PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout,
+    Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 
 mod waveform;
@@ -82,6 +83,13 @@ impl Backend for HostBackend {
     async fn set_control(&self, id: EntityId, value: ControlValue) -> Result<(), BackendError> {
         self.client
             .send_command(Command::ControlSet { id, value })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn request_quit(&self) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::ShimQuit)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
@@ -232,6 +240,31 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn list_audio_pool(
+        &self,
+        _session_id: &foyer_schema::EntityId,
+    ) -> Result<Vec<foyer_schema::AudioPoolSource>, BackendError> {
+        self.client
+            .list_audio_pool()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn import_audio(&self, path: String) -> Result<(), BackendError> {
+        self.client
+            .import_audio(path)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn media_import_staging_dir_abs(
+        &self,
+        _session_id: &foyer_schema::EntityId,
+        project_file_abs: &str,
+    ) -> Result<Option<PathBuf>, BackendError> {
+        Ok(Some(media_staging::staging_dir_abs(project_file_abs)))
+    }
+
     async fn update_region(
         &self,
         id: EntityId,
@@ -280,6 +313,33 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn stretch_region(
+        &self,
+        id: EntityId,
+        new_start_samples: i64,
+        new_length_samples: u64,
+        anchor: String,
+        preserve_pitch: bool,
+    ) -> Result<(), BackendError> {
+        self.client
+            .stretch_region(
+                id,
+                new_start_samples,
+                new_length_samples,
+                anchor,
+                preserve_pitch,
+            )
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn split_region(&self, id: EntityId, at_samples: i64) -> Result<(), BackendError> {
+        self.client
+            .split_region(id, at_samples)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn create_region(
         &self,
         track_id: EntityId,
@@ -309,6 +369,18 @@ impl Backend for HostBackend {
     async fn reorder_tracks(&self, ordered_ids: Vec<EntityId>) -> Result<(), BackendError> {
         self.client
             .send_command(Command::ReorderTracks { ordered_ids })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn set_track_midi_channel_mode(
+        &self,
+        track_id: EntityId,
+        direction: String,
+        mode: String,
+        mask: u16,
+    ) -> Result<Track, BackendError> {
+        self.client
+            .set_track_midi_channel_mode(track_id, direction, mode, mask)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
@@ -468,6 +540,16 @@ impl Backend for HostBackend {
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
+    async fn list_midi_patch_names(
+        &self,
+        track_id: EntityId,
+        channel: u8,
+    ) -> Result<MidiPatchNames, BackendError> {
+        self.client
+            .list_midi_patch_names(track_id, channel)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
     async fn load_plugin_preset(
         &self,
         plugin_id: EntityId,
@@ -507,6 +589,18 @@ impl Backend for HostBackend {
     ) -> Result<(), BackendError> {
         self.client
             .delete_patch_change(region_id, patch_change_id)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+    async fn set_track_midi_patch(
+        &self,
+        track_id: EntityId,
+        channel: u8,
+        bank: i32,
+        program: u8,
+    ) -> Result<(), BackendError> {
+        self.client
+            .set_track_midi_patch(track_id, channel, bank, program)
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }

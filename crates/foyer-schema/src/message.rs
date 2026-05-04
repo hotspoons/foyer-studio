@@ -1,17 +1,17 @@
 //! Message envelope and event/command types shared across `foyer-ipc` and
 //! `foyer-ws`.
 //!
-//! The envelope adds `seq`, `origin`, and a schema version tag so consumers can detect
-//! drops (by seq gap), attribute changes (for presence/UI), and reject incompatible
-//! senders.
+//! The envelope adds `seq`, `origin`, numeric `schema`, Kubernetes-style `api_version`,
+//! and a body so consumers can detect drops (by seq gap), attribute changes (for
+//! presence/UI), reject incompatible senders, and gate coarse API evolution.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    audio::{AudioTransport, IceCandidate, SdpPayload},
-    midi::{MidiNote, MidiNotePatch},
+    audio::{AudioPoolSource, AudioTransport, IceCandidate, SdpPayload},
+    midi::{MidiNote, MidiNotePatch, MidiPatchNames},
     session::{Group, GroupPatch, Track, TrackPatch},
     Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, LatencyReport,
     PathListing, PluginCatalogEntry, PluginInstance, PluginPreset, Region, RegionPatch, Session,
@@ -26,6 +26,10 @@ pub type Seq = u64;
 pub struct Envelope<T> {
     /// Schema version at send time. `(major, minor)` — major mismatches are hard errors.
     pub schema: (u16, u16),
+    /// Named API line (`group/version`), Kubernetes-style. Prefer this for coarse
+    /// compatibility; [`Self::schema`] remains the fine-grained tuple.
+    #[serde(default = "default_control_plane_api_version")]
+    pub api_version: String,
     pub seq: Seq,
     /// Free-form origin tag, e.g. `"shim"`, `"user:alice"`, `"sidecar"`. Used for
     /// presence displays and to let clients ignore echoes of their own changes.
@@ -41,6 +45,24 @@ pub struct Envelope<T> {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub session_id: Option<EntityId>,
     pub body: T,
+}
+
+fn default_control_plane_api_version() -> String {
+    crate::CONTROL_PLANE_API_VERSION.to_string()
+}
+
+impl<T> Envelope<T> {
+    /// Envelope with [`crate::SCHEMA_VERSION`] and [`crate::CONTROL_PLANE_API_VERSION`].
+    pub fn new(seq: Seq, origin: Option<String>, session_id: Option<EntityId>, body: T) -> Self {
+        Self {
+            schema: crate::SCHEMA_VERSION,
+            api_version: crate::CONTROL_PLANE_API_VERSION.to_string(),
+            seq,
+            origin,
+            session_id,
+            body,
+        }
+    }
 }
 
 /// Value update for a single control — produced whenever an authoritative side observes
@@ -153,9 +175,19 @@ pub enum Event {
         timeline: TimelineMeta,
         regions: Vec<Region>,
     },
+    /// Reply to `Command::ListAudioPool`: pool entries backed by on-disk audio
+    /// (typically one row per channel for multichannel files).
+    AudioPoolListed {
+        sources: Vec<AudioPoolSource>,
+    },
     /// Reply to `Command::ListPlugins`.
     PluginsList {
         entries: Vec<PluginCatalogEntry>,
+    },
+    /// Reply to `Command::ListMidiPatchNames` for one MIDI track/channel.
+    MidiPatchNamesListed {
+        track_id: EntityId,
+        names: MidiPatchNames,
     },
     /// Reply to `Command::ListPorts`. Contains the engine-level ports
     /// the shim enumerated (post-filter if the command specified a
@@ -377,12 +409,32 @@ pub enum Event {
     SessionClosed {
         session_id: EntityId,
     },
+    /// The sidecar's focus has shifted to a different open session
+    /// (`Command::SelectSession`, or post-close fallback to the next
+    /// session in the list). Carries the new focused session's id, or
+    /// `None` if focus was cleared (last session closed). Distinct from
+    /// `SessionSnapshot` so clients can tear down session-bound
+    /// resources (audio listener stream, region caches, etc.) without
+    /// having to track session_id transitions across every snapshot.
+    SessionFocusChanged {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        session_id: Option<EntityId>,
+    },
     /// Sidecar found orphan session registry entries on startup — shim
     /// processes still running but not attached, or crashed shims
     /// with leftover registry/crash data. The UI offers reattach or
     /// reopen (or dismiss / delete the registry entry).
     OrphansDetected {
         orphans: Vec<OrphanInfo>,
+    },
+    /// Recently-opened projects, server-tracked. The sidecar persists
+    /// this list across restarts (one file in XDG_DATA_HOME) so each
+    /// client doesn't carry its own per-browser fork that goes stale
+    /// when the server moves between containers. Emitted on connect
+    /// and after every touch / forget / clear so welcome screens +
+    /// the Session → Open Recent submenu stay live.
+    RecentsList {
+        recents: Vec<RecentEntry>,
     },
 
     // ───── audio streaming negotiation ──────────────────────────────────
@@ -550,6 +602,14 @@ fn default_region_kind() -> String {
     "midi".to_string()
 }
 
+fn default_stretch_anchor() -> String {
+    "start".to_string()
+}
+
+fn default_stretch_preserve_pitch() -> bool {
+    true
+}
+
 /// One currently-open session as tracked by the sidecar. Multi-session
 /// clients render this in the session switcher chip and in the
 /// Session → Recent menu.
@@ -575,6 +635,30 @@ pub struct SessionInfo {
     /// `Event::SessionDirtyChanged` for convenience in the UI.
     #[serde(default)]
     pub dirty: bool,
+}
+
+/// One entry in the server-tracked "recently opened projects" list.
+/// Persisted to disk so the list survives sidecar restarts and is
+/// shared across browser profiles. The previous design kept this in
+/// each browser's localStorage, which left stale entries pointing at
+/// projects that didn't exist on whichever container was currently
+/// hosting the sidecar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecentEntry {
+    /// Jail-relative path stored on the wire (matches the form clients
+    /// send to LaunchProject). Used as the unique key for touch /
+    /// forget operations.
+    pub path: String,
+    /// Display name, defaults to the project file's basename.
+    #[serde(default)]
+    pub name: String,
+    /// Backend adapter id ("ardour" / "stub"). Echoed back in the
+    /// touch path so the next launch goes to the right adapter.
+    #[serde(default)]
+    pub backend_id: String,
+    /// Unix epoch seconds the user last opened this project.
+    #[serde(default)]
+    pub opened_at: u64,
 }
 
 /// An orphaned session discovered on sidecar startup. Either the shim
@@ -708,6 +792,15 @@ pub enum Command {
     ListRegions {
         track_id: EntityId,
     },
+    /// Ask the shim for all audio file sources in the session pool.
+    /// Answered with `Event::AudioPoolListed`. Stub returns an empty list.
+    ListAudioPool,
+    /// Import/register an on-disk audio file into the pool via Ardour's
+    /// `SourceFactory::createExternal`. `path` must be an absolute filesystem
+    /// path readable by the host.
+    ImportAudio {
+        path: String,
+    },
     /// Ask for the plugin catalog.
     ListPlugins,
     /// Browse a path inside the jail. `""` / `"/"` / `"."` mean root.
@@ -785,6 +878,34 @@ pub enum Command {
         /// Destination position on the timeline in samples.
         at_samples: u64,
     },
+    /// Time-stretch or squash region contents so they fill a new timeline
+    /// span. `anchor` is `"start"` when the left edge stays fixed (typical
+    /// right-edge drag) or `"end"` when the right edge stays fixed (left-edge
+    /// drag). The Ardour shim applies MIDI via `MidiStretch` and audio via
+    /// `RBStretch` (Rubber Band), then `replace_region` so the session owns the
+    /// new source. Emits `RegionUpdated` / playlist echoes like other region
+    /// mutations.
+    ///
+    /// For **audio**, `preserve_pitch` selects Rubber Band behavior: `true`
+    /// keeps perceived pitch (editor "Time Stretch" default); `false` uses
+    /// inverse pitch scale like Ardour's "resample / no pitch preserve" preset
+    /// (varispeed / tape-style: longer → lower pitch). MIDI ignores this field.
+    StretchRegion {
+        id: EntityId,
+        new_start_samples: i64,
+        new_length_samples: u64,
+        #[serde(default = "default_stretch_anchor")]
+        anchor: String,
+        #[serde(default = "default_stretch_preserve_pitch")]
+        preserve_pitch: bool,
+    },
+    /// Split one region into two at an absolute timeline position (`at_samples`
+    /// in session samples). The cut must fall strictly inside the region.
+    /// Emits a fresh `RegionsList` for the track (stub + Ardour).
+    SplitRegion {
+        id: EntityId,
+        at_samples: i64,
+    },
     /// Ask for decimated peaks for `region_id` at the given resolution. The
     /// sidecar rounds the request to the nearest cached tier.
     ListWaveform {
@@ -830,6 +951,12 @@ pub enum Command {
     CloseSession {
         session_id: EntityId,
     },
+    /// Ask the shim to quit its host process. The Ardour shim raises
+    /// `SIGTERM` on its own pid so Ardour's stock signal handler runs
+    /// the normal save-and-exit path. Sent by the sidecar as the first
+    /// rung of the close-session escalation (graceful → SIGTERM →
+    /// SIGKILL); fire-and-forget. Stub backends ignore it.
+    ShimQuit,
     /// Reattach to an orphaned running shim. Sidecar builds a fresh
     /// backend against the orphan's socket and promotes it to a full
     /// session (as if it had been opened normally). Emits
@@ -843,6 +970,20 @@ pub enum Command {
     DismissOrphan {
         orphan_id: EntityId,
     },
+
+    // ───── recents (server-tracked recent projects) ─────────────────────
+    /// Ask the sidecar for its current recents list. Answered with
+    /// `Event::RecentsList`. Sent eagerly on initial WS attach; clients
+    /// can re-fire after a network blip to resync.
+    ListRecents,
+    /// Drop a single entry from the recents list. Persisted to disk.
+    /// Emits an updated `Event::RecentsList`.
+    ForgetRecent {
+        path: String,
+    },
+    /// Drop every recents entry. Emits an updated (empty)
+    /// `Event::RecentsList`.
+    ClearRecents,
 
     // ───── track / group / plugin lifecycle ─────────────────────────────
     /// Mutate a track. Fields in `patch` that are `None` stay unchanged.
@@ -860,6 +1001,20 @@ pub enum Command {
     /// Any track id omitted should keep relative order at the tail.
     ReorderTracks {
         ordered_ids: Vec<EntityId>,
+    },
+    /// Set a MIDI track's channel-filter mode + mask. `direction` is
+    /// `"capture"` (inbound recording) or `"playback"` (outbound to
+    /// the instrument). `mode` is `"all"` | `"filter"` | `"force"`.
+    /// `mask` is a 16-bit channel bitmask (bit 0 = ch 1); in `"force"`
+    /// mode the lowest set bit is the target channel. New MIDI tracks
+    /// default to `mode="force", mask=0x0001` so a viewing app's
+    /// channel selector stays hidden unless the user has explicitly
+    /// opted into a multi-channel setup.
+    SetTrackMidiChannelMode {
+        track_id: EntityId,
+        direction: String,
+        mode: String,
+        mask: u16,
     },
     /// Create a new group / submix. Answered with `Event::GroupUpdated`.
     CreateGroup {
@@ -904,6 +1059,13 @@ pub enum Command {
     /// `Event::PluginPresetsListed`.
     ListPluginPresets {
         plugin_id: EntityId,
+    },
+    /// Ask the shim/host for Midnam-backed patch names for a MIDI track.
+    /// Answered with `Event::MidiPatchNamesListed`.
+    ListMidiPatchNames {
+        track_id: EntityId,
+        /// MIDI channel 0..15.
+        channel: u8,
     },
     LoadPluginPreset {
         plugin_id: EntityId,
@@ -964,6 +1126,16 @@ pub enum Command {
     DeletePatchChange {
         region_id: EntityId,
         patch_change_id: EntityId,
+    },
+    /// Set the live patch on a MIDI track/channel. This mirrors
+    /// Ardour's patch selector: MIDI tracks update bank/program
+    /// automation controls, while instrument inserts receive immediate
+    /// MIDI bank/program events.
+    SetTrackMidiPatch {
+        track_id: EntityId,
+        channel: u8,
+        bank: i32,
+        program: u8,
     },
 
     /// Install a beat-sequencer layout on a MIDI region. The shim
@@ -1209,16 +1381,15 @@ mod tests {
 
     #[test]
     fn envelope_carries_seq_and_origin() {
-        let env = Envelope {
-            schema: crate::SCHEMA_VERSION,
-            seq: 42,
-            origin: Some("user:alice".into()),
-            session_id: None,
-            body: Command::ControlSet {
+        let env = Envelope::new(
+            42,
+            Some("user:alice".into()),
+            None,
+            Command::ControlSet {
                 id: EntityId::new("transport.tempo"),
                 value: ControlValue::Float(128.0),
             },
-        };
+        );
         let j = serde_json::to_string(&env).unwrap();
         let back: Envelope<Command> = serde_json::from_str(&j).unwrap();
         assert_eq!(env, back);
@@ -1245,6 +1416,11 @@ mod tests {
             inputs: vec![],
             outputs: vec![],
             automation_lanes: vec![],
+            capture_channel_mode: None,
+            capture_channel_mask: None,
+            playback_channel_mode: None,
+            playback_channel_mask: None,
+            midi_patches: vec![],
         };
         let patch = Patch::TrackAdded { track: Box::new(t) };
         let j = serde_json::to_string(&patch).unwrap();

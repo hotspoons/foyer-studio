@@ -386,6 +386,29 @@ customElements.define("foyer-plugin-layer", PluginLayer);
  * existing window. Caller passes the live plugin snapshot — we read its
  * `name` for the title and its layout heuristic for the initial size.
  */
+/// Walk the live session looking for the track that owns
+/// `pluginId`. Returns the track's display name, or null if no
+/// snapshot is loaded yet / the plugin was just deleted. Used by
+/// `openPluginFloat` to prefix the window title — same shape the
+/// legacy `<foyer-plugin-window>` chrome uses on line 225 above.
+function _findOwningTrack(pluginId) {
+  const session = (typeof window !== "undefined" ? window : globalThis)
+    ?.__foyer?.store?.state?.session;
+  if (!session) return null;
+  for (const t of session.tracks || []) {
+    const plugins = t.plugins || [];
+    for (let i = 0; i < plugins.length; i += 1) {
+      const pi = plugins[i];
+      if (pi.id !== pluginId) continue;
+      return {
+        trackId: t.id || "",
+        trackName: t.name || "",
+      };
+    }
+  }
+  return null;
+}
+
 export function openPluginFloat(pluginInstance) {
   if (!pluginInstance?.id) return;
   const size = heuristicSize(pluginInstance);
@@ -394,11 +417,22 @@ export function openPluginFloat(pluginInstance) {
   ]).then(([{ openWindow }]) => {
     const panel = document.createElement("foyer-plugin-panel");
     panel.plugin = pluginInstance;
-    // trackName resolves via the live session inside the panel itself
-    // when needed (mixer breadcrumb); the foyer-window header shows the
-    // plugin name.
+    // Title-bar label includes the OWNING TRACK so a tiled wall of
+    // plugin windows is navigable — without this, opening the EQ on
+    // five tracks gives you five identical "x42 EQ" titles and no
+    // way to tell which is which. Pattern matches the legacy
+    // `<foyer-plugin-window>` chrome (`{trackName} · {pluginName}`).
+    // The lookup walks the live session for the owning track; if
+    // the plugin can't be located (race during track delete, or the
+    // snapshot hasn't loaded yet), fall back to bare plugin name.
+    const owning = _findOwningTrack(pluginInstance.id);
+    const trackName = owning?.trackName || "";
+    const pluginName = pluginInstance.name || "Plugin";
+    const titleText = trackName ? `${trackName} · ${pluginName}` : pluginName;
+    panel.trackName = trackName;
+    panel.trackId = owning?.trackId || "";
     openWindow({
-      title: pluginInstance.name || "Plugin",
+      title: titleText,
       icon: "puzzle-piece",
       // Session-scoped: plugin instance ids are per-session in
       // libardour, so two projects can each surface a `plugin.7`

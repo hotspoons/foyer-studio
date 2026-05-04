@@ -12,6 +12,19 @@ use crate::{
     EntityId,
 };
 
+/// Fade curve shape for audio regions (`AudioRegion` in Ardour). Matches
+/// `ARDOUR::FadeShape` enum order / naming on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FadeShape {
+    #[default]
+    Linear,
+    Fast,
+    Slow,
+    ConstantPower,
+    Symmetric,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Region {
     pub id: EntityId,
@@ -59,6 +72,19 @@ pub struct Region {
     /// sequencer owns the note list.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub foyer_sequencer: Option<SequencerLayout>,
+    /// Per-region linear gain (Ardour `scale_amplitude`, ~1.0 = unity). Audio only.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub gain_linear: Option<f64>,
+    /// Fade-in length in session samples; `None` / omitted = not reported or off.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fade_in_samples: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fade_out_samples: Option<u64>,
+    /// Last-applied fade shape (stub / round-trip); omit when unknown.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fade_in_shape: Option<FadeShape>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fade_out_shape: Option<FadeShape>,
 }
 
 /// Minimal viewport/scale info UIs need to lay out regions consistently.
@@ -128,6 +154,18 @@ pub struct RegionPatch {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub muted: Option<bool>,
+    /// Length in samples; `Some(0)` clears the fade (Ardour: inactive + default curve).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fade_in_samples: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fade_out_samples: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fade_in_shape: Option<FadeShape>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fade_out_shape: Option<FadeShape>,
+    /// Linear gain coefficient (`AudioRegion::set_scale_amplitude`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub gain_linear: Option<f64>,
 }
 
 #[cfg(test)]
@@ -149,6 +187,11 @@ mod tests {
             notes: vec![],
             patch_changes: vec![],
             foyer_sequencer: None,
+            gain_linear: None,
+            fade_in_samples: None,
+            fade_out_samples: None,
+            fade_in_shape: None,
+            fade_out_shape: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         let back: Region = serde_json::from_str(&j).unwrap();

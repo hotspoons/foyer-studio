@@ -58,6 +58,10 @@ export class WaveformGl extends LitElement {
       display: block;
       position: absolute;
       inset: 0;
+      /* Same as midi-strip host: leave hit-testing to the parent
+       * region row (move) and edge handles (resize / stretch). The
+       * canvas would otherwise steal narrow left/right edge targets. */
+      pointer-events: none;
       /* inset:0 defaults the canvas to the region's full extent;
        * _updateViewport overrides left + width inline to the
        * visible slice. */
@@ -69,6 +73,7 @@ export class WaveformGl extends LitElement {
       width: 100%;
       height: 100%;
       display: block;
+      pointer-events: none;
     }
   `;
 

@@ -86,6 +86,7 @@ fn now_ms() -> u64 {
 fn envelope(state: &AppState, body: Event) -> Envelope<Event> {
     Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
         origin: Some("server".into()),
         session_id: None,

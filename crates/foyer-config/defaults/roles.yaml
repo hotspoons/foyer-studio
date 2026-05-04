@@ -115,6 +115,7 @@ roles:
       # waveform + listing so the client can render the timeline
       - list_waveform
       - list_regions
+      - list_audio_pool
       - list_plugins
       - list_ports
       - list_actions
@@ -152,6 +153,7 @@ roles:
       - audio_egress_stop
       - list_waveform
       - list_regions
+      - list_audio_pool
       - list_plugins
       - list_ports
       - list_actions

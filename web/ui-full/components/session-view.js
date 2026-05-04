@@ -4,7 +4,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { showPreview } from "foyer-ui-core/widgets/preview-modal.js";
-import { launchProjectGuarded } from "../session-launch.js";
+import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
 
 /** Parent of a jail-relative path. `""` and `"/"` return `""`. */
 function parentPath(p) {
@@ -24,6 +24,7 @@ export class SessionView extends LitElement {
     _activeBackend:     { state: true, type: String },
     _selectedBackendId: { state: true, type: String },
     _showHidden:        { state: true, type: Boolean },
+    mode:               { type: String },  // "open" (default) or "new"
   };
 
   static styles = css`
@@ -215,6 +216,7 @@ export class SessionView extends LitElement {
     // chip pins it explicitly until they click another chip.
     this._selectedBackendId = null;
     this._showHidden = false;
+    this.mode = "open";  // "open" or "new"
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
 
     // Internal browser history for file navigation. Replaces the old
@@ -584,7 +586,9 @@ export class SessionView extends LitElement {
     const click = e.kind === "dir"
       ? () => this._browse(e.path)
       : e.kind === "session_dir"
-        ? () => this._open(e)
+        ? (this.mode === "new"
+            ? () => this._browse(e.path)   // new mode: navigate into session_dir
+            : () => this._open(e))         // open mode: launch session
         : () => this._preview(e);
     return html`
       <div class="row ${e.kind === 'session_dir' ? 'session' : ''}"

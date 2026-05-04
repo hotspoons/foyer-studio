@@ -402,6 +402,21 @@ pub fn detect_ardour_executable() -> Option<PathBuf> {
     if let Some(p) = scan_ardour_build_tree(&build_root) {
         return Some(p);
     }
+    // 3b. In-repo convention (repo/ext/ardour) — used by this project's
+    //     `just run` and `just run-jack` recipes.
+    let in_repo = std::env::var("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .map(|p| {
+            p.parent()
+                .unwrap_or(&p)
+                .parent()
+                .unwrap_or(&p)
+                .join("ext/ardour")
+        })
+        .unwrap_or_else(|_| PathBuf::from("./ext/ardour"));
+    if let Some(p) = scan_ardour_build_tree(&in_repo) {
+        return Some(p);
+    }
     None
 }
 

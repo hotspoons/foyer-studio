@@ -52,12 +52,33 @@ export class FoyerWs extends EventTarget {
       this.dispatchEvent(
         new CustomEvent("project_launch_start", { detail: body }),
       );
-    } else if (body?.type === "control_set" && body?.id === "transport.position") {
+    } else if (body?.type === "control_set") {
+      // Generic self-set notification — listeners (notably the store)
+      // pin the value locally so a stale broadcast that lands AFTER
+      // we sent our command can't roll us back. Without this, hitting
+      // record on the phone while a desktop client has the same
+      // control cached reliably races: the desktop's pre-existing
+      // session_snapshot or the backend's slightly-delayed echo
+      // arrives carrying the OLD value and overrides the optimistic
+      // local update. The legacy `transport_seek_request` event
+      // remains as a more specific signal for transport.position
+      // (callers grep for the exact tag).
       this.dispatchEvent(
-        new CustomEvent("transport_seek_request", {
-          detail: { value: Number(body.value) || 0, at_ms: Date.now() },
+        new CustomEvent("control_set_request", {
+          detail: {
+            id: body.id,
+            value: body.value,
+            at_ms: Date.now(),
+          },
         }),
       );
+      if (body.id === "transport.position") {
+        this.dispatchEvent(
+          new CustomEvent("transport_seek_request", {
+            detail: { value: Number(body.value) || 0, at_ms: Date.now() },
+          }),
+        );
+      }
     }
     const env = { schema: [0, 1], seq: 0, origin: this.origin, body };
     const text = JSON.stringify(env);

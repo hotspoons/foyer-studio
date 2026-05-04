@@ -19,6 +19,7 @@ mod fixtures;
 mod jail;
 mod regions;
 mod state;
+mod stub_media_pool;
 mod waveform;
 
 pub use jail::Jail;
@@ -33,9 +34,9 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use foyer_backend::{Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx};
 use foyer_schema::{
-    Action, AudioFormat, AudioSource, ControlUpdate, ControlValue, EntityId, Event, LatencyReport,
-    PathListing, PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch, Session,
-    TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EntityId, Event,
+    LatencyReport, PathListing, PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch,
+    Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 use futures::{Stream, StreamExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -236,10 +237,13 @@ impl Backend for StubBackend {
 
     async fn set_control(&self, id: EntityId, value: ControlValue) -> Result<(), BackendError> {
         let mut st = self.state.lock().await;
-        st.set_control(&id, value.clone())?;
-        let _ = self.tx.send(Event::ControlUpdate {
-            update: ControlUpdate { id, value },
-        });
+        // `set_control_with_fanout` returns the primary update plus
+        // any sibling updates produced by an active group link, so
+        // the UI's optimistic-pin layer sees every echo it expects.
+        let updates = st.set_control_with_fanout(&id, value)?;
+        for update in updates {
+            let _ = self.tx.send(Event::ControlUpdate { update });
+        }
         Ok(())
     }
 
@@ -523,6 +527,57 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    async fn stretch_region(
+        &self,
+        id: EntityId,
+        new_start_samples: i64,
+        new_length_samples: u64,
+        anchor: String,
+        _preserve_pitch: bool,
+    ) -> Result<(), BackendError> {
+        const MIN_LEN: u64 = 4_800;
+        let (track_id, _region) = {
+            let mut store = self.regions.lock().await;
+            store
+                .stretch_content(&id, new_start_samples, new_length_samples, &anchor, MIN_LEN)
+                .map_err(BackendError::Other)?
+        };
+        self.waveforms.lock().await.clear_region(&id);
+        let regions = {
+            let mut store = self.regions.lock().await;
+            store.regions_for(&track_id, self.sample_rate()).clone()
+        };
+        let _ = self.tx.send(Event::RegionsList {
+            track_id,
+            regions,
+            timeline: self.timeline_meta(),
+        });
+        Ok(())
+    }
+
+    async fn split_region(&self, id: EntityId, at_samples: i64) -> Result<(), BackendError> {
+        const MIN_LEN: u64 = 4_800;
+        let left = crate::regions::fresh_region_id(self.next_dup_seed());
+        let right = crate::regions::fresh_region_id(self.next_dup_seed());
+        let track_id = {
+            let mut store = self.regions.lock().await;
+            store
+                .split_at(&id, at_samples, MIN_LEN, left, right)
+                .map_err(BackendError::Other)?
+        };
+        self.waveforms.lock().await.clear_region(&id);
+        let regions = {
+            let mut store = self.regions.lock().await;
+            store.regions_for(&track_id, self.sample_rate()).clone()
+        };
+        let _ = self.tx.send(Event::RegionsList {
+            track_id,
+            regions,
+            timeline: self.timeline_meta(),
+        });
+        Ok(())
+    }
+
     async fn update_track(&self, id: EntityId, patch: TrackPatch) -> Result<Track, BackendError> {
         let updated = self
             .state
@@ -531,6 +586,64 @@ impl Backend for StubBackend {
             .update_track(&id, &patch)
             .ok_or_else(|| BackendError::Other(format!("unknown track {id}")))?;
         // Echo to all subscribers so every browser repaints, not just the caller.
+        let _ = self.tx.send(Event::TrackUpdated {
+            track: Box::new(updated.clone()),
+        });
+        Ok(updated)
+    }
+
+    async fn create_group(
+        &self,
+        name: String,
+        color: Option<String>,
+        members: Vec<EntityId>,
+    ) -> Result<(), BackendError> {
+        let group = self.state.lock().await.create_group(name, color, members);
+        // Per-event `GroupUpdated` doesn't currently have a store-side
+        // reducer, so we emit a `Patch::Reload` to force the UI to
+        // re-fetch the snapshot — that's also what the Ardour shim
+        // does after `RouteGroup` mutations (`encode_patch_reload`),
+        // so backends behave the same way on the wire.
+        let _ = self.tx.send(Event::SessionPatch {
+            patch: foyer_schema::Patch::Reload,
+        });
+        let _ = self.tx.send(Event::GroupUpdated { group });
+        Ok(())
+    }
+
+    async fn update_group(
+        &self,
+        id: EntityId,
+        patch: foyer_schema::GroupPatch,
+    ) -> Result<(), BackendError> {
+        self.state.lock().await.update_group(&id, &patch)?;
+        let _ = self.tx.send(Event::SessionPatch {
+            patch: foyer_schema::Patch::Reload,
+        });
+        Ok(())
+    }
+
+    async fn delete_group(&self, id: EntityId) -> Result<(), BackendError> {
+        self.state.lock().await.delete_group(&id)?;
+        let _ = self.tx.send(Event::SessionPatch {
+            patch: foyer_schema::Patch::Reload,
+        });
+        Ok(())
+    }
+
+    async fn set_track_midi_channel_mode(
+        &self,
+        track_id: EntityId,
+        direction: String,
+        mode: String,
+        mask: u16,
+    ) -> Result<Track, BackendError> {
+        let updated = self
+            .state
+            .lock()
+            .await
+            .set_track_midi_channel_mode(&track_id, &direction, &mode, mask)
+            .ok_or_else(|| BackendError::Other(format!("unknown track {track_id}")))?;
         let _ = self.tx.send(Event::TrackUpdated {
             track: Box::new(updated.clone()),
         });
@@ -656,6 +769,37 @@ impl Backend for StubBackend {
             None => cache.clear_all(),
         };
         Ok(dropped)
+    }
+
+    async fn list_audio_pool(
+        &self,
+        session_id: &EntityId,
+    ) -> Result<Vec<AudioPoolSource>, BackendError> {
+        let Some(jail) = self.jail.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let root = jail
+            .root()
+            .canonicalize()
+            .map_err(|e| BackendError::Other(format!("jail root: {e}")))?;
+        let pool = stub_media_pool::pool_dir_abs(&root, session_id);
+        stub_media_pool::list_stub_pool_entries(&pool, &root, self.sample_rate())
+            .map_err(BackendError::Other)
+    }
+
+    async fn media_import_staging_dir_abs(
+        &self,
+        session_id: &EntityId,
+        _project_file_abs: &str,
+    ) -> Result<Option<PathBuf>, BackendError> {
+        let Some(jail) = self.jail.as_ref() else {
+            return Ok(None);
+        };
+        let root = jail
+            .root()
+            .canonicalize()
+            .map_err(|e| BackendError::Other(format!("jail root: {e}")))?;
+        Ok(Some(stub_media_pool::pool_dir_abs(&root, session_id)))
     }
 
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {

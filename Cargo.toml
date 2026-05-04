@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/foyer-schema",
+    "crates/foyer-capabilities-macros",
+    "crates/foyer-capabilities",
     "crates/foyer-ipc",
     "crates/foyer-backend",
     "crates/foyer-backend-stub",
@@ -10,6 +12,7 @@ members = [
     "crates/foyer-cli",
     "crates/foyer-desktop",
     "crates/foyer-config",
+    "crates/foyer-snapshot",
 ]
 
 [workspace.package]
@@ -30,6 +33,8 @@ repository = "https://github.com/foyer-studio/foyer-studio"
 [workspace.dependencies]
 # internal crates
 foyer-schema        = { path = "crates/foyer-schema" }
+foyer-capabilities-macros = { path = "crates/foyer-capabilities-macros" }
+foyer-capabilities  = { path = "crates/foyer-capabilities" }
 foyer-ipc           = { path = "crates/foyer-ipc" }
 foyer-backend       = { path = "crates/foyer-backend" }
 foyer-backend-stub  = { path = "crates/foyer-backend-stub" }
@@ -38,6 +43,7 @@ foyer-server        = { path = "crates/foyer-server" }
 foyer-cli           = { path = "crates/foyer-cli" }
 foyer-desktop       = { path = "crates/foyer-desktop" }
 foyer-config        = { path = "crates/foyer-config" }
+foyer-snapshot      = { path = "crates/foyer-snapshot" }
 
 # serde stack
 serde       = { version = "1", features = ["derive"] }

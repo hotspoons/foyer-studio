@@ -149,6 +149,29 @@ export class TrackStrip extends LitElement {
       margin: 0 2px;
       background: var(--color-accent);
     }
+    /* Group color band — thin horizontal stripe at the very top of
+       the strip when the track belongs to a group. Sits above the
+       track-color swatch so the user can read both at a glance:
+       group color = section affinity, swatch = per-track identity. */
+    .group-band {
+      height: 3px;
+      border-radius: 2px;
+      margin: 0 2px 2px;
+      background: var(--color-accent);
+      opacity: 0.85;
+    }
+    .group-band.linked-on::after {
+      /* Tiny dot on the right end signals an active group with at
+         least one live link flag — bright enough to read on a glance
+         but small enough not to compete with the peak meter. */
+      content: "";
+      display: block;
+      width: 4px; height: 4px; border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 4px currentColor;
+      margin-left: auto; margin-top: -3px;
+      transform: translate(-2px, 0);
+    }
     foyer-plugin-strip { flex: 0 0 auto; }
     .mon-row {
       display: flex;
@@ -321,8 +344,24 @@ export class TrackStrip extends LitElement {
       ? `background:${t.color}`
       : `background:linear-gradient(90deg, var(--color-accent), var(--color-accent-2))`;
     const nameStyle = `font-size:${d.labelSize}px`;
+    // Group affinity band. `t.group_id` is the foreign key; the
+    // matching group object lives on `session.groups`. We read it via
+    // the store rather than asking the parent because tile-leaf
+    // doesn't otherwise pass the session through.
+    const group = this._groupOf(t);
+    const groupActive = group && group.active !== false
+      && (group.link_gain !== false || group.link_mute !== false
+       || group.link_solo !== false || group.link_record !== false);
+    const groupBandStyle = group?.color
+      ? `background:${group.color}`
+      : null;
 
     return html`
+      ${group && groupBandStyle ? html`
+        <div class="group-band ${groupActive ? "linked-on" : ""}"
+             style=${groupBandStyle}
+             title="Group: ${group.name}${groupActive ? "" : " (inactive)"}"></div>
+      ` : null}
       ${d.showColorBar ? html`<div class="swatch" style=${swatchStyle}></div>` : null}
       ${this._renaming
         ? html`
@@ -584,6 +623,16 @@ export class TrackStrip extends LitElement {
   _isSequencer() {
     const ids = window.__foyer?.store?.state?.sequencerTrackIds;
     return ids ? ids.has(this.track?.id) : false;
+  }
+
+  /** Resolve the group object this track belongs to (or null). Read
+   *  through the store so the strip stays sealed off from any
+   *  parent-prop plumbing — the session always lives there. */
+  _groupOf(t) {
+    if (!t?.group_id) return null;
+    const groups = window.__foyer?.store?.state?.session?.groups;
+    if (!Array.isArray(groups)) return null;
+    return groups.find((g) => g.id === t.group_id) || null;
   }
 
   _onNameClick(ev) {

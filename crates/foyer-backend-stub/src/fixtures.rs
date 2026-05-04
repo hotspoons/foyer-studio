@@ -68,6 +68,7 @@ pub(crate) fn meter(id: &str) -> Parameter {
 }
 
 pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>) -> Track {
+    let is_midi = matches!(kind, TrackKind::Midi);
     Track {
         id: EntityId::new(format!("track.{slug}")),
         name: name.into(),
@@ -87,6 +88,11 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
         inputs: vec![],
         outputs: vec![],
         automation_lanes: vec![],
+        capture_channel_mode: is_midi.then(|| "force".into()),
+        capture_channel_mask: is_midi.then_some(0x0001),
+        playback_channel_mode: is_midi.then(|| "force".into()),
+        playback_channel_mask: is_midi.then_some(0x0001),
+        midi_patches: vec![],
     }
 }
 
@@ -504,6 +510,7 @@ pub(crate) fn default_inserts_for(slug: &str) -> Vec<PluginInstance> {
             current_preset: None,
             has_native_gui: None,
             native_gui_kind: None,
+            missing: None,
         }
     };
     match slug {
@@ -589,6 +596,21 @@ pub(crate) fn initial_session() -> Session {
             punch_out: None,
             metronome: None,
             sync_source: None,
+            // Server-authoritative return-on-stop mode. Default is
+            // "leave" (no auto-seek on stop) because that's what
+            // every DAW does out of the box. Clients change it via
+            // ControlSet on `transport.return_mode`.
+            return_mode: Some(Parameter {
+                id: EntityId::new("transport.return_mode"),
+                kind: ControlKind::Discrete,
+                label: "Return on Stop".into(),
+                range: None,
+                scale: ScaleCurve::Linear,
+                unit: None,
+                enum_labels: vec!["leave".into(), "zero".into(), "play_start".into()],
+                group: None,
+                value: ControlValue::Text("leave".into()),
+            }),
         },
         tracks: vec![
             track("kick", "Kick", TrackKind::Audio, Some("#c04040")),

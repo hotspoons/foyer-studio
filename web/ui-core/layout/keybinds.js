@@ -38,6 +38,43 @@ function queryDeep(sel) {
   return walk(document);
 }
 
+/** Every matching element in the document + open shadow trees (tree order). */
+function queryAllDeep(sel) {
+  const out = [];
+  const walk = (root) => {
+    try {
+      root.querySelectorAll(sel).forEach((el) => out.push(el));
+    } catch {
+      /* ignore */
+    }
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  };
+  walk(document);
+  return out;
+}
+
+/**
+ * Pick the timeline the user is actually editing. `queryDeep` alone
+ * returns DOM-first match, which can be an unused float / wrong instance
+ * while the focused tile has the selection — splits then no-op.
+ */
+function queryTimelineFromKeyEvent(ev) {
+  const path = typeof ev.composedPath === "function" ? ev.composedPath() : [];
+  for (const n of path) {
+    if (n?.nodeName === "FOYER-TIMELINE-VIEW") return n;
+  }
+  const all = queryAllDeep("foyer-timeline-view");
+  for (const tl of all) {
+    if (tl.getSelectedRegionIds?.()?.length) return tl;
+  }
+  for (const tl of all) {
+    if (tl._hoverSamples != null || tl._lastMouseGridX != null) return tl;
+  }
+  return all[0] || null;
+}
+
 export class Keybinds {
   /**
    * @param {import("./layout-store.js").LayoutStore} store
@@ -114,6 +151,21 @@ export class Keybinds {
           tl.toggleMuteRegionSelection?.();
           return;
         }
+      }
+      // Split at playhead: bare S. Runs in document capture so a preceding
+      // window handler can use stopImmediatePropagation without blocking us,
+      // yet `defaultPrevented` still suppresses split when that handler owned
+      // the key (e.g. a user layout chord on `S`).
+      if (
+        (e.code === "KeyS" || lower === "s")
+        && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
+      ) {
+        if (e.defaultPrevented || e.repeat) return;
+        const tl = queryTimelineFromKeyEvent(e);
+        if (!tl?.splitSelectedRegionsAtPlayhead) return;
+        e.preventDefault();
+        tl.splitSelectedRegionsAtPlayhead();
+        return;
       }
     }
 

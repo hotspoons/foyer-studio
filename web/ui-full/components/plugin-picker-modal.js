@@ -9,6 +9,12 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
+import {
+  getPluginPickerFavoritesOnly,
+  isPluginFavorite,
+  setPluginPickerFavoritesOnly,
+  togglePluginFavorite,
+} from "./plugin-favorites-store.js";
 
 export class PluginPickerModal extends LitElement {
   static properties = {
@@ -28,6 +34,7 @@ export class PluginPickerModal extends LitElement {
     _query:    { state: true, type: String },
     _format:   { state: true, type: String },
     _role:     { state: true, type: String },
+    _favoritesOnly: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -73,7 +80,7 @@ export class PluginPickerModal extends LitElement {
     }
     header .close:hover { color: var(--color-text); background: var(--color-surface-elevated); }
     .toolbar {
-      display: flex; gap: 10px; align-items: center;
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
       padding: 10px 18px;
       background: var(--color-surface);
       border-bottom: 1px solid var(--color-border);
@@ -91,6 +98,7 @@ export class PluginPickerModal extends LitElement {
       font: inherit; font-size: 12px; color: var(--color-text);
     }
     select {
+      flex: 0 0 auto;
       background: var(--color-surface-elevated);
       color: var(--color-text);
       border: 1px solid var(--color-border);
@@ -118,6 +126,39 @@ export class PluginPickerModal extends LitElement {
     .row .name { font-weight: 600; color: var(--color-text); font-size: 12px; }
     .row .vendor { font-size: 10px; color: var(--color-text-muted); }
     .row .badges { display: flex; gap: 4px; margin-left: auto; }
+    .fav-toggle {
+      flex: 0 0 auto;
+      box-sizing: border-box;
+      min-width: 32px;
+      height: 30px;
+      background: var(--color-surface-muted);
+      border: 1px solid var(--color-border);
+      cursor: pointer;
+      padding: 0 6px;
+      font-size: 17px;
+      line-height: 1;
+      color: var(--color-text-muted);
+      border-radius: var(--radius-sm);
+    }
+    .fav-toggle:hover {
+      background: var(--color-surface-elevated);
+      color: var(--color-text);
+      border-color: var(--color-accent);
+    }
+    .fav-toggle.on {
+      color: var(--color-accent);
+      border-color: color-mix(in oklab, var(--color-accent) 55%, var(--color-border));
+      background: color-mix(in oklab, var(--color-accent) 14%, var(--color-surface-muted));
+    }
+    label.fav-only {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--color-text);
+      cursor: pointer; user-select: none; white-space: nowrap;
+    }
+    label.fav-only input { accent-color: var(--color-accent); }
     .badge {
       font-size: 9px; font-weight: 600; letter-spacing: 0.08em;
       text-transform: uppercase; padding: 2px 6px;
@@ -158,8 +199,10 @@ export class PluginPickerModal extends LitElement {
     this._query = "";
     this._format = "all";
     this._role = "all";
+    this._favoritesOnly = getPluginPickerFavoritesOnly();
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
     this._keyHandler = (ev) => { if (ev.key === "Escape") this._close(); };
+    this._favPrefsHandler = () => this.requestUpdate();
   }
 
   connectedCallback() {
@@ -170,10 +213,12 @@ export class PluginPickerModal extends LitElement {
       ws.send({ type: "list_plugins" });
     }
     document.addEventListener("keydown", this._keyHandler);
+    window.addEventListener("foyer:plugin-favorites-changed", this._favPrefsHandler);
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     document.removeEventListener("keydown", this._keyHandler);
+    window.removeEventListener("foyer:plugin-favorites-changed", this._favPrefsHandler);
     super.disconnectedCallback();
   }
 
@@ -188,15 +233,17 @@ export class PluginPickerModal extends LitElement {
   _filtered() {
     const q = this._query.trim().toLowerCase();
     const lockRole = this.lockedRole || null;
-    return this._entries.filter((e) => {
+    let list = this._entries.filter((e) => {
       if (this._format !== "all" && e.format !== this._format) return false;
       if (lockRole) {
         if (e.role !== lockRole) return false;
       } else if (this._role !== "all" && e.role !== this._role) return false;
+      if (this._favoritesOnly && !isPluginFavorite(e.uri)) return false;
       if (!q) return true;
       return (e.name || "").toLowerCase().includes(q)
           || (e.vendor || "").toLowerCase().includes(q);
     });
+    return list;
   }
 
   _close() {
@@ -283,6 +330,16 @@ export class PluginPickerModal extends LitElement {
               <option value="utility">Utility</option>
             </select>
           `}
+          <label class="fav-only" title="Show only plugins marked with ★ (saved in this browser)">
+            <input
+              type="checkbox"
+              .checked=${this._favoritesOnly}
+              @change=${(e) => {
+                this._favoritesOnly = e.currentTarget.checked;
+                setPluginPickerFavoritesOnly(this._favoritesOnly);
+              }}>
+            Favorites only
+          </label>
         </div>
         <div class="list">
           ${this._loading && this._entries.length === 0
@@ -291,8 +348,19 @@ export class PluginPickerModal extends LitElement {
               ? html`<div class="empty">No plugins match.</div>`
               : Object.entries(byRole).map(([role, items]) => html`
                   <div class="group-title">${role} (${items.length})</div>
-                  ${items.map((p) => html`
+                  ${items.map((p) => {
+                    const fav = isPluginFavorite(p.uri);
+                    return html`
                     <div class="row" @click=${() => this._insert(p)}>
+                      <button
+                        type="button"
+                        class="fav-toggle ${fav ? "on" : ""}"
+                        title=${fav ? "Remove from favorites" : "Add to favorites"}
+                        @click=${(e) => {
+                          e.stopPropagation();
+                          togglePluginFavorite(p.uri);
+                          this.requestUpdate();
+                        }} aria-label=${fav ? "Remove from favorites" : "Add to favorites"}>${fav ? "★" : "☆"}</button>
                       ${icon("puzzle-piece", 16)}
                       <div>
                         <div class="name">${p.name}</div>
@@ -303,7 +371,8 @@ export class PluginPickerModal extends LitElement {
                         <span class="badge">${p.role}</span>
                       </div>
                     </div>
-                  `)}
+                  `;
+                  })}
                 `)
           }
         </div>

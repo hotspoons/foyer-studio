@@ -11,14 +11,15 @@
 mod actions;
 pub use actions::default_daw_actions;
 
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use async_trait::async_trait;
 use foyer_schema::{
-    Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, Event, LatencyReport,
-    MidiNote, MidiNotePatch, PatchChange, PatchChangePatch, PathListing, PluginCatalogEntry,
-    PluginPreset, Region, RegionPatch, SequencerLayout, Session, TimelineMeta, Track, TrackPatch,
-    WaveformPeaks,
+    Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EnginePort, EntityId, Event,
+    LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch,
+    PathListing, PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session,
+    TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -110,21 +111,11 @@ pub trait Backend: Send + Sync + 'static {
     /// = explicit hide; absent = unknown (UI is optimistic).
     fn features(&self) -> std::collections::BTreeMap<String, bool> {
         use std::collections::BTreeMap;
-        let mut f = BTreeMap::new();
-        for id in [
-            "sequencer",
-            "midi",
-            "surround_pan",
-            "automation",
-            "groups",
-            "sends",
-            "plugins",
-            "recording",
-            "export",
-        ] {
-            f.insert(id.into(), true);
+        let mut m = BTreeMap::new();
+        for c in foyer_capabilities::FoyerCapability::ALL {
+            m.insert(c.wire_id().to_string(), true);
         }
-        f
+        m
     }
 
     // ─── introspection ──────────────────────────────────────────────────
@@ -207,6 +198,40 @@ pub trait Backend: Send + Sync + 'static {
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {
         Ok(Vec::new())
     }
+    /// Enumerate audio file sources in the session media pool. Default empty.
+    ///
+    /// `session_id` is the open-session UUID. Backends that drive a real DAW
+    /// usually ignore it (the shim already scopes to the connected session);
+    /// stubs may use it for per-session disk layout.
+    async fn list_audio_pool(
+        &self,
+        _session_id: &EntityId,
+    ) -> Result<Vec<AudioPoolSource>, BackendError> {
+        Ok(Vec::new())
+    }
+    /// Register an absolute on-disk path as a session audio source (after any
+    /// server-side staging). Default is a no-op so minimal backends keep running.
+    async fn import_audio(&self, _path: String) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Absolute directory where HTTP/browser uploads should be written before
+    /// [`Self::import_audio`] is invoked with the resulting jail-visible path.
+    ///
+    /// `session_id` is the open-session UUID (same as the `session_id` query
+    /// parameter on the upload endpoint). `project_file_abs` is the session's
+    /// primary project file on disk — hosts that mirror disk beside the project
+    /// use it; stubs may ignore it and key only on `session_id`.
+    ///
+    /// `Ok(None)` means this backend does not support the HTTP staging flow —
+    /// the sidecar should reject uploads without embedding layout rules.
+    async fn media_import_staging_dir_abs(
+        &self,
+        _session_id: &EntityId,
+        _project_file_abs: &str,
+    ) -> Result<Option<PathBuf>, BackendError> {
+        Ok(None)
+    }
     async fn add_plugin(
         &self,
         _track_id: EntityId,
@@ -259,6 +284,15 @@ pub trait Backend: Send + Sync + 'static {
     async fn save_session(&self, _as_path: Option<&str>) -> Result<(), BackendError> {
         Err(BackendError::Other("save_session not supported".into()))
     }
+    /// Ask the backend's host process to quit. The Ardour shim
+    /// translates this to `kill(getpid(), SIGTERM)` so Ardour's stock
+    /// signal handler runs the normal save-and-exit path. Stub /
+    /// in-process backends are expected to no-op (default impl).
+    /// Fire-and-forget: the sidecar follows up with SIGTERM/SIGKILL
+    /// escalation against the child PID if the host doesn't exit.
+    async fn request_quit(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
     async fn update_region(
         &self,
         _id: EntityId,
@@ -279,6 +313,22 @@ pub trait Backend: Send + Sync + 'static {
     }
     async fn reorder_tracks(&self, _ordered_ids: Vec<EntityId>) -> Result<(), BackendError> {
         Err(BackendError::Other("reorder_tracks not supported".into()))
+    }
+    /// Set the channel-filter mode + mask on a MIDI track. `direction`
+    /// is `"capture"` or `"playback"`; `mode` is `"all"` | `"filter"` |
+    /// `"force"`. Mask is a 16-bit channel bitmask (bit 0 = ch 1).
+    /// On success returns the updated `Track` so the server rebroadcasts
+    /// the new channel state to peers.
+    async fn set_track_midi_channel_mode(
+        &self,
+        _track_id: EntityId,
+        _direction: String,
+        _mode: String,
+        _mask: u16,
+    ) -> Result<Track, BackendError> {
+        Err(BackendError::Other(
+            "set_track_midi_channel_mode not supported".into(),
+        ))
     }
 
     /// Open a named undo group. Mutations received between this call
@@ -344,6 +394,25 @@ pub trait Backend: Send + Sync + 'static {
         Err(BackendError::Other(
             "duplicate_region_range not supported".into(),
         ))
+    }
+
+    /// Time-stretch region contents to span `new_length_samples` on the
+    /// timeline. `anchor` is `"start"` or `"end"` (which timeline edge stays
+    /// fixed). Fire-and-forget: the host echoes `RegionUpdated` when applied.
+    async fn stretch_region(
+        &self,
+        _id: EntityId,
+        _new_start_samples: i64,
+        _new_length_samples: u64,
+        _anchor: String,
+        _preserve_pitch: bool,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other("stretch_region not supported".into()))
+    }
+
+    /// Split a region at absolute timeline `at_samples`. Fire-and-forget.
+    async fn split_region(&self, _id: EntityId, _at_samples: i64) -> Result<(), BackendError> {
+        Err(BackendError::Other("split_region not supported".into()))
     }
 
     /// Create a brand-new empty region on the given track.
@@ -430,6 +499,17 @@ pub trait Backend: Send + Sync + 'static {
             "delete_patch_change not supported".into(),
         ))
     }
+    async fn set_track_midi_patch(
+        &self,
+        _track_id: EntityId,
+        _channel: u8,
+        _bank: i32,
+        _program: u8,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Other(
+            "set_track_midi_patch not supported".into(),
+        ))
+    }
 
     async fn set_sequencer_layout(
         &self,
@@ -510,6 +590,18 @@ pub trait Backend: Send + Sync + 'static {
         _plugin_id: EntityId,
     ) -> Result<Vec<PluginPreset>, BackendError> {
         Ok(Vec::new())
+    }
+    async fn list_midi_patch_names(
+        &self,
+        _track_id: EntityId,
+        channel: u8,
+    ) -> Result<MidiPatchNames, BackendError> {
+        Ok(MidiPatchNames {
+            channel,
+            model: None,
+            mode: None,
+            banks: Vec::new(),
+        })
     }
     async fn load_plugin_preset(
         &self,

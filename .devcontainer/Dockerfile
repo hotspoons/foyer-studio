@@ -11,6 +11,8 @@ FROM debian:trixie
 
 ARG TARGETPLATFORM
 ARG TARGETARCH
+ARG WITH_KXSTUDIO=0
+ARG GMSYNTH_VERSION=0.6.4
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -98,6 +100,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libasound2-dev \
       libjack-jackd2-dev \
       libsndfile1-dev \
+      # libltc-dev: linear-timecode lib used by the Foyer Dummy audio
+      # backend (shims/ardour/backends/dummy/) for the LTC test-tone
+      # generator. Without it the shim's CMake bails at line 351 with
+      # "libltc not found." Mirrors the runtime Dockerfile's build stage.
+      libltc-dev \
+      # libudev-dev: defensive include — Ardour headers transitively
+      # pull a udev path on Linux via JACK/ALSA device enumeration.
+      # Same reason it lives in the production builder stage.
+      libudev-dev \
       # ---- audio runtime (optional — dummy mode works without hardware) ----
       # jackd2 ships the `jackd` daemon so Ardour can use its native backend
       # inside the container via `jackd -d dummy` (no audio device required).
@@ -142,28 +153,35 @@ RUN curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors
       > /etc/apt/sources.list.d/xpra.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      xpra xpra-x11 xpra-html5 \
+      xpra xpra-x11 xpra-html5 dbus-x11 \
  && rm -rf /var/lib/apt/lists/*
 # `xpra-x11` is the load-bearing piece for `xpra start :NN`. xpra ≥6
 # split the X11 server modes (`seamless`/`desktop`/`shadow`) into a
 # separate package; without it `just run-dummy`'s xpra spawn aborts
 # with `you must install 'xpra-x11' to use 'seamless'` and the dev
 # loop's plugin GUI projection silently doesn't come up.
-
 # ── LV2 plugin + soundfont bundle (devcontainer = release parity) ──
 #
 # Same plugin pack the production runtime image ships (Dockerfile
 # at the repo root). Keeping the dev container at parity means
 # UI/UX work, plugin-panel testing, and record-arm workflows
 # exercise the same plugin surface a deployed Foyer instance has.
-# Total install: ~91 packages, ~378 MB on disk.
 #
 # Plugin sourcing strategy + KXStudio gotchas are documented in
 # the runtime Dockerfile. tl;dr: KXStudio's PPA fills the gaps
 # Debian doesn't ship (Dexed, OB-Xd, Geonkick, TAL, MOD pedalboard,
 # Cardinal, AIDA-X, Master-Me, …); pinning at priority 100 keeps
 # Debian winning on any name collision.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# Default `WITH_KXSTUDIO=0` skips the PPA entirely — launchpad may
+# be unreachable. Set `WITH_KXSTUDIO=1` via devcontainer.json
+# build args (or `--build-arg`) to pull in the ~16 KXStudio-only
+# plugins when the repo is available again.
+RUN if [ "$WITH_KXSTUDIO" = "0" ]; then \
+      echo "[Dockerfile] WITH_KXSTUDIO=0 — skipping KXStudio PPA setup"; \
+      exit 0; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
       gpg dirmngr ca-certificates curl \
  && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
         "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x89195BA21C5CE3C72BAC1C0A0C955638F15F1FDC" \
@@ -182,9 +200,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       'Package: *' 'Pin: release o=LP-PPA-kxstudio-debian-plugins' 'Pin-Priority: 100' '' \
       'Package: *' 'Pin: release o=LP-PPA-kxstudio-debian-apps' 'Pin-Priority: 100' '' \
       'Package: *' 'Pin: release o=LP-PPA-kxstudio-debian-kxstudio' 'Pin-Priority: 100' \
-      > /etc/apt/preferences.d/kxstudio.pref \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
+      > /etc/apt/preferences.d/kxstudio.pref
+
+RUN KXSTUDIO_PKGS=""; \
+    if [ "$WITH_KXSTUDIO" = "1" ]; then \
+      KXSTUDIO_PKGS="aida-x airwindows-lv2 master-me kxstudio-meta-audio-plugins-collection"; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
       ardour-lv2-plugins \
       fluid-soundfont-gm fluid-soundfont-gs fluidr3mono-gm-soundfont \
       timgm6mb-soundfont fluidsynth qsynth \
@@ -202,9 +224,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       yoshimi yoshimi-data amsynth whysynth \
       hydrogen hydrogen-data drumgizmo guitarix-lv2 \
       \
-      aida-x airwindows-lv2 master-me \
-      kxstudio-meta-audio-plugins-collection \
+      $KXSTUDIO_PKGS \
  && rm -rf /var/lib/apt/lists/*
+
+# x42 General MIDI Synth (x42-gmsynth) prebuilt LV2 bundle.
+# Upstream publishes per-arch tarballs with gmsynth.lv2 included.
+RUN case "${TARGETARCH}" in \
+      amd64|x86_64) GMSYNTH_ARCH="x86_64" ;; \
+      arm64|aarch64) GMSYNTH_ARCH="arm64" ;; \
+      *) echo "Unsupported TARGETARCH for x42-gmsynth: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && tmpdir="$(mktemp -d)" \
+ && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+      -o "${tmpdir}/gmsynth.tar.gz" \
+      "https://x42-plugins.com/x42/linux/x42-gmsynth-v${GMSYNTH_VERSION}-${GMSYNTH_ARCH}.tar.gz" \
+ && tar -xzf "${tmpdir}/gmsynth.tar.gz" -C "${tmpdir}" \
+ && install -d /usr/lib/lv2 \
+ && cp -a "${tmpdir}/x42-gmsynth/gmsynth.lv2" /usr/lib/lv2/ \
+ && rm -rf "${tmpdir}"
 
 # Create vscode user (UID 1000) with passwordless sudo, mirroring the devcontainer convention.
 # Also add vscode to `audio` so `/dev/snd/*` nodes are readable when the

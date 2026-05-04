@@ -132,6 +132,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIBMM  REQUIRED IMPORTED_TARGET glibmm-2.4)
 pkg_check_modules(SIGCPP  REQUIRED IMPORTED_TARGET sigc++-2.0)
 pkg_check_modules(LIBXML2 REQUIRED IMPORTED_TARGET libxml-2.0)
+pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 
 # ── Homebrew prefix on macOS ───────────────────────────────────
 #
@@ -289,6 +290,7 @@ target_link_libraries(foyer_shim PRIVATE
   PkgConfig::GLIBMM
   PkgConfig::SIGCPP
   PkgConfig::LIBXML2
+  PkgConfig::SNDFILE
 )
 
 # Output a clean `libfoyer_shim.so` with no lib prefix nested extra

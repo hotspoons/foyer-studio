@@ -275,7 +275,7 @@ export class TrackEditorModal extends LitElement {
     // filter: we only route track inputs *from* readable ports.
     this._requestPorts();
     const preferred = this.initialTab || this._loadLastTab();
-    if (preferred === "midi") this._tab = "midi";
+    if (preferred === "midi" || preferred === "setup") this._tab = "midi";
   }
   disconnectedCallback() {
     document.removeEventListener("keydown", this._keyHandler);
@@ -340,14 +340,15 @@ export class TrackEditorModal extends LitElement {
 
   _loadLastTab() {
     try {
-      return localStorage.getItem("foyer.trackEditor.lastMidiTab") || "editor";
+      const tab = localStorage.getItem("foyer.trackEditor.lastMidiTab") || "editor";
+      return (tab === "midi" || tab === "setup") ? "midi" : "editor";
     } catch {
       return "editor";
     }
   }
 
   _setTab(tab) {
-    this._tab = tab === "midi" ? "midi" : "editor";
+    this._tab = (tab === "midi" || tab === "setup") ? "midi" : "editor";
     try {
       localStorage.setItem("foyer.trackEditor.lastMidiTab", this._tab);
     } catch {}
@@ -453,6 +454,7 @@ export class TrackEditorModal extends LitElement {
             style="flex:1;min-height:0"
             .trackId=${this.trackId}
             .trackName=${t.name}
+            .mode=${"all"}
           ></foyer-midi-manager>
         ` : html`<div class="content">
           <div class="form-body">

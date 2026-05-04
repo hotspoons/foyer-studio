@@ -12,6 +12,7 @@ default:
     @./scripts/dev/jack.sh help
 
 prep:
+    mkdir -p sessions/
     ./scripts/dev/tw.sh check
     ./scripts/dev/ardour.sh ensure
     ./scripts/dev/autovocoder.sh ensure
@@ -19,7 +20,10 @@ prep:
     ./scripts/dev/shim.sh check
     ./scripts/dev/nuke-web-install.sh
 
-run *args='': prep
+# JACK + GUI Ardour path. Use `just run` (libardour Dummy backend) if
+# you don't have a privileged container or don't need real audio — that
+# was historically `just run-dummy` and is now the default.
+run-jack *args='': prep
     #!/usr/bin/env bash
     # Explicit --web-root so the dev loop edits the repo tree, not the
     # installed copy under $XDG_DATA_HOME/foyer/web. Without a flag the
@@ -71,26 +75,27 @@ run-static *args='': prep
     FOYER_BUNDLE_WATCH_DEBUG=1 cargo build --bin foyer
     ./target/debug/foyer serve --listen 0.0.0.0:3838 {{args}}
 
-# Run with the libardour Dummy backend instead of JACK. Mirrors the
-# Cloud Run / non-privileged-container audio path locally — no jackd,
-# no realtime scheduling, GUI Ardour painting onto an in-container
-# Xvfb that nobody's watching. Useful for:
+# Default dev loop. Run with the libardour Dummy backend instead of
+# JACK. Mirrors the Cloud Run / non-privileged-container audio path
+# locally — no jackd, no realtime scheduling, GUI Ardour painting onto
+# an in-container Xvfb that nobody's watching. Useful for:
 #   * replicating Cloud Run boot end-to-end before pushing
 #   * quick-iteration UI work where you don't need real audio
 #   * showing the project to someone without configuring JACK
 #
-# Differences from `just run`:
+# Differences from `just run-jack`:
 #   * does NOT start jackd (`scripts/dev/jack.sh stop` if it's up)
 #   * starts an Xvfb on :99 if no $DISPLAY is set
 #   * seeds ~/.config/ardour9/{.a9,config} so Ardour autostarts the
 #     Dummy backend with the Silence device — no welcome wizard,
 #     no AMS dialog. Existing config files are NEVER overwritten.
-run-dummy *args='':
+run *args='':
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p sessions/
     # Same prep work as `prep` but without `scripts/dev/jack.sh start`.
-    # If jackd is already running from a prior `just run`, stop it so
-    # there's no JACK socket on /dev/shm tempting Ardour to pick the
+    # If jackd is already running from a prior `just run-jack`, stop it
+    # so there's no JACK socket on /dev/shm tempting Ardour to pick the
     # JACK backend instead of Dummy.
     ./scripts/dev/tw.sh check
     ./scripts/dev/ardour.sh ensure
@@ -207,12 +212,22 @@ run-dummy *args='':
     ./scripts/runtime/seed-ardour-config.sh --ams-dummy
 
     # Force foyer-config to re-detect the right binary now that
-    # DISPLAY is set — without this, a previous `just run` cached
+    # DISPLAY is set — without this, a previous `just run-jack` cached
     # `headless/hardour-9.x.x` and we'd skip past GUI Ardour.
     cfg="${XDG_DATA_HOME:-$HOME/.local/share}/foyer/config.yaml"
+    # Resolve ARDOUR_DIR with the same priority as scripts/dev/ardour.sh
+    REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -n "${FOYER_ARDOUR_DIR:-}" ]; then
+        ARDOUR_DIR="$FOYER_ARDOUR_DIR"
+    elif [ -d "$REPO_ROOT/ext/ardour" ]; then
+        ARDOUR_DIR="$REPO_ROOT/ext/ardour"
+    else
+        ARDOUR_DIR="/workspaces/ardour"
+    fi
     if [ -f "$cfg" ] && ! grep -q "gtk2_ardour" "$cfg"; then
         rm -f "$cfg"
-        cargo run --bin foyer -- configure --force >/dev/null
+        FOYER_ARDOUR_BUILD_ROOT="$ARDOUR_DIR" \
+            cargo run --bin foyer -- configure --force >/dev/null
     fi
 
     cargo run --bin foyer -- serve \

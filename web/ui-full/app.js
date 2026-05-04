@@ -12,7 +12,6 @@ import { FoyerWs } from "foyer-core/ws.js";
 import { Store } from "foyer-core/store.js";
 import { applyTheme } from "foyer-ui-core/theme.js";
 import { installTransportReturn } from "foyer-core/transport-return.js";
-import { audioController } from "foyer-core/audio/master-controller.js";
 import { rehydrateWindows } from "foyer-ui-core/widgets/window.js";
 import { bootRegionCache } from "foyer-core/region-cache.js";
 
@@ -42,12 +41,11 @@ import "./components/right-dock.js";
 // commented) parks the chat-agent surface without deleting the file.
 // Revisit when the agent integration is re-enabled.
 // import "./components/agent-panel.js";
-import "./components/chat-panel.js";
+import "foyer-ui-core/chat-panel.js";
 // Actions + Session-info FABs removed — they didn't add value over
 // the menu bar / project picker. The components remain on disk but
 // nothing imports them, so they're not registered with the FAB
 // registry and don't appear in the rail.
-import "./components/windows-fab.js";
 import "./components/command-palette.js";
 import "./components/layout-fab.js";
 import "./components/automation-panel.js";
@@ -298,17 +296,14 @@ export class FoyerApp extends LitElement {
       ws: this.ws,
       store: this.store,
       layout: this.layout,
-      audio: audioController,
       workspaceRect: () => this._workspaceRect(),
       windowIndex: this.windowIndex,
     });
 
-    // Boot the master-bus audio listener as a singleton owned by the
-    // app shell, not by the mixer view. This unblocks tunnel guests
-    // who haven't opened the mixer yet (TODO 38) and survives mixer
-    // mount/unmount cycles. The mixer's toggle becomes a thin
-    // observer of this controller's state.
-    audioController.attach(this.ws, this.store);
+    // The master-bus audio listener is now attached by foyer-core's
+    // bootstrap so the phone variant gets it too. Re-calling
+    // `audioController.attach` here would just rebind handlers that
+    // were already bound — harmless but pointless.
 
     // Boot the global region cache so MIDI-editor / beat-sequencer
     // rehydrate factories can resolve `regionId → region` without
@@ -473,8 +468,7 @@ export class FoyerApp extends LitElement {
       <foyer-floating-tiles .store=${this.layout}></foyer-floating-tiles>
       <!-- <foyer-agent-panel></foyer-agent-panel> disabled, see import comment -->
       <foyer-chat-panel></foyer-chat-panel>
-      <!-- <foyer-actions-fab>, <foyer-session-fab> retired -->
-      <foyer-windows-fab></foyer-windows-fab>
+      <!-- <foyer-actions-fab>, <foyer-session-fab>, <foyer-windows-fab> retired -->
       <foyer-layout-fab .store=${this.layout}></foyer-layout-fab>
       <foyer-command-palette></foyer-command-palette>
       <foyer-automation-panel></foyer-automation-panel>

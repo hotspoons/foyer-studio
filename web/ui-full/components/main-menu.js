@@ -8,8 +8,9 @@ import { getTransportPref, toggleTransportPref } from "foyer-core/transport-sett
 import { showProjectPicker } from "./project-picker-modal.js";
 import { openSettings } from "./settings-modal.js";
 import { promptText } from "foyer-ui-core/widgets/prompt-modal.js";
+import { confirmChoice } from "foyer-ui-core/widgets/confirm-modal.js";
 import { load as loadRecents, forget as forgetRecent, touch as touchRecent, clearAll as clearRecents } from "foyer-core/recents.js";
-import { launchProjectGuarded } from "../session-launch.js";
+import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
 import { isAllowed, isActionAllowed } from "foyer-core/rbac.js";
 
 // Walk shadow roots to find a custom element. The timeline lives ≥2
@@ -35,29 +36,29 @@ function findTimeline() {
 }
 
 // Category → menu label + order. Categories not listed are skipped.
+//
+// Transport is intentionally absent — every action there is already
+// reachable from the always-visible transport bar, so a Transport menu
+// just duplicates buttons two pixels apart. View is absent because the
+// layout FAB owns view spawning and tile arrangement; the old View menu
+// items hooked into a stub backend handler that never landed.
+//
+// Plugin's items are folded into Settings (see _renderMenu) — there's
+// effectively only "Plugin manager…" so an entire top-level button for
+// it is overkill.
 const MENU_ORDER = [
   { cat: "session",   label: "Session"   },
   { cat: "edit",      label: "Edit"      },
-  { cat: "transport", label: "Transport" },
-  { cat: "view",      label: "View"      },
   { cat: "track",     label: "Track"     },
-  { cat: "plugin",    label: "Plugin"    },
   { cat: "settings",  label: "Settings"  },
 ];
 
-// A built-in "Launch" menu that spawns views into the workspace. Lives in
-// the top menu bar (always reachable — can't be covered by a floating window
-// because the top chrome has a higher z-index than floating tiles).
-//
-// Only the two core tile-class views (mixer + timeline) belong here.
-// Everything else lives in the widgets layer and is spawned via the
-// right-dock's widget "+" menu — see `right-dock.js` SPAWNABLE_WIDGETS.
-// Project picking is reachable through the Session menu (Open) and the
-// welcome screen, both of which open `<foyer-project-picker-modal>`.
-const LAUNCH_VIEWS = [
-  { view: "mixer",       label: "Mixer",       icon: "adjustments-horizontal" },
-  { view: "timeline",    label: "Timeline",    icon: "list-bullet" },
-];
+// The "+ New" tile launcher used to live here — a button that
+// spawned Mixer / Timeline as floating windows or tile splits. The
+// layout FAB on the right rail now owns that affordance (preset
+// layouts pin the same views), and the always-visible workspace
+// already paints the mixer + timeline by default. The launcher's
+// only effect was eating chrome real-estate; removed.
 
 export class MainMenu extends LitElement {
   static properties = {
@@ -159,41 +160,6 @@ export class MainMenu extends LitElement {
       margin: 4px 0;
     }
 
-    .btn.launch {
-      display: inline-flex; align-items: center;
-      color: var(--color-accent-3);
-      font-weight: 600;
-    }
-    .btn.launch:hover, .btn.launch.open {
-      background: color-mix(in oklab, var(--color-accent) 12%, transparent);
-      color: #fff;
-    }
-    .dropdown.launch-drop { min-width: 260px; }
-    .menu-heading {
-      padding: 6px 10px 2px;
-      font-size: 9px;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--color-text-muted);
-    }
-    .launch-item .icon-chip {
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 22px; height: 22px;
-      border-radius: 6px;
-      background: color-mix(in oklab, var(--color-accent) 15%, transparent);
-      color: var(--color-accent-3);
-      flex: 0 0 auto;
-    }
-    .launch-item .hint {
-      font-size: 9px;
-      color: var(--color-text-muted);
-      opacity: 0.6;
-    }
-    .launch-item:hover .icon-chip {
-      background: rgba(255,255,255,0.18);
-      color: #fff;
-    }
-    .launch-item:hover .hint { color: rgba(255,255,255,0.8); opacity: 1; }
   `;
 
   constructor() {
@@ -225,11 +191,22 @@ export class MainMenu extends LitElement {
       ws.send({ type: "list_actions" });
     }
     window.__foyer?.store?.addEventListener("rbac", this._onRbac);
+    // Sessions add/remove flips Close Session between enabled and
+    // disabled and changes the "Close Session — <name>" suffix; the
+    // switcher dispatches "sessions" on every list/open/close event.
+    this._onSessions = () => this.requestUpdate();
+    window.__foyer?.store?.addEventListener("sessions", this._onSessions);
+    // Open Recent submenu reads from the server-tracked recents
+    // cache; re-render when the cache flips.
+    this._onRecents = () => this.requestUpdate();
+    window.__foyer?.store?.addEventListener("recents", this._onRecents);
   }
   disconnectedCallback() {
     document.removeEventListener("pointerdown", this._onDocDown, true);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     window.__foyer?.store?.removeEventListener("rbac", this._onRbac);
+    window.__foyer?.store?.removeEventListener("sessions", this._onSessions);
+    window.__foyer?.store?.removeEventListener("recents", this._onRecents);
     super.disconnectedCallback();
   }
 
@@ -368,74 +345,21 @@ export class MainMenu extends LitElement {
 
   render() {
     return html`
-      ${this._renderLaunchMenu()}
       ${MENU_ORDER.map(({ cat, label }) => {
-        const items = this._byCategory(cat);
-        if (!items.length) return null;
+        let items = this._byCategory(cat);
+        // Plugin actions get folded into Settings — there's effectively
+        // only one (Plugin manager…) and a whole top-level menu for it
+        // is wasted chrome. Order: settings first, then plugin items.
+        if (cat === "settings") {
+          items = items.concat(this._byCategory("plugin"));
+        }
+        // The session dropdown carries hard-coded extras (Close, Open
+        // Recent, Remote Access) so render it even when the backend
+        // hasn't replied to list_actions yet.
+        if (!items.length && cat !== "session") return null;
         return this._renderMenu(cat, label, items);
       })}
     `;
-  }
-
-  /**
-   * Built-in "Launch" menu. Always present, never obscured by floating
-   * windows — the answer to "where's the button to make a new tile when the
-   * one that spawned this window is covered?"
-   *
-   * Click an item: open that view as a floating window at the user's sticky
-   * slot (or center if no sticky). Shift-click: open as a tile split below
-   * the currently focused tile. Drag an item out to tear it into a floating
-   * window at the cursor.
-   */
-  _renderLaunchMenu() {
-    const open = this._openMenu === "__launch__";
-    return html`
-      <button class="btn launch ${open ? 'open' : ''}"
-              title="Launch a view — click to open, shift-click to tile"
-              @click=${() => { this._openMenu = open ? "" : "__launch__"; }}>
-        ${icon("plus", 12)}
-        <span style="margin-left:4px">New</span>
-      </button>
-      ${open ? html`
-        <div class="dropdown launch-drop" style="left:0">
-          <div class="menu-heading">Launch view</div>
-          ${LAUNCH_VIEWS.map(v => html`
-            <div class="item launch-item"
-                 @click=${(ev) => this._launchView(v.view, ev)}
-                 @contextmenu=${(ev) => this._launchWithPicker(v.view, ev)}>
-              <span class="icon-chip">${icon(v.icon, 12)}</span>
-              <span class="label">${v.label}</span>
-              <span class="hint">click · shift-click tiles · right-click picks slot</span>
-            </div>
-          `)}
-        </div>
-      ` : null}
-    `;
-  }
-
-  _launchView(view, ev) {
-    this._openMenu = "";
-    const layout = window.__foyer?.layout;
-    if (!layout) return;
-    if (ev?.shiftKey) {
-      // Shift-click → split the focused tile below with this view.
-      layout.split("column", view);
-      return;
-    }
-    // Default → float at the view's sticky slot, or center if none.
-    layout.openFloating(view);
-  }
-
-  _launchWithPicker(view, ev) {
-    ev.preventDefault();
-    this._openMenu = "";
-    const layout = window.__foyer?.layout;
-    if (!layout) return;
-    const id = layout.openFloating(view);
-    setTimeout(() => {
-      const ft = window.__foyer?.floatingTiles;
-      if (ft) ft._slotPickerFor = id;
-    }, 0);
   }
 
   _renderMenu(cat, label, items) {
@@ -462,6 +386,17 @@ export class MainMenu extends LitElement {
             `;
           })}
           ${cat === "session" ? this._renderRecentSubmenu() : null}
+          ${cat === "session" && isAllowed("list_audio_pool") ? html`
+            <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
+            <div class="item" @click=${() => {
+              this._openMenu = "";
+              import("./audio-pool-modal.js").then((m) => m.openAudioPoolModal());
+            }}>
+              <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("musical-note", 11)}</span>
+              <span class="label">Audio pool…</span>
+            </div>
+          ` : null}
+          ${cat === "session" ? this._renderCloseSessionItem() : null}
           ${cat === "session" && this._canManageTunnels() ? html`
             <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
             <div class="item" @click=${() => { this._openMenu = ""; import("./tunnel-manager-modal.js").then((m) => m.openTunnelManager()); }}>
@@ -541,6 +476,54 @@ export class MainMenu extends LitElement {
       backend_id: entry.backend_id || "ardour",
       project_path: entry.path,
     });
+  }
+
+  /// "Close current session" tail-item on the Session menu. Hidden if
+  /// the role can't issue close_session, disabled when no session is
+  /// open. The session-switcher's dropdown carries the same affordance;
+  /// duplicating it here is intentional — once a user covers the
+  /// switcher with a floating window, the menu bar is the only always-
+  /// reachable surface for session-level operations.
+  _renderCloseSessionItem() {
+    if (!isAllowed("close_session")) return null;
+    const cur = window.__foyer?.store?.currentSession?.();
+    const enabled = !!cur;
+    return html`
+      <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
+      <div class="item ${enabled ? '' : 'disabled'}"
+           @click=${() => enabled && this._closeCurrentSession()}>
+        <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("x-mark", 11)}</span>
+        <span class="label">Close Session${enabled && cur?.name ? ` — ${cur.name}` : ''}</span>
+      </div>
+    `;
+  }
+
+  async _closeCurrentSession() {
+    this._openMenu = "";
+    const cur = window.__foyer?.store?.currentSession?.();
+    if (!cur) return;
+    if (cur.dirty) {
+      const choice = await confirmChoice({
+        title: "Unsaved changes",
+        message:
+          `"${cur.name || "This session"}" has unsaved changes.\n\n`
+          + `Save before closing?`,
+        confirmLabel: "Save & close",
+        altLabel: "Close without saving",
+        altTone: "danger",
+        cancelLabel: "Cancel",
+        tone: "warning",
+      });
+      if (choice === "cancel") return;
+      if (choice === "confirm") {
+        // Fire-and-forget save; close_session below runs after the
+        // shim's save handler queues. Same pattern session-switcher
+        // uses — no guarantee of a sync save round-trip, just a best
+        // effort before the IPC channel closes.
+        window.__foyer?.ws?.send({ type: "save_session" });
+      }
+    }
+    window.__foyer?.ws?.send({ type: "close_session", session_id: cur.id });
   }
 
   _menuLeftFor(cat) {

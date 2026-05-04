@@ -453,6 +453,7 @@ async fn broadcast_event(state: &AppState, event: Event) {
     let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
     let env = Envelope {
         schema: SCHEMA_VERSION,
+        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
         seq,
         origin: Some("server".into()),
         session_id: None,

@@ -9,7 +9,7 @@
 //!
 //! Wire shape: opaque bidirectional bytes between the browser
 //! WebSocket and a single TCP connection to `127.0.0.1:14500` (the
-//! xpra TCP listener spawned by the entrypoint / `just run-dummy`).
+//! xpra TCP listener spawned by the entrypoint / `just run`).
 //! No framing, no schema involvement, no base64 — xpra's own
 //! protocol travels intact in both directions.
 //!

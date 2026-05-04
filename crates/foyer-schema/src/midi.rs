@@ -14,6 +14,41 @@ use serde::{Deserialize, Serialize};
 
 use crate::EntityId;
 
+/// One named program entry in a Midnam-provided patch bank.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MidiPatchProgram {
+    /// Program number 0..127.
+    pub program: u8,
+    /// Human-facing patch label from Ardour's InstrumentInfo/Midnam stack.
+    pub name: String,
+}
+
+/// One Midnam patch bank with its named programs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MidiPatchBank {
+    /// Bank id as encoded by Ardour/Midnam.
+    pub bank: u16,
+    pub name: String,
+    #[serde(default)]
+    pub programs: Vec<MidiPatchProgram>,
+}
+
+/// Midnam-backed patch metadata for one track/channel query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MidiPatchNames {
+    /// Channel 0..15 that the bank/program list was resolved for.
+    #[serde(default)]
+    pub channel: u8,
+    /// Instrument model reported by Ardour's InstrumentInfo, when known.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model: Option<String>,
+    /// Active custom-device mode (Midnam mode), when known.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub banks: Vec<MidiPatchBank>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MidiNote {
     /// Stable per-region id. Used as the target of note-level mutations.
@@ -376,16 +411,22 @@ pub fn expand_sequencer_layout(layout: &SequencerLayout, ppqn: u32) -> Vec<MidiN
             // length_steps > 1 = pitched-mode long note. A cell with
             // length_steps == N fills N consecutive steps visually;
             // the emitted MIDI note's length_ticks covers N*step_ticks
-            // minus a tiny gap so adjacent notes don't chord. The
-            // default (0/missing/1) keeps the drum-grid behavior:
-            // one short note per cell at `note_ticks` length.
+            // minus a tiny gap so adjacent notes don't chord.
+            //
+            // Drum mode is always percussive: ignore length_steps and
+            // emit a short fixed-length note. Pitched mode respects
+            // length_steps for sustained notes.
             let len_steps = cell.length_steps.max(1) as u64;
-            let length = if len_steps > 1 {
+            let length = if layout.mode == "drum" {
+                note_ticks
+            } else if len_steps > 1 {
                 (len_steps * step_ticks)
                     .saturating_sub(step_ticks / 10)
                     .max(1)
             } else {
-                note_ticks
+                // Pitched mode with length_steps == 1: default to a
+                // full-step sustained note so melodic hits ring.
+                step_ticks
             };
             let id_str = format!(
                 "note.seq.{}.{}.{}.{}",

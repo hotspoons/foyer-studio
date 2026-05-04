@@ -110,6 +110,7 @@ fn fake_session() -> Session {
             punch_out: None,
             metronome: None,
             sync_source: None,
+            return_mode: None,
         },
         tracks: vec![Track {
             id: EntityId::new("track.x"),
@@ -130,6 +131,11 @@ fn fake_session() -> Session {
             inputs: vec![],
             outputs: vec![],
             automation_lanes: vec![],
+            capture_channel_mode: None,
+            capture_channel_mask: None,
+            playback_channel_mode: None,
+            playback_channel_mask: None,
+            midi_patches: vec![],
         }],
         groups: vec![],
         dirty: false,
@@ -173,15 +179,14 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
             match cmd {
                 Command::Subscribe | Command::RequestSnapshot => {
                     let session = fake_session();
-                    let reply = Envelope {
-                        schema: SCHEMA_VERSION,
-                        seq: next_seq,
-                        origin: Some("shim".into()),
-                        session_id: None,
-                        body: Control::Event(Event::SessionSnapshot {
+                    let reply = Envelope::new(
+                        next_seq,
+                        Some("shim".into()),
+                        None,
+                        Control::Event(Event::SessionSnapshot {
                             session: Box::new(session),
                         }),
-                    };
+                    );
                     next_seq += 1;
                     let payload = encode_control(&reply).unwrap();
                     write_frame(
@@ -195,15 +200,14 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                     .unwrap();
                 }
                 Command::ControlSet { id, value } if cfg.echo_control_sets => {
-                    let reply = Envelope {
-                        schema: SCHEMA_VERSION,
-                        seq: next_seq,
-                        origin: Some("shim".into()),
-                        session_id: None,
-                        body: Control::Event(Event::ControlUpdate {
+                    let reply = Envelope::new(
+                        next_seq,
+                        Some("shim".into()),
+                        None,
+                        Control::Event(Event::ControlUpdate {
                             update: ControlUpdate { id, value },
                         }),
-                    };
+                    );
                     next_seq += 1;
                     let payload = encode_control(&reply).unwrap();
                     write_frame(
@@ -218,13 +222,12 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                 }
                 Command::ControlSet { .. } => {}
                 Command::AudioEgressStart { stream_id, .. } => {
-                    let ack = Envelope {
-                        schema: SCHEMA_VERSION,
-                        seq: next_seq,
-                        origin: Some("shim".into()),
-                        session_id: None,
-                        body: Control::Event(Event::AudioEgressStarted { stream_id }),
-                    };
+                    let ack = Envelope::new(
+                        next_seq,
+                        Some("shim".into()),
+                        None,
+                        Control::Event(Event::AudioEgressStarted { stream_id }),
+                    );
                     next_seq += 1;
                     let payload = encode_control(&ack).unwrap();
                     write_frame(
@@ -255,18 +258,17 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                     source,
                     format,
                 } => {
-                    let ack = Envelope {
-                        schema: SCHEMA_VERSION,
-                        seq: next_seq,
-                        origin: Some("shim".into()),
-                        session_id: None,
-                        body: Control::Event(Event::AudioIngressOpened {
+                    let ack = Envelope::new(
+                        next_seq,
+                        Some("shim".into()),
+                        None,
+                        Control::Event(Event::AudioIngressOpened {
                             stream_id,
                             source,
                             format,
                             port_name: None,
                         }),
-                    };
+                    );
                     next_seq += 1;
                     let payload = encode_control(&ack).unwrap();
                     write_frame(
@@ -285,13 +287,12 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                         sample_rate: 48_000,
                         jitter_samples: 4,
                     };
-                    let ack = Envelope {
-                        schema: SCHEMA_VERSION,
-                        seq: next_seq,
-                        origin: Some("shim".into()),
-                        session_id: None,
-                        body: Control::Event(Event::LatencyReport { stream_id, report }),
-                    };
+                    let ack = Envelope::new(
+                        next_seq,
+                        Some("shim".into()),
+                        None,
+                        Control::Event(Event::LatencyReport { stream_id, report }),
+                    );
                     next_seq += 1;
                     let payload = encode_control(&ack).unwrap();
                     write_frame(
