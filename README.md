@@ -15,6 +15,80 @@ keyboard-first commands. The DAW's own editor keeps doing what it's
 always done; Foyer adds a parallel surface for when you're not
 sitting at the workstation.
 
+## Running it
+
+Three deployment shapes, ordered by "how fast can I see it work?" —
+Docker is first because it's a single command and needs nothing
+installed beyond Docker itself. Full setup recipes for each live in
+[docs/USAGE.md](docs/USAGE.md).
+
+### 1. Docker — Foyer + Ardour + plugins, all in one image
+
+The fastest path: nothing on your machine but Docker. The image
+bundles Ardour 9.2, the shim, the autovocoder LV2, and ~200 LV2
+plugins.
+
+```bash
+docker run --rm -it --name foyer-studio \
+  -p 3838:3838 --shm-size=1g \
+  -v "$(pwd):/projects" \
+  ghcr.io/hotspoons/foyer-studio:latest
+```
+
+Open <http://localhost:3838>. This runs the **gui-dummy** mode —
+GUI Ardour painting onto an in-container Xvfb against libardour's
+"None (Dummy)" backend. No JACK, no realtime scheduling, no
+privileged flags. Works identically on Cloud Run, Docker Desktop,
+Colima, plain Linux. Audio leaves the container only via Foyer's
+WebSocket egress.
+
+For real audio hardware via a host-running jackd (Linux only),
+flip into `jack-headless` mode with the privileged flags + JACK
+shm passthrough — full recipe in
+[docs/USAGE.md#path-1--docker](docs/USAGE.md#path-1--docker).
+
+### 2. Host install — drives your own Ardour 9.2
+
+Best for laptops / studio machines: lowest latency, real audio
+hardware, your existing plugin collection. Linux + macOS (Apple
+Silicon and Intel).
+
+```bash
+# Pulls the most recent passing CI build (no GitHub auth needed).
+curl -fsSL https://raw.githubusercontent.com/hotspoons/foyer-studio/main/install.sh \
+  | bash -s -- --latest-ci
+
+foyer serve --backend ardour
+```
+
+Open <http://127.0.0.1:3838>. The installer also drops the C++
+shim into Ardour's surfaces directory; tick **Preferences →
+Control Surfaces → Foyer Studio Shim** in Ardour once and the
+sidecar attaches automatically on every Ardour launch from there
+on.
+
+Full walkthrough (LAN access, TLS, uninstall) in
+[docs/USAGE.md#path-2--host-install-against-your-own-ardour-92](docs/USAGE.md#path-2--host-install-against-your-own-ardour-92).
+
+### 3. From source — the dev container
+
+For hacking on Foyer itself: the C++ toolchain, Ardour's deps,
+JACK, Bun + Playwright, and every script the Justfile relies on
+land in a VS Code dev container.
+
+```bash
+git clone https://github.com/hotspoons/foyer-studio.git
+cd foyer-studio
+code .   # VS Code → "Reopen in Container"
+# then, in the container terminal:
+just run
+```
+
+First boot clones and builds Ardour (~20 min on Apple Silicon).
+Subsequent runs are instant. See
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full workflow —
+UI overlays, the CI gate, the Justfile catalog.
+
 ## Architecture (the one-paragraph version)
 
 Three layers, each with a strict job:
@@ -88,96 +162,6 @@ Future shims for other engines (Reaper SDK, JUCE-based hosts,
 commercial SDKs) will each carry their own license terms. See
 [docs/DECISIONS.md](docs/DECISIONS.md) entry 15 for the long
 version.
-
-## Running it
-
-Three deployment shapes, in increasing order of "how much do you
-want to do yourself" — full setup recipes for each live in
-[docs/USAGE.md](docs/USAGE.md).
-
-### 1. Host install — drives your own Ardour 9.2
-
-Best for laptops / studio machines: lowest latency, real audio
-hardware, your existing plugin collection. Linux + macOS (Apple
-Silicon and Intel).
-
-```bash
-# Pulls the most recent passing CI build (no GitHub auth needed).
-curl -fsSL https://raw.githubusercontent.com/hotspoons/foyer-studio/main/install.sh \
-  | bash -s -- --latest-ci
-
-foyer serve --backend ardour
-```
-
-Open <http://127.0.0.1:3838>. The installer also drops the C++
-shim into Ardour's surfaces directory; tick **Preferences →
-Control Surfaces → Foyer Studio Shim** in Ardour once and the
-sidecar attaches automatically on every Ardour launch from there
-on.
-
-Full walkthrough (LAN access, TLS, uninstall) in
-[docs/USAGE.md#path-1--host-install-against-your-own-ardour-92](docs/USAGE.md#path-1--host-install-against-your-own-ardour-92).
-
-### 2. Docker — Foyer + Ardour + plugins, all in one image
-
-Best for one-shot deploys (Cloud Run, fly.io, a home server) or
-when you don't have Ardour locally. The image bundles Ardour 9.2,
-the shim, the autovocoder LV2, and ~200 LV2 plugins.
-
-```bash
-docker run --rm -it --name foyer-studio \
-  -p 3838:3838 --shm-size=1g \
-  -v "$(pwd):/projects" \
-  ghcr.io/hotspoons/foyer-studio:latest
-```
-
-Open <http://localhost:3838>. This runs the **gui-dummy** mode —
-GUI Ardour painting onto an in-container Xvfb against libardour's
-"None (Dummy)" backend. No JACK, no realtime scheduling, no
-privileged flags. Works identically on Cloud Run, Docker Desktop,
-Colima, plain Linux. Audio leaves the container only via Foyer's
-WebSocket egress.
-
-For real audio hardware via a host-running jackd (Linux only),
-flip into `jack-headless` mode with the privileged flags + JACK
-shm passthrough — full recipe in
-[docs/USAGE.md#path-2--docker](docs/USAGE.md#path-2--docker).
-
-### 3. Snapshot a project — freeze it into a portable Docker image
-
-Already have a project and Ardour installed locally?  `foyer snapshot`
-captures the DAW, every plugin, and the session into a runnable OCI
-image:
-
-```bash
-foyer snapshot /path/to/MySong.ardour --build --tag mysong:latest
-docker run --rm -it -p 3838:3838 mysong:latest
-```
-
-The image layers the matching Debian base, the DAW, each discovered
-plugin, and the project — so two projects that share the same Ardour
-version reuse the same layer.  See
-[`crates/foyer-snapshot/README.md`](crates/foyer-snapshot/README.md)
-for details.
-
-### 4. From source — the dev container
-
-For hacking on Foyer itself: the C++ toolchain, Ardour's deps,
-JACK, Bun + Playwright, and every script the Justfile relies on
-land in a VS Code dev container.
-
-```bash
-git clone https://github.com/hotspoons/foyer-studio.git
-cd foyer-studio
-code .   # VS Code → "Reopen in Container"
-# then, in the container terminal:
-just run
-```
-
-First boot clones and builds Ardour (~20 min on Apple Silicon).
-Subsequent runs are instant. See
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full workflow —
-UI overlays, the CI gate, the Justfile catalog.
 
 ## Reading further
 

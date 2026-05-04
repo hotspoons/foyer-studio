@@ -1,4 +1,4 @@
-// Channel strip: color swatch · name · kind · plugin strip · M/S/R · fader + meter.
+// Channel strip: color swatch · name · kind · plugin strip · M/S/R/I · fader + meter.
 
 import { LitElement, html, css } from "lit";
 
@@ -10,6 +10,12 @@ import { ControlController } from "foyer-core/store.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { openTrackEditor } from "./track-editor-modal.js";
 import { openPanEditor } from "./pan-editor-modal.js";
+import { isAllowed } from "foyer-core/rbac.js";
+import {
+  isTrackMicActive,
+  onTrackMicChange,
+  toggleTrackTake,
+} from "foyer-core/audio/track-mic.js";
 
 // Curated palette for the "Set color" submenu. Close to DAW defaults so
 // colors carry some semantic weight (reds for drums, blues for bass,
@@ -54,6 +60,9 @@ export class TrackStrip extends LitElement {
     // optimistic copy with the stale store value and the button
     // appears to ignore the first click (Rich, 2026-04-25).
     _monitoringPending: { state: true, type: String },
+    // Take-chip latch: blocks re-entry while the bundled
+    // claim+mic+wire toggle is in flight, fades the chip while busy.
+    _takeBusy: { state: true, type: Boolean },
   };
 
   static styles = css`
@@ -241,6 +250,22 @@ export class TrackStrip extends LitElement {
       background: color-mix(in oklab, var(--color-accent) 55%, transparent);
       border-color: var(--color-accent);
     }
+    /* Bundled Take chip — same one-tap claim+mic+wire as the phone
+     * surface (web/ui-phone/components/track-row.js). The shared
+     * state-machine lives in foyer-core/audio/track-mic.js so a flip
+     * on either surface lights up the chip on both. We render a
+     * regular foyer-toggle for visual consistency with M/S/●; the
+     * .busy modifier fades+pulses it while the async toggle is
+     * in flight so a double-click does not queue a second claim. */
+    foyer-toggle.take-toggle.busy {
+      opacity: 0.55;
+      pointer-events: none;
+      animation: foyer-take-pulse 1s ease-in-out infinite;
+    }
+    @keyframes foyer-take-pulse {
+      0%, 100% { opacity: 0.55; }
+      50%      { opacity: 0.85; }
+    }
   `;
 
   constructor() {
@@ -256,14 +281,33 @@ export class TrackStrip extends LitElement {
     this._meterCtl = null;
     this._panOpen = false;
     this._panMode = "stereo";
+    this._takeBusy = false;
+    this._unsubTrackMic = null;
   }
 
   connectedCallback() {
     super.connectedCallback();
     this._onSelection = () => this._syncSelected();
     this._onBrowserSources = () => this.requestUpdate();
+    // Audio ingress envelopes — the desktop track-editor modal and
+    // any other surface that drives the registry without going
+    // through `toggleTrackTake` only signal the change via a WS
+    // envelope. Listening here keeps the Take chip in sync with
+    // mic flips that happen "around" us.
+    this._onIngressEnv = (ev) => {
+      const t = ev?.detail?.body?.type;
+      if (t === "audio_ingress_opened" || t === "audio_ingress_closed") {
+        this.requestUpdate();
+      }
+    };
     window.__foyer?.store?.addEventListener("selection", this._onSelection);
     window.__foyer?.store?.addEventListener("track-browser-sources", this._onBrowserSources);
+    window.__foyer?.ws?.addEventListener?.("envelope", this._onIngressEnv);
+    // Repaint the Take chip whenever ANY surface (this strip, the
+    // phone row) flips a mic via the shared `toggleTrackTake` — the
+    // shared registry is on globalThis but state changes need an
+    // explicit nudge to invalidate render.
+    this._unsubTrackMic = onTrackMicChange(() => this.requestUpdate());
     this._syncSelected();
     this.addEventListener("click", this._onStripClick);
     this.addEventListener("dblclick", this._onStripDblClick);
@@ -271,10 +315,28 @@ export class TrackStrip extends LitElement {
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("selection", this._onSelection);
     window.__foyer?.store?.removeEventListener("track-browser-sources", this._onBrowserSources);
+    window.__foyer?.ws?.removeEventListener?.("envelope", this._onIngressEnv);
+    this._unsubTrackMic?.();
+    this._unsubTrackMic = null;
     this.removeEventListener("click", this._onStripClick);
     this.removeEventListener("dblclick", this._onStripDblClick);
     super.disconnectedCallback();
   }
+
+  _toggleTake = async () => {
+    if (!this.track?.id || this._takeBusy) return;
+    this._takeBusy = true;
+    try {
+      await toggleTrackTake({
+        trackId: this.track.id,
+        ws: window.__foyer?.ws,
+        store: window.__foyer?.store,
+      });
+    } finally {
+      this._takeBusy = false;
+      this.requestUpdate();
+    }
+  };
   _syncSelected() {
     if (!this.track) return;
     const sel = !!window.__foyer?.store?.isTrackSelected?.(this.track.id);
@@ -424,6 +486,15 @@ export class TrackStrip extends LitElement {
           ${t.record_arm ? html`
             <foyer-toggle tone="rec" label="●" .on=${rec} @input=${(e) => this._setBool(t.record_arm.id, e.detail.value)}></foyer-toggle>
           ` : null}
+          ${this._showTake() ? html`
+            <foyer-toggle class="take-toggle ${this._takeBusy ? "busy" : ""}"
+                          label="I"
+                          .on=${isTrackMicActive(t.id)}
+                          title=${isTrackMicActive(t.id)
+                            ? "Stop my mic and release this track"
+                            : "Claim this track for my mic — assigns source user + opens browser ingress"}
+                          @input=${this._toggleTake}></foyer-toggle>
+          ` : null}
         </div>
         ${t.monitoring !== undefined && t.monitoring !== null ? html`
           <div class="divider"></div>
@@ -552,6 +623,24 @@ export class TrackStrip extends LitElement {
   _setBool(id, v) {
     if (!id) return;
     window.__foyer.ws.controlSet(id, v ? 1 : 0);
+  }
+
+  /// Take chip gates: audio tracks + control_set permission.
+  ///
+  /// Unlike the phone (web/ui-phone/components/track-row.js), the
+  /// desktop chip is NOT tunnel-only. The desktop UI variant is
+  /// frequently a remote control surface against a DAW running
+  /// somewhere else (Cloud Run instance, studio rig over LAN, a
+  /// container the user is SSH'd into) — the "host already has the
+  /// studio interface" assumption that justifies the phone's tunnel
+  /// gate doesn't carry over. A user sitting at the actual studio
+  /// rig can still see the chip and just ignore it; that's a smaller
+  /// loss than hiding the affordance from every remote-control
+  /// session that isn't routed through a Cloudflare tunnel.
+  _showTake() {
+    if (!this.track || this.track.kind !== "audio") return false;
+    if (!isAllowed("control_set")) return false;
+    return true;
   }
 
   _renderPanControl(t, panVal) {

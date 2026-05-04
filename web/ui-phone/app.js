@@ -198,6 +198,7 @@ export class PhoneApp extends LitElement {
         <div class="tunnel-audio-prompt"
              role="button"
              aria-label="Tap to enable audio"
+             data-foyer-listen-toggle="1"
              @click=${this._onTunnelAudioPromptTap}>
           Tap to enable audio
         </div>
