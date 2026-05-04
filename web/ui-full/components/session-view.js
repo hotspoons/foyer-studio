@@ -1,5 +1,6 @@
 // Session picker — jailed file browser. Shows a breadcrumb path, lists entries
-// with folder/session/file distinction, and lets the user "open" a session dir.
+// with folder/session/file distinction, and lets the user "open" a session dir
+// (unless `mode` is `new` or `save_as`, which change folder vs session behavior).
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
@@ -24,7 +25,7 @@ export class SessionView extends LitElement {
     _activeBackend:     { state: true, type: String },
     _selectedBackendId: { state: true, type: String },
     _showHidden:        { state: true, type: Boolean },
-    mode:               { type: String },  // "open" (default) or "new"
+    mode:               { type: String },  // "open" (default), "new", or "save_as"
   };
 
   static styles = css`
@@ -81,6 +82,11 @@ export class SessionView extends LitElement {
     .row.session .name { font-weight: 600; }
     .row.session { color: var(--color-accent-3); }
     .row.session:hover { background: color-mix(in oklab, var(--color-accent) 15%, transparent); }
+    .row.atomic-session {
+      opacity: 0.72;
+      cursor: default;
+    }
+    .row.atomic-session:hover { background: transparent; }
     .error {
       padding: 12px 14px;
       color: var(--color-danger);
@@ -216,7 +222,7 @@ export class SessionView extends LitElement {
     // chip pins it explicitly until they click another chip.
     this._selectedBackendId = null;
     this._showHidden = false;
-    this.mode = "open";  // "open" or "new"
+    this.mode = "open";  // "open", "new", or "save_as"
     this._envelopeHandler = (ev) => this._onEnvelope(ev.detail);
 
     // Internal browser history for file navigation. Replaces the old
@@ -475,6 +481,7 @@ export class SessionView extends LitElement {
   }
 
   _renderPicker() {
+    if (this.mode === "save_as") return null;
     const backends = (this._backends || []).filter((b) => b.enabled);
     if (backends.length <= 1) return null;
     return html`
@@ -607,15 +614,22 @@ export class SessionView extends LitElement {
     const meta = e.kind === "file" && e.size_bytes != null
       ? fmtBytes(e.size_bytes)
       : e.kind === "session_dir" ? "session" : "";
-    const click = e.kind === "dir"
-      ? () => this._browse(e.path)
-      : e.kind === "session_dir"
-        ? (this.mode === "new"
-            ? () => this._browse(e.path)   // new mode: navigate into session_dir
-            : () => this._open(e))         // open mode: launch session
-        : () => this._preview(e);
+    let click = () => this._preview(e);
+    if (e.kind === "dir") {
+      click = () => this._browse(e.path);
+    } else if (e.kind === "session_dir") {
+      if (this.mode === "save_as") {
+        click = () => {};
+      } else if (this.mode === "new") {
+        click = () => this._browse(e.path);
+      } else {
+        click = () => this._open(e);
+      }
+    }
+    const atomic = e.kind === "session_dir" && this.mode === "save_as";
     return html`
-      <div class="row ${e.kind === 'session_dir' ? 'session' : ''}"
+      <div class="row ${e.kind === 'session_dir' ? 'session' : ''} ${atomic ? "atomic-session" : ""}"
+           title=${atomic ? "Open this session from Session → Open" : ""}
            @click=${click}>
         ${icon(iconName, 16)}
         <div class="name">${e.session_name || e.name}</div>

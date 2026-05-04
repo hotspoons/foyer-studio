@@ -37,7 +37,7 @@ const CLIENT_ONLY_ACTIONS = new Set([
   "transport.return_on_stop",
   "view.zoom_selection",
   "view.zoom_previous",
-  "settings.preferences",
+  "session.preferences",
 ]);
 
 /// Specific action ids that take a different server command than
@@ -60,6 +60,29 @@ const ACTION_SPECIFIC_COMMAND = {
   "edit.delete_selection": "delete_region",
   "edit.mute_selection":   "update_region",
 };
+
+/// Catalog entries hidden from menus, command palette, and action FAB —
+/// broken no-ops or withdrawn UX (RBAC is separate; see `isActionAllowed`).
+const HIDDEN_CATALOG_IDS = new Set([
+  "edit.delete_selection",
+  "edit.mute_selection",
+  "track.freeze",
+  "track.freeze_track",
+  "track.toggle_freeze",
+]);
+
+/**
+ * @param {{ id?: string, category?: string, label?: string }} action
+ * @returns {boolean}
+ */
+export function isActionHiddenFromCatalog(action) {
+  if (!action?.id) return false;
+  if (HIDDEN_CATALOG_IDS.has(action.id)) return true;
+  if (action.category === "track" && /\bfreeze\b/i.test(action.label || "")) {
+    return true;
+  }
+  return false;
+}
 
 /// Decide whether a given action catalog entry (id) should be shown.
 /// Client-only ids are always shown; otherwise we check the specific

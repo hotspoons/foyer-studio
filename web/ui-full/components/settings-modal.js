@@ -8,8 +8,8 @@
 // separate modal that round-trips through the shim; this one is
 // intentionally client-only.
 //
-// Opened by the `settings.preferences` action in the main menu, or
-// `Cmd+,` / `Ctrl+,`.
+// Opened from Session → Preferences…, the command palette, or
+// Cmd+, / Ctrl+, (global shortcut from main-menu).
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";

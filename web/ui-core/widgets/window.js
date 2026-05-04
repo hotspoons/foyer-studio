@@ -73,6 +73,18 @@ function saveBounds(key, bounds) {
   try { localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(bounds)); } catch {}
 }
 
+/** Diagonal cascade step — MDI-style offset when opening without saved bounds. */
+const CASCADE_STEP = 28;
+
+function rectsOverlap(a, b, gap = 2) {
+  return !(
+    a.x + a.w <= b.x + gap ||
+    b.x + b.w <= a.x + gap ||
+    a.y + a.h <= b.y + gap ||
+    b.y + b.h <= a.y + gap
+  );
+}
+
 export class FoyerWindow extends LitElement {
   static properties = {
     title:       { type: String },
@@ -246,6 +258,53 @@ export class FoyerWindow extends LitElement {
         this._emitClose();
       }
     };
+
+    this._onDocPointerDownFront = (ev) => {
+      if (ev.button !== 0) return;
+      if (this.hasAttribute("hidden-by-layer") || this.minimized) return;
+      const path = ev.composedPath?.() || [];
+      if (!path.includes(this)) return;
+      const top = path[0];
+      if (top?.classList?.contains?.("backdrop")) return;
+      this._bumpGlobalZIndex();
+    };
+  }
+
+  _bumpGlobalZIndex() {
+    const layout = window.__foyer?.layout;
+    if (!layout?.bumpGlobalStackZ) return;
+    const z = layout.bumpGlobalStackZ();
+    const use = this.maximized ? Math.max(1400, z) : z;
+    this.style.zIndex = String(use);
+  }
+
+  /**
+   * After layout, nudge diagonally while our rect overlaps another visible
+   * foyer-window (refines the sync peer-count offset when peers moved).
+   */
+  _cascadeAwayFromPeers() {
+    if (this.maximized) return;
+    const maxTries = 48;
+    let me = { x: this._x, y: this._y, w: this._w, h: this._h };
+    const peerRects = () => {
+      const out = [];
+      for (const el of document.querySelectorAll("foyer-window")) {
+        if (el === this) continue;
+        if (el.minimized || el.hasAttribute("hidden-by-layer")) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8) continue;
+        out.push({ x: r.left, y: r.top, w: r.width, h: r.height });
+      }
+      return out;
+    };
+    const overlapsAny = () => peerRects().some((o) => rectsOverlap(me, o));
+    let n = 0;
+    while (overlapsAny() && n < maxTries) {
+      n += 1;
+      this._x += CASCADE_STEP;
+      this._y += CASCADE_STEP;
+      me = { x: this._x, y: this._y, w: this._w, h: this._h };
+    }
   }
 
   connectedCallback() {
@@ -262,11 +321,20 @@ export class FoyerWindow extends LitElement {
     } else {
       this._w = this.initWidth;
       this._h = this.initHeight;
-      this._x = Math.max(16, Math.round((window.innerWidth  - this._w) / 2));
-      this._y = Math.max(16, Math.round((window.innerHeight - this._h) / 2));
+      const baseX = Math.max(16, Math.round((window.innerWidth  - this._w) / 2));
+      const baseY = Math.max(16, Math.round((window.innerHeight - this._h) / 2));
+      let peers = 0;
+      for (const el of document.querySelectorAll("foyer-window")) {
+        if (el === this) continue;
+        if (el.minimized || el.hasAttribute("hidden-by-layer")) continue;
+        peers += 1;
+      }
+      this._x = baseX + peers * CASCADE_STEP;
+      this._y = baseY + peers * CASCADE_STEP;
     }
     this._clampToViewport();
     document.addEventListener("keydown", this._onKeydown);
+    document.addEventListener("pointerdown", this._onDocPointerDownFront, true);
     // Register with the widgets layer so the right-dock lists this
     // window and the layer's visibility/sticky/minimize-all controls
     // affect it. foyer-window instances are dialog-class widgets by
@@ -274,14 +342,27 @@ export class FoyerWindow extends LitElement {
     // belong in the dock alongside Console + Diagnostics.
     this._registerWithLayer();
     window.__foyer?.layout?.addEventListener?.("change", this._onWidgetsLayerChange);
-    // Apply the current layer-visibility state on mount in case the
+    // Apply current layer-visibility state on mount in case the
     // layer was already hidden when we opened.
     this._onWidgetsLayerChange();
+    // Fresh mounts must win over peers that already have an inline z from
+    // click-to-raise; otherwise a new Track editor stays at :host 1000
+    // behind a wall of plugin windows (Rich, 2026-05).
+    if (!isRehydrating()) this._bumpGlobalZIndex();
+    if (!stored) {
+      requestAnimationFrame(() => {
+        if (!this.isConnected) return;
+        this._cascadeAwayFromPeers();
+        this._clampToViewport();
+        this.requestUpdate();
+      });
+    }
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     document.removeEventListener("keydown", this._onKeydown);
+    document.removeEventListener("pointerdown", this._onDocPointerDownFront, true);
     window.__foyer?.layout?.removeEventListener?.("change", this._onWidgetsLayerChange);
     this._unregisterFromLayer();
   }
@@ -298,9 +379,7 @@ export class FoyerWindow extends LitElement {
       view: this.title?.toLowerCase().split(" ")[0] || "widget",
       focus: () => {
         this.minimized = false;
-        // Bring above siblings — the simplest portable z-bump that
-        // works without managing a global stack ourselves.
-        try { this.parentNode?.appendChild(this); } catch {}
+        this._bumpGlobalZIndex();
         this._persist();
       },
       close: () => this._emitClose(),
@@ -368,6 +447,10 @@ export class FoyerWindow extends LitElement {
 
   _toggleMax() {
     this.maximized = !this.maximized;
+    if (this.maximized) {
+      const cur = Number.parseInt(String(this.style.zIndex || ""), 10);
+      this.style.zIndex = String(Number.isFinite(cur) ? Math.max(1400, cur) : 1400);
+    }
     this._persist();
     // Notify slotted children so they can adapt their layout to the
     // new size (e.g. beat-sequencer surfaces a play/tempo strip when
@@ -637,11 +720,9 @@ export function openWindow({ title, icon, storageKey, content, width, height, ba
         } catch {}
       }
       if (title) existing.title = title;
-      // Bump above siblings only on user-initiated opens. Rehydrate
-      // calls would otherwise reorder the z-stack of restored windows
-      // every time a region cache update fires — windows shuffle
-      // visibly on reload (Rich, 2026-04-26).
+      // User re-opened an existing window — bring it above other widgets.
       if (!fromRehydrate) {
+        try { existing._bumpGlobalZIndex?.(); } catch {}
         try { document.body.appendChild(existing); } catch {}
       }
       try {

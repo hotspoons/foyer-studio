@@ -26,6 +26,8 @@ export class TileContainer extends LitElement {
 
     .splitter {
       flex: 0 0 auto;
+      position: relative;
+      z-index: 3;
       background: var(--color-border);
       opacity: 0.5;
       transition: opacity 0.12s ease, background 0.12s ease;
@@ -37,6 +39,31 @@ export class TileContainer extends LitElement {
     .splitter.row    { width: 4px; cursor: col-resize; }
     .splitter.column { height: 4px; cursor: row-resize; }
   `;
+
+  constructor() {
+    super();
+    this._onStoreChange = () => this.requestUpdate();
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this.store?.addEventListener("change", this._onStoreChange);
+  }
+
+  disconnectedCallback() {
+    this.store?.removeEventListener("change", this._onStoreChange);
+    super.disconnectedCallback();
+  }
+
+  _branchHasFocus(treeNode) {
+    const fid = this.store?.focusId;
+    if (!fid || !treeNode) return false;
+    if (treeNode.kind === "leaf") return treeNode.id === fid;
+    for (const c of treeNode.children || []) {
+      if (this._branchHasFocus(c)) return true;
+    }
+    return false;
+  }
 
   render() {
     const n = this.node;
@@ -70,8 +97,16 @@ export class TileContainer extends LitElement {
     for (let i = 0; i < n.children.length; i++) {
       const child = n.children[i];
       const flex = `${n.ratios[i] || (1 / n.children.length)}`;
+      const front = this._branchHasFocus(child);
       children.push(html`
-        <div style="flex: ${flex} 1 0; min-width:0; min-height:0; display:flex;"
+        <div style="
+          flex: ${flex} 1 0;
+          min-width:0;
+          min-height:0;
+          display:flex;
+          position: relative;
+          z-index: ${front ? 2 : 0};
+        "
              @click=${(e) => this._onChildClick(e, child)}>
           <foyer-tile-container .node=${child} .store=${this.store}></foyer-tile-container>
         </div>

@@ -10,6 +10,7 @@
 
 import { html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
+import { isActionHiddenFromCatalog } from "foyer-core/rbac.js";
 import { QuadrantFab } from "./quadrant-fab.js";
 
 export class FoyerActionsFab extends QuadrantFab {
@@ -86,6 +87,14 @@ export class FoyerActionsFab extends QuadrantFab {
   }
 
   _invoke(id) {
+    if (id === "session.save_as") {
+      import("./save-session-as-modal.js").then((m) => m.openSaveSessionAs());
+      return;
+    }
+    if (id === "session.preferences") {
+      import("./settings-modal.js").then((m) => m.openSettings());
+      return;
+    }
     window.__foyer?.ws?.send?.({ type: "invoke_action", id });
   }
 
@@ -94,11 +103,12 @@ export class FoyerActionsFab extends QuadrantFab {
   }
 
   _renderPanelContent() {
-    if (!this._actions.length) {
+    const visible = this._actions.filter((a) => !isActionHiddenFromCatalog(a));
+    if (!visible.length) {
       return html`<div class="empty">No actions from the backend yet — request pending.</div>`;
     }
     const byCat = {};
-    for (const a of this._actions) (byCat[a.category] ||= []).push(a);
+    for (const a of visible) (byCat[a.category] ||= []).push(a);
     const cats = Object.keys(byCat).sort();
     return html`
       ${cats.map((c) => html`

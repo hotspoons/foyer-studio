@@ -149,28 +149,60 @@ export class TrackStrip extends LitElement {
       margin: 0 2px;
       background: var(--color-accent);
     }
-    /* Group color band — thin horizontal stripe at the very top of
-       the strip when the track belongs to a group. Sits above the
-       track-color swatch so the user can read both at a glance:
-       group color = section affinity, swatch = per-track identity. */
+    /* Name + kind share one column so every strip has the same vertical
+       rhythm; the group stripe is not in document flow. */
+    .name-kind-header {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .name-block {
+      position: relative;
+    }
+    /* Preserve the same 6px breathing room that :host gap used to insert
+       between the old standalone .name and .kind siblings. */
+    .name-kind-header.has-kind .name-block {
+      margin-bottom: 6px;
+    }
+    /* Group color — absolutely positioned in the gap between the track
+       name and the AUDIO/MIDI row so grouped strips don't push M/S/R
+       and the fader stack down relative to ungrouped neighbors. */
     .group-band {
+      position: absolute;
+      left: 2px;
+      right: 2px;
       height: 3px;
       border-radius: 2px;
-      margin: 0 2px 2px;
       background: var(--color-accent);
       opacity: 0.85;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .name-kind-header.has-kind .group-band {
+      /* Center the 3px bar in the 6px margin under the name block. */
+      top: calc(100% + 3px - 1.5px);
+    }
+    .name-kind-header:not(.has-kind) .group-band {
+      /* No kind row — tuck a short marker just under the name; still
+         out of flow so layout matches ungrouped strips. */
+      top: calc(100% + 2px);
+    }
+    .group-band.linked-on {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      box-sizing: border-box;
+      padding-right: 1px;
     }
     .group-band.linked-on::after {
-      /* Tiny dot on the right end signals an active group with at
-         least one live link flag — bright enough to read on a glance
-         but small enough not to compete with the peak meter. */
+      /* Dot: link flags active on this group. */
       content: "";
-      display: block;
-      width: 4px; height: 4px; border-radius: 50%;
+      flex-shrink: 0;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
       background: #fff;
       box-shadow: 0 0 4px currentColor;
-      margin-left: auto; margin-top: -3px;
-      transform: translate(-2px, 0);
     }
     foyer-plugin-strip { flex: 0 0 auto; }
     .mon-row {
@@ -357,30 +389,34 @@ export class TrackStrip extends LitElement {
       : null;
 
     return html`
-      ${group && groupBandStyle ? html`
-        <div class="group-band ${groupActive ? "linked-on" : ""}"
-             style=${groupBandStyle}
-             title="Group: ${group.name}${groupActive ? "" : " (inactive)"}"></div>
-      ` : null}
       ${d.showColorBar ? html`<div class="swatch" style=${swatchStyle}></div>` : null}
-      ${this._renaming
-        ? html`
+      <div class="name-kind-header ${d.showKind ? "has-kind" : ""}">
+        <div class="name-block">
+          ${this._renaming
+            ? html`
           <input class="name-input" style=${nameStyle}
                  .value=${t.name}
                  @keydown=${(e) => this._onRenameKey(e)}
                  @blur=${(e) => this._commitRename(e.currentTarget.value)}>
         `
-        : html`
+            : html`
           <div class="name" style=${nameStyle}
                title="${t.name} — click to select · right-click for options"
                @click=${(e) => this._onNameClick(e)}
                @contextmenu=${(e) => this._onContextMenu(e)}>${t.name}</div>
         `}
-      ${d.showKind ? html`
-        <div class="kind">
-          ${t.kind}${this._isSequencer() ? html`<span class="seq-chip" title="This track has an active beat-sequencer region">SEQ</span>` : null}
+          ${group && groupBandStyle ? html`
+            <div class="group-band ${groupActive ? "linked-on" : ""}"
+                 style=${groupBandStyle}
+                 title="Group: ${group.name}${groupActive ? "" : " (inactive)"}"></div>
+          ` : null}
         </div>
-      ` : null}
+        ${d.showKind ? html`
+          <div class="kind">
+            ${t.kind}${this._isSequencer() ? html`<span class="seq-chip" title="This track has an active beat-sequencer region">SEQ</span>` : null}
+          </div>
+        ` : null}
+      </div>
       <div class="monitor-stack">
         <div class="row">
           <foyer-toggle tone="mute" label="M" .on=${mute} @input=${(e) => this._setBool(t.mute?.id, e.detail.value)}></foyer-toggle>

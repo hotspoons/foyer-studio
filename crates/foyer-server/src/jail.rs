@@ -109,6 +109,28 @@ impl Jail {
             hidden_count,
         })
     }
+
+    /// True when `rel` (jail-relative, normalized) points at an existing path
+    /// that cannot be used as a fresh "Save session as" target: either a file
+    /// already sits there, or the directory already holds an Ardour session
+    /// (`*.ardour`). Missing paths return false.
+    pub fn existing_session_save_conflict(&self, rel: &Path) -> Result<bool, JailError> {
+        if rel.as_os_str().is_empty() {
+            return Ok(false);
+        }
+        let abs = self.root.join(rel);
+        let canon = match abs.canonicalize() {
+            Ok(c) => c,
+            Err(_) => return Ok(false),
+        };
+        if !canon.starts_with(&self.root_canon) {
+            return Err(JailError::OutsideJail(rel.display().to_string()));
+        }
+        if !canon.is_dir() {
+            return Ok(true);
+        }
+        Ok(find_session_in(&canon).is_some())
+    }
 }
 
 fn normalize_relative(rel: &str) -> PathBuf {

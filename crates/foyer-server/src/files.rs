@@ -66,6 +66,17 @@ pub(crate) fn sanitize_relative_path(raw: &str) -> PathBuf {
     sanitize(raw)
 }
 
+/// Forward-slash jail-relative path for WS / backend (no leading slash).
+pub(crate) fn rel_path_wire(rel: &Path) -> String {
+    rel.components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn sanitize(raw: &str) -> PathBuf {
     let trimmed = raw.trim_start_matches('/').trim();
     let mut out = PathBuf::new();

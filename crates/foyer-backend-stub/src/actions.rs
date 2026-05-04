@@ -70,6 +70,13 @@ pub(crate) fn catalog() -> Vec<Action> {
             Some("Cmd+S"),
         ),
         mk(
+            "session.save_as",
+            "Save Session As…",
+            ActionCategory::Session,
+            Some("document-duplicate"),
+            Some("Cmd+Shift+S"),
+        ),
+        mk(
             "session.export",
             "Export Project…",
             ActionCategory::Session,
@@ -82,6 +89,13 @@ pub(crate) fn catalog() -> Vec<Action> {
             ActionCategory::Session,
             Some("arrow-up-tray"),
             None,
+        ),
+        mk(
+            "session.preferences",
+            "Preferences…",
+            ActionCategory::Session,
+            Some("cog-6-tooth"),
+            Some("Cmd+,"),
         ),
         // Edit
         mk(
@@ -141,13 +155,6 @@ pub(crate) fn catalog() -> Vec<Action> {
             Some("plus"),
             None,
         ),
-        mk(
-            "track.freeze",
-            "Freeze Track",
-            ActionCategory::Track,
-            Some("snowflake"),
-            None,
-        ),
         // View
         mk(
             "view.mixer",
@@ -169,22 +176,6 @@ pub(crate) fn catalog() -> Vec<Action> {
             ActionCategory::View,
             Some("puzzle-piece"),
             Some("F5"),
-        ),
-        // Plugin
-        mk(
-            "plugin.rescan",
-            "Rescan Plugins",
-            ActionCategory::Plugin,
-            Some("arrow-path"),
-            None,
-        ),
-        // Settings
-        mk(
-            "settings.preferences",
-            "Preferences…",
-            ActionCategory::Settings,
-            Some("cog-6-tooth"),
-            Some("Cmd+,"),
         ),
     ]
 }

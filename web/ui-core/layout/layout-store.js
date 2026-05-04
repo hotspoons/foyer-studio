@@ -622,6 +622,32 @@ export class LayoutStore extends EventTarget {
     this._emit();
   }
 
+  /**
+   * Monotonic z shared by `<foyer-floating-tiles>`, `<foyer-plugin-layer>`,
+   * and `<foyer-window>` so the surface the user last clicked wins over
+   * neighbors (each layer defaults to a fixed z-index and would otherwise
+   * ignore internal float ordering).
+   */
+  bumpGlobalStackZ() {
+    this._globalStackZ = (this._globalStackZ ?? 1000) + 1;
+    return this._globalStackZ;
+  }
+
+  /**
+   * `raiseFloat` plus a global stack bump and host z-index on the
+   * floating-tiles element (when mounted). Use for any path that should
+   * feel like "bring this tear-out above other app surfaces".
+   */
+  raiseFloatToGlobalFront(id) {
+    this.raiseFloat(id);
+    const z = this.bumpGlobalStackZ();
+    try {
+      const ft = window.__foyer?.floatingTiles;
+      if (ft) ft.style.zIndex = String(z);
+    } catch {}
+    return z;
+  }
+
   /** Bring a plugin window to the front within the plugin layer. */
   raisePluginFloat(plugin_id) {
     const p = this._pluginFloats.find((x) => x.plugin_id === plugin_id);

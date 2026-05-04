@@ -16,6 +16,7 @@
 #include <cctype>
 #include <csignal>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <string>
@@ -268,6 +269,18 @@ struct In
 		out.assign (reinterpret_cast<const char*> (p), n);
 		p += n;
 		return ok ();
+	}
+
+	/// MessagePack `nil` (save in place) or a string (`save_as` target folder).
+	bool read_nil_or_str (std::string& out)
+	{
+		if (!have (1)) return false;
+		if (peek () == 0xc0) {
+			take_u8 ();
+			out.clear ();
+			return ok ();
+		}
+		return read_str (out);
 	}
 
 	bool read_f64 (double& out)
@@ -1472,12 +1485,10 @@ decode (const std::vector<std::uint8_t>& buf)
 					}
 				} else if (k == "as_path") {
 					// Command::SaveSession { as_path: Option<String> }
-					// — decoded into `out.id` since we already have a
-					// free string slot. MessagePack can carry nil or
-					// the string; we accept either.
-					std::string p;
-					if (!in.read_str (p)) return out;
-					out.id = p;
+					// — decoded into `out.id`. `nil` or absent key → empty
+					// string (save in place). Non-empty → absolute path to
+					// the new session *folder* (parent + final dirname).
+					if (!in.read_nil_or_str (out.id)) return out;
 				} else if (k == "lane_id") {
 					if (!in.read_str (out.lane_id)) return out;
 				} else if (k == "mask") {
@@ -3966,10 +3977,6 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						mt->set_playback_channel_mode (ARDOUR::ForceChannel, 0x0001);
 					}
 				}
-				else if (id == "track.freeze") {
-					PBD::warning << "foyer_shim: track.freeze not yet wired" << endmsg;
-				}
-
 				// Plugin: ask Ardour's PluginManager to rescan its
 				// search paths. The rescan runs on whatever thread
 				// PluginManager schedules; we just kick it off. Clients
@@ -4283,12 +4290,56 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			break;
 		}
 		case DecodedCmd::Kind::SaveSession: {
-			// `out.id` holds `as_path` (possibly empty = save in place).
+			// Empty `as_path` → save in place. Non-empty → absolute path to
+			// the new session directory; must use Session::save_as(), not
+			// save_state() (the latter's string arg is a *snapshot* name).
 			std::string as_path = cmd.id;
 			FoyerShim* shim = &_shim;
 			_shim.call_slot (MISSING_INVALIDATOR, [shim, as_path] () {
-				PBD::warning << "foyer_shim: save_session as_path='" << as_path << "'" << endmsg;
-				shim->session ().save_state (as_path);
+				Session& session = shim->session ();
+				if (as_path.empty ()) {
+					session.save_state ("");
+					return;
+				}
+				namespace fs = std::filesystem;
+				fs::path target = fs::path (as_path).lexically_normal ();
+				fs::path parent  = target.parent_path ();
+				fs::path name    = target.filename ();
+				if (name.empty ()) {
+					PBD::warning << "foyer_shim: save_session: invalid as_path (no folder name): '"
+					             << as_path << "'" << endmsg;
+					auto err = msgpack_out::encode_error (
+					    "save_session_failed",
+					    std::string ("invalid save path (no folder name): ") + as_path);
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, err);
+					return;
+				}
+				Session::SaveAs sa;
+				sa.new_parent_folder = parent.empty () ? std::string (".") : parent.generic_string ();
+				sa.new_name          = name.generic_string ();
+				sa.switch_to         = true;
+				sa.include_media     = true;
+				sa.copy_media        = true;
+				// `copy_external` runs `bring_all_sources_into_session`; it often fails on
+				// normal projects (outside paths, permissions) and returns -1 with only
+				// `failure_message` — leave media paths as references unless we add a
+				// dedicated "consolidate" UX.
+				sa.copy_external     = false;
+				int const r = session.save_as (sa);
+				if (r != 0) {
+					PBD::warning << "foyer_shim: save_as failed (" << r << "): " << sa.failure_message
+					             << endmsg;
+					std::string const& fm = sa.failure_message;
+					std::string msg       = fm.empty ()
+					                            ? (std::string ("save_as failed (code ") + std::to_string (r) + ")")
+					                            : fm;
+					auto err = msgpack_out::encode_error ("save_session_failed", msg);
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, err);
+					return;
+				}
+				PBD::info << "foyer_shim: save_as completed → " << sa.final_session_folder_name << endmsg;
+				auto bytes = msgpack_out::encode_patch_reload ();
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;
 		}

@@ -319,6 +319,18 @@ encode_patch_reload ()
 }
 
 std::vector<std::uint8_t>
+encode_error (const std::string& code, const std::string& message)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");     o.str ("event");
+		o.str ("type");    o.str ("error");
+		o.str ("code");    o.str (code);
+		o.str ("message"); o.str (message);
+	});
+}
+
+std::vector<std::uint8_t>
 encode_control_update (Session& session, const Controllable& c)
 {
 	std::string id = schema_map::id_for_controllable (session, c);

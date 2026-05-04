@@ -63,7 +63,7 @@ function applySlot(layout, slotId) {
     shown.sort((a, b) => (b.z | 0) - (a.z | 0));
     const top = shown[0];
     layout.floatSet(top.id, { ...rect, slot: slotId });
-    layout.raiseFloat(top.id);
+    layout.raiseFloatToGlobalFront(top.id);
     try {
       localStorage.setItem(`foyer.layout.sticky.${top.view}`, slotId);
     } catch {}

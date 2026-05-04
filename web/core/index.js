@@ -37,4 +37,9 @@ export {
 
 // RBAC helpers (thin wrapper around store.isAllowed — UI uses these
 // directly to gate controls without null-checking the store).
-export { isAllowed, isActionAllowed, onRbacChange } from "./rbac.js";
+export {
+  isAllowed,
+  isActionAllowed,
+  isActionHiddenFromCatalog,
+  onRbacChange,
+} from "./rbac.js";

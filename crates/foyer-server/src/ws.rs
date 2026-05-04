@@ -772,6 +772,45 @@ fn command_tag(cmd: &Command) -> &'static str {
     }
 }
 
+/// Sanitize optional save-as target, reject overwrite of existing session dirs
+/// / files inside the jail, and return the path to pass to the backend: an
+/// **absolute** filesystem path to the new session folder when a jail is
+/// configured, otherwise a sanitized relative string (non-jail setups). `None` /
+/// empty string means save-in-place (same as omitting `as_path` on the wire).
+fn normalize_save_as_path(
+    raw: Option<&str>,
+    jail: Option<&crate::jail::Jail>,
+) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let rel = crate::files::sanitize_relative_path(t);
+    if rel.as_os_str().is_empty() {
+        return Err("invalid save path".into());
+    }
+    if let Some(jail) = jail {
+        match jail.existing_session_save_conflict(&rel) {
+            Ok(true) => {
+                return Err(
+                    "that path already exists or contains a session — pick a new folder name"
+                        .into(),
+                );
+            }
+            Err(e) => return Err(e.to_string()),
+            Ok(false) => {}
+        }
+        // Ardour expects an absolute filesystem path to the *new session folder*
+        // (parent/name), not a Foyer jail-relative segment.
+        let abs = jail.root().join(&rel);
+        return Ok(Some(abs.to_string_lossy().into_owned()));
+    }
+    Ok(Some(crate::files::rel_path_wire(&rel)))
+}
+
 async fn dispatch_command(
     state: &std::sync::Arc<AppState>,
     origin: Option<&str>,
@@ -1033,7 +1072,26 @@ async fn dispatch_command(
             }
         },
         Command::SaveSession { as_path } => {
-            if let Err(e) = state.backend().await.save_session(as_path.as_deref()).await {
+            let normalized = match normalize_save_as_path(as_path.as_deref(), state.jail.as_ref()) {
+                Ok(n) => n,
+                Err(message) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "save_session_failed".into(),
+                            message,
+                        },
+                    )
+                    .await;
+                    return Ok(());
+                }
+            };
+            if let Err(e) = state
+                .backend()
+                .await
+                .save_session(normalized.as_deref())
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {

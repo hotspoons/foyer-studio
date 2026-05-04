@@ -109,6 +109,15 @@ pub fn default_daw_actions() -> Vec<Action> {
             Some("arrow-up-tray"),
             None,
         ),
+        // Client-side preferences modal (browser audio, etc.) — intercepted
+        // in main-menu / command palette before invoke_action.
+        mk(
+            "session.preferences",
+            "Preferences…",
+            ActionCategory::Session,
+            Some("cog-6-tooth"),
+            Some("Cmd+,"),
+        ),
         // ── Edit ────────────────────────────────────────────────
         mk(
             "edit.undo",
@@ -186,13 +195,6 @@ pub fn default_daw_actions() -> Vec<Action> {
             Some("plus"),
             None,
         ),
-        mk(
-            "track.freeze",
-            "Freeze Track",
-            ActionCategory::Track,
-            Some("snowflake"),
-            None,
-        ),
         // ── View ────────────────────────────────────────────────
         mk(
             "view.mixer",
@@ -230,22 +232,6 @@ pub fn default_daw_actions() -> Vec<Action> {
             ActionCategory::View,
             Some("arrow-uturn-left"),
             Some("Ctrl+Shift+Backspace"),
-        ),
-        // ── Plugin ──────────────────────────────────────────────
-        mk(
-            "plugin.rescan",
-            "Rescan Plugins",
-            ActionCategory::Plugin,
-            Some("arrow-path"),
-            None,
-        ),
-        // ── Settings ────────────────────────────────────────────
-        mk(
-            "settings.preferences",
-            "Preferences…",
-            ActionCategory::Settings,
-            Some("cog-6-tooth"),
-            Some("Cmd+,"),
         ),
     ]
 }

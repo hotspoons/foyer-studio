@@ -239,7 +239,7 @@ export class FloatingTiles extends LitElement {
       if (n.classList.contains("window") && myMenu?.contains(n)) {
         // data-float-id set in the render; fallback to DOM order if missing.
         const fid = n.getAttribute("data-float-id");
-        if (fid) this.store?.raiseFloat(fid);
+        if (fid) this.store?.raiseFloatToGlobalFront?.(fid);
         return;
       }
     }
@@ -368,13 +368,13 @@ export class FloatingTiles extends LitElement {
         action: () => {
           const r = clampToWorkspace({ x: e.x, y: e.y, w: e.w, h: e.h });
           this.store.floatSet(e.id, { ...r, slot: null });
-          this.store.raiseFloat(e.id);
+          this.store.raiseFloatToGlobalFront(e.id);
         },
       },
       {
         label: "Bring to front",
         icon: "arrow-top-right-on-square",
-        action: () => this.store.raiseFloat(e.id),
+        action: () => this.store.raiseFloatToGlobalFront(e.id),
       },
       { separator: true },
       { heading: "Snap to slot" },
@@ -456,7 +456,6 @@ export class FloatingTiles extends LitElement {
         class="window ${isTop ? "active" : ""}"
         style=${style}
         data-float-id=${e.id}
-        @pointerdown=${() => this.store.raiseFloat(e.id)}
         @contextmenu=${(ev) => this._windowContextMenu(ev, e)}
       >
         <header @pointerdown=${(ev) => this._startMove(ev, e)}>
@@ -575,7 +574,7 @@ export class FloatingTiles extends LitElement {
     const startY = ev.clientY;
     const ox = entry.x;
     const oy = entry.y;
-    this.store.raiseFloat(entry.id);
+    this.store.raiseFloatToGlobalFront(entry.id);
     const zones = dropZones();
     zones.show();
     const rightDock = window.__foyer?.rightDock;
@@ -700,7 +699,7 @@ export class FloatingTiles extends LitElement {
     const minW = 240;
     const minH = 160;
 
-    this.store.raiseFloat(entry.id);
+    this.store.raiseFloatToGlobalFront(entry.id);
 
     // Paired-window resize: any other visible window whose opposite edge
     // touches OUR resize edge (within 8px tolerance) grows or shrinks
