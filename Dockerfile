@@ -515,14 +515,25 @@ COPY --from=builder /workspace/target/release/foyer /usr/local/bin/foyer
 # bundles into `/opt/foyer/sample-sessions/` via a separate COPY (or
 # `--build-arg`) when you want preloaded content for visitors.
 
-# Wire the shim into the search paths Ardour scans on startup.
-# `~/.config/ardour9/surfaces/` is the per-user default;
-# `/opt/foyer/surfaces/` is what the entrypoint prepends to
-# `ARDOUR_SURFACES_PATH` so `ardour-9` picks it up regardless of
-# $HOME (matters for Cloud Run which rewrites uid/gid).
+# Wire the shim onto Ardour's surface search path.
+#
+# IMPORTANT: install to ONE location only. Ardour's `find_files_matching_pattern`
+# does not dedupe across search-path entries (libs/pbd/file_utils.cc), so
+# the same .so under two scanned dirs becomes two `ControlProtocolInfo`
+# rows with identical `name="Foyer Studio Shim"`. The session XML's
+# `<ControlProtocols>` then contains TWO matching `<Protocol>` children;
+# our XML preflight flips the first to `active="1"` but the second stays
+# `active="0"`, and `ControlProtocolManager::set_state` iterates in order
+# (libs/ardour/control_protocol_manager.cc:534) — instantiate-then-teardown
+# leaves the shim with no IPC server, no advert, and foyer-cli times out
+# at 30 s. The dev `shim.sh` install path (~/.config/ardour9/surfaces/)
+# is single-source so this never reproduces locally.
+#
+# /opt/foyer/surfaces wins over ~/.config/ardour9/surfaces because the
+# entrypoint exports ARDOUR_SURFACES_PATH=/opt/foyer/surfaces — works
+# regardless of $HOME, which matters when Cloud Run rewrites uid/gid
+# and the home dir resolves somewhere other than /home/foyer.
 RUN install -D /opt/foyer/shim/libfoyer_shim.so \
-      /home/foyer/.config/ardour9/surfaces/libfoyer_shim.so \
- && install -D /opt/foyer/shim/libfoyer_shim.so \
       /opt/foyer/surfaces/libfoyer_shim.so
 
 # Project jail root + initial seeding — populated on first boot if
