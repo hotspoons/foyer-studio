@@ -139,6 +139,30 @@ if [ "$mode" = "--ams-dummy" ] || [ "$mode" = "--force-ams-dummy" ]; then
         sample_rate="${FOYER_SAMPLE_RATE:-48000}"
         buffer_size="${FOYER_BUFFER_SIZE:-4096}"
         n_periods="${FOYER_N_PERIODS:-3}"
+        # Driver selection. The Foyer Dummy backend ships several
+        # speed presets; only the one named "Realtime" calls
+        # `pbd_realtime_pthread_create(SCHED_FIFO, …)` for its main
+        # process thread. Without that, MIDI synth (or any non-trivial
+        # plugin chain) under CPU pressure causes audible underruns
+        # because the SCHED_OTHER process thread can be preempted
+        # mid-cycle. The acquisition only succeeds when the kernel
+        # grants `rtprio` to our user — i.e. the container was run
+        # with `--ulimit rtprio=95` (and `--ulimit memlock=-1` is
+        # recommended alongside it). Pick "Realtime" when the rlimit
+        # allows; fall back to the default ("") which Ardour resolves
+        # to "Normal Speed" + non-RT scheduling. The backend's
+        # absolute-time-sleep timing fix keeps the clock locked to
+        # wall-clock either way, so the non-RT path still produces
+        # correct-rate output — it just can't dodge scheduler stalls.
+        driver=""
+        rtprio_max=$(ulimit -r 2>/dev/null || echo 0)
+        if [ "${FOYER_DUMMY_REALTIME:-auto}" = "off" ]; then
+            :
+        elif [ "${FOYER_DUMMY_REALTIME:-auto}" = "on" ]; then
+            driver="Realtime"
+        elif [ "${rtprio_max}" -gt 0 ] 2>/dev/null; then
+            driver="Realtime"
+        fi
         # Capture pre-state for the action-verb log line below.
         pre_existed="no"
         if [ -f "$cfg_dir/config" ]; then
@@ -157,7 +181,7 @@ if [ "$mode" = "--ams-dummy" ] || [ "$mode" = "--force-ams-dummy" ]; then
     <AudioMIDISetup>
       <EngineStates>
         <State backend="Foyer Dummy"
-               driver=""
+               driver="${driver}"
                device="Silence"
                input-device=""
                output-device=""
@@ -183,6 +207,7 @@ EOF
         if [ "$pre_existed" = "yes" ]; then
             action="overwrote"
         fi
-        echo "seed-ardour-config: $action $cfg_dir/config (Dummy / Silence, sr=${sample_rate}, buf=${buffer_size}, periods=${n_periods})"
+        driver_log="${driver:-Normal Speed}"
+        echo "seed-ardour-config: $action $cfg_dir/config (Dummy / Silence, driver=${driver_log}, rtprio_max=${rtprio_max}, sr=${sample_rate}, buf=${buffer_size}, periods=${n_periods})"
     fi
 fi

@@ -42,6 +42,18 @@ privileged flags. Works identically on Cloud Run, Docker Desktop,
 Colima, plain Linux. Audio leaves the container only via Foyer's
 WebSocket egress.
 
+**For pop-free playback under load (MIDI synths, plugin-heavy
+sessions)** add `--cap-add=SYS_NICE --ulimit rtprio=95 --ulimit
+memlock=-1` to the run. Without those, the dummy backend's process
+thread runs on `SCHED_OTHER` and gets preempted mid-cycle by anything
+else on the host → audible dropouts. With them, the entrypoint's
+seed step auto-pins Ardour to its **Realtime** driver and the
+backend acquires `SCHED_FIFO`. Look for `driver=Realtime,
+rtprio_max=95` in the boot log to confirm. Full walkthrough +
+buffer-size knobs for hosts where rtprio isn't available (Cloud Run
+gen2) in
+[docs/USAGE.md#eliminating-audio-dropouts-with-realtime-scheduling](docs/USAGE.md#eliminating-audio-dropouts-with-realtime-scheduling).
+
 For real audio hardware via a host-running jackd (Linux only),
 flip into `jack-headless` mode with the privileged flags + JACK
 shm passthrough — full recipe in

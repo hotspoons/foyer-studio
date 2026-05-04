@@ -60,6 +60,58 @@ Three flags worth understanding:
 - **`-v "$(pwd):/projects"`** (or any host path you prefer) — see **Volumes** below. Without
   a mount, every project upload vanishes on container stop.
 
+### Eliminating audio dropouts with realtime scheduling
+
+The standalone command above produces correct-rate audio under light
+load, but heavy MIDI / softsynth use can preempt the dummy backend's
+process thread mid-cycle (it runs on `SCHED_OTHER` because the
+container has no `CAP_SYS_NICE`). Symptom: pops, dropouts, or short
+silences while the synth is busy.
+
+**The fix** — add `--cap-add=SYS_NICE` plus the rtprio + memlock
+rlimits. Verified to eliminate dropouts on heavy MIDI / soft-synth
+sessions. Same caps the dev container grants:
+
+```bash
+docker run --rm -it --name foyer-studio \
+  -p 3838:3838 --shm-size=1g \
+  --cap-add=SYS_NICE \
+  --ulimit rtprio=95 --ulimit memlock=-1 \
+  -v "$(pwd):/projects" \
+  ghcr.io/hotspoons/foyer-studio:latest
+```
+
+**Why it works.** The entrypoint's seed step probes `ulimit -r` at
+boot; when the rlimit is non-zero it pins Ardour's Foyer Dummy
+backend to the **Realtime** driver, which calls
+`pbd_realtime_pthread_create` under the hood and gets `SCHED_FIFO`
+for the process thread. To confirm, check the boot log for:
+
+```
+seed-ardour-config: created … (Dummy / Silence, driver=Realtime, rtprio_max=95, …)
+```
+
+If you see `driver=Normal Speed, rtprio_max=0` instead, one of the
+two ulimits / the cap didn't take effect — most often a stale
+container that was started before you added the flags, or a host
+that strips them silently (Cloud Run gen2 is the main one).
+
+**Overrides.** `-e FOYER_DUMMY_REALTIME=on` forces Realtime even
+when the probe reads zero (rare — useful if you've granted SYS_NICE
+out-of-band but the rlimit didn't propagate); `-e
+FOYER_DUMMY_REALTIME=off` keeps Normal Speed even when rtprio is
+available (useful for reproducing the SCHED_OTHER path).
+
+**When you can't grant rtprio** (Cloud Run gen2, locked-down hosts):
+`-e FOYER_BUFFER_SIZE=8192` (or 16384) is the lever that's left.
+Bigger buffers smooth over scheduler stalls; the trade-off is
+monitoring latency, which doesn't matter for a browser surface
+because the WS round-trip already dominates.
+
+**Docker Desktop / Colima users:** the ulimits are passed to the
+Linux VM kernel and grant the rlimits to the in-container user
+without any host PAM / `limits.d` setup. Just add the flags and go.
+
 ### Volumes
 
 | Mount | What's there | When you need it |
@@ -145,6 +197,9 @@ honors these on every boot:
 | `FOYER_NETJACK_HOST` / `FOYER_NETJACK_PORT` | _unset_ / `19000` | NetJack2 target when `FOYER_JACK_MODE=netjack`. |
 | `FOYER_SAMPLE_RATE` | `48000` | Engine sample rate (Hz). |
 | `FOYER_PERIOD_FRAMES` | `1024` | JACK period frames (latency vs. CPU). |
+| `FOYER_BUFFER_SIZE` | `4096` | Foyer Dummy backend buffer size in samples. Bigger = more headroom under CPU pressure, more latency (irrelevant for browser monitoring — the WS round-trip dominates). 8192 / 16384 are reasonable for heavy MIDI work without rtprio. |
+| `FOYER_N_PERIODS` | `3` | Foyer Dummy backend period count. 3-4 is the sweet spot. |
+| `FOYER_DUMMY_REALTIME` | `auto` | `on` / `off` / `auto`. `auto` picks the Realtime driver when the container's rtprio rlimit is non-zero. Force `on` if you've granted SYS_NICE but the rlimit probe misreads (rare); force `off` to stay on Normal Speed even when rtprio is available. |
 | `FOYER_TLS_CERT` / `FOYER_TLS_KEY` | _unset_ | Direct HTTPS without a fronting proxy. |
 
 ### Uploading and exporting projects
