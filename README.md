@@ -127,7 +127,7 @@ the shim, the autovocoder LV2, and ~200 LV2 plugins.
 ```bash
 docker run --rm -it --name foyer-studio \
   -p 3838:3838 --shm-size=1g \
-  -v foyer-projects:/projects \
+  -v "$(pwd):/projects" \
   ghcr.io/hotspoons/foyer-studio:latest
 ```
 

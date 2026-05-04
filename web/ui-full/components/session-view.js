@@ -227,6 +227,8 @@ export class SessionView extends LitElement {
     // localStorage, and bind mouse 3/4 + Alt+←/Alt+→ for back/forward.
     this._history = [];      // stack of visited paths, oldest → newest
     this._histCursor = -1;   // index into _history; -1 = uninitialized
+    /** Last path sent in `browse_path` (for stale last-path recovery). */
+    this._lastBrowseRequest = "";
     this._keyHandler = (e) => this._onKey(e);
     this._mouseHandler = (e) => this._onMouseButton(e);
   }
@@ -359,11 +361,32 @@ export class SessionView extends LitElement {
   }
 
   _sendBrowse(path) {
+    this._lastBrowseRequest = path || "";
     window.__foyer?.ws?.send({
       type: "browse_path",
       path: path || "",
       show_hidden: !!this._showHidden,
     });
+  }
+
+  /**
+   * If the picker opens on a remembered folder that no longer exists,
+   * the server returns "no such path". Recover by jumping to jail root
+   * without flashing an error — same as first-run with an empty path.
+   */
+  _tryRecoverStaleInitialPath(message) {
+    if (!/no such path:/i.test(message || "")) return false;
+    const attempted = this._lastBrowseRequest;
+    if (!attempted) return false;
+    if (this._history.length !== 1 || this._history[0] !== attempted) return false;
+    this._error = "";
+    this._listing = null;
+    this._history = [""];
+    this._histCursor = 0;
+    this._saveLastPath("");
+    this._sendBrowse("");
+    this.requestUpdate();
+    return true;
   }
 
   _onEnvelope(env) {
@@ -373,6 +396,7 @@ export class SessionView extends LitElement {
       this._listing = body.listing;
       this._error = "";
     } else if (body.type === "error" && body.code?.startsWith("browse_")) {
+      if (this._tryRecoverStaleInitialPath(body.message)) return;
       this._error = body.message;
     } else if (body.type === "error" && body.code === "no_jail") {
       this._error = body.message;
