@@ -27,6 +27,7 @@ import { getVizPref, getVizPrefs, setVizPref } from "foyer-ui-core/viz/viz-setti
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { toast } from "foyer-ui-core/widgets/toast.js";
+import { icon } from "foyer-ui-core/icons.js";
 import { sessionScopedKey } from "foyer-core/session-scope.js";
 
 const LANE_HEIGHT_DEFAULT = 52;
@@ -42,6 +43,16 @@ const EDGE_GRAB = 6;
 const TIERS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
 const LANE_HEIGHT_KEY = "foyer.timeline.lane-heights.v1";
 const SNAP_PREFS_KEY = "foyer.timeline.snap.v1";
+
+/** Beat subdivisions for quant grid / snap (value = denominator slots per bar in 4/4 terms). */
+const QUANT_SUBDIV_OPTIONS = [
+  { v: 4, label: "1/4" },
+  { v: 8, label: "1/8" },
+  { v: 16, label: "1/16" },
+  { v: 32, label: "1/32" },
+  { v: 6, label: "1/8T" },
+  { v: 12, label: "1/16T" },
+];
 
 function defaultSnapPrefs() {
   return {
@@ -113,30 +124,44 @@ export class TimelineView extends LitElement {
     }
     .toolbar details.tb-menu {
       position: relative;
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
+      border: none;
       background: transparent;
-      min-height: 22px;
-    }
-    .toolbar details.tb-menu[open] {
-      border-color: var(--color-accent);
     }
     .toolbar details.tb-menu > summary {
       list-style: none;
       cursor: pointer;
-      font: inherit;
+      font-family: var(--font-sans);
       font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      padding: 4px 8px;
+      border-radius: 3px;
+      border: 1px solid var(--color-border);
+      background: var(--color-surface);
       color: var(--color-text-muted);
-      padding: 2px 8px;
       user-select: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: color 0.1s ease, border-color 0.1s ease;
+    }
+    .toolbar details.tb-menu > summary:hover {
+      color: var(--color-text);
+      border-color: var(--color-accent);
     }
     .toolbar details.tb-menu > summary::-webkit-details-marker { display: none; }
     .toolbar details.tb-menu > summary::after {
-      content: " ▾";
+      content: "▾";
       font-size: 9px;
-      opacity: 0.8;
+      opacity: 0.75;
+      margin-left: 2px;
+      font-weight: 400;
+      letter-spacing: normal;
     }
-    .toolbar details.tb-menu[open] > summary { color: var(--color-text); }
+    .toolbar details.tb-menu[open] > summary {
+      color: var(--color-text);
+      border-color: var(--color-accent);
+    }
     .toolbar .tb-panel {
       position: absolute;
       top: calc(100% + 4px);
@@ -639,9 +664,8 @@ export class TimelineView extends LitElement {
     this._lastSeekAtMs = 0;
     this._recordingAnchorSamples = null;
     this._transportDropStats = { stale_seq: 0, backward_jump: 0 };
-    // Quantization grid prefs persist per-browser. Default off so a
-    // first-time user doesn't see extra lines they didn't ask for.
-    // Visibility (`_quantOn`) is now mirrored to the viz prefs
+    // Quant overlay defaults on (`quantGridOn`); time grid defaults off.
+    // Visibility (`_quantOn`) is mirrored to the viz prefs
     // (`quantGridOn`) so the Viz menu can toggle it alongside the
     // time-grid toggle. Subdivision (`_quantDiv`) stays in its own
     // localStorage key — it's a per-timeline setting that doesn't
@@ -1800,17 +1824,7 @@ export class TimelineView extends LitElement {
         <span style="flex:1"></span>
         ${this._renderRegionToolsMenu()}
         ${this._renderSnapMenu()}
-        ${this._quantOn ? html`
-          <select title="Grid subdivision per quarter note (toggle visibility from the Viz menu)"
-                  @change=${(e) => this._setQuantDiv(Number(e.currentTarget.value))}>
-            <option value="4"  ?selected=${this._quantDiv === 4}>1/4</option>
-            <option value="8"  ?selected=${this._quantDiv === 8}>1/8</option>
-            <option value="16" ?selected=${this._quantDiv === 16}>1/16</option>
-            <option value="32" ?selected=${this._quantDiv === 32}>1/32</option>
-            <option value="6"  ?selected=${this._quantDiv === 6}>1/8T</option>
-            <option value="12" ?selected=${this._quantDiv === 12}>1/16T</option>
-          </select>
-        ` : null}
+        ${this._renderQuantSubdivMenu()}
         <foyer-viz-picker></foyer-viz-picker>
         ${this._diagEnabled() ? html`
           <span>
@@ -2095,10 +2109,6 @@ export class TimelineView extends LitElement {
     return { L, R, sL, eL, sR, eR, inter, track_id: L.track_id };
   }
 
-  _notImplemented(msg) {
-    toast(msg, { tone: "info", ttl: 4000 });
-  }
-
   _quantizeSelectedRegionsToGrid() {
     const step = this._gridStepSamples();
     if (!step) {
@@ -2182,8 +2192,18 @@ export class TimelineView extends LitElement {
   _applyCrossfadeToSelection() {
     const pair = this._regionPairForCrossfadeGlue();
     const ws = window.__foyer?.ws;
-    if (!pair || !ws) return;
-    if (pair.inter <= 0) return;
+    if (!pair) return;
+    if (!ws) {
+      toast("Not connected — cannot apply crossfade.", { tone: "warn" });
+      return;
+    }
+    if (pair.inter <= 0) {
+      toast(
+        "Crossfade needs two overlapping audio regions on the same track (drag one over the other).",
+        { tone: "warn" },
+      );
+      return;
+    }
     const ov = Math.floor(pair.inter);
     ws.send({
       type: "update_region",
@@ -2196,12 +2216,6 @@ export class TimelineView extends LitElement {
       patch: { fade_in_samples: ov, fade_in_shape: "symmetric" },
     });
     toast("Crossfade applied over overlap.", { tone: "info" });
-  }
-
-  _glueSelection() {
-    this._notImplemented(
-      "Glue / consolidate needs an offline-render path — not wired yet.",
-    );
   }
 
   _regionEditMenuActions() {
@@ -2249,34 +2263,41 @@ export class TimelineView extends LitElement {
         label: "Crossfade overlap",
         icon: "arrows-pointing-in",
         disabled: pair.inter <= 0,
+        title:
+          pair.inter <= 0
+            ? "Needs overlap: put two audio regions on the same track so they share time."
+            : "Sets symmetric fades across the overlapping span.",
         action: () => this._applyCrossfadeToSelection(),
       });
       items.push({
         label: "Glue regions",
         icon: "circle-stack",
-        disabled: pair.inter < 0,
-        action: () => this._glueSelection(),
+        disabled: true,
+        title:
+          "Not implemented — needs consolidate/offline-render in the Ardour shim (docs/TODO.md).",
       });
     }
     items.push({ separator: true });
     items.push({
       label: "Reverse audio",
       icon: "arrow-uturn-left",
-      disabled: !anyAudio,
-      action: () =>
-        this._notImplemented("Reverse audio is not available in this build yet."),
+      disabled: true,
+      title:
+        "Not implemented — Ardour uses a reverse filter / new source; no foyer command yet (docs/TODO.md).",
     });
     items.push({
       label: "Strip silence…",
       icon: "scissors",
-      action: () =>
-        this._notImplemented("Strip silence is not available in this build yet."),
+      disabled: true,
+      title:
+        "Not implemented — needs analysis + split batch in the shim (docs/TODO.md).",
     });
     items.push({
       label: "Pitch shift…",
       icon: "musical-note",
-      action: () =>
-        this._notImplemented("Pitch shift is not available in this build yet."),
+      disabled: true,
+      title:
+        "Not implemented — needs region FX / MIDI transpose wiring (docs/TODO.md).",
     });
     return items;
   }
@@ -2291,7 +2312,7 @@ export class TimelineView extends LitElement {
     };
     return html`
       <details class="tb-menu" @click=${(e) => e.stopPropagation()}>
-        <summary>Snap</summary>
+        <summary>${icon("arrows-pointing-in", 12)}<span>Snap</span></summary>
         <div class="tb-panel" @click=${(e) => e.stopPropagation()}>
           <div class="tb-row">
             <label><input type="checkbox" .checked=${p.grid}
@@ -2318,6 +2339,43 @@ export class TimelineView extends LitElement {
     `;
   }
 
+  _quantSubdivSummaryLabel() {
+    const d = this._quantDiv;
+    const hit = QUANT_SUBDIV_OPTIONS.find((o) => o.v === d);
+    return hit?.label ?? "1/16";
+  }
+
+  _renderQuantSubdivMenu() {
+    const d = this._quantDiv;
+    const onPick = (v) => (ev) => {
+      if (!ev.target.checked) {
+        ev.target.checked = true;
+        return;
+      }
+      this._setQuantDiv(v);
+      const det = ev.target.closest("details");
+      if (det) det.open = false;
+      this.requestUpdate();
+    };
+    return html`
+      <details class="tb-menu" @click=${(e) => e.stopPropagation()}>
+        <summary title="Beat subdivision (per quarter): magnetic snap, region quantize, and BPM quant grid when on in Viz">
+          ${icon("squares-2x2", 12)}<span>${this._quantSubdivSummaryLabel()}</span>
+        </summary>
+        <div class="tb-panel" @click=${(e) => e.stopPropagation()}>
+          ${QUANT_SUBDIV_OPTIONS.map(
+            (o) => html`
+              <div class="tb-row">
+                <label><input type="checkbox" .checked=${d === o.v} @change=${onPick(o.v)}> ${o.label}</label>
+              </div>
+            `,
+          )}
+          <div class="tb-hint">Same step as magnetic snap (Quant grid) and region quantize.</div>
+        </div>
+      </details>
+    `;
+  }
+
   _renderRegionToolsMenu() {
     const has = this._selectedRegionIds.size > 0;
     if (!has) return null;
@@ -2330,7 +2388,7 @@ export class TimelineView extends LitElement {
 
     return html`
       <details class="tb-menu" @click=${(e) => e.stopPropagation()}>
-        <summary>Regions</summary>
+        <summary>${icon("square-3-stack-3d", 12)}<span>Regions</span></summary>
         <div class="tb-panel" @click=${(e) => e.stopPropagation()}>
           <button class="mi" ?disabled=${!this._gridStepSamples()}
             @click=${() => this._quantizeSelectedRegionsToGrid()}>
@@ -2350,28 +2408,50 @@ export class TimelineView extends LitElement {
           </button>
           ${pair
             ? html`
-              <button class="mi" ?disabled=${pair.inter <= 0}
-                @click=${() => this._applyCrossfadeToSelection()}>
+              <button
+                class="mi"
+                ?disabled=${pair.inter <= 0}
+                title=${pair.inter <= 0
+                  ? "Needs overlap: two audio regions on this track must share time."
+                  : "Symmetric fade-out on the left region and fade-in on the right across the overlap."}
+                @click=${() => this._applyCrossfadeToSelection()}
+              >
                 Crossfade overlap
               </button>
-              <button class="mi" ?disabled=${pair.inter < 0}
-                @click=${() => this._glueSelection()}>
+              <button
+                class="mi"
+                disabled
+                title="Not implemented — glue/consolidate needs an offline-render path in the shim (see docs/TODO.md)."
+              >
                 Glue regions
               </button>
             `
             : null}
-          <button class="mi" ?disabled=${!anyAudio} @click=${() =>
-      this._notImplemented("Reverse audio is not available in this build yet.")}>
+          <button
+            class="mi"
+            disabled
+            title="Not implemented yet — reverse needs a shim command (see docs/TODO.md Region tasks)."
+          >
             Reverse audio
           </button>
-          <button class="mi" @click=${() =>
-      this._notImplemented("Strip silence is not available in this build yet.")}>
+          <button
+            class="mi"
+            disabled
+            title="Not implemented yet — strip silence needs analysis + splits in the shim (docs/TODO.md)."
+          >
             Strip silence…
           </button>
-          <button class="mi" @click=${() =>
-      this._notImplemented("Pitch shift is not available in this build yet.")}>
+          <button
+            class="mi"
+            disabled
+            title="Not implemented yet — pitch needs region FX or MIDI transpose wiring (docs/TODO.md)."
+          >
             Pitch shift…
           </button>
+          <div class="tb-hint">
+            <strong>Working:</strong> quantize, fades, crossfade (two overlapping audio clips).
+            <strong>Not in the shim yet:</strong> glue, reverse, strip silence, pitch — menus are placeholders until those backend commands exist.
+          </div>
         </div>
       </details>
     `;
@@ -3328,7 +3408,13 @@ export class TimelineView extends LitElement {
           // playback starts the source `-start_samples` in.
           preview.start_samples = o.start + dxSamples + moveSnapAdj;
         } else if (mode === "resize-right") {
-          preview.length_samples = Math.max(4800, o.len + dxSamples);
+          let newLen = Math.max(4800, o.len + dxSamples);
+          if (!stretchResize && !e.altKey) {
+            const rawEnd = o.start + newLen;
+            const snappedEnd = this._collectSnapTargets(new Set(movingIds), rawEnd);
+            newLen = Math.max(4800, snappedEnd - o.start);
+          }
+          preview.length_samples = newLen;
         } else if (mode === "resize-left") {
           if (stretchResize) {
             const minDx = -o.offset;
@@ -3349,7 +3435,12 @@ export class TimelineView extends LitElement {
           // The right edge stays anchored at o.start + o.len.
           const minDx = -o.offset;            // most we can trim leftward
           const maxDx = o.len - 4_800;         // most we can trim rightward
-          const dx = Math.max(minDx, Math.min(maxDx, dxSamples));
+          let dx = Math.max(minDx, Math.min(maxDx, dxSamples));
+          if (!e.altKey) {
+            const rawStart = o.start + dx;
+            const snappedStart = this._collectSnapTargets(new Set(movingIds), rawStart);
+            dx = Math.max(minDx, Math.min(maxDx, snappedStart - o.start));
+          }
           preview.start_samples = o.start + dx;
           preview.length_samples = o.len - dx;
           preview.source_offset_samples = o.offset + dx;

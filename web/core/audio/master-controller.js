@@ -16,8 +16,12 @@
 // Forced-on rule: tunnel guests have no hardware audio path to the
 // host machine, so we always start the listener for them. The
 // non-tunnel branch honors the user's saved preference
-// (`foyer.listen.master`), and falls back to "on if the connection
-// is remote, off if local" when no preference is set.
+// (`foyer.listen.master`), and when unset defaults to **on** so a
+// normal browser session against the sidecar hears the mix without
+// an extra click. (Older builds defaulted local connections to off
+// on the assumption the operator was also at the DAW with monitors;
+// standalone Foyer use is common enough that default-off caused more
+// confusion than help.)
 
 import { AudioListener } from "./audio-listener.js";
 
@@ -130,7 +134,7 @@ class AudioController extends EventTarget {
       if (saved === "1") wantOn = true;
       else if (saved === "0") wantOn = false;
       else if (isLocal === null) return;
-      else wantOn = !isLocal;
+      else wantOn = true;
     }
     if (wantOn) this._scheduleAutoStart();
   }
