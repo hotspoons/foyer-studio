@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "ardour/audio_port.h"
+#include "ardour/audioregion.h"
 #include "ardour/automation_control.h"
 #include "ardour/delivery.h"
 #include "ardour/gain_control.h"
@@ -155,6 +156,25 @@ foyer_seed_default_region_patch_change (
 	    model->new_patch_change_diff_command ("foyer default patch on new region");
 	diff->add (pc);
 	model->apply_diff_command_as_commit (session, diff);
+}
+
+/// Wire `fade_*_shape` strings → `ARDOUR::FadeShape` (matches `foyer_schema::FadeShape`).
+static FadeShape
+parse_fade_shape (std::string const& s)
+{
+	if (s == "fast") {
+		return FadeFast;
+	}
+	if (s == "slow") {
+		return FadeSlow;
+	}
+	if (s == "constant_power") {
+		return FadeConstantPower;
+	}
+	if (s == "symmetric") {
+		return FadeSymmetric;
+	}
+	return FadeLinear;
 }
 
 // ---- tiny msgpack reader (what we need for inbound commands) ----
@@ -460,6 +480,17 @@ struct DecodedCmd
 	std::string   patch_name;
 	bool          has_patch_muted   = false;
 	bool          patch_muted       = false;
+	// Audio fades / region gain (`RegionPatch` — audio regions only).
+	bool          has_patch_fade_in = false;
+	std::uint64_t patch_fade_in     = 0;
+	bool          has_patch_fade_out = false;
+	std::uint64_t patch_fade_out    = 0;
+	bool          has_patch_fade_in_shape = false;
+	std::string   patch_fade_in_shape;
+	bool          has_patch_fade_out_shape = false;
+	std::string   patch_fade_out_shape;
+	bool          has_patch_gain_linear = false;
+	double        patch_gain_linear = 1.0;
 
 	// TrackPatch fields — only read for UpdateTrack. All optional; `name`
 	// is shared with RegionPatch (both store via has_patch_name / patch_name).
@@ -1019,6 +1050,21 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 		} else if (pk == "muted") {
 			if (!in.read_bool (out.patch_muted)) return false;
 			out.has_patch_muted = true;
+		} else if (pk == "fade_in_samples") {
+			if (!in.read_u64 (out.patch_fade_in)) return false;
+			out.has_patch_fade_in = true;
+		} else if (pk == "fade_out_samples") {
+			if (!in.read_u64 (out.patch_fade_out)) return false;
+			out.has_patch_fade_out = true;
+		} else if (pk == "fade_in_shape") {
+			if (!in.read_str (out.patch_fade_in_shape)) return false;
+			out.has_patch_fade_in_shape = true;
+		} else if (pk == "fade_out_shape") {
+			if (!in.read_str (out.patch_fade_out_shape)) return false;
+			out.has_patch_fade_out_shape = true;
+		} else if (pk == "gain_linear") {
+			if (!in.read_f64 (out.patch_gain_linear)) return false;
+			out.has_patch_gain_linear = true;
 		} else if (pk == "color") {
 			if (!in.read_str (out.patch_color)) return false;
 			out.has_patch_color = true;
@@ -1858,6 +1904,39 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				if (snap.has_patch_muted) {
 					hit.region->set_muted (snap.patch_muted);
+				}
+				if (auto ar = std::dynamic_pointer_cast<AudioRegion> (hit.region)) {
+					if (snap.has_patch_gain_linear) {
+						ar->set_scale_amplitude (static_cast<gain_t> (snap.patch_gain_linear));
+					}
+					if (snap.has_patch_fade_in) {
+						if (snap.patch_fade_in == 0) {
+							ar->set_fade_in_active (false);
+						} else {
+							FadeShape sh_in = FadeLinear;
+							if (snap.has_patch_fade_in_shape) {
+								sh_in = parse_fade_shape (snap.patch_fade_in_shape);
+							}
+							ar->set_fade_in_active (true);
+							ar->set_fade_in (sh_in, static_cast<samplecnt_t> (snap.patch_fade_in));
+						}
+					} else if (snap.has_patch_fade_in_shape) {
+						ar->set_fade_in_shape (parse_fade_shape (snap.patch_fade_in_shape));
+					}
+					if (snap.has_patch_fade_out) {
+						if (snap.patch_fade_out == 0) {
+							ar->set_fade_out_active (false);
+						} else {
+							FadeShape sh_out = FadeLinear;
+							if (snap.has_patch_fade_out_shape) {
+								sh_out = parse_fade_shape (snap.patch_fade_out_shape);
+							}
+							ar->set_fade_out_active (true);
+							ar->set_fade_out (sh_out, static_cast<samplecnt_t> (snap.patch_fade_out));
+						}
+					} else if (snap.has_patch_fade_out_shape) {
+						ar->set_fade_out_shape (parse_fade_shape (snap.patch_fade_out_shape));
+					}
 				}
 				session.add_command (new PBD::StatefulDiffCommand (hit.region));
 				if (own_txn) session.commit_reversible_command ();

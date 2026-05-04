@@ -1,0 +1,11 @@
+[package]
+name = "foyer-capabilities"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Canonical Foyer engine capability registry and diff helpers."
+
+[dependencies]
+foyer-capabilities-macros = { path = "../foyer-capabilities-macros" }
+serde = { workspace = true, features = ["derive"] }

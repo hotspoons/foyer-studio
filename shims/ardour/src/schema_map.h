@@ -319,6 +319,12 @@ struct RegionDesc {
 	/// `_extra_xml` under the `Foyer/Sequencer` path. `.present`
 	/// is false for regions without a layout.
 	SequencerLayoutDesc sequencer;
+	/// True when this row comes from an `AudioRegion` — emitted gain +
+	/// fade lengths for `Region` wire decoding.
+	bool          emit_audio_envelope = false;
+	double        gain_linear         = 1.0;
+	std::uint64_t fade_in_samples     = 0;
+	std::uint64_t fade_out_samples    = 0;
 };
 
 /// Enumerate regions on the playlist of the track identified by `track_id`

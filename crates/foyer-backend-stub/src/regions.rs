@@ -50,6 +50,35 @@ impl RegionStore {
                 if let Some(m) = patch.muted {
                     r.muted = m;
                 }
+                if let Some(g) = patch.gain_linear {
+                    r.gain_linear = Some(g);
+                }
+                if let Some(f) = patch.fade_in_samples {
+                    if f == 0 {
+                        r.fade_in_samples = None;
+                        r.fade_in_shape = None;
+                    } else {
+                        r.fade_in_samples = Some(f);
+                        if let Some(s) = patch.fade_in_shape {
+                            r.fade_in_shape = Some(s);
+                        }
+                    }
+                } else if let Some(s) = patch.fade_in_shape {
+                    r.fade_in_shape = Some(s);
+                }
+                if let Some(f) = patch.fade_out_samples {
+                    if f == 0 {
+                        r.fade_out_samples = None;
+                        r.fade_out_shape = None;
+                    } else {
+                        r.fade_out_samples = Some(f);
+                        if let Some(s) = patch.fade_out_shape {
+                            r.fade_out_shape = Some(s);
+                        }
+                    }
+                } else if let Some(s) = patch.fade_out_shape {
+                    r.fade_out_shape = Some(s);
+                }
                 return Some(r.clone());
             }
         }
@@ -237,6 +266,11 @@ fn synthesize_for(track_id: &EntityId, sample_rate: u32) -> Vec<Region> {
             notes: vec![],
             patch_changes: vec![],
             foyer_sequencer: None,
+            gain_linear: None,
+            fade_in_samples: None,
+            fade_out_samples: None,
+            fade_in_shape: None,
+            fade_out_shape: None,
         });
     }
     out

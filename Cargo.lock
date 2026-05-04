@@ -999,6 +999,7 @@ name = "foyer-backend"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "foyer-capabilities",
  "foyer-schema",
  "futures",
  "thiserror 1.0.69",
@@ -1038,6 +1039,23 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "foyer-capabilities"
+version = "0.0.0"
+dependencies = [
+ "foyer-capabilities-macros",
+ "serde",
+]
+
+[[package]]
+name = "foyer-capabilities-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1127,6 +1145,7 @@ dependencies = [
  "flate2",
  "foyer-backend",
  "foyer-backend-stub",
+ "foyer-capabilities",
  "foyer-config",
  "foyer-schema",
  "futures",

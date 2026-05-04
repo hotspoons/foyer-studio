@@ -325,12 +325,21 @@ combination of `update_region` + `duplicate_region_range` +
     Schema needs `RegionPatch.fade_{in,out}_samples` + a fade-shape
     enum, and the timeline view needs to draw the X curve in the
     overlap. Hover handles on the overlap edges adjust the curve.
+  - **Shim (2026-05):** `RegionPatch` carries `fade_{in,out}_samples`,
+    `fade_{in,out}_shape` (`FadeShape`), and `gain_linear`; Ardour
+    `update_region` maps them to `AudioRegion::set_fade_in` /
+    `set_fade_out`, `set_fade_in/out_shape`, and `set_scale_amplitude`.
+    **Still not 1:1 here:** pairing overlaps, mutual autofades, and
+    drawing the crossfade curve are UI/playlist concerns — not done.
 - [ ] Fade-in / fade-out per region (independent of crossfade)
   - Same `fade_{in,out}_samples` patch fields, applied to a
     non-overlapping region. UI: a small triangular handle in the top-
     inside corner of the lozenge that you drag inward to set the fade
     length. Holding the modifier rotates through fade shapes (linear,
     log, exp, S-curve).
+  - **Shim (2026-05):** backend + schema above; Ardour exposes linear,
+    fast, slow, constant_power, symmetric — not separate log/exp/S
+    names. **UI handles** still needed.
 - [x] Razor / split tool — split a region at the playhead or at click
   - **Implemented:** `Command::SplitRegion { id, at_samples }` — shim calls `Playlist::split_region`; stub replaces one region with two. **S** splits each selected region under the playhead (strict interior, min 4800 samples per piece).
 - [ ] Glue / consolidate selected regions into one
@@ -338,11 +347,18 @@ combination of `update_region` + `duplicate_region_range` +
     merge the note streams into one region) and replace them with the
     rendered region. Backend-heavy: needs a new offline-render verb
     that returns a `source_path`. Useful for printing FX chains.
+  - **Not a thin Ardour op:** glue uses bounce/export/filter pipelines
+    (`Track::bounce`, domain bounce, editor `apply_filter`), not a
+    single IPC-stable mutator — skip until an offline-render command
+    exists.
 - [ ] Strip silence / detect transients
   - Per-region analysis pass that splits at silence boundaries (RMS
     threshold + min-gap configuration). Returns N new regions. UI:
     a region-context-menu item that opens a parameter modal, then
     fires a single undo-grouped batch of split + delete operations.
+  - **Not 1:1:** Ardour uses `StripSilence` filter + dialog + optional
+    `find_silence` on `AudioRegion`; needs batch split orchestration
+    and UI — skip here.
 - [ ] Region groups (linked-edit)
   - Mark several regions as a group; subsequent move / trim / fade /
     delete on any one applies to all. Ardour has a native
@@ -350,45 +366,63 @@ combination of `update_region` + `duplicate_region_range` +
     `Command::CreateRegionGroup { region_ids }` + a group-id field
     in the `Region` payload, then the timeline view applies edits to
     every group sibling.
+  - **Not mapped:** requires new commands + `Region` metadata + editor
+    group retainer flow — more than forwarding one Ardour call.
 - [ ] Quantize region start to grid
   - Snap a region's `start_samples` to the nearest beat / bar / sub-
     division of the active grid. Per-region or per-selection. Schema-
     only — already expressible as `update_region` with the snapped
     start; needs a context-menu entry + a "Quantize" toolbar widget.
+  - **No new backend op:** tempo/grid math + `update_region` —
+    client-only; skip shim work.
 - [ ] Reverse region (audio)
   - Render a reversed copy of the source media as a new source and
     swap the region onto it. Backend offline-render path overlaps
     with Glue. Cheap UI surface.
+  - **Not 1:1:** Ardour's editor runs the `Reverse` **filter** over a
+    selection (`Editor::reverse_region`), not a one-call `Region`
+    API we can mirror trivially — skip until glue/offline path exists.
 - [ ] Pitch-shift region
   - Per-region semitone offset stored in `Region.pitch_shift_cents`
     or similar. Audio path uses Ardour's region FX
     `a-pitchshifter`; MIDI path is just transposing the note list.
     UI: a context-menu submenu with ±semitone increments and a
     free-form input for cents.
+  - **Not mapped:** needs schema fields + region FX processor wiring
+    (or MIDI note transform) — skip.
 - [ ] Region gain handle (per-region volume)
   - A draggable strip across the region top renders gain in dB. Edge
     cases: live preview during the drag without sending N
     `update_region`s (use a `RegionGainPreview` envelope or just one
     write on pointer-up, like the move/resize commit pattern).
+  - **Shim (2026-05):** `RegionPatch.gain_linear` →
+    `AudioRegion::set_scale_amplitude` (linear gain). **UI** (dB strip,
+    drag preview) still TODO — wire is ready.
 - [ ] Snap-to-grid on region drag (move + resize)
   - Scaffolding is already in place (the grid math gives a sample-
     aligned step list — see entry under the chord modifier item
     above). Needs hookup in `_startDrag` so a Shift-held drag commits
     to the nearest grid step. Modifier choice TBD.
+  - **Client-only:** no Ardour op — skip shim.
 - [ ] Fit selection to view (zoom + scroll to selection bounds)
   - "Z" or "F" key. Already partially wired via `zoomToSelection`;
     extend so a region selection (not just a time range) drives the
     same fit. Trivial in `timeline-view.js`.
+  - **Client-only** — skip shim.
 - [ ] Nudge region left/right by grid step (arrow keys)
   - Plain Left/Right when a region is selected nudges by the active
     grid sub-step (16th by default); Shift+arrow nudges by a beat;
     Ctrl/Cmd+arrow nudges by 1 sample. Already partially wired for
     automation points; extend the same handler to regions.
+  - **Already expressible** as `update_region { start_samples }` with
+    client-computed deltas — no new backend mapping.
 - [ ] Crop / trim around time selection
   - With a region + ruler time selection, "Crop to selection" trims
     the region to the carved range (mirror of Cut, but destructive
     on the original — the slice REPLACES the region). One menu
     entry; reuses the existing slice-capture math.
+  - **Compose-only:** combine `update_region` (start, length,
+    `source_offset_samples`) — UI orchestration; skip shim.
 
 ## Ingress drain — port off MasterTap dependency
 

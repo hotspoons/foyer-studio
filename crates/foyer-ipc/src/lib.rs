@@ -39,6 +39,7 @@ pub use foyer_schema::{Command, Envelope, Event};
 /// Shim-to-sidecar and sidecar-to-shim messages share a single control envelope with
 /// the two polymorphic payloads collapsed into one enum. Keeping a single wire type
 /// simplifies framing: both directions look identical to the codec.
+#[allow(clippy::large_enum_variant)] // Command vs Event size mismatch is inherent to the wire shape.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "dir", rename_all = "snake_case")]
 pub enum Control {

@@ -15,6 +15,10 @@ use std::sync::Arc;
 
 use crate::AppState;
 
+#[foyer_capabilities::cap_decl("audio.pool.import_http")]
+#[allow(dead_code)]
+const _CAP_IMPORT_HTTP: () = ();
+
 const MAX_IMPORT_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Serialize)]

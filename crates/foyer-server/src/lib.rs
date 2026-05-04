@@ -15,6 +15,7 @@ mod archive;
 mod audio;
 mod audio_opus;
 mod audio_ws;
+mod capabilities;
 pub(crate) mod chat;
 mod cloudflare_api;
 mod cloudflare_provider;
@@ -411,6 +412,14 @@ impl AppState {
         self.backend.read().await.clone()
     }
 
+    /// Same key set as [`Event::ClientGreeting`]: backend [`Backend::features`]
+    /// merged with server-only flags (e.g. `native_plugin_gui`).
+    pub(crate) async fn merged_feature_map(&self) -> std::collections::BTreeMap<String, bool> {
+        let mut feat = self.backend().await.features();
+        feat.insert("native_plugin_gui".into(), self.xpra_available);
+        feat
+    }
+
     /// Swap the active backend. Aborts the old event pump, starts a new
     /// one subscribed to `next`, drops the cached snapshot (so the next
     /// `SessionSnapshot` from the new backend re-seeds it), and emits a
@@ -789,7 +798,12 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
         // this to learn which `ui-*/package.js` packages are available
         // under the served web_root, so users can drop a new variant
         // folder without editing the index.html's import map.
-        .route("/variants.json", get(variants_json));
+        .route("/variants.json", get(variants_json))
+        .route("/capabilities", get(capabilities::get_capabilities))
+        .route(
+            "/capabilities/diff",
+            post(capabilities::post_capabilities_diff),
+        );
 
     // Dev-only integration probe harness. Gated on FOYER_DEV=1 so
     // production runs don't expose a side-channel for backend

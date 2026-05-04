@@ -312,18 +312,7 @@ async fn handle(
                 // UI can gate surfaces for DAWs with narrower feature
                 // sets than Ardour (mixing/matching backends is a
                 // medium-term goal — see DECISION 40).
-                features: {
-                    // Backend's capability snapshot is the base; we
-                    // layer server-side flags on top. `native_plugin_gui`
-                    // is a SERVER property (xpra installed?), not a
-                    // backend property — backends like the stub never
-                    // know whether the host has xpra, and the same
-                    // backend can run on a host with xpra and one
-                    // without. Probed once at AppState construction.
-                    let mut feat = state.backend.read().await.features();
-                    feat.insert("native_plugin_gui".into(), state.xpra_available);
-                    feat
-                },
+                features: state.merged_feature_map().await,
                 // No host-level pin by default. An operator can set
                 // `Config::default_ui_variant` to force all browsers
                 // onto `touch`, `kids`, `lite`, or a third-party UI.

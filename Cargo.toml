@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/foyer-schema",
+    "crates/foyer-capabilities-macros",
+    "crates/foyer-capabilities",
     "crates/foyer-ipc",
     "crates/foyer-backend",
     "crates/foyer-backend-stub",
@@ -31,6 +33,8 @@ repository = "https://github.com/foyer-studio/foyer-studio"
 [workspace.dependencies]
 # internal crates
 foyer-schema        = { path = "crates/foyer-schema" }
+foyer-capabilities-macros = { path = "crates/foyer-capabilities-macros" }
+foyer-capabilities  = { path = "crates/foyer-capabilities" }
 foyer-ipc           = { path = "crates/foyer-ipc" }
 foyer-backend       = { path = "crates/foyer-backend" }
 foyer-backend-stub  = { path = "crates/foyer-backend-stub" }

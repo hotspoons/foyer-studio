@@ -1141,12 +1141,16 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	const bool emit_notes       = !r.notes.empty ();
 	const bool emit_patches     = !r.patch_changes.empty ();
 	const bool emit_sequencer   = r.sequencer.present;
+	const bool emit_audio_env   = r.emit_audio_envelope;
 	if (emit_color)       ++n;
 	if (emit_source_path) ++n;
 	if (emit_source_off)  ++n;
 	if (emit_notes)       ++n;
 	if (emit_patches)     ++n;
 	if (emit_sequencer)   ++n;
+	if (emit_audio_env) {
+		n += 3; // gain_linear, fade_in_samples, fade_out_samples
+	}
 
 	o.map (n);
 	o.str ("id");             o.str (r.id);
@@ -1249,6 +1253,14 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 			o.str ("step");     o.u (c.step);
 			o.str ("velocity"); o.u (c.velocity);
 		}
+	}
+	if (r.emit_audio_envelope) {
+		o.str ("gain_linear");
+		o.f64 (r.gain_linear);
+		o.str ("fade_in_samples");
+		o.u (r.fade_in_samples);
+		o.str ("fade_out_samples");
+		o.u (r.fade_out_samples);
 	}
 }
 

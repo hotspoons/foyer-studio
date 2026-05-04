@@ -1,0 +1,15 @@
+[package]
+name = "foyer-capabilities-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Proc macros for the Foyer engine capability registry."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }

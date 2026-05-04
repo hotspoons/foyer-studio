@@ -111,21 +111,11 @@ pub trait Backend: Send + Sync + 'static {
     /// = explicit hide; absent = unknown (UI is optimistic).
     fn features(&self) -> std::collections::BTreeMap<String, bool> {
         use std::collections::BTreeMap;
-        let mut f = BTreeMap::new();
-        for id in [
-            "sequencer",
-            "midi",
-            "surround_pan",
-            "automation",
-            "groups",
-            "sends",
-            "plugins",
-            "recording",
-            "export",
-        ] {
-            f.insert(id.into(), true);
+        let mut m = BTreeMap::new();
+        for c in foyer_capabilities::FoyerCapability::ALL {
+            m.insert(c.wire_id().to_string(), true);
         }
-        f
+        m
     }
 
     // ─── introspection ──────────────────────────────────────────────────
