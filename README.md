@@ -31,28 +31,27 @@ plugins.
 ```bash
 docker run --rm -it --name foyer-studio \
   -p 3838:3838 --shm-size=1g \
+  --cap-add=SYS_NICE \
+  --ulimit rtprio=95 --ulimit memlock=-1 \
   -v "$(pwd):/projects" \
   ghcr.io/hotspoons/foyer-studio:latest
 ```
 
 Open <http://localhost:3838>. This runs the **gui-dummy** mode —
-GUI Ardour painting onto an in-container Xvfb against libardour's
-"None (Dummy)" backend. No JACK, no realtime scheduling, no
-privileged flags. Works identically on Cloud Run, Docker Desktop,
-Colima, plain Linux. Audio leaves the container only via Foyer's
-WebSocket egress.
+GUI Ardour painting onto an in-container Xvfb against the Foyer
+Dummy audio backend. No JACK, no soundcard, no `--privileged`.
+Works on Docker Desktop, Colima, and plain Linux; audio leaves the
+container only via Foyer's WebSocket egress.
 
-**For pop-free playback under load (MIDI synths, plugin-heavy
-sessions)** add `--cap-add=SYS_NICE --ulimit rtprio=95 --ulimit
-memlock=-1` to the run. Without those, the dummy backend's process
-thread runs on `SCHED_OTHER` and gets preempted mid-cycle by anything
-else on the host → audible dropouts. With them, the entrypoint's
-seed step auto-pins Ardour to its **Realtime** driver and the
-backend acquires `SCHED_FIFO`. Look for `driver=Realtime,
-rtprio_max=95` in the boot log to confirm. Full walkthrough +
-buffer-size knobs for hosts where rtprio isn't available (Cloud Run
-gen2) in
-[docs/USAGE.md#eliminating-audio-dropouts-with-realtime-scheduling](docs/USAGE.md#eliminating-audio-dropouts-with-realtime-scheduling).
+The three audio flags (`--cap-add=SYS_NICE` plus the two `--ulimit`
+lines) are what let Ardour's process thread acquire `SCHED_FIFO`
+priority — without them, MIDI synths and plugin-heavy sessions get
+preempted mid-cycle and you hear pops/dropouts. The entrypoint's
+seed probes the rtprio rlimit at boot and auto-pins Ardour to its
+**Realtime** driver when it's available. Drop the three flags if
+you're deploying somewhere that strips them (Cloud Run gen2) — see
+[docs/USAGE.md#when-you-cant-grant-sys_nice--rtprio](docs/USAGE.md#when-you-cant-grant-sys_nice--rtprio)
+for the buffer-size lever that's left.
 
 For real audio hardware via a host-running jackd (Linux only),
 flip into `jack-headless` mode with the privileged flags + JACK

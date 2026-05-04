@@ -34,6 +34,8 @@ the right arch.
 ```bash
 docker run --rm -it --name foyer-studio \
   -p 3838:3838 --shm-size=1g \
+  --cap-add=SYS_NICE \
+  --ulimit rtprio=95 --ulimit memlock=-1 \
   -v "$(pwd):/projects" \
   ghcr.io/hotspoons/foyer-studio:latest
 ```
@@ -41,13 +43,12 @@ docker run --rm -it --name foyer-studio \
 Open <http://localhost:3838>. That's it.
 
 This is the **gui-dummy** runtime mode (default): GUI Ardour
-painting onto an in-container Xvfb, using libardour's "None
-(Dummy)" backend. No JACK, no realtime scheduling, no privileged
-flags. Audio leaves the container only via Foyer's WebSocket
-egress — the DAW doesn't need a soundcard. Identical behavior on
-Cloud Run, Docker Desktop, Colima, plain Linux.
+painting onto an in-container Xvfb, using libardour's Foyer Dummy
+backend. No JACK, no soundcard, no `--privileged`. Audio leaves
+the container only via Foyer's WebSocket egress. Works on Docker
+Desktop, Colima, and plain Linux.
 
-Three flags worth understanding:
+The flags, briefly:
 
 - **`-p 3838:3838`** — the only port Foyer needs to expose. The
   xpra endpoint at 14500 (used for native-plugin-GUI projection)
@@ -55,62 +56,42 @@ Three flags worth understanding:
   separately if you want raw access for debugging.
 - **`--shm-size=1g`** — libardour reserves ~107 MB of POSIX shm
   during session load. Docker's default 64 MB tmpfs ENOMEMs the
-  open. Cloud Run gen2 auto-sizes `/dev/shm` to ~50% of `--memory`,
-  so this flag isn't needed there.
-- **`-v "$(pwd):/projects"`** (or any host path you prefer) — see **Volumes** below. Without
-  a mount, every project upload vanishes on container stop.
+  open.
+- **`--cap-add=SYS_NICE` + `--ulimit rtprio=95` + `--ulimit memlock=-1`**
+  — give the audio engine the scheduling permission it needs to
+  acquire `SCHED_FIFO` on its process thread. Without these,
+  heavy MIDI / softsynth sessions get preempted mid-cycle and you
+  hear pops/dropouts; the dummy backend can run "correct-rate"
+  audio on `SCHED_OTHER` thanks to its absolute-time-sleep timing
+  fix, but no amount of tuning can dodge a scheduler stall when
+  another process steals the CPU. The entrypoint's seed step
+  probes `ulimit -r` at boot and auto-pins Ardour to its
+  **Realtime** driver when it's available — confirm via the
+  `seed-ardour-config:` log line at startup, which prints
+  `driver=Realtime, rtprio_max=95` on a healthy boot.
+- **`-v "$(pwd):/projects"`** (or any host path you prefer) — see
+  **Volumes** below. Without a mount, every project upload
+  vanishes on container stop.
 
-### Eliminating audio dropouts with realtime scheduling
+#### When you can't grant SYS_NICE / rtprio
 
-The standalone command above produces correct-rate audio under light
-load, but heavy MIDI / softsynth use can preempt the dummy backend's
-process thread mid-cycle (it runs on `SCHED_OTHER` because the
-container has no `CAP_SYS_NICE`). Symptom: pops, dropouts, or short
-silences while the synth is busy.
-
-**The fix** — add `--cap-add=SYS_NICE` plus the rtprio + memlock
-rlimits. Verified to eliminate dropouts on heavy MIDI / soft-synth
-sessions. Same caps the dev container grants:
+Cloud Run gen2 strips both, and some locked-down corporate hosts
+do too. The seed gracefully falls back to Normal Speed (`driver=`,
+`rtprio_max=0` in the log) and the only lever left is buffer size:
 
 ```bash
-docker run --rm -it --name foyer-studio \
-  -p 3838:3838 --shm-size=1g \
-  --cap-add=SYS_NICE \
-  --ulimit rtprio=95 --ulimit memlock=-1 \
-  -v "$(pwd):/projects" \
-  ghcr.io/hotspoons/foyer-studio:latest
+-e FOYER_BUFFER_SIZE=8192 -e FOYER_N_PERIODS=4
 ```
 
-**Why it works.** The entrypoint's seed step probes `ulimit -r` at
-boot; when the rlimit is non-zero it pins Ardour's Foyer Dummy
-backend to the **Realtime** driver, which calls
-`pbd_realtime_pthread_create` under the hood and gets `SCHED_FIFO`
-for the process thread. To confirm, check the boot log for:
-
-```
-seed-ardour-config: created … (Dummy / Silence, driver=Realtime, rtprio_max=95, …)
-```
-
-If you see `driver=Normal Speed, rtprio_max=0` instead, one of the
-two ulimits / the cap didn't take effect — most often a stale
-container that was started before you added the flags, or a host
-that strips them silently (Cloud Run gen2 is the main one).
-
-**Overrides.** `-e FOYER_DUMMY_REALTIME=on` forces Realtime even
-when the probe reads zero (rare — useful if you've granted SYS_NICE
-out-of-band but the rlimit didn't propagate); `-e
-FOYER_DUMMY_REALTIME=off` keeps Normal Speed even when rtprio is
-available (useful for reproducing the SCHED_OTHER path).
-
-**When you can't grant rtprio** (Cloud Run gen2, locked-down hosts):
-`-e FOYER_BUFFER_SIZE=8192` (or 16384) is the lever that's left.
 Bigger buffers smooth over scheduler stalls; the trade-off is
 monitoring latency, which doesn't matter for a browser surface
-because the WS round-trip already dominates.
+because the WebSocket round-trip already dominates. 16384 / 5 is a
+reasonable upper end for very heavy sessions on rtprio-less hosts.
 
-**Docker Desktop / Colima users:** the ulimits are passed to the
-Linux VM kernel and grant the rlimits to the in-container user
-without any host PAM / `limits.d` setup. Just add the flags and go.
+`-e FOYER_DUMMY_REALTIME=off` forces the Normal Speed driver even
+when rtprio is available (useful for reproducing the SCHED_OTHER
+path); `-e FOYER_DUMMY_REALTIME=on` forces Realtime when the probe
+reads zero but you know SYS_NICE got granted some other way.
 
 ### Volumes
 
