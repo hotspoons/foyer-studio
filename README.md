@@ -31,16 +31,27 @@ plugins.
 ```bash
 docker run --rm -it --name foyer-studio \
   -p 3838:3838 --shm-size=1g \
+  --cap-add=SYS_NICE \
+  --ulimit rtprio=95 --ulimit memlock=-1 \
   -v "$(pwd):/projects" \
   ghcr.io/hotspoons/foyer-studio:latest
 ```
 
 Open <http://localhost:3838>. This runs the **gui-dummy** mode —
-GUI Ardour painting onto an in-container Xvfb against libardour's
-"None (Dummy)" backend. No JACK, no realtime scheduling, no
-privileged flags. Works identically on Cloud Run, Docker Desktop,
-Colima, plain Linux. Audio leaves the container only via Foyer's
-WebSocket egress.
+GUI Ardour painting onto an in-container Xvfb against the Foyer
+Dummy audio backend. No JACK, no soundcard, no `--privileged`.
+Works on Docker Desktop, Colima, and plain Linux; audio leaves the
+container only via Foyer's WebSocket egress.
+
+The three audio flags (`--cap-add=SYS_NICE` plus the two `--ulimit`
+lines) are what let Ardour's process thread acquire `SCHED_FIFO`
+priority — without them, MIDI synths and plugin-heavy sessions get
+preempted mid-cycle and you hear pops/dropouts. The entrypoint's
+seed probes the rtprio rlimit at boot and auto-pins Ardour to its
+**Realtime** driver when it's available. Drop the three flags if
+you're deploying somewhere that strips them (Cloud Run gen2) — see
+[docs/USAGE.md#when-you-cant-grant-sys_nice--rtprio](docs/USAGE.md#when-you-cant-grant-sys_nice--rtprio)
+for the buffer-size lever that's left.
 
 For real audio hardware via a host-running jackd (Linux only),
 flip into `jack-headless` mode with the privileged flags + JACK

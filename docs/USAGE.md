@@ -34,6 +34,8 @@ the right arch.
 ```bash
 docker run --rm -it --name foyer-studio \
   -p 3838:3838 --shm-size=1g \
+  --cap-add=SYS_NICE \
+  --ulimit rtprio=95 --ulimit memlock=-1 \
   -v "$(pwd):/projects" \
   ghcr.io/hotspoons/foyer-studio:latest
 ```
@@ -41,13 +43,12 @@ docker run --rm -it --name foyer-studio \
 Open <http://localhost:3838>. That's it.
 
 This is the **gui-dummy** runtime mode (default): GUI Ardour
-painting onto an in-container Xvfb, using libardour's "None
-(Dummy)" backend. No JACK, no realtime scheduling, no privileged
-flags. Audio leaves the container only via Foyer's WebSocket
-egress — the DAW doesn't need a soundcard. Identical behavior on
-Cloud Run, Docker Desktop, Colima, plain Linux.
+painting onto an in-container Xvfb, using libardour's Foyer Dummy
+backend. No JACK, no soundcard, no `--privileged`. Audio leaves
+the container only via Foyer's WebSocket egress. Works on Docker
+Desktop, Colima, and plain Linux.
 
-Three flags worth understanding:
+The flags, briefly:
 
 - **`-p 3838:3838`** — the only port Foyer needs to expose. The
   xpra endpoint at 14500 (used for native-plugin-GUI projection)
@@ -55,10 +56,42 @@ Three flags worth understanding:
   separately if you want raw access for debugging.
 - **`--shm-size=1g`** — libardour reserves ~107 MB of POSIX shm
   during session load. Docker's default 64 MB tmpfs ENOMEMs the
-  open. Cloud Run gen2 auto-sizes `/dev/shm` to ~50% of `--memory`,
-  so this flag isn't needed there.
-- **`-v "$(pwd):/projects"`** (or any host path you prefer) — see **Volumes** below. Without
-  a mount, every project upload vanishes on container stop.
+  open.
+- **`--cap-add=SYS_NICE` + `--ulimit rtprio=95` + `--ulimit memlock=-1`**
+  — give the audio engine the scheduling permission it needs to
+  acquire `SCHED_FIFO` on its process thread. Without these,
+  heavy MIDI / softsynth sessions get preempted mid-cycle and you
+  hear pops/dropouts; the dummy backend can run "correct-rate"
+  audio on `SCHED_OTHER` thanks to its absolute-time-sleep timing
+  fix, but no amount of tuning can dodge a scheduler stall when
+  another process steals the CPU. The entrypoint's seed step
+  probes `ulimit -r` at boot and auto-pins Ardour to its
+  **Realtime** driver when it's available — confirm via the
+  `seed-ardour-config:` log line at startup, which prints
+  `driver=Realtime, rtprio_max=95` on a healthy boot.
+- **`-v "$(pwd):/projects"`** (or any host path you prefer) — see
+  **Volumes** below. Without a mount, every project upload
+  vanishes on container stop.
+
+#### When you can't grant SYS_NICE / rtprio
+
+Cloud Run gen2 strips both, and some locked-down corporate hosts
+do too. The seed gracefully falls back to Normal Speed (`driver=`,
+`rtprio_max=0` in the log) and the only lever left is buffer size:
+
+```bash
+-e FOYER_BUFFER_SIZE=8192 -e FOYER_N_PERIODS=4
+```
+
+Bigger buffers smooth over scheduler stalls; the trade-off is
+monitoring latency, which doesn't matter for a browser surface
+because the WebSocket round-trip already dominates. 16384 / 5 is a
+reasonable upper end for very heavy sessions on rtprio-less hosts.
+
+`-e FOYER_DUMMY_REALTIME=off` forces the Normal Speed driver even
+when rtprio is available (useful for reproducing the SCHED_OTHER
+path); `-e FOYER_DUMMY_REALTIME=on` forces Realtime when the probe
+reads zero but you know SYS_NICE got granted some other way.
 
 ### Volumes
 
@@ -145,6 +178,9 @@ honors these on every boot:
 | `FOYER_NETJACK_HOST` / `FOYER_NETJACK_PORT` | _unset_ / `19000` | NetJack2 target when `FOYER_JACK_MODE=netjack`. |
 | `FOYER_SAMPLE_RATE` | `48000` | Engine sample rate (Hz). |
 | `FOYER_PERIOD_FRAMES` | `1024` | JACK period frames (latency vs. CPU). |
+| `FOYER_BUFFER_SIZE` | `4096` | Foyer Dummy backend buffer size in samples. Bigger = more headroom under CPU pressure, more latency (irrelevant for browser monitoring — the WS round-trip dominates). 8192 / 16384 are reasonable for heavy MIDI work without rtprio. |
+| `FOYER_N_PERIODS` | `3` | Foyer Dummy backend period count. 3-4 is the sweet spot. |
+| `FOYER_DUMMY_REALTIME` | `auto` | `on` / `off` / `auto`. `auto` picks the Realtime driver when the container's rtprio rlimit is non-zero. Force `on` if you've granted SYS_NICE but the rlimit probe misreads (rare); force `off` to stay on Normal Speed even when rtprio is available. |
 | `FOYER_TLS_CERT` / `FOYER_TLS_KEY` | _unset_ | Direct HTTPS without a fronting proxy. |
 
 ### Uploading and exporting projects
