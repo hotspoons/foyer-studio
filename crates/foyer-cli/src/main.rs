@@ -942,17 +942,21 @@ if [ ! -f "$SESSION_FILE" ]; then
     for HELPER in "$TOP"/build/session_utils/ardour*-new_empty_session; do
         if [ -x "$HELPER" ]; then
             echo "foyer: bootstrapping new session $LEAF_DIR via $HELPER" >&2
-            # FOYER_SHIM_NO_IPC=1 makes the foyer_shim surface skip its
-            # IPC bring-up for THIS invocation only — the helper still
-            # loads the .so (it's in ARDOUR_SURFACES_PATH) but the
-            # control protocol becomes a no-op. Without it, the helper
-            # spins up an advert + listener that races foyer-cli's
-            # discovery (250 ms poll) and gets claimed before the real
-            # ardour-9 below ever advertises. Symptom: "Waiting for
-            # session…" UI on every new project. The exec below
-            # inherits a clean env, so the real ardour-9 runs IPC
-            # normally.
-            FOYER_SHIM_NO_IPC=1 "$HELPER" "$LEAF_DIR" "$NAME" || true
+            # Two scoped env tweaks for the helper child only — see the
+            # Rust path's `bootstrap_session_if_missing` for the long
+            # form. Short version:
+            #   FOYER_SHIM_NO_IPC=1 — shim skips its IPC bring-up so it
+            #     can't race-advertise ahead of the real ardour-9.
+            #   ARDOUR_BACKEND_PATH= — keep our patched
+            #     `libfoyer_audiobackend.so` out of this transient
+            #     libardour process. The helper hardcodes "None
+            #     (Dummy)" and never picks ours, but the .so being
+            #     dlopen'd alongside upstream's still makes glibc abort
+            #     with "corrupted size" inside a static dtor's `free()`
+            #     on exit. Real ardour-9 below inherits a clean env and
+            #     still gets ARDOUR_BACKEND_PATH so it picks Foyer
+            #     Dummy.
+            ARDOUR_BACKEND_PATH= FOYER_SHIM_NO_IPC=1 "$HELPER" "$LEAF_DIR" "$NAME" || true
             if [ -f "$LEAF_DIR/$NAME.ardour" ]; then
                 SESSION_DIR="$LEAF_DIR"
                 SESSION_FILE="$SESSION_DIR/$NAME.ardour"
@@ -1127,52 +1131,42 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
         .with_context(|| format!("spawn {}", resolved_exec.display()))?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    // Tracks adverts we've seen in a previous poll. We claim a socket
-    // only after it survives a second scan AND a quick connect-probe —
-    // both gates skip transient adverts that the bash launcher's
-    // `ardour*-new_empty_session` step writes during its brief shim
-    // activation. Without this gate we race new_empty_session: it
-    // activates the shim → advert appears → we claim it → new_empty_session
-    // exits and tears the shim down → real `ardour-9` exec'd on the
-    // exit-path advertises a DIFFERENT advert that we've already given
-    // up watching for. Symptom: HostBackend connects to a dead socket,
-    // gets EOF in 0.6 ms, foyer UI stuck on "Waiting for session".
-    // Cost: at most 1 extra 250 ms poll cycle on the happy path.
-    let mut seen_once: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    // The helper invocation runs the shim with `FOYER_SHIM_NO_IPC=1`
+    // (see `bootstrap_session_if_missing` and the bash branch above) so
+    // it never advertises — the only advert we'll see is from the real
+    // `ardour-9` we just spawned. A connect-probe filters stale advert
+    // files left behind by a crashed prior shim that `is_alive()`
+    // happened to miss.
     loop {
         for s in discovery::scan() {
             if before.contains(&s.socket) {
                 continue;
             }
-            if !seen_once.insert(s.socket.clone()) {
-                // Saw it on a previous poll AND it's still here — the
-                // advert outlived the new_empty_session window. Now
-                // verify the socket actually responds to a connect
-                // (catches the "advert still on disk but the shim
-                // already torn the listener down" tail end of the
-                // race, e.g. if our scan landed during the bash exec
-                // boundary between new_empty_session and ardour-9).
-                match std::os::unix::net::UnixStream::connect(&s.socket) {
-                    Ok(stream) => {
-                        drop(stream);
-                        tracing::info!("shim advertised at {}", s.socket.display());
-                        return Ok((s.socket, child));
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            "advert {} present but connect failed ({e}); waiting for next advert",
-                            s.socket.display()
-                        );
-                        // Drop from seen_once so we'd re-confirm if it
-                        // reappears stable later.
-                        seen_once.remove(&s.socket);
-                    }
+            match std::os::unix::net::UnixStream::connect(&s.socket) {
+                Ok(stream) => {
+                    drop(stream);
+                    tracing::info!("shim advertised at {}", s.socket.display());
+                    return Ok((s.socket, child));
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "advert {} present but connect failed ({e}); waiting for next advert",
+                        s.socket.display()
+                    );
                 }
             }
         }
         if std::time::Instant::now() >= deadline {
             return Err(anyhow!(
-                "timed out waiting for shim advertisement after spawn (did you run `just shim-build`?)"
+                "timed out waiting for shim advertisement after spawn — \
+                 see {} for Ardour's own log; common causes: \
+                 libfoyer_shim.so missing from the surface search path \
+                 (ARDOUR_SURFACES_PATH, $HOME/.config/ardour9/surfaces/, \
+                 or /usr/lib/ardour9/surfaces/), or the session XML's \
+                 <Protocol name=\"Foyer Studio Shim\"/> entry isn't active",
+                daw_log_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "the foyer state dir".into()),
             ));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1729,16 +1723,36 @@ fn bootstrap_session_if_missing(
         leaf_dir.display(),
         helper.display(),
     );
-    // Mirror `launch_and_wait_for_shim`'s bash branch: the helper is a
-    // short-lived libardour process that loads the Foyer surface .so.
-    // Without `FOYER_SHIM_NO_IPC=1` it runs full IPC bring-up (advert +
-    // listener) and exits ~2s later — foyer-cli's discovery can grab
-    // that dead socket, and Docker/package builds have seen follow-on
-    // failures for *new* sessions only (existing sessions skip this
-    // helper). See shims/ardour/src/ipc.cc and the bash launcher comment
-    // around `FOYER_SHIM_NO_IPC`.
+    // Two scoped env tweaks for the helper child only:
+    //
+    //   * FOYER_SHIM_NO_IPC=1 — mirrors the bash branch above. Without
+    //     it the helper loads the foyer surface .so and runs full IPC
+    //     bring-up (advert + listener), exits ~2s later, and the parent
+    //     foyer-cli can race-claim the dead socket. shims/ardour/src/ipc.cc
+    //     short-circuits when this is set.
+    //
+    //   * ARDOUR_BACKEND_PATH stripped — the helper hardcodes
+    //     `engine->set_backend("None (Dummy)", ...)` (upstream
+    //     ardour/session_utils/common.cc::create_session) and never
+    //     instantiates ours, but the mere presence of
+    //     `libfoyer_audiobackend.so` in libardour's dlopen set during
+    //     teardown causes glibc to abort with "corrupted size vs.
+    //     prev_size while consolidating" inside `free()` from a static
+    //     destructor — class-static members of `DummyAudioBackend`
+    //     (which both upstream `libdummy_audiobackend.so` and our
+    //     `libfoyer_audiobackend.so` define) collide on dlclose. The
+    //     session XML still gets written before the abort fires (so
+    //     bootstrap recovers in practice via the file-exists check
+    //     below) but the helper takes ~3s to die instead of exiting
+    //     cleanly, and the SIGABRT lands in foyer-cli's log as a
+    //     misleading warning. The actual `ardour-9` we spawn next
+    //     keeps ARDOUR_BACKEND_PATH set so it picks our patched
+    //     "Foyer Dummy" (absolute-time-sleep variant required for
+    //     non-RT containers); we just don't want it for this
+    //     transient invocation.
     match std::process::Command::new(&helper)
         .env("FOYER_SHIM_NO_IPC", "1")
+        .env_remove("ARDOUR_BACKEND_PATH")
         .arg(&leaf_dir)
         .arg(snapshot_name)
         .status()

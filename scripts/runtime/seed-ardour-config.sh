@@ -150,6 +150,9 @@ if [ "$mode" = "--ams-dummy" ] || [ "$mode" = "--force-ams-dummy" ]; then
   <Config>
     <Option name="try-autostart-engine" value="1"/>
   </Config>
+  <ControlProtocols>
+    <Protocol name="Foyer Studio Shim" active="1"/>
+  </ControlProtocols>
   <Extra>
     <AudioMIDISetup>
       <EngineStates>
