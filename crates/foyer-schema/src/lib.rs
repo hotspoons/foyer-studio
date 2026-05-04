@@ -53,7 +53,7 @@ pub use value::{
 };
 
 /// Current wire-schema version. Major bump = breaking; minor = additive.
-pub const SCHEMA_VERSION: (u16, u16) = (0, 3);
+pub const SCHEMA_VERSION: (u16, u16) = (0, 4);
 
 /// Kubernetes-style named API revision for control-plane envelopes (IPC shim ↔ sidecar
 /// and WebSocket). Evolve `v1alpha1` in place during development; promote to `v1beta1` /

@@ -694,6 +694,10 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::DuplicateRegionRange { .. } => "duplicate_region_range",
         Command::StretchRegion { .. } => "stretch_region",
         Command::SplitRegion { .. } => "split_region",
+        Command::ReverseRegion { .. } => "reverse_region",
+        Command::CombineRegions { .. } => "combine_regions",
+        Command::StripSilenceRegion { .. } => "strip_silence_region",
+        Command::PitchShiftRegion { .. } => "pitch_shift_region",
         Command::ListWaveform { .. } => "list_waveform",
         Command::ClearWaveformCache { .. } => "clear_waveform_cache",
         Command::ListBackends => "list_backends",
@@ -1939,6 +1943,68 @@ async fn dispatch_command(
                     state,
                     Event::Error {
                         code: "split_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::ReverseRegion { id } => {
+            if let Err(e) = state.backend().await.reverse_region(id).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "reverse_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::CombineRegions { region_ids } => {
+            if let Err(e) = state.backend().await.combine_regions(region_ids).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "combine_regions_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::StripSilenceRegion {
+            id,
+            threshold_db,
+            minimum_length_samples,
+            fade_length_samples,
+        } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .strip_silence_region(id, threshold_db, minimum_length_samples, fade_length_samples)
+                .await
+            {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "strip_silence_region_failed".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+
+        Command::PitchShiftRegion { id, semitones } => {
+            if let Err(e) = state.backend().await.pitch_shift_region(id, semitones).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "pitch_shift_region_failed".into(),
                         message: e.to_string(),
                     },
                 )

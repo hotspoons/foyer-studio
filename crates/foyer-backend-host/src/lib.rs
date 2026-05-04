@@ -340,6 +340,40 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn reverse_region(&self, id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .reverse_region(id)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn combine_regions(&self, region_ids: Vec<EntityId>) -> Result<(), BackendError> {
+        self.client
+            .combine_regions(region_ids)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn strip_silence_region(
+        &self,
+        id: EntityId,
+        threshold_db: f32,
+        minimum_length_samples: u64,
+        fade_length_samples: u64,
+    ) -> Result<(), BackendError> {
+        self.client
+            .strip_silence_region(id, threshold_db, minimum_length_samples, fade_length_samples)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn pitch_shift_region(&self, id: EntityId, semitones: f32) -> Result<(), BackendError> {
+        self.client
+            .pitch_shift_region(id, semitones)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn create_region(
         &self,
         track_id: EntityId,

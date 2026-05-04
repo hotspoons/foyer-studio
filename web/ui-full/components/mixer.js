@@ -1,8 +1,5 @@
-// Mixer surface. Wraps a row of track strips with a density toolbar that
-// lets the user flip between Wide / Normal / Compact / Narrow presets and
-// choose whether strip widths scale with the container (Fill) or lock
-// to a fixed pixel width (Fixed) that horizontally scrolls.
-//
+// Mixer surface. Row of track strips plus a toolbar: layout (density + width)
+// lives in one <details> pop-out (Wide/Normal/Compact/Narrow and Fill/Fixed).
 // Settings persist via mixer-density.js.
 
 import { LitElement, html, css } from "lit";
@@ -35,13 +32,94 @@ export class Mixer extends LitElement {
       flex-wrap: wrap;
       min-width: 0;
     }
-    .toolbar .group {
+    .toolbar details.mx-menu {
+      position: relative;
+      border: none;
+      background: transparent;
+    }
+    .toolbar details.mx-menu > summary {
+      list-style: none;
+      cursor: pointer;
+      font-family: var(--font-sans);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--color-border);
+      background: var(--color-surface);
+      color: var(--color-text-muted);
+      user-select: none;
       display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 22px;
+      box-sizing: border-box;
+      transition: color 0.1s ease, border-color 0.1s ease;
+    }
+    .toolbar details.mx-menu > summary:hover {
+      color: var(--color-text);
+      border-color: var(--color-accent);
+    }
+    .toolbar details.mx-menu > summary::-webkit-details-marker { display: none; }
+    .toolbar details.mx-menu > summary::after {
+      content: "▾";
+      font-size: 9px;
+      opacity: 0.75;
+      margin-left: 2px;
+      font-weight: 400;
+      letter-spacing: normal;
+    }
+    .toolbar details.mx-menu[open] > summary {
+      color: var(--color-text);
+      border-color: var(--color-accent);
+    }
+    .toolbar .mx-menu-pill {
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-transform: none;
+      color: var(--color-text-muted);
+      padding: 1px 6px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 50%, transparent);
+    }
+    .toolbar details.mx-menu[open] .mx-menu-pill {
+      color: var(--color-text);
+    }
+    .toolbar .mx-panel {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 40;
+      min-width: 260px;
+      padding: 10px;
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-panel);
+      font-size: 10px;
+      color: var(--color-text);
+    }
+    .toolbar .mx-section-label {
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+      margin: 12px 0 6px;
+    }
+    .toolbar .mx-section-label:first-child { margin-top: 0; }
+    .toolbar .mx-panel .group {
+      display: flex;
+      width: 100%;
       border: 1px solid var(--color-border);
       border-radius: var(--radius-sm);
       overflow: hidden;
     }
-    .toolbar .group button {
+    .toolbar .mx-panel .group button {
+      flex: 1 1 0;
       background: transparent;
       border: 0;
       font: inherit; font-family: var(--font-sans);
@@ -49,13 +127,16 @@ export class Mixer extends LitElement {
       letter-spacing: 0.06em;
       text-transform: uppercase;
       color: var(--color-text-muted);
-      padding: 3px 8px;
+      padding: 6px 6px;
       cursor: pointer;
       transition: all 0.12s ease;
     }
-    .toolbar .group button + button { border-left: 1px solid var(--color-border); }
-    .toolbar .group button:hover { color: var(--color-text); background: var(--color-surface-elevated); }
-    .toolbar .group button.active {
+    .toolbar .mx-panel .group button + button { border-left: 1px solid var(--color-border); }
+    .toolbar .mx-panel .group button:hover {
+      color: var(--color-text);
+      background: var(--color-surface);
+    }
+    .toolbar .mx-panel .group button.active {
       color: #fff;
       background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
     }
@@ -108,6 +189,8 @@ export class Mixer extends LitElement {
       align-items: center;
       gap: 4px;
       padding: 3px 8px;
+      min-height: 22px;
+      box-sizing: border-box;
       font-family: var(--font-sans);
       font-size: 10px;
       font-weight: 600;
@@ -127,6 +210,25 @@ export class Mixer extends LitElement {
       color: var(--color-accent);
       border-color: var(--color-accent);
       background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+    }
+    .toolbar button.toolbar-aux {
+      font-family: var(--font-sans);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      background: transparent;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      color: var(--color-text-muted);
+      padding: 3px 8px;
+      min-height: 22px;
+      box-sizing: border-box;
+      cursor: pointer;
+      transition: color 0.1s ease, border-color 0.1s ease;
+    }
+    .toolbar button.toolbar-aux:hover {
+      color: var(--color-text);
+      border-color: var(--color-accent);
     }
     .empty {
       padding: 24px;
@@ -208,6 +310,23 @@ export class Mixer extends LitElement {
   _setDensity(k) { this._density = k; this._save(); }
   _setMode(m)    { this._widthMode = m; this._save(); }
 
+  _closeMxMenu() {
+    queueMicrotask(() => {
+      const el = this.renderRoot?.querySelector("details.mx-menu");
+      if (el) el.open = false;
+    });
+  }
+
+  _pickDensity(k) {
+    this._setDensity(k);
+    this._closeMxMenu();
+  }
+
+  _pickWidthMode(m) {
+    this._setMode(m);
+    this._closeMxMenu();
+  }
+
   _onChannelResize(ev) {
     const { trackId, width, delta, startWidth, final, resizeAll } = ev.detail || {};
     if (!trackId) return;
@@ -251,30 +370,49 @@ export class Mixer extends LitElement {
   render() {
     const tracks = this.session?.tracks ?? [];
     const density = DENSITIES[this._density] || DENSITIES.normal;
+    const widthLabel = this._widthMode === "fill" ? "Fill" : "Fixed";
     return html`
       <div class="toolbar">
-        <span>Density</span>
-        <div class="group">
-          ${Object.entries(DENSITIES).map(([k, v]) => html`
-            <button class=${this._density === k ? "active" : ""}
-                    @click=${() => this._setDensity(k)}>${v.label}</button>
-          `)}
-        </div>
-        <span style="margin-left:10px">Width</span>
-        <div class="group">
-          <button class=${this._widthMode === "fill" ? "active" : ""}
-                  @click=${() => this._setMode("fill")}
-                  title="Strips flex to fill the container">Fill</button>
-          <button class=${this._widthMode === "fixed" ? "active" : ""}
-                  @click=${() => this._setMode("fixed")}
-                  title="Strips stay at the density's pixel width; mixer scrolls horizontally if needed">Fixed</button>
-        </div>
+        <details class="mx-menu" @click=${(e) => e.stopPropagation()}>
+          <summary>
+            ${icon("adjustments-horizontal", 12)}
+            <span>Mixer</span>
+            <span class="mx-menu-pill">${density.label} · ${widthLabel}</span>
+          </summary>
+          <div class="mx-panel" @click=${(e) => e.stopPropagation()}>
+            <div class="mx-section-label">Density</div>
+            <div class="group">
+              ${Object.entries(DENSITIES).map(([k, v]) => html`
+                <button
+                  type="button"
+                  class=${this._density === k ? "active" : ""}
+                  @click=${() => this._pickDensity(k)}
+                >${v.label}</button>
+              `)}
+            </div>
+            <div class="mx-section-label">Width</div>
+            <div class="group">
+              <button
+                type="button"
+                class=${this._widthMode === "fill" ? "active" : ""}
+                title="Strips flex to fill the container"
+                @click=${() => this._pickWidthMode("fill")}
+              >Fill</button>
+              <button
+                type="button"
+                class=${this._widthMode === "fixed" ? "active" : ""}
+                title="Strips stay at the density's pixel width; mixer scrolls horizontally if needed"
+                @click=${() => this._pickWidthMode("fixed")}
+              >Fixed</button>
+            </div>
+          </div>
+        </details>
         <span style="flex:1"></span>
         ${Object.keys(this._widthOverrides).length
           ? html`<button
+              class="toolbar-aux"
               @click=${this._resetAllOverrides}
               title="Clear every per-channel width override"
-              style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:10px;padding:3px 8px;cursor:pointer;font-family:var(--font-sans);"
             >Reset widths</button>`
           : null}
         ${window.__foyer?.store?.state?.rbac?.isTunnel

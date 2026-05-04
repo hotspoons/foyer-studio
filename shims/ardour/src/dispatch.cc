@@ -29,13 +29,19 @@
 #include "ardour/internal_send.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
-#include "ardour/midi_stretch.h"
-#include "ardour/stretch.h"
+#include "ardour/reverse.h"
+#include "ardour/strip_silence.h"
+#include "ardour/dB.h"
+#include "ardour/interthread_info.h"
+
+#include <cmath>
 
 #include "pbd/progress.h"
 #include <rubberband/RubberBandStretcher.h>
 #include "ardour/midi_source.h"
 #include "ardour/timefx_request.h"
+#include "ardour/midi_stretch.h"
+#include "ardour/stretch.h"
 #include "ardour/midi_track.h"
 #include "ardour/types.h"
 #include "ardour/monitor_control.h"
@@ -425,6 +431,10 @@ struct DecodedCmd
 		DuplicateRegionRange,
 		StretchRegion,
 		SplitRegion,
+		ReverseRegion,
+		CombineRegions,
+		StripSilenceRegion,
+		PitchShiftRegion,
 		CreateRegion,
 		ReplaceRegionNotes,
 		ListPlugins,
@@ -570,6 +580,21 @@ struct DecodedCmd
 	std::uint64_t stretch_new_length_u64 = 0;
 	std::string   stretch_anchor;
 	bool          stretch_preserve_pitch = true;
+
+	// CombineRegions — region id list (same track).
+	std::vector<std::string> combine_region_ids;
+
+	// StripSilenceRegion — optional analysis parameters (Ardour strip-silence dialog).
+	double       strip_threshold_db = -48.0;
+	bool         has_strip_threshold = false;
+	std::uint64_t strip_minimum_length_samples = 2048;
+	bool         has_strip_minimum_length = false;
+	std::uint64_t strip_fade_length_samples = 64;
+	bool         has_strip_fade_length = false;
+
+	// PitchShiftRegion
+	double       pitch_semitones = 0.0;
+	bool         has_pitch_semitones = false;
 
 	// ImportAudio payload — absolute path on the host.
 	std::string   import_audio_path;
@@ -1250,6 +1275,34 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!in.read_str (out.stretch_anchor)) return out;
 				} else if (k == "preserve_pitch") {
 					if (!in.read_bool (out.stretch_preserve_pitch)) return out;
+				} else if (k == "region_ids") {
+					std::size_t n = 0;
+					std::uint8_t b = in.peek ();
+					if ((b & 0xf0) == 0x90) { in.take_u8 (); n = b & 0x0f; }
+					else if (b == 0xdc)     { in.take_u8 (); n = in.take_be16 (); }
+					else if (b == 0xdd)     { in.take_u8 (); n = in.take_be32 (); }
+					else return out;
+					if (!in.ok ()) return out;
+					n = in.cap_count (n);
+					out.combine_region_ids.clear ();
+					out.combine_region_ids.reserve (n);
+					for (std::size_t i = 0; i < n; ++i) {
+						std::string rid;
+						if (!in.read_str (rid)) return out;
+						out.combine_region_ids.push_back (rid);
+					}
+				} else if (k == "threshold_db") {
+					if (!in.read_f64 (out.strip_threshold_db)) return out;
+					out.has_strip_threshold = true;
+				} else if (k == "minimum_length_samples") {
+					if (!in.read_u64 (out.strip_minimum_length_samples)) return out;
+					out.has_strip_minimum_length = true;
+				} else if (k == "fade_length_samples") {
+					if (!in.read_u64 (out.strip_fade_length_samples)) return out;
+					out.has_strip_fade_length = true;
+				} else if (k == "semitones") {
+					if (!in.read_f64 (out.pitch_semitones)) return out;
+					out.has_pitch_semitones = true;
 				} else if (k == "path") {
 					if (!in.read_str (out.import_audio_path)) return out;
 				} else if (k == "source_offset_samples") {
@@ -1526,6 +1579,10 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "duplicate_region_range") out.kind = DecodedCmd::Kind::DuplicateRegionRange;
 			else if (cmd_type == "stretch_region")       out.kind = DecodedCmd::Kind::StretchRegion;
 			else if (cmd_type == "split_region")         out.kind = DecodedCmd::Kind::SplitRegion;
+			else if (cmd_type == "reverse_region")       out.kind = DecodedCmd::Kind::ReverseRegion;
+			else if (cmd_type == "combine_regions")      out.kind = DecodedCmd::Kind::CombineRegions;
+			else if (cmd_type == "strip_silence_region") out.kind = DecodedCmd::Kind::StripSilenceRegion;
+			else if (cmd_type == "pitch_shift_region")    out.kind = DecodedCmd::Kind::PitchShiftRegion;
 			else if (cmd_type == "create_region")       out.kind = DecodedCmd::Kind::CreateRegion;
 			else if (cmd_type == "replace_region_notes") out.kind = DecodedCmd::Kind::ReplaceRegionNotes;
             else if (cmd_type == "list_plugins")        out.kind = DecodedCmd::Kind::ListPlugins;
@@ -2564,6 +2621,256 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				} else {
 					newpos = hit.region->position ();
 				}
+				playlist->replace_region (hit.region, stretched, newpos);
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
+			});
+			break;
+		}
+		case DecodedCmd::Kind::ReverseRegion: {
+			if (cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: reverse_region: unknown region: " << snap.id << endmsg;
+					return;
+				}
+				auto ar = std::dynamic_pointer_cast<AudioRegion> (hit.region);
+				if (!ar) {
+					PBD::warning << "foyer_shim: reverse_region: not an audio region" << endmsg;
+					return;
+				}
+				auto playlist = hit.region->playlist ();
+				if (!playlist) {
+					return;
+				}
+				auto& session = shim->session ();
+				Reverse rev (session);
+				FoyerRBProgress rbprog;
+				if (hit.region->apply (rev, &rbprog) != 0 || rev.results.empty ()) {
+					return;
+				}
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer reverse region");
+				playlist->clear_changes ();
+				playlist->clear_owned_changes ();
+				playlist->freeze ();
+				auto ri = rev.results.begin ();
+				playlist->replace_region (hit.region, *ri, (*ri)->position ());
+				++ri;
+				while (ri != rev.results.end ()) {
+					playlist->add_region (*ri, (*ri)->position ());
+					++ri;
+				}
+				playlist->thaw ();
+				std::vector<PBD::Command*> pcmds;
+				playlist->rdiff (pcmds);
+				session.add_commands (pcmds);
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
+			});
+			break;
+		}
+		case DecodedCmd::Kind::CombineRegions: {
+			if (cmd.combine_region_ids.size () < 2) {
+				PBD::warning << "foyer_shim: combine_regions: need >= 2 region ids" << endmsg;
+				break;
+			}
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				RegionList rl;
+				std::shared_ptr<Playlist> playlist;
+				for (std::string const& rid : snap.combine_region_ids) {
+					auto hit = schema_map::find_region (shim->session (), rid);
+					if (!hit.region) {
+						PBD::warning << "foyer_shim: combine_regions: unknown region: " << rid << endmsg;
+						return;
+					}
+					auto pl = hit.region->playlist ();
+					if (!pl) {
+						return;
+					}
+					if (!playlist) {
+						playlist = pl;
+					} else if (pl.get () != playlist.get ()) {
+						PBD::warning << "foyer_shim: combine_regions: regions must share one playlist" << endmsg;
+						return;
+					}
+					rl.push_back (hit.region);
+				}
+				std::shared_ptr<Track> owner_track;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					auto tr = std::dynamic_pointer_cast<Track> (r);
+					if (!tr) continue;
+					if (tr->playlist () == playlist) {
+						owner_track = tr;
+						break;
+					}
+				}
+				if (!owner_track) {
+					PBD::warning << "foyer_shim: combine_regions: could not resolve track" << endmsg;
+					return;
+				}
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer combine regions");
+				playlist->clear_changes ();
+				playlist->combine (rl, owner_track);
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
+			});
+			break;
+		}
+		case DecodedCmd::Kind::StripSilenceRegion: {
+			if (cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: strip_silence_region: unknown region: " << snap.id << endmsg;
+					return;
+				}
+				auto ar = std::dynamic_pointer_cast<AudioRegion> (hit.region);
+				if (!ar) {
+					PBD::warning << "foyer_shim: strip_silence_region: not audio" << endmsg;
+					return;
+				}
+				auto playlist = hit.region->playlist ();
+				if (!playlist) {
+					return;
+				}
+				const float th_db =
+				    snap.has_strip_threshold ? static_cast<float> (snap.strip_threshold_db) : -48.f;
+				const samplecnt_t min_len = std::max (
+				    static_cast<samplecnt_t> (1),
+				    static_cast<samplecnt_t> (
+				        snap.has_strip_minimum_length ? snap.strip_minimum_length_samples : 2048));
+				const samplecnt_t fade_len = static_cast<samplecnt_t> (
+				    snap.has_strip_fade_length ? snap.strip_fade_length_samples : 64);
+				InterThreadInfo itt;
+				AudioIntervalResult intervals = ar->find_silence (
+				    dB_to_coefficient (th_db), min_len, fade_len, itt);
+				AudioIntervalMap smap;
+				smap[hit.region] = intervals;
+				StripSilence ss (shim->session (), smap, fade_len);
+				FoyerRBProgress rbprog;
+				if (hit.region->apply (ss, &rbprog) != 0 || ss.results.empty ()) {
+					return;
+				}
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				if (own_txn) session.begin_reversible_command ("Foyer strip silence");
+				playlist->clear_changes ();
+				playlist->clear_owned_changes ();
+				playlist->freeze ();
+				auto si = ss.results.begin ();
+				playlist->replace_region (hit.region, *si, (*si)->position ());
+				++si;
+				while (si != ss.results.end ()) {
+					playlist->add_region (*si, (*si)->position ());
+					++si;
+				}
+				playlist->thaw ();
+				std::vector<PBD::Command*> pcmds;
+				playlist->rdiff (pcmds);
+				session.add_commands (pcmds);
+				session.add_command (new PBD::StatefulDiffCommand (playlist));
+				if (own_txn) session.commit_reversible_command ();
+				session.set_dirty ();
+			});
+			break;
+		}
+		case DecodedCmd::Kind::PitchShiftRegion: {
+			if (cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				auto hit = schema_map::find_region (shim->session (), snap.id);
+				if (!hit.region) {
+					PBD::warning << "foyer_shim: pitch_shift_region: unknown region: " << snap.id << endmsg;
+					return;
+				}
+				const double st = snap.has_pitch_semitones ? snap.pitch_semitones : 0.0;
+				if (std::fabs (st) < 1e-9) {
+					return;
+				}
+				auto& session = shim->session ();
+				const bool own_txn = (self->_undo_group_depth == 0);
+				const DataType rdt = hit.region->data_type ();
+				if (rdt == DataType::MIDI) {
+					auto mr = std::dynamic_pointer_cast<MidiRegion> (hit.region);
+					if (!mr) return;
+					auto model = mr->model ();
+					if (!model) return;
+					auto* diff =
+					    model->new_note_diff_command ("Foyer pitch shift");
+					const int ist = static_cast<int> (std::lround (st));
+					for (auto const& nptr : model->notes ()) {
+						model->transpose (diff, nptr, ist);
+					}
+					model->apply_diff_command_as_commit (session, diff);
+					auto bytes = msgpack_out::encode_region_updated (session, snap.id);
+					if (!bytes.empty ()) {
+						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+					}
+					(void)own_txn;
+					return;
+				}
+				if (rdt != DataType::AUDIO) {
+					PBD::warning << "foyer_shim: pitch_shift_region: unsupported type" << endmsg;
+					return;
+				}
+				std::shared_ptr<ARDOUR::Playlist> playlist;
+				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+				for (auto const& r : *routes) {
+					if (!r) continue;
+					auto track = std::dynamic_pointer_cast<Track> (r);
+					if (!track) continue;
+					auto pl = track->playlist ();
+					if (pl && pl->region_by_id (hit.region->id ())) {
+						playlist = pl;
+						break;
+					}
+				}
+				if (!playlist) {
+					PBD::warning << "foyer_shim: pitch_shift_region: region not on playlist" << endmsg;
+					return;
+				}
+				if (own_txn) session.begin_reversible_command ("Foyer pitch shift");
+				playlist->clear_changes ();
+				ARDOUR::TimeFXRequest request;
+				request.time_fraction = Temporal::ratio_t (1, 1);
+				request.pitch_fraction =
+				    static_cast<float> (std::pow (2.0, st / 12.0));
+				if (request.pitch_fraction <= 0.f) {
+					request.pitch_fraction = 1.0f;
+				}
+				request.opts = static_cast<int> (
+				    RubberBand::RubberBandStretcher::OptionEngineFiner);
+				FoyerRBProgress rb_progress;
+				RBStretch rb (session, request);
+				if (rb.run (hit.region, &rb_progress) != 0 ||
+				    rb.results.empty () ||
+				    !rb.results[0]) {
+					PBD::warning << "foyer_shim: pitch_shift_region: RBStretch failed" << endmsg;
+					if (own_txn) session.commit_reversible_command ();
+					return;
+				}
+				auto stretched = rb.results[0];
+				timepos_t newpos = hit.region->position ();
 				playlist->replace_region (hit.region, stretched, newpos);
 				session.add_command (new PBD::StatefulDiffCommand (playlist));
 				if (own_txn) session.commit_reversible_command ();

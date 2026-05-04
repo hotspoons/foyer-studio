@@ -36,11 +36,9 @@ const LANE_HEIGHT_MAX = 240;
 const RULER_HEIGHT = 26;
 const HEAD_WIDTH = 140;
 const EDGE_GRAB = 6;
-// Sample-level detail at extreme zoom requires tiers smaller than 64 —
-// at 4000 px/s on 48 kHz audio each pixel covers ~12 source samples, so
-// a tier of 64 spreads one peak over 5+ pixels and the bar looks blocky.
-// Adding 8/16/32 lets the decoder honor finer resolution when asked.
-const TIERS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
+// Sample-level detail at extreme zoom requires finer waveform tiers; see
+// WaveformCache / waveform-gl for decoding resolution.
+
 const LANE_HEIGHT_KEY = "foyer.timeline.lane-heights.v1";
 const SNAP_PREFS_KEY = "foyer.timeline.snap.v1";
 
@@ -61,12 +59,6 @@ function defaultSnapPrefs() {
     markers: true,
     playhead: false,
   };
-}
-
-function pickTier(samplesPerPx) {
-  let best = TIERS[0];
-  for (const t of TIERS) if (t <= samplesPerPx) best = t;
-  return best;
 }
 
 export class TimelineView extends LitElement {
@@ -93,7 +85,7 @@ export class TimelineView extends LitElement {
     ${scrollbarStyles}
     :host { display: flex; flex-direction: column; flex: 1; overflow: hidden; background: var(--color-surface); }
     .toolbar {
-      display: flex; align-items: center; gap: 10px;
+      display: flex; align-items: center; gap: 8px;
       padding: 6px 14px;
       background: var(--color-surface);
       border-bottom: 1px solid var(--color-border);
@@ -102,7 +94,7 @@ export class TimelineView extends LitElement {
       flex-wrap: wrap;
       min-width: 0;
     }
-    .toolbar input[type=range] { width: 200px; }
+    /* Toolbar chips — same radius + padding vocabulary as foyer-mixer. */
     .toolbar button,
     .toolbar select {
       font: inherit; font-size: 10px;
@@ -110,10 +102,66 @@ export class TimelineView extends LitElement {
       background: transparent;
       border: 1px solid var(--color-border);
       border-radius: var(--radius-sm);
-      padding: 2px 8px;
+      padding: 3px 8px;
       cursor: pointer;
       display: inline-flex; align-items: center;
+      gap: 4px;
       min-height: 22px;
+      transition: color 0.1s ease, border-color 0.1s ease;
+    }
+    .zoom-toolbar {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+    .zoom-toolbar .zoom-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+    }
+    .toolbar input.zoom-range {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 120px;
+      height: 6px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+      cursor: pointer;
+    }
+    .toolbar input.zoom-range:focus-visible {
+      outline: 2px solid color-mix(in oklab, var(--color-accent) 50%, transparent);
+      outline-offset: 2px;
+    }
+    .toolbar input.zoom-range::-webkit-slider-runnable-track {
+      height: 6px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+    }
+    .toolbar input.zoom-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      margin-top: -4px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      border: 2px solid var(--color-surface-elevated);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+    }
+    .toolbar input.zoom-range::-moz-range-track {
+      height: 6px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+    }
+    .toolbar input.zoom-range::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      border: 2px solid var(--color-surface-elevated);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.35);
     }
     .toolbar button:hover,
     .toolbar select:hover { color: var(--color-text); border-color: var(--color-accent); }
@@ -135,7 +183,7 @@ export class TimelineView extends LitElement {
       font-weight: 600;
       letter-spacing: 0.05em;
       padding: 4px 8px;
-      border-radius: 3px;
+      border-radius: var(--radius-sm);
       border: 1px solid var(--color-border);
       background: var(--color-surface);
       color: var(--color-text-muted);
@@ -143,6 +191,8 @@ export class TimelineView extends LitElement {
       display: inline-flex;
       align-items: center;
       gap: 4px;
+      min-height: 22px;
+      box-sizing: border-box;
       transition: color 0.1s ease, border-color 0.1s ease;
     }
     .toolbar details.tb-menu > summary:hover {
@@ -299,7 +349,7 @@ export class TimelineView extends LitElement {
       font-weight: 700;
       letter-spacing: 0.1em;
       padding: 1px 4px;
-      border-radius: 3px;
+      border-radius: var(--radius-sm);
       background: color-mix(in oklab, var(--color-accent) 24%, transparent);
       color: var(--color-accent);
     }
@@ -314,7 +364,7 @@ export class TimelineView extends LitElement {
       font-size: 9px;
       font-weight: 700;
       padding: 2px 0;
-      border-radius: 3px;
+      border-radius: var(--radius-sm);
       border: 1px solid var(--color-border);
       background: var(--color-surface);
       color: var(--color-text-muted);
@@ -1803,14 +1853,16 @@ export class TimelineView extends LitElement {
 
     return html`
       <div class="toolbar">
-        <span>Zoom</span>
-        <input type="range" min="0" max="1000" step="1"
-               .value=${String(Math.round(Math.log(this._zoom / 2) / Math.log(4000 / 2) * 1000))}
-               @input=${(e) => {
-                 const t = Number(e.currentTarget.value) / 1000;
-                 this._zoom = Math.max(2, Math.min(4000, Math.round(2 * Math.pow(4000 / 2, t))));
-               }}>
-        <span>${this._zoom} px/s · tier=${pickTier(this._samplesPerPx())}</span>
+        <label class="zoom-toolbar">
+          <span class="zoom-label">Zoom</span>
+          <input type="range" class="zoom-range" min="0" max="1000" step="1"
+                 title="Timeline scale (pixels per second)"
+                 .value=${String(Math.round(Math.log(this._zoom / 2) / Math.log(4000 / 2) * 1000))}
+                 @input=${(e) => {
+                   const t = Number(e.currentTarget.value) / 1000;
+                   this._zoom = Math.max(2, Math.min(4000, Math.round(2 * Math.pow(4000 / 2, t))));
+                 }}>
+        </label>
         ${this._selection ? html`
           <button
             @click=${() => this.zoomToSelection()}
@@ -2218,9 +2270,113 @@ export class TimelineView extends LitElement {
     toast("Crossfade applied over overlap.", { tone: "info" });
   }
 
+  /** Timeline order (left to right) for currently selected regions. */
+  _sortedSelectedRegionsByTimeline() {
+    const regs = this._selectedRegionObjects();
+    return [...regs].sort(
+      (a, b) => Number(a.start_samples) - Number(b.start_samples),
+    );
+  }
+
+  /** ≥2 regions, all on the same track — valid for `combine_regions`. */
+  _combineRegionSelection() {
+    if (this._selectedRegionIds.size < 2) return null;
+    const regs = this._sortedSelectedRegionsByTimeline();
+    const tid = regs[0]?.track_id;
+    if (!tid || !regs.every((r) => r.track_id === tid)) return null;
+    return { track_id: tid, regs };
+  }
+
+  _reverseSelectedAudioRegions() {
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    const audioRegs = this._sortedSelectedRegionsByTimeline().filter(
+      (r) => this._trackKind(r.track_id) === "audio",
+    );
+    if (!audioRegs.length) {
+      toast("Select at least one audio region.", { tone: "warn" });
+      return;
+    }
+    ws.send({ type: "undo_group_begin", name: "Foyer reverse audio" });
+    for (const r of audioRegs) {
+      ws.send({ type: "reverse_region", id: r.id });
+    }
+    ws.send({ type: "undo_group_end" });
+  }
+
+  _combineSelectedRegions() {
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    const sel = this._combineRegionSelection();
+    if (!sel) {
+      toast("Glue needs two or more regions on the same track.", { tone: "warn" });
+      return;
+    }
+    ws.send({
+      type: "combine_regions",
+      region_ids: sel.regs.map((r) => r.id),
+    });
+  }
+
+  _stripSilenceSelectedAudioRegions() {
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    const audioRegs = this._sortedSelectedRegionsByTimeline().filter(
+      (r) => this._trackKind(r.track_id) === "audio",
+    );
+    if (!audioRegs.length) {
+      toast("Select at least one audio region.", { tone: "warn" });
+      return;
+    }
+    ws.send({ type: "undo_group_begin", name: "Foyer strip silence" });
+    for (const r of audioRegs) {
+      ws.send({ type: "strip_silence_region", id: r.id });
+    }
+    ws.send({ type: "undo_group_end" });
+  }
+
+  _pitchShiftSelectedRegions() {
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    const regs = this._selectedRegionObjects();
+    if (!regs.length) {
+      toast("Select a region.", { tone: "warn" });
+      return;
+    }
+    const raw = window.prompt("Pitch shift (semitones, e.g. 2 or -3):", "0");
+    if (raw == null) return;
+    const semitones = Number.parseFloat(String(raw).trim());
+    if (!Number.isFinite(semitones)) {
+      toast("Enter a valid number of semitones.", { tone: "warn" });
+      return;
+    }
+    if (semitones === 0) {
+      toast("No change (0 semitones).", { tone: "info" });
+      return;
+    }
+    ws.send({ type: "undo_group_begin", name: "Foyer pitch shift" });
+    for (const r of regs) {
+      ws.send({ type: "pitch_shift_region", id: r.id, semitones });
+    }
+    ws.send({ type: "undo_group_end" });
+  }
+
   _regionEditMenuActions() {
     const nSel = this._selectedRegionIds.size;
     const pair = nSel === 2 ? this._regionPairForCrossfadeGlue() : null;
+    const combineSel = this._combineRegionSelection();
     const anyAudio = [...this._selectedRegionIds].some((id) => {
       const r = this._regionForId(id);
       return r && this._trackKind(r.track_id) === "audio";
@@ -2269,35 +2425,45 @@ export class TimelineView extends LitElement {
             : "Sets symmetric fades across the overlapping span.",
         action: () => this._applyCrossfadeToSelection(),
       });
+    }
+    if (combineSel) {
+      if (!pair) items.push({ separator: true });
       items.push({
         label: "Glue regions",
         icon: "circle-stack",
-        disabled: true,
-        title:
-          "Not implemented — needs consolidate/offline-render in the Ardour shim (docs/TODO.md).",
+        disabled: false,
+        title: "Combine selected regions on this track into one (Ardour playlist combine).",
+        action: () => this._combineSelectedRegions(),
       });
     }
     items.push({ separator: true });
     items.push({
       label: "Reverse audio",
       icon: "arrow-uturn-left",
-      disabled: true,
-      title:
-        "Not implemented — Ardour uses a reverse filter / new source; no foyer command yet (docs/TODO.md).",
+      disabled: !anyAudio,
+      title: anyAudio
+        ? "Reverse each selected audio region in time."
+        : "Select at least one audio region.",
+      action: () => this._reverseSelectedAudioRegions(),
     });
     items.push({
       label: "Strip silence…",
       icon: "scissors",
-      disabled: true,
-      title:
-        "Not implemented — needs analysis + split batch in the shim (docs/TODO.md).",
+      disabled: !anyAudio,
+      title: anyAudio
+        ? "Detect silence and remove it (uses default threshold / fade; Ardour strip silence)."
+        : "Select at least one audio region.",
+      action: () => this._stripSilenceSelectedAudioRegions(),
     });
     items.push({
       label: "Pitch shift…",
       icon: "musical-note",
-      disabled: true,
+      disabled: nSel === 0,
       title:
-        "Not implemented — needs region FX / MIDI transpose wiring (docs/TODO.md).",
+        nSel === 0
+          ? "Select a region."
+          : "Shift pitch for audio (Rubber Band) or transpose MIDI notes.",
+      action: () => this._pitchShiftSelectedRegions(),
     });
     return items;
   }
@@ -2381,6 +2547,7 @@ export class TimelineView extends LitElement {
     if (!has) return null;
     const nSel = this._selectedRegionIds.size;
     const pair = nSel === 2 ? this._regionPairForCrossfadeGlue() : null;
+    const combineSel = this._combineRegionSelection();
     const anyAudio = [...this._selectedRegionIds].some((id) => {
       const r = this._regionForId(id);
       return r && this._trackKind(r.track_id) === "audio";
@@ -2418,10 +2585,14 @@ export class TimelineView extends LitElement {
               >
                 Crossfade overlap
               </button>
+            `
+            : null}
+          ${combineSel
+            ? html`
               <button
                 class="mi"
-                disabled
-                title="Not implemented — glue/consolidate needs an offline-render path in the shim (see docs/TODO.md)."
+                title="Combine selected regions on this track (timeline order)."
+                @click=${() => this._combineSelectedRegions()}
               >
                 Glue regions
               </button>
@@ -2429,28 +2600,37 @@ export class TimelineView extends LitElement {
             : null}
           <button
             class="mi"
-            disabled
-            title="Not implemented yet — reverse needs a shim command (see docs/TODO.md Region tasks)."
+            ?disabled=${!anyAudio}
+            title=${!anyAudio
+              ? "Select at least one audio region."
+              : "Reverse each selected audio region in time."}
+            @click=${() => this._reverseSelectedAudioRegions()}
           >
             Reverse audio
           </button>
           <button
             class="mi"
-            disabled
-            title="Not implemented yet — strip silence needs analysis + splits in the shim (docs/TODO.md)."
+            ?disabled=${!anyAudio}
+            title=${!anyAudio
+              ? "Select at least one audio region."
+              : "Remove silence using default detection settings."}
+            @click=${() => this._stripSilenceSelectedAudioRegions()}
           >
             Strip silence…
           </button>
           <button
             class="mi"
-            disabled
-            title="Not implemented yet — pitch needs region FX or MIDI transpose wiring (docs/TODO.md)."
+            ?disabled=${nSel === 0}
+            title=${nSel === 0
+              ? "Select a region."
+              : "Prompt for semitones; audio uses Rubber Band, MIDI transposes notes."}
+            @click=${() => this._pitchShiftSelectedRegions()}
           >
             Pitch shift…
           </button>
           <div class="tb-hint">
-            <strong>Working:</strong> quantize, fades, crossfade (two overlapping audio clips).
-            <strong>Not in the shim yet:</strong> glue, reverse, strip silence, pitch — menus are placeholders until those backend commands exist.
+            <strong>Regions:</strong> quantize, fades, crossfade (two overlapping audio),
+            glue (same track), reverse, strip silence, pitch shift (prompt).
           </div>
         </div>
       </details>

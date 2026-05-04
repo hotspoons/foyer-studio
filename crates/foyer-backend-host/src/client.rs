@@ -486,6 +486,36 @@ impl HostClient {
             .await
     }
 
+    pub async fn reverse_region(&self, id: EntityId) -> Result<(), ClientError> {
+        self.send_command(Command::ReverseRegion { id }).await
+    }
+
+    pub async fn combine_regions(&self, region_ids: Vec<EntityId>) -> Result<(), ClientError> {
+        self.send_command(Command::CombineRegions { region_ids })
+            .await
+    }
+
+    pub async fn strip_silence_region(
+        &self,
+        id: EntityId,
+        threshold_db: f32,
+        minimum_length_samples: u64,
+        fade_length_samples: u64,
+    ) -> Result<(), ClientError> {
+        self.send_command(Command::StripSilenceRegion {
+            id,
+            threshold_db,
+            minimum_length_samples,
+            fade_length_samples,
+        })
+        .await
+    }
+
+    pub async fn pitch_shift_region(&self, id: EntityId, semitones: f32) -> Result<(), ClientError> {
+        self.send_command(Command::PitchShiftRegion { id, semitones })
+            .await
+    }
+
     pub async fn create_region(
         &self,
         track_id: EntityId,
