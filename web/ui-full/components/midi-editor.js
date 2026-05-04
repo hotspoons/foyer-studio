@@ -1166,6 +1166,17 @@ export class MidiEditor extends LitElement {
       const isBar = (b % 4) === 0;
       beatLines.push(html`<div class="beat-line ${isBar ? "bar" : ""}" style="left:${x}px"></div>`);
     }
+    // Scale-highlighting context. MUST be declared BEFORE the
+    // visiblePitches loop below — the loop's body references all
+    // three. They used to live further down the function and a
+    // refactor (commit 14fde6f) introduced the loop's read while
+    // leaving the const declarations in place, which trips a
+    // ReferenceError ("Cannot access 'scaleHL' before initialization")
+    // at first paint of the editor under chromatic mode.
+    const scaleMode = this._scaleMode || "chromatic";
+    const scaleHL = isScaleHighlightEnabled(scaleMode);
+    const scaleRoot = this._scaleRoot ?? 0;
+
     const cStripes = [];
     const scaleLanes = [];
     visiblePitches.forEach((p, i) => {
@@ -1185,9 +1196,6 @@ export class MidiEditor extends LitElement {
     });
 
     const selCount = this._selection.size;
-    const scaleMode = this._scaleMode || "chromatic";
-    const scaleHL = isScaleHighlightEnabled(scaleMode);
-    const scaleRoot = this._scaleRoot ?? 0;
 
     // Resolve a velocity value to display / use as the slider start.
     // If exactly one note is selected, show that; if multiple, show

@@ -15,15 +15,13 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { isAllowed } from "foyer-core/rbac.js";
-import { AudioIngress } from "foyer-core/audio/audio-ingress.js";
+import {
+  isTrackMicActive,
+  onTrackMicChange,
+  toggleTrackTake,
+} from "foyer-core/audio/track-mic.js";
 import "./horizontal-fader.js";
 import { dbToNorm, normToDb } from "./horizontal-fader.js";
-
-// Shared registry of active per-track mic ingress streams. Same map
-// the advanced sheet uses, so a track-row tap and an advanced-sheet
-// tap manipulate the same audio resource — no duplicate AudioIngress
-// per track. Survives sheet open/close because it lives on globalThis.
-const TRACK_MICS = (globalThis.__foyerTrackMics ||= new Map());
 
 export class PhoneTrackRow extends LitElement {
   static properties = {
@@ -204,6 +202,11 @@ export class PhoneTrackRow extends LitElement {
     store?.addEventListener("control", this._onControl);
     store?.addEventListener("track-browser-sources", this._onPeerSrcs);
     window.__foyer?.ws?.addEventListener?.("envelope", this._onIngressEnv);
+    // Repaint the Take chip when ANY surface (this row, the phone
+    // sheet, the desktop strip) flips a mic in/out of the shared
+    // registry — the registry sits on globalThis, but state changes
+    // need an explicit nudge to invalidate render.
+    this._unsubTrackMic = onTrackMicChange(() => this.requestUpdate());
     this._syncFromStore();
     const ro = !isAllowed("control_set");
     this.toggleAttribute("readonly", ro);
@@ -214,6 +217,8 @@ export class PhoneTrackRow extends LitElement {
     store?.removeEventListener("control", this._onControl);
     store?.removeEventListener("track-browser-sources", this._onPeerSrcs);
     window.__foyer?.ws?.removeEventListener?.("envelope", this._onIngressEnv);
+    this._unsubTrackMic?.();
+    this._unsubTrackMic = null;
     super.disconnectedCallback();
   }
 
@@ -245,88 +250,23 @@ export class PhoneTrackRow extends LitElement {
   };
 
   _isTakeActive() {
-    if (!this.track?.id) return false;
-    return TRACK_MICS.has(this.track.id);
+    return isTrackMicActive(this.track?.id);
   }
 
-  /// Tap handler for the Take ("I") chip. One-tap source-user + mic
-  /// activation: claim the track for self, open a browser ingress,
-  /// pin the track's input_port to the new ingress port. Tapping
-  /// again reverses all three. Saves a remote performer the four
-  /// taps that would otherwise be: open advanced sheet → pick self
-  /// from the source-user dropdown → tap "Start my mic" → close.
+  /// Tap handler for the Take ("I") chip. Bundled source-user + mic
+  /// + input-port toggle, shared with the desktop's strip Take button
+  /// via `foyer-core/audio/track-mic.js` so both surfaces drive the
+  /// same registry and ordering.
   _toggleTake = async () => {
     const t = this.track;
     if (!t?.id) return;
     if (this._takeBusy) return;
-    const ws = window.__foyer?.ws;
-    const store = window.__foyer?.store;
-    if (!ws || !store) return;
-    const selfPeerId = store.state?.selfPeerId || "";
-    if (!selfPeerId) return;
-
-    if (this._isTakeActive()) {
-      // Active → release. Stop our ingress, clear the track's input
-      // port (so Ardour reverts to its previous auto-connection), and
-      // un-claim source-user ownership.
-      this._takeBusy = true;
-      try {
-        const live = TRACK_MICS.get(t.id);
-        if (live) {
-          try { await live.ingress.stop(); } catch {}
-          TRACK_MICS.delete(t.id);
-        }
-        ws.send({
-          type: "update_track",
-          id: t.id,
-          patch: { input_port: "" },
-        });
-        ws.send({
-          type: "set_track_browser_source",
-          track_id: t.id,
-          peer_id: "",
-        });
-      } finally {
-        this._takeBusy = false;
-        this.requestUpdate();
-      }
-      return;
-    }
-
-    // Idle → claim + start. Order matters: assign source-user FIRST
-    // so the server-side mic-routing policy sees the new ownership
-    // before the ingress port shows up; start mic SECOND so the engine
-    // port name we wire into input_port THIRD is real.
     this._takeBusy = true;
     try {
-      ws.send({
-        type: "set_track_browser_source",
-        track_id: t.id,
-        peer_id: selfPeerId,
-      });
-      const ingress = new AudioIngress({
-        ws,
-        baseUrl: location.origin.replace(/^http/, "ws"),
-      });
-      try {
-        await ingress.start();
-      } catch (e) {
-        console.error("[phone-track-row] take: mic ingress failed:", e);
-        // Roll back the source-user assignment so we don't leave the
-        // track claimed but silent.
-        ws.send({
-          type: "set_track_browser_source",
-          track_id: t.id,
-          peer_id: "",
-        });
-        return;
-      }
-      const portName = ingress.enginePortName;
-      TRACK_MICS.set(t.id, { ingress, portName });
-      ws.send({
-        type: "update_track",
-        id: t.id,
-        patch: { input_port: portName },
+      await toggleTrackTake({
+        trackId: t.id,
+        ws: window.__foyer?.ws,
+        store: window.__foyer?.store,
       });
     } finally {
       this._takeBusy = false;

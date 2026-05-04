@@ -386,19 +386,38 @@ export class SessionView extends LitElement {
   }
 
   /**
-   * If the picker opens on a remembered folder that no longer exists,
-   * the server returns "no such path". Recover by jumping to jail root
-   * without flashing an error — same as first-run with an empty path.
+   * Backend says "no such path" — almost always because the folder we
+   * tried to browse to was remembered from a previous run and has
+   * since been deleted/renamed/moved off the jail. Recover by jumping
+   * to the jail root, dropping the dead entry from history, and
+   * staying silent (no error banner).
+   *
+   * Fires for the cold-boot last-remembered case AND for in-session
+   * clicks/keyboard nav whose target vanished — anywhere a non-root
+   * path lookup fails. The empty-path ("") case is left alone so a
+   * genuine "no jail mounted" / "jail root deleted" error still
+   * surfaces; that's not a remembered-path bug.
    */
   _tryRecoverStaleInitialPath(message) {
     if (!/no such path:/i.test(message || "")) return false;
     const attempted = this._lastBrowseRequest;
     if (!attempted) return false;
-    if (this._history.length !== 1 || this._history[0] !== attempted) return false;
     this._error = "";
     this._listing = null;
-    this._history = [""];
-    this._histCursor = 0;
+    // Drop the dead path from history so Alt+← doesn't bounce back to
+    // it. If we were already at the head of history, replace it; if a
+    // dead entry sat mid-stack, splice it out + re-cursor.
+    const idx = this._history.indexOf(attempted);
+    if (idx >= 0) {
+      this._history.splice(idx, 1);
+      if (this._histCursor >= idx) {
+        this._histCursor = Math.max(0, this._histCursor - 1);
+      }
+    }
+    if (this._history.length === 0) {
+      this._history = [""];
+      this._histCursor = 0;
+    }
     this._saveLastPath("");
     this._sendBrowse("");
     this.requestUpdate();
@@ -624,6 +643,11 @@ export class SessionView extends LitElement {
     const meta = e.kind === "file" && e.size_bytes != null
       ? fmtBytes(e.size_bytes)
       : e.kind === "session_dir" ? "session" : "";
+    // `atomic` MUST be declared before `rowTitle` reads it — used to
+    // sit at the bottom of this function, which TDZ-crashed render
+    // ("Cannot access 'atomic' before initialization") whenever a
+    // session-dir row appeared in save-as mode.
+    const atomic = e.kind === "session_dir" && this.mode === "save_as";
     const rowTitle = atomic
       ? "Open this session from Session → Open"
       : e.kind === "session_dir"
@@ -643,7 +667,6 @@ export class SessionView extends LitElement {
         click = () => this._open(e);
       }
     }
-    const atomic = e.kind === "session_dir" && this.mode === "save_as";
     return html`
       <div class="row ${e.kind === 'session_dir' ? 'session' : ''} ${atomic ? "atomic-session" : ""}"
            title=${rowTitle}
