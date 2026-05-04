@@ -596,11 +596,7 @@ impl Backend for StubBackend {
         Ok(())
     }
 
-    async fn pitch_shift_region(
-        &self,
-        _id: EntityId,
-        _semitones: f32,
-    ) -> Result<(), BackendError> {
+    async fn pitch_shift_region(&self, _id: EntityId, _semitones: f32) -> Result<(), BackendError> {
         Ok(())
     }
 
@@ -743,7 +739,7 @@ impl Backend for StubBackend {
         self.waveforms.lock().await.clear_region(&id);
         // Broadcast so every other subscriber repaints.
         let _ = self.tx.send(Event::RegionUpdated {
-            region: updated.clone(),
+            region: Box::new(updated.clone()),
         });
         Ok(updated)
     }

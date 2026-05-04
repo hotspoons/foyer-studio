@@ -362,7 +362,12 @@ impl Backend for HostBackend {
         fade_length_samples: u64,
     ) -> Result<(), BackendError> {
         self.client
-            .strip_silence_region(id, threshold_db, minimum_length_samples, fade_length_samples)
+            .strip_silence_region(
+                id,
+                threshold_db,
+                minimum_length_samples,
+                fade_length_samples,
+            )
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }

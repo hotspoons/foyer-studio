@@ -511,7 +511,11 @@ impl HostClient {
         .await
     }
 
-    pub async fn pitch_shift_region(&self, id: EntityId, semitones: f32) -> Result<(), ClientError> {
+    pub async fn pitch_shift_region(
+        &self,
+        id: EntityId,
+        semitones: f32,
+    ) -> Result<(), ClientError> {
         self.send_command(Command::PitchShiftRegion { id, semitones })
             .await
     }
@@ -1052,12 +1056,12 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                         .regions_cache
                         .lock()
                         .await
-                        .insert(region.id.clone(), region.clone());
+                        .insert(region.id.clone(), region.as_ref().clone());
                     if let Some(waiters) =
                         shared.pending_update_region.lock().await.remove(&region.id)
                     {
                         for w in waiters {
-                            let _ = w.send(region.clone());
+                            let _ = w.send(region.as_ref().clone());
                         }
                     }
                 }

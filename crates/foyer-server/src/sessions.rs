@@ -325,7 +325,11 @@ impl SessionRegistry {
     /// same session id; refreshes canonical `path`, display `name`
     /// (folder basename), and broadcasts [`Event::SessionList`].
     /// Returns `false` if `id` is not registered.
-    pub(crate) async fn update_project_location(&self, id: &EntityId, new_path_abs: String) -> bool {
+    pub(crate) async fn update_project_location(
+        &self,
+        id: &EntityId,
+        new_path_abs: String,
+    ) -> bool {
         {
             let mut map = self.sessions.write().await;
             let Some(entry) = map.get_mut(id) else {
