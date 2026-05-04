@@ -42,7 +42,10 @@ pub use session::{
     Bus, Group, GroupPatch, MidiPatchState, PluginInstance, Send, Session, Track, TrackKind,
     TrackPatch, Transport, DEFAULT_SAMPLE_RATE,
 };
-pub use timeline::{FadeShape, Region, RegionPatch, TimelineMeta, WaveformPeaks, WaveformRequest};
+pub use timeline::{
+    AudioSourceSegment, FadeShape, Region, RegionPatch, TimelineMeta, WaveformPeaks,
+    WaveformRequest,
+};
 pub use tunnel::{
     TunnelConnection, TunnelCreateToken, TunnelManifest, TunnelProviderConfig, TunnelProviderKind,
     TunnelRevokeToken, TunnelRole, TunnelState, TunnelUp,

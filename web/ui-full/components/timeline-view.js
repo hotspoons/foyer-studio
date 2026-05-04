@@ -27,6 +27,7 @@ import { getVizPref, getVizPrefs, setVizPref } from "foyer-ui-core/viz/viz-setti
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { toast } from "foyer-ui-core/widgets/toast.js";
+import { promptText } from "foyer-ui-core/widgets/prompt-modal.js";
 import { icon } from "foyer-ui-core/icons.js";
 import { sessionScopedKey } from "foyer-core/session-scope.js";
 
@@ -94,19 +95,22 @@ export class TimelineView extends LitElement {
       flex-wrap: wrap;
       min-width: 0;
     }
-    /* Toolbar chips — same radius + padding vocabulary as foyer-mixer. */
+    /* Toolbar chips — match tb-menu summaries + viz-picker (same padding/weight). */
     .toolbar button,
     .toolbar select {
       font: inherit; font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
       color: var(--color-text-muted);
-      background: transparent;
+      background: var(--color-surface);
       border: 1px solid var(--color-border);
       border-radius: var(--radius-sm);
-      padding: 3px 8px;
+      padding: 4px 8px;
       cursor: pointer;
       display: inline-flex; align-items: center;
       gap: 4px;
       min-height: 22px;
+      box-sizing: border-box;
       transition: color 0.1s ease, border-color 0.1s ease;
     }
     .zoom-toolbar {
@@ -1867,11 +1871,11 @@ export class TimelineView extends LitElement {
           <button
             @click=${() => this.zoomToSelection()}
             title="Zoom to the current timeline selection"
-          >Zoom to selection</button>
+          >${icon("magnifying-glass", 12)}<span>Zoom</span></button>
           <button
             @click=${() => this._setLoopToSelection()}
             title="Set loop start/end from current selection"
-          >Loop selection</button>
+          >${icon("loop", 12)}<span>Loop</span></button>
         ` : null}
         <span style="flex:1"></span>
         ${this._renderRegionToolsMenu()}
@@ -2344,7 +2348,7 @@ export class TimelineView extends LitElement {
     ws.send({ type: "undo_group_end" });
   }
 
-  _pitchShiftSelectedRegions() {
+  async _pitchShiftSelectedRegions() {
     const ws = window.__foyer?.ws;
     if (!ws) {
       toast("Not connected.", { tone: "warn" });
@@ -2355,7 +2359,19 @@ export class TimelineView extends LitElement {
       toast("Select a region.", { tone: "warn" });
       return;
     }
-    const raw = window.prompt("Pitch shift (semitones, e.g. 2 or -3):", "0");
+    const raw = await promptText({
+      title: "Pitch shift",
+      message:
+        "Semitone offset. Audio uses Rubber Band; MIDI transposes notes.",
+      inputKind: "slider",
+      sliderMin: -24,
+      sliderMax: 24,
+      sliderStep: 0.1,
+      defaultValue: "0",
+      placeholder: "±24",
+      confirmLabel: "Apply",
+      cancelLabel: "Cancel",
+    });
     if (raw == null) return;
     const semitones = Number.parseFloat(String(raw).trim());
     if (!Number.isFinite(semitones)) {

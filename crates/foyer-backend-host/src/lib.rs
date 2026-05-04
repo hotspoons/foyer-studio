@@ -736,6 +736,21 @@ impl Backend for HostBackend {
         // call for a region the client hasn't listed yet falls through
         // to the placeholder, which is fine.
         if let Some(region) = self.client.region_by_id(&region_id).await {
+            if !region.source_segments.is_empty() {
+                match waveform::decode_peaks_merged(
+                    &region.source_segments,
+                    region_id.clone(),
+                    samples_per_peak,
+                ) {
+                    Ok(peaks) => return Ok(peaks),
+                    Err(e) => {
+                        tracing::warn!(
+                            "symphonia merged decode failed for {region_id:?}: {e} — \
+                             falling back to single-file or synthesized peaks"
+                        );
+                    }
+                }
+            }
             if let Some(path) = region.source_path.as_deref() {
                 match waveform::decode_peaks(
                     std::path::Path::new(path),

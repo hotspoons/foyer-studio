@@ -310,23 +310,6 @@ export class Mixer extends LitElement {
   _setDensity(k) { this._density = k; this._save(); }
   _setMode(m)    { this._widthMode = m; this._save(); }
 
-  _closeMxMenu() {
-    queueMicrotask(() => {
-      const el = this.renderRoot?.querySelector("details.mx-menu");
-      if (el) el.open = false;
-    });
-  }
-
-  _pickDensity(k) {
-    this._setDensity(k);
-    this._closeMxMenu();
-  }
-
-  _pickWidthMode(m) {
-    this._setMode(m);
-    this._closeMxMenu();
-  }
-
   _onChannelResize(ev) {
     const { trackId, width, delta, startWidth, final, resizeAll } = ev.detail || {};
     if (!trackId) return;
@@ -386,7 +369,7 @@ export class Mixer extends LitElement {
                 <button
                   type="button"
                   class=${this._density === k ? "active" : ""}
-                  @click=${() => this._pickDensity(k)}
+                  @click=${() => this._setDensity(k)}
                 >${v.label}</button>
               `)}
             </div>
@@ -396,13 +379,13 @@ export class Mixer extends LitElement {
                 type="button"
                 class=${this._widthMode === "fill" ? "active" : ""}
                 title="Strips flex to fill the container"
-                @click=${() => this._pickWidthMode("fill")}
+                @click=${() => this._setMode("fill")}
               >Fill</button>
               <button
                 type="button"
                 class=${this._widthMode === "fixed" ? "active" : ""}
                 title="Strips stay at the density's pixel width; mixer scrolls horizontally if needed"
-                @click=${() => this._pickWidthMode("fixed")}
+                @click=${() => this._setMode("fixed")}
               >Fixed</button>
             </div>
           </div>

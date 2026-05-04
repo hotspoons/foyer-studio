@@ -16,10 +16,12 @@
 #include "ardour/parameter_descriptor.h"
 #include "ardour/plug_insert_base.h"
 #include "ardour/playlist.h"
+#include "ardour/playlist_source.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
 #include "ardour/plugin_manager.h"
 #include "ardour/region.h"
+#include "ardour/region_sorters.h"
 #include "ardour/route.h"
 #include "ardour/route_group.h"
 #include "ardour/session.h"
@@ -492,6 +494,51 @@ region_source_path (const Region& r)
 	return fs->path ();
 }
 
+static void
+append_playlist_audio_segments (
+	std::shared_ptr<const Playlist> pl,
+	std::vector<AudioSourceSegmentDesc>& out)
+{
+	if (!pl) {
+		return;
+	}
+	/* `Playlist::region_list()` is non-const in libardour; the PlaylistSource
+	 * accessor hands us `shared_ptr<const Playlist>`. Peeking the region
+	 * list for schema export does not mutate playlist state. */
+	std::shared_ptr<RegionList> rlist_sp =
+	    std::const_pointer_cast<Playlist> (pl)->region_list ();
+	if (!rlist_sp || rlist_sp->empty ()) {
+		return;
+	}
+	RegionList sorted = *rlist_sp;
+	sorted.sort (RegionSortByLayerAndPosition ());
+	for (std::shared_ptr<Region> const& reg : sorted) {
+		if (!reg) {
+			continue;
+		}
+		std::shared_ptr<AudioRegion> ar = std::dynamic_pointer_cast<AudioRegion> (reg);
+		if (!ar) {
+			continue;
+		}
+		std::string path = region_source_path (*ar);
+		if (!path.empty ()) {
+			AudioSourceSegmentDesc seg;
+			seg.path           = path;
+			seg.offset_samples = static_cast<std::uint64_t> (
+			    std::max<samplecnt_t> (ar->start_sample (), 0));
+			seg.length_samples = static_cast<std::uint64_t> (
+			    std::max<samplecnt_t> (ar->length_samples (), 0));
+			out.push_back (std::move (seg));
+			continue;
+		}
+		std::shared_ptr<PlaylistSource> inner_pls =
+		    std::dynamic_pointer_cast<PlaylistSource> (ar->source (0));
+		if (inner_pls && inner_pls->playlist ()) {
+			append_playlist_audio_segments (inner_pls->playlist (), out);
+		}
+	}
+}
+
 // Best-effort: find the track whose id matches the `"track.<pbd-id>"` form
 // that msgpack_out emits. Busses/masters are skipped — they don't host
 // regions.
@@ -665,6 +712,13 @@ describe_region (const Region& r, const std::string& track_id)
 	d.source_path     = region_source_path (r);
 	d.source_offset_samples = static_cast<std::uint64_t> (std::max<samplecnt_t> (r.start_sample (), 0));
 	d.has_source_offset     = !d.source_path.empty ();
+	d.source_segments.clear ();
+	if (d.source_path.empty ()) {
+		auto pls = std::dynamic_pointer_cast<PlaylistSource> (r.source (0));
+		if (pls) {
+			append_playlist_audio_segments (pls->playlist (), d.source_segments);
+		}
+	}
 
 	// MIDI regions: extract the note list so the web UI's piano roll
 	// has data to render. Done inline on the region emission so

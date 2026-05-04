@@ -263,6 +263,7 @@ fn synthesize_for(track_id: &EntityId, sample_rate: u32) -> Vec<Region> {
             muted: false,
             source_path: None,
             source_offset_samples: None,
+            source_segments: vec![],
             notes: vec![],
             patch_changes: vec![],
             foyer_sequencer: None,
