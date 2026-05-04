@@ -209,7 +209,7 @@ pub enum Event {
 
     /// A region was mutated. Clients should patch it in place (same id).
     RegionUpdated {
-        region: Region,
+        region: Box<Region>,
     },
     /// A region was removed from the session. Clients should drop it from
     /// their per-track region list.

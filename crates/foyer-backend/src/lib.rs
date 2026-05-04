@@ -433,16 +433,16 @@ pub trait Backend: Send + Sync + 'static {
         _minimum_length_samples: u64,
         _fade_length_samples: u64,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Other("strip_silence_region not supported".into()))
+        Err(BackendError::Other(
+            "strip_silence_region not supported".into(),
+        ))
     }
 
     /// Pitch-shift region (audio: Rubber Band; MIDI: transpose). Fire-and-forget.
-    async fn pitch_shift_region(
-        &self,
-        _id: EntityId,
-        _semitones: f32,
-    ) -> Result<(), BackendError> {
-        Err(BackendError::Other("pitch_shift_region not supported".into()))
+    async fn pitch_shift_region(&self, _id: EntityId, _semitones: f32) -> Result<(), BackendError> {
+        Err(BackendError::Other(
+            "pitch_shift_region not supported".into(),
+        ))
     }
 
     /// Create a brand-new empty region on the given track.

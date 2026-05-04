@@ -1128,25 +1128,25 @@ async fn dispatch_command(
                 .await;
 
                 if let Some(jail_root) = state.sessions.jail_root.read().await.clone() {
-                    let backend_id =
-                        if let Some(sid) = state.focus_session_id.read().await.as_ref() {
-                            match state.sessions.backend_id_of(sid).await {
-                                Some(b) => b,
-                                None => state
-                                    .active_backend_id
-                                    .read()
-                                    .await
-                                    .clone()
-                                    .unwrap_or_default(),
-                            }
-                        } else {
-                            state
+                    let backend_id = if let Some(sid) = state.focus_session_id.read().await.as_ref()
+                    {
+                        match state.sessions.backend_id_of(sid).await {
+                            Some(b) => b,
+                            None => state
                                 .active_backend_id
                                 .read()
                                 .await
                                 .clone()
-                                .unwrap_or_default()
-                        };
+                                .unwrap_or_default(),
+                        }
+                    } else {
+                        state
+                            .active_backend_id
+                            .read()
+                            .await
+                            .clone()
+                            .unwrap_or_default()
+                    };
                     let recents = crate::recents::touch(foyer_schema::RecentEntry {
                         path: crate::recents::normalize_path(
                             &display_rel,
@@ -1178,7 +1178,15 @@ async fn dispatch_command(
         }
         Command::UpdateRegion { id, patch } => {
             match state.backend().await.update_region(id, patch).await {
-                Ok(region) => broadcast_event(state, Event::RegionUpdated { region }).await,
+                Ok(region) => {
+                    broadcast_event(
+                        state,
+                        Event::RegionUpdated {
+                            region: Box::new(region),
+                        },
+                    )
+                    .await
+                }
                 Err(e) => {
                     broadcast_event(
                         state,
@@ -2117,7 +2125,12 @@ async fn dispatch_command(
             if let Err(e) = state
                 .backend()
                 .await
-                .strip_silence_region(id, threshold_db, minimum_length_samples, fade_length_samples)
+                .strip_silence_region(
+                    id,
+                    threshold_db,
+                    minimum_length_samples,
+                    fade_length_samples,
+                )
                 .await
             {
                 broadcast_event(
@@ -2132,7 +2145,12 @@ async fn dispatch_command(
         }
 
         Command::PitchShiftRegion { id, semitones } => {
-            if let Err(e) = state.backend().await.pitch_shift_region(id, semitones).await {
+            if let Err(e) = state
+                .backend()
+                .await
+                .pitch_shift_region(id, semitones)
+                .await
+            {
                 broadcast_event(
                     state,
                     Event::Error {
