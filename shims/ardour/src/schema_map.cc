@@ -718,10 +718,12 @@ describe_region (const Region& r, const std::string& track_id)
 	if (auto const* ar = dynamic_cast<const ARDOUR::AudioRegion*> (&r)) {
 		d.emit_audio_envelope = true;
 		d.gain_linear         = ar->scale_amplitude ();
+		/* Ardour declares fade_in/out_length() non-const; reads are logically const. */
+		auto* ar_mut = const_cast<ARDOUR::AudioRegion*> (ar);
 		d.fade_in_samples =
-		    static_cast<std::uint64_t> (std::max<samplecnt_t> (ar->fade_in_length ().samples (), 0));
+		    static_cast<std::uint64_t> (std::max<samplecnt_t> (ar_mut->fade_in_length ().samples (), 0));
 		d.fade_out_samples =
-		    static_cast<std::uint64_t> (std::max<samplecnt_t> (ar->fade_out_length ().samples (), 0));
+		    static_cast<std::uint64_t> (std::max<samplecnt_t> (ar_mut->fade_out_length ().samples (), 0));
 	}
 
 	return d;
