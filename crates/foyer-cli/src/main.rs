@@ -788,9 +788,14 @@ impl BackendSpawner for CliSpawner {
                     project.to_path_buf()
                 };
                 let sr_hint = sample_rate.or(cfg_backend.sample_rate);
-                let (socket, child) =
-                    launch_and_wait_for_shim(&exec, &cfg_backend.args, &cfg_backend.env, &abs, sr_hint)
-                        .await?;
+                let (socket, child) = launch_and_wait_for_shim(
+                    &exec,
+                    &cfg_backend.args,
+                    &cfg_backend.env,
+                    &abs,
+                    sr_hint,
+                )
+                .await?;
                 let host = HostBackend::connect(socket.clone())
                     .await
                     .with_context(|| format!("connect to shim at {}", socket.display()))?;
@@ -1360,7 +1365,9 @@ fn daw_log_path() -> Result<PathBuf> {
 }
 
 fn ardour_had_existing_session(session_dir: &Path, snapshot_name: &str) -> bool {
-    session_dir.join(format!("{snapshot_name}.ardour")).is_file()
+    session_dir
+        .join(format!("{snapshot_name}.ardour"))
+        .is_file()
         || session_dir
             .join(snapshot_name)
             .join(format!("{snapshot_name}.ardour"))
@@ -2144,13 +2151,17 @@ mod tests {
     #[test]
     fn patch_sample_rate_noop_when_missing_attr() {
         let xml = "<Session>";
-        assert!(patch_session_xml_sample_rate_content(xml, 48_000).unwrap().is_none());
+        assert!(patch_session_xml_sample_rate_content(xml, 48_000)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn patch_sample_rate_noop_when_already_matches() {
         let xml = r#"<Session sample-rate="48000">"#;
-        assert!(patch_session_xml_sample_rate_content(xml, 48_000).unwrap().is_none());
+        assert!(patch_session_xml_sample_rate_content(xml, 48_000)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
