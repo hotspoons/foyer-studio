@@ -1,0 +1,14 @@
+# Patterns to ignore when packaging the chart.
+.DS_Store
+.git/
+.gitignore
+.idea/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+# Local-only override files; users keep these alongside the chart
+# but we don't want them packaged up.
+values.local.yaml
+values-*.local.yaml

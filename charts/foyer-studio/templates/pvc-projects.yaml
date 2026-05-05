@@ -1,0 +1,25 @@
+{{- if and .Values.persistence.projects.enabled (not .Values.persistence.projects.existingClaim) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "foyer-studio.projectsPvcName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+    foyer.io/role: projects
+  {{- with .Values.persistence.projects.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- range .Values.persistence.projects.accessModes }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- with .Values.persistence.projects.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.projects.size | quote }}
+{{- end -}}

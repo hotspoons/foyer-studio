@@ -1,0 +1,48 @@
+Foyer Studio is deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Image:        {{ include "foyer-studio.image" . }}
+Service:      {{ include "foyer-studio.fullname" . }} ({{ .Values.service.type }}, port {{ .Values.service.port }})
+Projects PVC: {{ include "foyer-studio.projectsPvcName" . }} ({{ .Values.persistence.projects.size }})
+Config:       {{ include "foyer-studio.configSecretName" . }}{{ if not .Values.config.create }} (existing){{ end }}
+Realtime:     {{ if .Values.realtime.enabled }}rtprio={{ .Values.realtime.rtprio }}, memlock={{ if .Values.realtime.memlockUnlimited }}unlimited{{ else }}default{{ end }}{{ else }}disabled (audio jitter expected on contended nodes){{ end }}
+Web overlay:  {{ if .Values.webOverlay.enabled }}{{ .Values.webOverlay.kind }}{{ else }}none (ship-image UI){{ end }}
+
+{{- if .Values.expose.ingress.enabled }}
+
+Exposed via Ingress at:
+  {{ if .Values.expose.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.expose.host }}{{ .Values.expose.ingress.path }}
+
+  IngressClass: {{ if .Values.expose.ingress.className }}{{ .Values.expose.ingress.className }}{{ else }}<cluster default>{{ end }}
+  TLS:          {{ if .Values.expose.tls.enabled }}{{ if .Values.expose.tls.secretName }}{{ .Values.expose.tls.secretName }}{{ else }}{{ include "foyer-studio.fullname" . }}-tls{{ end }}{{ if .Values.expose.tls.certManager.enabled }} (cert-manager: {{ .Values.expose.tls.certManager.issuerRef.kind }}/{{ .Values.expose.tls.certManager.issuerRef.name }}){{ end }}{{ else }}disabled{{ end }}
+
+{{- else if .Values.expose.gateway.enabled }}
+
+Exposed via Gateway API ({{ .Values.expose.gateway.style }} style) at:
+  {{ if .Values.expose.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.expose.host }}/
+
+  Parent Gateway: {{ .Values.expose.gateway.parentRef.namespace | default .Release.Namespace }}/{{ .Values.expose.gateway.parentRef.name }}{{ with .Values.expose.gateway.parentRef.sectionName }} (section: {{ . }}){{ end }}
+  {{- if eq .Values.expose.gateway.style "listenerSet" }}
+  ListenerSet:    {{ if .Values.expose.gateway.listenerSet.experimental }}gateway.networking.x-k8s.io/v1alpha1 (XListenerSet){{ else }}gateway.networking.k8s.io/v1 (ListenerSet){{ end }}
+  {{- end }}
+  TLS:            {{ if .Values.expose.tls.enabled }}{{ if .Values.expose.tls.secretName }}{{ .Values.expose.tls.secretName }}{{ else }}{{ include "foyer-studio.fullname" . }}-tls{{ end }}{{ if .Values.expose.tls.certManager.enabled }} (cert-manager: {{ .Values.expose.tls.certManager.issuerRef.kind }}/{{ .Values.expose.tls.certManager.issuerRef.name }}){{ end }}{{ else }}disabled{{ end }}
+
+{{- else }}
+
+No external expose surface enabled. Reach the service via:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "foyer-studio.fullname" . }} 3838:{{ .Values.service.port }}
+  open http://127.0.0.1:3838/
+
+{{- end }}
+
+Quick checks:
+  kubectl -n {{ .Release.Namespace }} get pods,svc,pvc,ingress,httproute -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "foyer-studio.fullname" . }} -c foyer
+
+To uninstall:
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+  # …or use: just helm-uninstall RELEASE={{ .Release.Name }} NAMESPACE={{ .Release.Namespace }}
+{{ if .Values.persistence.projects.retainPolicy }}
+NB: the projects PVC's bound PV has its reclaim policy set to Retain.
+Uninstalling the release does NOT delete the underlying volume — you
+must delete it explicitly with `kubectl delete pv <name>`.
+{{- end }}
