@@ -34,8 +34,8 @@ fi
 unset __foyer_av_env_already_set
 
 # Optional pin to a specific autovocoder ref (tag, branch, or commit
-# SHA). Empty means "whatever upstream HEAD is" — current behavior
-# before the variable existed. See `.env` for the full rationale.
+# SHA). Empty → each `ensure` fetches origin and follows `origin/HEAD`
+# (default branch). Non-empty → fetch that ref and checkout its tip.
 AUTOVOCODER_REF="${AUTOVOCODER_REF:-}"
 
 # Where the LV2 bundle lands. The upstream `scripts/install-lv2.sh`
@@ -51,14 +51,14 @@ autovocoder subcommands:
   clone       Clone autovocoder into $REPO_ROOT/ext/autovocoder (if not present)
   build       Build the LV2 plugin (cargo --release)
   install     Build + install the LV2 bundle into $LV2_DIR (idempotent)
-  ensure      Soft-check install; clone + build + install only when missing/stale
+  ensure      Fetch upstream + sync checkout; clone/build/install when missing or HEAD moved
   check       Hard-check the installed bundle
   clean       Remove the build directory
   uninstall   Remove the installed LV2 bundle from $LV2_DIR
 
 Current AV_DIR:           $AV_DIR
 Current LV2_DIR:          $LV2_DIR
-Current AUTOVOCODER_REF:  ${AUTOVOCODER_REF:-(unset — upstream HEAD)}
+Current AUTOVOCODER_REF:  ${AUTOVOCODER_REF:-(unset — track origin/HEAD)}
 Override paths with: FOYER_AUTOVOCODER_DIR=/path  LV2_DIR=/path
 EOF
 }
@@ -106,60 +106,90 @@ do_clone() {
     git clone "$AV_UPSTREAM" "$AV_DIR"
 }
 
-# Switch an existing checkout to $AUTOVOCODER_REF when it doesn't
-# match. No-op when the ref is empty or already correct. Matches
-# either by tag/branch name or by commit SHA prefix (so a 7-char SHA
-# in .env still correctly identifies the full commit). Skips when
-# there are local modifications — user may be mid-hack.
+# Resolve the commit we want to be on, fetching from origin first so
+# branch pins (e.g. main) actually advance when upstream moves.
+# Empty AUTOVOCODER_REF → track upstream default branch (origin/HEAD).
+resolve_autovocoder_target_sha() {
+    local sha
+    if [ -n "$AUTOVOCODER_REF" ]; then
+        # Try shallow fetch first (fast on CI / repeated ensures).
+        if ! git -C "$AV_DIR" fetch --depth 1 origin "$AUTOVOCODER_REF" 2>/dev/null; then
+            if ! git -C "$AV_DIR" fetch origin "$AUTOVOCODER_REF" 2>/dev/null \
+                    && ! git -C "$AV_DIR" fetch --tags origin 2>/dev/null; then
+                echo "autovocoder: fetch origin '$AUTOVOCODER_REF' failed"
+                return 1
+            fi
+        fi
+        if git -C "$AV_DIR" rev-parse --verify --quiet \
+                "refs/remotes/origin/$AUTOVOCODER_REF" >/dev/null; then
+            git -C "$AV_DIR" rev-parse "refs/remotes/origin/$AUTOVOCODER_REF"
+            return 0
+        fi
+        if git -C "$AV_DIR" rev-parse --verify --quiet \
+                "refs/tags/$AUTOVOCODER_REF" >/dev/null; then
+            git -C "$AV_DIR" rev-parse "refs/tags/$AUTOVOCODER_REF^{commit}"
+            return 0
+        fi
+        sha="$(git -C "$AV_DIR" rev-parse --verify "$AUTOVOCODER_REF^{commit}" 2>/dev/null || true)"
+        if [ -n "$sha" ]; then
+            echo "$sha"
+            return 0
+        fi
+        echo "autovocoder: could not resolve AUTOVOCODER_REF='$AUTOVOCODER_REF' after fetch"
+        return 1
+    fi
+    # No pin — stay on upstream default branch (latest tip).
+    if ! git -C "$AV_DIR" fetch origin 2>/dev/null; then
+        echo "autovocoder: fetch origin failed"
+        return 1
+    fi
+    local sym
+    sym="$(git -C "$AV_DIR" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+    if [ -n "$sym" ]; then
+        git -C "$AV_DIR" rev-parse "$sym"
+        return 0
+    fi
+    if git -C "$AV_DIR" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+        git -C "$AV_DIR" rev-parse refs/remotes/origin/main
+        return 0
+    fi
+    if git -C "$AV_DIR" rev-parse --verify --quiet refs/remotes/origin/master >/dev/null; then
+        git -C "$AV_DIR" rev-parse refs/remotes/origin/master
+        return 0
+    fi
+    echo "autovocoder: could not resolve origin default branch (no origin/HEAD, main, or master)"
+    return 1
+}
+
+# Move an existing checkout to the resolved target commit when we're
+# behind origin (or pinned SHA/tag moved). No-op when already there.
+# Skips when there are local modifications — user may be mid-hack.
 ensure_ref() {
-    [ -n "$AUTOVOCODER_REF" ] || return 0
     [ -d "$AV_DIR/.git" ] || return 0
-    local current full
+    local current target_sha head_sha
     current="$(git -C "$AV_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
-    full="$(git -C "$AV_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
-    # Already at the requested ref? Compare against full SHA, short
-    # SHA, current branch name (`git symbolic-ref`), and any tag that
-    # currently points at HEAD. That covers branch / tag / SHA inputs
-    # without a separate ref-type detection step.
-    if [ "$full" = "$AUTOVOCODER_REF" ] \
-            || [ "$current" = "$AUTOVOCODER_REF" ]; then
-        return 0
+    head_sha="$(git -C "$AV_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+
+    # Fast path: exact SHA pin already checked out (no network).
+    if [ -n "$AUTOVOCODER_REF" ]; then
+        if [ "$head_sha" = "$AUTOVOCODER_REF" ]; then
+            return 0
+        fi
+        case "$head_sha" in "$AUTOVOCODER_REF"*) return 0 ;; esac
     fi
-    case "$full" in "$AUTOVOCODER_REF"*) return 0 ;; esac
-    if [ "$(git -C "$AV_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" \
-            = "$AUTOVOCODER_REF" ]; then
-        return 0
+
+    if ! target_sha="$(resolve_autovocoder_target_sha)"; then
+        return 1
     fi
-    if git -C "$AV_DIR" tag --points-at HEAD 2>/dev/null \
-            | grep -qxF "$AUTOVOCODER_REF"; then
+    if [ "$head_sha" = "$target_sha" ]; then
         return 0
     fi
     if [ -n "$(git -C "$AV_DIR" status --porcelain)" ]; then
-        echo "autovocoder: ⚠ uncommitted changes — staying on $current (target: $AUTOVOCODER_REF)"
+        echo "autovocoder: ⚠ uncommitted changes — staying on $current (would move to ${target_sha:0:12})"
         return 0
     fi
-    echo "autovocoder: switching $current → $AUTOVOCODER_REF"
-    # Fetch the ref. Try unqualified (works for branches/tags +
-    # already-cached SHAs) before falling through to a SHA-fetch.
-    if ! git -C "$AV_DIR" fetch --depth 1 origin "$AUTOVOCODER_REF" 2>/dev/null \
-            && ! git -C "$AV_DIR" fetch --tags origin 2>/dev/null; then
-        echo "autovocoder: fetch failed — leaving on $current"
-        return 1
-    fi
-    # Branch case: if `origin/<ref>` exists after the fetch, the user
-    # almost certainly wants to track it (not stay pinned to whatever
-    # the local branch happened to point at before our fetch). Check
-    # out `origin/<ref>` directly so we land on the just-fetched commit
-    # regardless of whether the local branch was stale. Detached-HEAD
-    # is fine — we're not committing here.
-    if git -C "$AV_DIR" rev-parse --verify --quiet \
-            "refs/remotes/origin/$AUTOVOCODER_REF" >/dev/null; then
-        git -C "$AV_DIR" -c advice.detachedHead=false \
-            checkout "origin/$AUTOVOCODER_REF"
-    else
-        git -C "$AV_DIR" -c advice.detachedHead=false \
-            checkout "$AUTOVOCODER_REF"
-    fi
+    echo "autovocoder: updating $current → ${target_sha:0:12}"
+    git -C "$AV_DIR" -c advice.detachedHead=false checkout "$target_sha"
 }
 
 do_build() {
