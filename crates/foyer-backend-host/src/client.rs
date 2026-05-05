@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use foyer_backend::{PcmFrame, PcmRx, PcmTx};
+use foyer_backend::{AudioIngressAck, PcmFrame, PcmRx, PcmTx};
 use foyer_ipc::{
     codec::{decode_control, encode_control, pack_audio, read_frame, unpack_audio, write_frame},
     frame::{Frame, FrameKind},
@@ -98,7 +98,7 @@ struct Shared {
     /// For audio.* commands, which arrive asynchronously: a registry of in-flight
     /// requests keyed by stream_id, resolved when the matching event comes back.
     pending_egress: Mutex<HashMap<u32, oneshot::Sender<Result<(), ClientError>>>>,
-    pending_ingress: Mutex<HashMap<u32, oneshot::Sender<Result<(), ClientError>>>>,
+    pending_ingress: Mutex<HashMap<u32, oneshot::Sender<Result<AudioIngressAck, ClientError>>>>,
     pending_latency: Mutex<HashMap<u32, oneshot::Sender<LatencyReport>>>,
     pending_snapshot: Mutex<Vec<oneshot::Sender<Session>>>,
     /// In-flight `list_regions` requests keyed by `track_id`. The shim
@@ -336,7 +336,7 @@ impl HostClient {
         stream_id: u32,
         source: AudioSource,
         format: AudioFormat,
-    ) -> Result<PcmTx, ClientError> {
+    ) -> Result<(PcmTx, AudioIngressAck), ClientError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.shared
             .pending_ingress
@@ -349,7 +349,7 @@ impl HostClient {
             format,
         })
         .await?;
-        timeout(ack_rx, "ingress_open").await??;
+        let ack = timeout(ack_rx, "ingress_open").await??;
 
         // Pipe a caller-facing sender to writer-bound audio frames.
         let (tx_pcm, mut rx_pcm) = mpsc::channel::<PcmFrame>(INGRESS_QUEUE_CAP);
@@ -367,7 +367,7 @@ impl HostClient {
                 }
             }
         });
-        Ok(tx_pcm)
+        Ok((tx_pcm, ack))
     }
 
     pub async fn measure_latency(&self, stream_id: u32) -> Result<LatencyReport, ClientError> {
@@ -1004,6 +1004,7 @@ where
 async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
     match env.body {
         Control::Event(ev) => {
+            let skip_publish = matches!(&ev, Event::AudioIngressOpened { .. });
             match &ev {
                 Event::SessionSnapshot { session } => {
                     // Mirror the snapshot's sample rate into the cached
@@ -1022,9 +1023,17 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                         let _ = w.send(Ok(()));
                     }
                 }
-                Event::AudioIngressOpened { stream_id, .. } => {
+                Event::AudioIngressOpened {
+                    stream_id,
+                    format,
+                    port_name,
+                    ..
+                } => {
                     if let Some(w) = shared.pending_ingress.lock().await.remove(stream_id) {
-                        let _ = w.send(Ok(()));
+                        let _ = w.send(Ok(AudioIngressAck {
+                            format: *format,
+                            port_name: port_name.clone(),
+                        }));
                     }
                 }
                 Event::LatencyReport { stream_id, report } => {
@@ -1129,7 +1138,9 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                 }
                 _ => {}
             }
-            let _ = shared.events.send(ev);
+            if !skip_publish {
+                let _ = shared.events.send(ev);
+            }
         }
         Control::Command(cmd) => {
             // Shims shouldn't be sending commands; but if one does, log it.

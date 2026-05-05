@@ -56,9 +56,9 @@ zstd = "0.13"
 # not expand entities by default, which sidesteps the
 # billion-laughs concern from libxml2's XML_PARSE_HUGE.
 quick-xml = "0.36"
-# M6a audio egress pipeline: libopus bindings + rubato resampler.
+# M6a audio egress pipeline: libopus bindings + foyer-audio resampler.
 audiopus = { workspace = true }
-rubato = { workspace = true }
+foyer-audio.workspace = true
 # Tunnel / remote-access support: token hashing, key generation, temp manifest writes.
 sha2 = "0.10"
 hex = "0.4"

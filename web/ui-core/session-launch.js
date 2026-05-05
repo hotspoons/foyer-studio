@@ -74,16 +74,21 @@ async function confirmUnsavedBeforeLaunch(store, ws) {
 export async function launchProjectGuarded({
   backend_id,
   project_path,
+  sample_rate,
   ws = window.__foyer?.ws,
   store = window.__foyer?.store,
 } = {}) {
   if (!ws || !project_path) return false;
   const ok = await confirmUnsavedBeforeLaunch(store, ws);
   if (!ok) return false;
-  ws.send({
+  const payload = {
     type: "launch_project",
     backend_id,
     project_path,
-  });
+  };
+  if (sample_rate != null && Number.isFinite(Number(sample_rate))) {
+    payload.sample_rate = Math.round(Number(sample_rate));
+  }
+  ws.send(payload);
   return true;
 }

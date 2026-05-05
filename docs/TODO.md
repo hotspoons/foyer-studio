@@ -348,7 +348,7 @@ combination of `update_region` + `duplicate_region_range` +
     (`Track::bounce`, domain bounce, editor `apply_filter`), not a
     single IPC-stable mutator — skip until an offline-render command
     exists.
-- [ ] Strip silence / detect transients
+- [x] Strip silence / detect transients
   - Per-region analysis pass that splits at silence boundaries (RMS
     threshold + min-gap configuration). Returns N new regions. UI:
     a region-context-menu item that opens a parameter modal, then
@@ -365,21 +365,21 @@ combination of `update_region` + `duplicate_region_range` +
     every group sibling.
   - **Not mapped:** requires new commands + `Region` metadata + editor
     group retainer flow — more than forwarding one Ardour call.
-- [ ] Quantize region start to grid
+- [x] Quantize region start to grid
   - Snap a region's `start_samples` to the nearest beat / bar / sub-
     division of the active grid. Per-region or per-selection. Schema-
     only — already expressible as `update_region` with the snapped
     start; needs a context-menu entry + a "Quantize" toolbar widget.
   - **No new backend op:** tempo/grid math + `update_region` —
     client-only; skip shim work.
-- [ ] Reverse region (audio)
+- [x] Reverse region (audio)
   - Render a reversed copy of the source media as a new source and
     swap the region onto it. Backend offline-render path overlaps
     with Glue. Cheap UI surface.
   - **Not 1:1:** Ardour's editor runs the `Reverse` **filter** over a
     selection (`Editor::reverse_region`), not a one-call `Region`
     API we can mirror trivially — skip until glue/offline path exists.
-- [ ] Pitch-shift region
+- [x] Pitch-shift region
   - Per-region semitone offset stored in `Region.pitch_shift_cents`
     or similar. Audio path uses Ardour's region FX
     `a-pitchshifter`; MIDI path is just transposing the note list.
@@ -395,13 +395,13 @@ combination of `update_region` + `duplicate_region_range` +
   - **Shim (2026-05):** `RegionPatch.gain_linear` →
     `AudioRegion::set_scale_amplitude` (linear gain). **UI** (dB strip,
     drag preview) still TODO — wire is ready.
-- [ ] Snap-to-grid on region drag (move + resize)
+- [x] Snap-to-grid on region drag (move + resize)
   - Scaffolding is already in place (the grid math gives a sample-
     aligned step list — see entry under the chord modifier item
     above). Needs hookup in `_startDrag` so a Shift-held drag commits
     to the nearest grid step. Modifier choice TBD.
   - **Client-only:** no Ardour op — skip shim.
-- [ ] Fit selection to view (zoom + scroll to selection bounds)
+- [x] Fit selection to view (zoom + scroll to selection bounds)
   - "Z" or "F" key. Already partially wired via `zoomToSelection`;
     extend so a region selection (not just a time range) drives the
     same fit. Trivial in `timeline-view.js`.
@@ -584,20 +584,22 @@ master bus at all.
 
 ## Resampler (audio ingress / egress sample-rate handling)
 
-- [ ] Add a `foyer-audio` crate (or module in `foyer-backend`) wrapping
-  `rubato::SincFixedIn` with a small `Resampler { in_rate, out_rate, channels }` helper
-  that pushes/pops f32 chunks.
-- [ ] Ingress: in `shim_input_port.cc` `drain_loop`, check `_sample_rate` vs
-  `AudioEngine::instance()->sample_rate()`; when mismatched, hold a `rubato` instance per
-  port and run captured chunks through it before `buf.read_from`. Keep the 20 ms
-  frame-size invariant on the output side, not input.
-- [ ] Egress: in `foyer-server/src/audio.rs` `encode_loop`, resample the shim-side PCM to
-  `format.sample_rate` before Opus/raw framing — wire it between the mpsc receiver and
-  the encoder's frame batcher. Same Resampler helper.
-- [ ] Bit depth: not a real concern — the whole pipeline is already f32 end-to-end
-  (browser `AudioWorklet`, IPC `pack_audio`, Ardour `AudioBuffer`). No conversion needed
-  unless we add a `SampleFormat::S16Le` variant later.
-- [ ] Handshake: extend `AudioIngressOpen` so the client can send its actual
-  `AudioContext.sampleRate` (don't hardcode 48k in `audio-ingress.js:49`); shim echoes
-  back the engine's rate in `AudioIngressOpened.format` so the browser knows whether to
-  resize its worklet buffer.
+Done in the sidecar + UI (not in the shim DSP path): client capture rate can differ from
+the session engine rate.
+
+- [x] **`foyer-audio`** — [`crates/foyer-audio`](../crates/foyer-audio): `InterleavedResampler`
+  (`rubato::SincFixedIn`) for f32 interleaved chunks.
+- [x] **Ingress** — [`crates/foyer-server/src/ingress_ws.rs`](../crates/foyer-server/src/ingress_ws.rs):
+  `/ws/ingress` receives PCM at `IngressSink.client_sample_rate`; resamples to
+  `engine_sample_rate` before forwarding into the backend/shim. Shim ports stay at engine rate.
+- [x] **Egress** — [`crates/foyer-server/src/audio.rs`](../crates/foyer-server/src/audio.rs):
+  resamples engine PCM to each listener's `format.sample_rate` before encode/send.
+- [x] **Bit depth** — Still f32 end-to-end unless a future `SampleFormat::S16Le` appears.
+- [x] **Handshake / UI** — [`web/core/audio/audio-ingress.js`](../web/core/audio/audio-ingress.js)
+  sends real `AudioContext` sample rate + frame size; aligns/reopens when engine SR differs.
+  Session switches: [`web/core/store.js`](../web/core/store.js) + [`track-mic.js`](../web/core/audio/track-mic.js).
+  **New Ardour sessions:** [`LaunchProject.sample_rate`](../crates/foyer-schema/src/message.rs)
+  patches `.ardour` XML when the session did not exist before launch ([`foyer-cli`](../crates/foyer-cli/src/main.rs)).
+- [ ] **Optional:** resample inside `shim_input_port.cc` instead of (or in addition to) the
+  server — only useful if non-browser ingress sends mismatched rate without going through
+  `ingress_ws`; not required for the browser pipeline today.

@@ -32,7 +32,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use foyer_backend::{Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx};
+use foyer_backend::{AudioIngressAck, Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx};
 use foyer_schema::{
     Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EntityId, Event,
     LatencyReport, PathListing, PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch,
@@ -304,7 +304,7 @@ impl Backend for StubBackend {
         stream_id: u32,
         _source: AudioSource,
         format: AudioFormat,
-    ) -> Result<PcmTx, BackendError> {
+    ) -> Result<(PcmTx, AudioIngressAck), BackendError> {
         let (tx, mut rx) = mpsc::channel::<PcmFrame>(64);
         let capture = self.ingress_capture.clone();
         tokio::spawn(async move {
@@ -317,7 +317,11 @@ impl Backend for StubBackend {
         if format.channels == 0 {
             return Err(BackendError::UnsupportedFormat("zero channels".into()));
         }
-        Ok(tx)
+        let ack = AudioIngressAck {
+            format,
+            port_name: None,
+        };
+        Ok((tx, ack))
     }
 
     async fn measure_latency(&self, _stream_id: u32) -> Result<LatencyReport, BackendError> {
@@ -990,7 +994,7 @@ mod tests {
     async fn ingress_is_captured() {
         let b = StubBackend::new();
         let fmt = AudioFormat::new(48_000, 1, 64);
-        let tx = b
+        let (tx, _) = b
             .open_ingress(
                 2,
                 AudioSource::VirtualInput {

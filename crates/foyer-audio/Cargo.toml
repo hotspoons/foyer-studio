@@ -1,0 +1,13 @@
+[package]
+name = "foyer-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Small audio helpers for Foyer (sample-rate conversion, etc.)."
+
+[dependencies]
+rubato.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(FALSE)'] }

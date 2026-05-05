@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use foyer_backend::{Backend, BackendError, EventStream, PcmRx, PcmTx};
+use foyer_backend::{AudioIngressAck, Backend, BackendError, EventStream, PcmRx, PcmTx};
 use foyer_schema::{
     AudioFormat, AudioSource, AutomationMode, AutomationPoint, Command, ControlValue, EnginePort,
     EntityId, LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange,
@@ -216,7 +216,7 @@ impl Backend for HostBackend {
         stream_id: u32,
         source: AudioSource,
         format: AudioFormat,
-    ) -> Result<PcmTx, BackendError> {
+    ) -> Result<(PcmTx, AudioIngressAck), BackendError> {
         self.client
             .open_ingress(stream_id, source, format)
             .await

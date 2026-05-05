@@ -415,7 +415,7 @@ async fn ingress_sink_opens_and_accepts_frames() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     let backend = HostBackend::connect(sock).await.unwrap();
     let fmt = AudioFormat::new(48_000, 1, 64);
-    let tx = backend
+    let (tx, _) = backend
         .open_ingress(
             9,
             AudioSource::VirtualInput {

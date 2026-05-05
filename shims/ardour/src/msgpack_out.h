@@ -141,9 +141,12 @@ std::vector<std::uint8_t> encode_audio_egress_stopped (std::uint32_t stream_id);
 /// the name from the triggering `AudioIngressOpen` command — required
 /// because the schema's `AudioSource::VirtualInput` carries `{ name }`
 /// and rmp-serde rejects the whole frame if the field is absent.
+/// `frame_size` is the engine-side capture quantum (typically ~20 ms at
+/// `sample_rate`), matching `ShimInputPort` and the sidecar's shim format.
 std::vector<std::uint8_t> encode_audio_ingress_opened (
     std::uint32_t stream_id, std::uint32_t sample_rate, std::uint32_t channels,
-    const std::string& source_name, const std::string& engine_port_name);
+    std::uint32_t frame_size, const std::string& source_name,
+    const std::string& engine_port_name);
 
 /// Encode `Event::AudioIngressClosed { stream_id }`.
 std::vector<std::uint8_t> encode_audio_ingress_closed (std::uint32_t stream_id);

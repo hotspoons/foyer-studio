@@ -72,11 +72,13 @@ pub trait BackendSpawner: Send + Sync + 'static {
     fn list(&self) -> Vec<BackendInfo>;
 
     /// Build a new backend. `project_path` is jail-relative (or absolute
-    /// — the spawner decides how to resolve it).
+    /// — the spawner decides how to resolve it). `sample_rate` is an optional
+    /// hint for stub launches / demos; Ardour ignores it today.
     async fn launch(
         &self,
         backend_id: &str,
         project_path: Option<&Path>,
+        sample_rate: Option<u32>,
     ) -> anyhow::Result<LaunchedBackend>;
 
     /// Connect to an existing host process by its IPC socket — the
@@ -194,6 +196,15 @@ impl Default for Config {
     }
 }
 
+/// Browser → engine ingress registration: PCM sink plus rates for optional resampling.
+#[derive(Clone)]
+pub(crate) struct IngressSink {
+    pub tx: PcmTx,
+    pub client_sample_rate: u32,
+    pub engine_sample_rate: u32,
+    pub channels: u16,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
     #[error("backend: {0}")]
@@ -262,10 +273,10 @@ pub(crate) struct AppState {
     pub(crate) audio_hub: Arc<audio::AudioHub>,
     /// M6b ingress senders. Keyed by `stream_id`; browser pushes
     /// binary PCM to `/ws/ingress/:stream_id`, and the task there
-    /// forwards frames into this `mpsc::Sender`. Dropping the entry
+    /// forwards frames into this sink. Dropping the entry
     /// (on `AudioIngressClose` or server restart) closes the channel
     /// and the backend tears the sink down from its side.
-    pub(crate) ingress_senders: Mutex<HashMap<u32, PcmTx>>,
+    pub(crate) ingress_senders: Mutex<HashMap<u32, IngressSink>>,
     /// In-app chat + PTT state. Decoupled from the DAW — messages and
     /// push-to-talk audio fan out purely client-to-client via the
     /// sidecar. See `chat.rs` for the wire format.
