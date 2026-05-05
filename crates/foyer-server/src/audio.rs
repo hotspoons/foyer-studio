@@ -14,7 +14,7 @@
 //!                                                    ▼
 //!                                          ┌─────────────────────────┐
 //!                                          │ AudioHub::encode_loop   │
-//!                                          │  · rubato resample      │
+//!                                          │  · foyer_audio resample │
 //!                                          │  · audiopus encode      │
 //!                                          └─────────┬───────────────┘
 //!                                                    │ opus packets
@@ -107,6 +107,7 @@ impl AudioHub {
         stream_id: u32,
         source: AudioSource,
         format: AudioFormat,
+        pcm_source_rate: u32,
         mut pcm_rx: mpsc::Receiver<foyer_backend::PcmFrame>,
     ) -> Result<broadcast::Sender<EncodedPacket>, String> {
         let mut streams = self.streams.lock().await;
@@ -138,6 +139,19 @@ impl AudioHub {
             AudioCodec::RawF32Le => None,
         };
 
+        let egress_resampler = if pcm_source_rate != format.sample_rate && pcm_source_rate > 0 {
+            Some(
+                foyer_audio::InterleavedResampler::new(
+                    pcm_source_rate,
+                    format.sample_rate,
+                    format.channels,
+                )
+                .map_err(|e| format!("egress resampler: {e}"))?,
+            )
+        } else {
+            None
+        };
+
         let (tx, _) = broadcast::channel(self.broadcast_depth);
         let tx_for_task = tx.clone();
         let codec = format.codec;
@@ -147,12 +161,27 @@ impl AudioHub {
         // When `pcm_rx` closes (source gone) the task exits and the
         // broadcast's receivers see `RecvError::Closed` and tidy up.
         let encode_task = tokio::spawn(async move {
+            let mut resampler = egress_resampler;
             let channels = format.channels as usize;
             let samples_per_frame = frame_size * channels;
             let mut pending: Vec<f32> = Vec::with_capacity(samples_per_frame * 2);
             let mut chunks_seen: u64 = 0;
             while let Some(frame) = pcm_rx.recv().await {
-                pending.extend_from_slice(&frame.samples);
+                let chunk = if let Some(ref mut r) = resampler {
+                    match r.push(&frame.samples) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!("egress resample failed on stream {stream_id}: {e}");
+                            continue;
+                        }
+                    }
+                } else {
+                    frame.samples
+                };
+                if chunk.is_empty() {
+                    continue;
+                }
+                pending.extend_from_slice(&chunk);
                 while pending.len() >= samples_per_frame {
                     let chunk: Vec<f32> = pending.drain(..samples_per_frame).collect();
                     // Source-side diagnostic: peak + zero-crossings on
@@ -372,7 +401,7 @@ mod tests {
         let fmt = AudioFormat::new(48_000, 2, 128);
         let (_tx, rx) = mpsc::channel(4);
         let bcast = hub
-            .open_stream(7, AudioSource::Master, fmt, rx)
+            .open_stream(7, AudioSource::Master, fmt, 48_000, rx)
             .await
             .expect("open");
         assert!(bcast.receiver_count() == 0);

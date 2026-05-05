@@ -995,6 +995,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "foyer-audio"
+version = "0.0.0"
+dependencies = [
+ "rubato",
+]
+
+[[package]]
 name = "foyer-backend"
 version = "0.0.0"
 dependencies = [
@@ -1143,6 +1150,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "flate2",
+ "foyer-audio",
  "foyer-backend",
  "foyer-backend-stub",
  "foyer-capabilities",
@@ -1158,7 +1166,6 @@ dependencies = [
  "quick-xml",
  "rand 0.8.6",
  "reqwest",
- "rubato",
  "rustls",
  "rustls-pemfile",
  "serde",

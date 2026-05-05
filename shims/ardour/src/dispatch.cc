@@ -488,6 +488,7 @@ struct DecodedCmd
 	std::string   audio_source_name;  // name from VirtualInput { name: ... }
 	std::uint32_t audio_channels     = 2;
 	std::uint32_t audio_sample_rate  = 48000;
+	std::uint32_t audio_frame_size   = 0;
 
 	// RegionPatch fields — only read for UpdateRegion. All optional.
 	bool          has_patch_start   = false;
@@ -1479,6 +1480,10 @@ decode (const std::vector<std::uint8_t>& buf)
 							std::uint64_t v = 0;
 							if (!in.read_u64 (v)) return out;
 							out.audio_sample_rate = static_cast<std::uint32_t> (v);
+						} else if (kk == "frame_size") {
+							std::uint64_t v = 0;
+							if (!in.read_u64 (v)) return out;
+							out.audio_frame_size = static_cast<std::uint32_t> (v);
 						} else {
 							if (!in.skip_value ()) return out;
 						}
@@ -2975,24 +2980,28 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 		case DecodedCmd::Kind::AudioIngressOpen: {
 			const std::uint32_t sid   = cmd.audio_stream_id;
 			const std::uint32_t ch    = cmd.audio_channels;
-			const std::uint32_t sr    = cmd.audio_sample_rate;
+			const std::uint32_t engine_sr =
+			    static_cast<std::uint32_t> (_shim.session ().sample_rate ());
 			std::string         name  = cmd.audio_source_name.empty ()
 			                            ? std::to_string (sid) : cmd.audio_source_name;
-			// Use a conservative frame size if the command didn't carry one.
-			const std::uint32_t fsize = 960; // ~20 ms @ 48 kHz
+			std::uint32_t fsize = cmd.audio_frame_size;
+			if (fsize == 0) {
+				fsize = std::max (32u, engine_sr * 20u / 1000u);
+			}
 
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, sid, name, ch, sr, fsize, this] () {
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, sid, name, ch, engine_sr, fsize, this] () {
 				try {
 					auto port = std::make_unique<ShimInputPort> (
-					    *shim, sid, name, ch, sr, fsize);
+					    *shim, sid, name, ch, engine_sr, fsize);
 					std::string engine_port_name;
 					{
 						std::lock_guard<std::mutex> lk (this->_ingress_mx);
 						this->_ingress_ports[sid] = std::move (port);
 						engine_port_name = this->_ingress_ports.at (sid)->engine_port_name ();
 					}
-					auto ack = msgpack_out::encode_audio_ingress_opened (sid, sr, ch, name, engine_port_name);
+					auto ack = msgpack_out::encode_audio_ingress_opened (
+					    sid, engine_sr, ch, fsize, name, engine_port_name);
 					shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
 				} catch (const std::exception& e) {
 					PBD::error << "foyer_shim: [ingress] open failed: " << e.what () << endmsg;

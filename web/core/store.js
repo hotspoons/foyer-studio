@@ -454,6 +454,18 @@ export class Store extends EventTarget {
         this._lastTransportSeq = Number(env?.seq || 0);
         this._lastTransportPos = Number(c.get("transport.position") || 0);
         this._emit();
+        {
+          const sess = this.state.session || {};
+          const srRaw = sess.sample_rate ?? sess.meta?.sample_rate;
+          const sr = Number(srRaw);
+          if (Number.isFinite(sr) && sr > 0) {
+            import("./audio/track-mic.js").then((m) => {
+              if (typeof m.syncTrackMicsEngineSampleRate === "function") {
+                void m.syncTrackMicsEngineSampleRate(sr);
+              }
+            }).catch(() => {});
+          }
+        }
         break;
       }
       case "control_update": {

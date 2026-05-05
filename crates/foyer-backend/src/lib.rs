@@ -66,6 +66,14 @@ pub type PcmRx = mpsc::Receiver<PcmFrame>;
 /// Sender half used for ingress streams (sidecar → backend).
 pub type PcmTx = mpsc::Sender<PcmFrame>;
 
+/// Shim/stub reply metadata for a successful [`Backend::open_ingress`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioIngressAck {
+    /// Format the engine is consuming on the IPC/shim wire (session sample rate).
+    pub format: AudioFormat,
+    pub port_name: Option<String>,
+}
+
 /// The union of everything the sidecar can observe from a backend.
 pub type EventStream = Pin<Box<dyn Stream<Item = Event> + Send>>;
 
@@ -741,7 +749,7 @@ pub trait Backend: Send + Sync + 'static {
         stream_id: u32,
         source: AudioSource,
         format: AudioFormat,
-    ) -> Result<PcmTx, BackendError>;
+    ) -> Result<(PcmTx, AudioIngressAck), BackendError>;
 
     async fn measure_latency(&self, stream_id: u32) -> Result<LatencyReport, BackendError>;
 }

@@ -99,6 +99,21 @@ launcher; pick a project folder in the Session view and Foyer
 spawns Ardour via the shim, swapping the backend without dropping
 the browser connection.
 
+### New session sample rate (`LaunchProject.sample_rate`)
+
+When you create a **new** Ardour session from the UI (folder had no `.ardour` yet), an optional
+sample rate from `launch_project` is written into the session XML root `sample-rate="…"` attribute.
+
+- **Packaged / direct Ardour spawn:** `foyer-cli` patches the file in Rust immediately after
+  [`preflight_session`](../crates/foyer-cli/src/main.rs) bootstraps the `.ardour`.
+- **Dev checkout spawn** (binary lives under an Ardour source tree so Foyer wraps it in bash):
+  the same rewrite runs inside the generated wrapper script using **`perl -pi`** on
+  `$SESSION_FILE`, driven by env var **`FOYER_SESSION_SAMPLE_RATE`** that `foyer-cli` sets only
+  in that path. If `perl` is missing, the line fails open (`|| true`) and the template default
+  rate remains — install `perl` in the dev image if you rely on non-default rates here.
+
+Existing sessions are never rewritten.
+
 ## Building a UI outside the main tree
 
 You don't have to fork `web/` to add your own UI. Drop your package

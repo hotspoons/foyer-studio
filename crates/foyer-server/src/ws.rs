@@ -24,8 +24,8 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Extension, Query, State};
 use axum::response::IntoResponse;
 use foyer_schema::{
-    Command, ControlUpdate, EntityId, Envelope, Event, TunnelProviderConfig, TunnelProviderKind,
-    SCHEMA_VERSION,
+    AudioFormat, Command, ControlUpdate, EntityId, Envelope, Event, TunnelProviderConfig,
+    TunnelProviderKind, SCHEMA_VERSION,
 };
 use futures::{SinkExt, StreamExt};
 use std::net::{IpAddr, SocketAddr};
@@ -1269,21 +1269,42 @@ async fn dispatch_command(
             source,
             format,
         } => {
+            let engine_sr = state.backend().await.sample_rate();
+            let client_sr = format.sample_rate;
+            let ch = format.channels.max(1);
+            let engine_frame = u32::try_from(u64::from(engine_sr) * 20 / 1000)
+                .unwrap_or(u32::MAX)
+                .max(32);
+            let shim_format = AudioFormat {
+                sample_rate: engine_sr,
+                channels: ch,
+                format: format.format,
+                frame_size: engine_frame,
+                codec: format.codec,
+            };
             match state
                 .backend()
                 .await
-                .open_ingress(stream_id, source.clone(), format)
+                .open_ingress(stream_id, source.clone(), shim_format)
                 .await
             {
-                Ok(tx) => {
-                    state.ingress_senders.lock().await.insert(stream_id, tx);
+                Ok((tx, ack)) => {
+                    state.ingress_senders.lock().await.insert(
+                        stream_id,
+                        crate::IngressSink {
+                            tx,
+                            client_sample_rate: client_sr,
+                            engine_sample_rate: engine_sr,
+                            channels: ch,
+                        },
+                    );
                     broadcast_event(
                         state,
                         Event::AudioIngressOpened {
                             stream_id,
                             source,
-                            format,
-                            port_name: None,
+                            format: ack.format,
+                            port_name: ack.port_name,
                         },
                     )
                     .await;
@@ -1329,6 +1350,7 @@ async fn dispatch_command(
         Command::LaunchProject {
             backend_id,
             project_path,
+            sample_rate,
         } => {
             let Some(spawner) = state.spawner.clone() else {
                 broadcast_event(
@@ -1427,7 +1449,7 @@ async fn dispatch_command(
                     }
                 }
             }
-            match spawner.launch(&backend_id, path).await {
+            match spawner.launch(&backend_id, path, sample_rate).await {
                 Ok(launched) => {
                     // swap_backend synthesizes a session UUID when
                     // the caller doesn't supply one. Once the
@@ -1810,9 +1832,10 @@ async fn dispatch_command(
                     return Ok(());
                 }
             };
+            let pcm_source_rate = state.backend().await.sample_rate();
             match state
                 .audio_hub
-                .open_stream(stream_id, source.clone(), format, rx)
+                .open_stream(stream_id, source.clone(), format, pcm_source_rate, rx)
                 .await
             {
                 Ok(_) => {

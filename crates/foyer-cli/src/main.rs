@@ -655,7 +655,7 @@ async fn serve(
             // apply. Subsequent `LaunchProject` commands go through
             // the swap path and DO register a terminator.
             spawner
-                .launch(&backend.id, project.as_deref())
+                .launch(&backend.id, project.as_deref(), None)
                 .await
                 .with_context(|| format!("launch backend `{}`", backend.id))?
                 .backend
@@ -711,9 +711,9 @@ struct CliSpawner {
     /// instance the spawner builds.
     stub_test_tone: bool,
     /// Resolved engine sample rate (CLI / env > config > schema
-    /// default). Stamped onto every stub instance and forwarded to
-    /// the Ardour child as a future hook (right now Ardour negotiates
-    /// with JACK and we just trust whatever it reports).
+    /// default). Stamped onto every stub instance. When launching an
+    /// Ardour backend, `LaunchProject.sample_rate` (and optional per-
+    /// backend `sample_rate` in config) patches **new** session XML only.
     sample_rate: u32,
 }
 
@@ -740,6 +740,7 @@ impl BackendSpawner for CliSpawner {
         &self,
         backend_id: &str,
         project_path: Option<&Path>,
+        sample_rate: Option<u32>,
     ) -> anyhow::Result<foyer_server::LaunchedBackend> {
         let cfg_backend = self
             .config
@@ -753,8 +754,12 @@ impl BackendSpawner for CliSpawner {
                 // Per-backend `sample_rate` config wins over the
                 // CliSpawner-resolved rate when set, since this
                 // launch path is per-id and the config field is
-                // documented as a per-backend override.
-                let sr = cfg_backend.sample_rate.unwrap_or(self.sample_rate);
+                // documented as a per-backend override. A per-launch
+                // hint from `LaunchProject.sample_rate` wins over all
+                // for stub/demo sessions.
+                let sr = sample_rate
+                    .or(cfg_backend.sample_rate)
+                    .unwrap_or(self.sample_rate);
                 let mut b = StubBackend::new()
                     .with_test_tone(self.stub_test_tone)
                     .with_sample_rate(sr);
@@ -782,8 +787,9 @@ impl BackendSpawner for CliSpawner {
                 } else {
                     project.to_path_buf()
                 };
+                let sr_hint = sample_rate.or(cfg_backend.sample_rate);
                 let (socket, child) =
-                    launch_and_wait_for_shim(&exec, &cfg_backend.args, &cfg_backend.env, &abs)
+                    launch_and_wait_for_shim(&exec, &cfg_backend.args, &cfg_backend.env, &abs, sr_hint)
                         .await?;
                 let host = HostBackend::connect(socket.clone())
                     .await
@@ -839,11 +845,17 @@ impl BackendSpawner for CliSpawner {
 /// so the shim activates without manual XML surgery on the session file.
 /// System-installed Ardours (on `$PATH` or in `/Applications/...`) are
 /// exec'd directly — they don't need the wrapper.
+///
+/// `sample_rate_hint`, when `Some`, rewrites the root `<Session>`
+/// `sample-rate="…"` attribute **only if** both `.ardour` paths were
+/// absent before bootstrap (brand-new session). Matches `LaunchProject`
+/// + optional per-backend config from the sidecar.
 async fn launch_and_wait_for_shim(
     exec: &std::path::Path,
     extra_args: &[String],
     env: &std::collections::BTreeMap<String, String>,
     project: &std::path::Path,
+    sample_rate_hint: Option<u32>,
 ) -> Result<(PathBuf, tokio::process::Child)> {
     use std::time::Duration;
 
@@ -872,12 +884,26 @@ async fn launch_and_wait_for_shim(
     //   · `<dir>`  (contains *.ardour)  → (<dir>, <stem>)
     //   · anything else                  → (parent, basename)   (new-session case)
     let (session_dir, snapshot_name) = resolve_ardour_session_args(project);
+    let had_session = ardour_had_existing_session(&session_dir, &snapshot_name);
     tracing::info!(
         "resolved project {} → DIR={} NAME={}",
         project.display(),
         session_dir.display(),
         snapshot_name,
     );
+
+    let patch_sr_shell = if sample_rate_hint.is_some() && !had_session {
+        r#"
+
+# Foyer: rewrite root <Session> sample-rate on freshly bootstrapped sessions only.
+if [ -n "${FOYER_SESSION_SAMPLE_RATE:-}" ] && [ -f "$SESSION_FILE" ]; then
+  echo "foyer: patching session sample-rate to ${FOYER_SESSION_SAMPLE_RATE} in $SESSION_FILE" >&2
+  perl -pi -e 's/sample-rate="[0-9]+"/sample-rate="'"$FOYER_SESSION_SAMPLE_RATE"'"/' "$SESSION_FILE" || true
+fi
+"#
+    } else {
+        ""
+    };
 
     let dev_root = foyer_config::ardour_dev_root(&resolved_exec);
     let mut cmd = if let Some(ref root) = dev_root {
@@ -988,7 +1014,7 @@ if [ -f "$SESSION_FILE" ] && ! grep -q 'name="Foyer Studio Shim" active="1"' "$S
         echo "foyer: WARNING no <ControlProtocols> block found in $SESSION_FILE — add Foyer Studio Shim by hand" >&2
     fi
 fi
-
+{patch_sr_shell}
 # Sweep Ardour's crash-recovery breadcrumbs out of the session
 # dir so the "Recover from crash / Ignore" modal doesn't block
 # session load — we render to an Xvfb the user can't see, so a
@@ -1031,6 +1057,7 @@ if [ -n "${{FOYER_DEBUG_ARDOUR:-}}" ] && command -v gdb >/dev/null 2>&1; then
         --args {exec} "$@" "$SESSION_DIR" "$NAME"
 fi
 exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
+            patch_sr_shell = patch_sr_shell,
             top = shell_escape(root.to_string_lossy().as_ref()),
             shim = shell_escape(shim.to_string_lossy().as_ref()),
             exec = shell_escape(resolved_exec.to_string_lossy().as_ref()),
@@ -1060,6 +1087,19 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
         // Shadowing here keeps the dev-build path's bindings intact.
         let (session_dir, snapshot_name) =
             preflight_session(&resolved_exec, &session_dir, &snapshot_name);
+        if let Some(sr) = sample_rate_hint {
+            if !had_session {
+                let session_file = session_dir.join(format!("{snapshot_name}.ardour"));
+                if session_file.is_file() {
+                    if let Err(e) = patch_ardour_session_sample_rate(&session_file, sr) {
+                        tracing::warn!(
+                            "foyer: failed to patch new session sample-rate in {}: {e:#}",
+                            session_file.display(),
+                        );
+                    }
+                }
+            }
+        }
         tracing::info!(
             "spawning {} {} {} {}",
             resolved_exec.display(),
@@ -1101,6 +1141,13 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
     // pick them up instead of overriding.
     for (k, v) in env {
         cmd.env(k, v);
+    }
+    if dev_root.is_some() {
+        if let Some(sr) = sample_rate_hint {
+            if !had_session {
+                cmd.env("FOYER_SESSION_SAMPLE_RATE", sr.to_string());
+            }
+        }
     }
 
     // Redirect the child's stdout+stderr to a per-launch log file so
@@ -1310,6 +1357,63 @@ fn daw_log_path() -> Result<PathBuf> {
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     Ok(base.join("foyer").join("daw.log"))
+}
+
+fn ardour_had_existing_session(session_dir: &Path, snapshot_name: &str) -> bool {
+    session_dir.join(format!("{snapshot_name}.ardour")).is_file()
+        || session_dir
+            .join(snapshot_name)
+            .join(format!("{snapshot_name}.ardour"))
+            .is_file()
+}
+
+/// Rewrite the first `sample-rate="…"` attribute (Ardour root `<Session>` tag).
+/// Returns `Ok(None)` when the attribute is absent or already matches `sr`.
+fn patch_session_xml_sample_rate_content(xml: &str, sr: u32) -> Result<Option<String>> {
+    const RANGE: std::ops::RangeInclusive<u32> = 8000..=384_000;
+    if !RANGE.contains(&sr) {
+        anyhow::bail!("sample rate {sr} is outside supported range {RANGE:?}");
+    }
+    let needle = "sample-rate=\"";
+    let Some(pos) = xml.find(needle) else {
+        tracing::warn!("foyer: session XML has no sample-rate attribute — leaving file unchanged");
+        return Ok(None);
+    };
+    let start = pos + needle.len();
+    let Some(end_rel) = xml[start..].find('"') else {
+        anyhow::bail!("session XML sample-rate attribute is malformed");
+    };
+    let end = start + end_rel;
+    let prev = &xml[start..end];
+    if prev == sr.to_string() {
+        return Ok(None);
+    }
+    let mut out = xml.to_string();
+    out.replace_range(start..end, &sr.to_string());
+    Ok(Some(out))
+}
+
+fn patch_ardour_session_sample_rate(session_file: &Path, sr: u32) -> Result<()> {
+    let meta = std::fs::symlink_metadata(session_file)
+        .with_context(|| format!("stat session file {}", session_file.display()))?;
+    if !meta.file_type().is_file() {
+        anyhow::bail!(
+            "session file {} is not a regular file — refusing to patch sample-rate",
+            session_file.display(),
+        );
+    }
+    let original = std::fs::read_to_string(session_file)
+        .with_context(|| format!("read session file {}", session_file.display()))?;
+    let Some(updated) = patch_session_xml_sample_rate_content(&original, sr)? else {
+        return Ok(());
+    };
+    write_atomic(session_file, &updated)
+        .with_context(|| format!("write session file {}", session_file.display()))?;
+    tracing::info!(
+        "foyer: patched session sample-rate to {sr} in {}",
+        session_file.display(),
+    );
+    Ok(())
 }
 
 /// Normalize a picked project path into Ardour's expected
@@ -2025,6 +2129,61 @@ mod tests {
             apply_foyer_shim_edit(input),
             FoyerShimEdit::ListedButUnknownShape,
         );
+    }
+
+    #[test]
+    fn patch_sample_rate_rewrites_first_hit() {
+        let xml = r#"<Session version="9" sample-rate="48000" name="x">"#;
+        let out = patch_session_xml_sample_rate_content(xml, 96_000)
+            .unwrap()
+            .unwrap();
+        assert!(out.contains(r#"sample-rate="96000""#));
+        assert!(!out.contains(r#"sample-rate="48000""#));
+    }
+
+    #[test]
+    fn patch_sample_rate_noop_when_missing_attr() {
+        let xml = "<Session>";
+        assert!(patch_session_xml_sample_rate_content(xml, 48_000).unwrap().is_none());
+    }
+
+    #[test]
+    fn patch_sample_rate_noop_when_already_matches() {
+        let xml = r#"<Session sample-rate="48000">"#;
+        assert!(patch_session_xml_sample_rate_content(xml, 48_000).unwrap().is_none());
+    }
+
+    #[test]
+    fn ardour_had_session_detects_flat_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "foyer-test-flat-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mysession.ardour"), "<Session/>").unwrap();
+        assert!(ardour_had_existing_session(&dir, "mysession"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ardour_had_session_detects_nested_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "foyer-test-nested-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nested = dir.join("news");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("news.ardour"), "<Session/>").unwrap();
+        assert!(ardour_had_existing_session(&dir, "news"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

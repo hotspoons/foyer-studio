@@ -147,3 +147,23 @@ export async function stopTrackMic(trackId) {
     TRACK_MICS.delete(trackId);
     emitChange(trackId);
 }
+
+/// After `session_snapshot` updates the focused session's engine rate,
+/// rebuild any live ingress graphs so declared capture rate matches the
+/// graph (and reopen the ingress WS when needed). Requires `window.__foyer.ws`.
+export async function syncTrackMicsEngineSampleRate(engineSr) {
+    const ws = globalThis.__foyer?.ws;
+    if (!ws) return;
+    for (const [trackId, live] of TRACK_MICS) {
+        try {
+            const r = await live.ingress.syncEngineSampleRate(engineSr);
+            if (r.portChanged && r.portName) {
+                live.portName = r.portName;
+                ws.send({ type: "update_track", id: trackId, patch: { input_port: r.portName } });
+            }
+            emitChange(trackId);
+        } catch (e) {
+            console.error("[track-mic] syncEngineSampleRate failed:", e);
+        }
+    }
+}

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/foyer-audio",
     "crates/foyer-schema",
     "crates/foyer-capabilities-macros",
     "crates/foyer-capabilities",
@@ -32,6 +33,7 @@ repository = "https://github.com/foyer-studio/foyer-studio"
 
 [workspace.dependencies]
 # internal crates
+foyer-audio         = { path = "crates/foyer-audio" }
 foyer-schema        = { path = "crates/foyer-schema" }
 foyer-capabilities-macros = { path = "crates/foyer-capabilities-macros" }
 foyer-capabilities  = { path = "crates/foyer-capabilities" }

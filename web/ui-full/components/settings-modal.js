@@ -153,8 +153,8 @@ export class SettingsModal extends LitElement {
       : null;
     const hint2 = (a.sampleRate > 48_000)
       ? html`<div style="font-size:10px;color:var(--color-text-muted);padding:4px 0">
-               Higher-rate streaming requires Ardour itself running at this sample rate — the
-               shim doesn't resample yet. Mismatches cause pitch/time drift.
+               Higher-rate streaming uses lossless raw PCM (Opus is capped at 48 kHz). The sidecar
+               resamples engine PCM to the rate you pick when it differs from the project.
              </div>`
       : null;
     return html`

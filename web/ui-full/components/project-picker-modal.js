@@ -10,9 +10,9 @@
 //   · "new" — same picker, but direct session_dir clicks only *navigate
 //     into* the folder. A "Create here" row at the bottom takes a name
 //     input and fires `launch_project` with `<current path>/<name>` —
-//     Ardour will create the session if it doesn't exist. (The stub
-//     falls through to its open_session handler, which is a no-op but
-//     harmless.)
+//     Ardour will create the session if it doesn't exist, optionally at the
+//     sample rate chosen in the modal (new sessions only). The stub backend
+//     ignores the path beyond open_session (harmless).
 
 import { LitElement, html, css } from "lit";
 
@@ -25,6 +25,7 @@ export class ProjectPickerModal extends LitElement {
     mode:            { type: String },
     _currentPath:    { state: true, type: String },
     _newName:        { state: true, type: String },
+    _newSessionSampleRate: { state: true, type: Number },
     _activeBackend:  { state: true, type: String },
     _backends:       { state: true, type: Array },
     _error:          { state: true, type: String },
@@ -173,6 +174,7 @@ export class ProjectPickerModal extends LitElement {
     this.mode = "open";
     this._currentPath = "";
     this._newName = "";
+    this._newSessionSampleRate = 48_000;
     this._activeBackend = null;
     this._backends = [];
     this._error = "";
@@ -237,6 +239,7 @@ export class ProjectPickerModal extends LitElement {
     launchProjectGuarded({
       backend_id: backendId,
       project_path: path,
+      sample_rate: this._newSessionSampleRate,
     });
   }
 
@@ -261,6 +264,21 @@ export class ProjectPickerModal extends LitElement {
           <foyer-session-view .mode=${this.mode} @click=${this._onPick}></foyer-session-view>
         </div>
         ${this.mode === "new" ? html`
+          <div class="create-row">
+            <span class="label">Sample rate</span>
+            <select
+              style="background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;padding:4px 8px;font-size:11px"
+              @change=${(e) => {
+                this._newSessionSampleRate = Number(e.currentTarget.value);
+              }}
+            >
+              ${[44_100, 48_000, 88_200, 96_000, 176_400, 192_000].map((r) => html`
+                <option value=${r} ?selected=${r === this._newSessionSampleRate}>
+                  ${(r / 1000).toFixed(r % 1000 === 0 ? 0 : 1)} kHz
+                </option>
+              `)}
+            </select>
+          </div>
           <div class="create-row">
             <span class="label">Create in</span>
             <span class="parent" title=${this._currentPath || "(jail root)"}>

@@ -779,6 +779,10 @@ pub enum Command {
         stream_id: u32,
     },
     /// Open an ingress sink (subscriber → DAW) bound to a host input.
+    ///
+    /// `format.sample_rate` is the **client capture rate** (e.g. browser
+    /// `AudioContext.sampleRate`). The sidecar translates to the session /
+    /// engine rate before forwarding to the shim.
     AudioIngressOpen {
         stream_id: u32,
         source: AudioSource,
@@ -963,6 +967,12 @@ pub enum Command {
         backend_id: String,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         project_path: Option<String>,
+        /// Optional engine sample rate for **new** sessions: applied when
+        /// creating the `.ardour` file (stub backends use it directly;
+        /// Ardour patches the session XML only when the session did not
+        /// exist before launch).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        sample_rate: Option<u32>,
     },
 
     // ───── multi-session control plane ──────────────────────────────────
