@@ -635,7 +635,9 @@ jack cmd='help' *args='':
 #   1. $FOYER_DOMAIN in the current shell env
 #   2. FOYER_DOMAIN=... in .env.local at the repo root
 #   3. FOYER_DOMAIN=... in .env at the repo root
-#   4. literal default "app.foyer.io"
+#   4. auto-generated `f-<8 hex>.${FOYER_DOMAIN_PARENT:-foyer.io}` and
+#      persisted to .env.local — random prefix avoids collisions when
+#      multiple contributors deploy into the same shared cluster.
 #
 # Other env knobs (all optional):
 #   FOYER_HELM_VALUES   path to an extra values.yaml (passed as -f)
@@ -674,7 +676,12 @@ _kube-precheck:
     fi
     echo "$ctx"
 
-# Resolve FOYER_DOMAIN with the precedence documented above.
+# Resolve FOYER_DOMAIN with the precedence documented above. If nothing
+# resolves, mint a per-developer randomly-prefixed subdomain under
+# `$FOYER_DOMAIN_PARENT` (default `foyer.io`) and persist it in
+# .env.local so repeat deploys land on the same hostname. The random
+# prefix is what stops two contributors deploying from the same shared
+# cluster from racing each other onto the same Ingress host.
 _resolve-domain:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -687,7 +694,20 @@ _resolve-domain:
             if [ -n "$v" ]; then echo "$v"; exit 0; fi
         fi
     done
-    echo "app.foyer.io"
+    # Nothing set anywhere — generate one and stash it in .env.local
+    # (which .gitignore already excludes from version control).
+    parent="${FOYER_DOMAIN_PARENT:-foyer.io}"
+    rand=$(openssl rand -hex 4 2>/dev/null || tr -dc 'a-f0-9' </dev/urandom | head -c 8)
+    generated="f-${rand}.${parent}"
+    if [ ! -f .env.local ]; then
+        printf '# Per-developer overrides for `just` recipes. Not committed (see .gitignore).\n' > .env.local
+    fi
+    if ! grep -qE '^FOYER_DOMAIN=' .env.local 2>/dev/null; then
+        printf 'FOYER_DOMAIN=%s\n' "$generated" >> .env.local
+    fi
+    echo "==> generated FOYER_DOMAIN=$generated and saved to .env.local" >&2
+    echo "    (override anytime by exporting FOYER_DOMAIN= in your shell or editing .env.local)" >&2
+    echo "$generated"
 
 # Probe ghcr.io for a tag matching the current commit. Order:
 #   main-<short-sha>  → snapshot-<short-sha> → latest

@@ -83,12 +83,19 @@ realtime:
   # memlock=-1 means unlimited (RLIMIT_MEMLOCK). Required so JACK can
   # mlock its DMA buffers without paging.
   memlockUnlimited: true
-  # Extra capabilities to add. SYS_NICE is required for SCHED_FIFO;
-  # IPC_LOCK is required for unlimited memlock; AUDIO_WRITE is a no-op
-  # in containers but harmless. `drop` clears every other capability
-  # the runtime might grant by default.
+  # Capabilities the runtime needs:
+  #   * SYS_NICE — set SCHED_FIFO/RR priority (rtprio bump)
+  #   * IPC_LOCK — unlimited mlock (JACK DMA buffers)
+  #   * DAC_OVERRIDE — bypass DAC perms when running as root.
+  #     Required because Debian trixie's `useradd --create-home`
+  #     defaults `/home/foyer` to mode 0700, and the chart runs the
+  #     container as uid 0 to give prlimit the headroom it needs.
+  #     Without DAC_OVERRIDE, root sees /home/foyer as un-writable
+  #     and the entrypoint dies seeding ~/.config/ardour9.
+  # `drop: ["ALL"]` clears the runtime's default cap set so we ship
+  # an explicit allowlist, not "default + a couple."
   capabilities:
-    add: ["SYS_NICE", "IPC_LOCK"]
+    add: ["SYS_NICE", "IPC_LOCK", "DAC_OVERRIDE"]
     drop: ["ALL"]
 
 # ────────────────────────── runtime config ──────────────────────────
@@ -124,13 +131,40 @@ config:
   # file directly without merging into the templated body.
   yamlKey: "config.yaml"
   yamlOverride: ""
-  # Templated body — minimal default that starts a quick cloudflare
-  # tunnel on first launch and otherwise no-ops.
+  # Templated body — mirrors crates/foyer-config/src/lib.rs::Config
+  # exactly. Anything you set here gets serialized as-is into the
+  # mounted config.yaml. Override individual fields without redoing
+  # the whole tree by passing `--set config.defaults.<field>=...`.
+  #
+  # Why we render the full schema instead of a partial: the foyer
+  # binary refuses to start if its referenced default_backend isn't
+  # in the `backends` list. A partial config would force the binary
+  # to fall back to a self-seeded default, which our mounted file
+  # would then shadow. Easier to ship the canonical seed here.
   defaults:
+    version: 1
+    default_backend: ardour
+    launcher:
+      jail: /projects
+      recent: []
     server:
       bind: "0.0.0.0:3838"
-    jail:
-      root: "/projects"
+    backends:
+      - id: stub
+        kind: stub
+        enabled: true
+        label: "Dummy (no DAW)"
+      - id: ardour
+        kind: ardour
+        enabled: true
+        label: Ardour
+        # Path to the Ardour wrapper inside the runtime image. The
+        # production Dockerfile installs ardour from Debian sid via
+        # apt, which lands the launcher at /usr/bin/ardour and the
+        # actual binary at /usr/lib/ardour9/ardour-9.<ver>~ds. Use
+        # the wrapper — it sets up LD_LIBRARY_PATH + LV2 search
+        # paths before exec'ing the binary.
+        executable: /usr/bin/ardour
   tunnel:
     cloudflare:
       enabled: false

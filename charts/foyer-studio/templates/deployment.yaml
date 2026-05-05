@@ -74,12 +74,35 @@ spec:
               echo "[seed-config] wrote ${dest}/config.yaml"
           env:
             - name: HOME
-              value: /root
+              value: /home/foyer
             - name: XDG_DATA_HOME
-              value: /root/.local/share
+              value: /home/foyer/.local/share
+          # Match the main container's security context so seed-config
+          # writes under /home/foyer with the same uid/caps. Without
+          # this, the init runs as the image's USER (foyer 1000) while
+          # the main runs as root, and any path created by one shows
+          # up at the wrong perms for the other.
+          securityContext:
+            {{- $secCtx := omit .Values.containerSecurityContext "capabilities" -}}
+            {{- toYaml $secCtx | nindent 12 }}
+            {{- if .Values.realtime.enabled }}
+            capabilities:
+              {{- with .Values.realtime.capabilities.add }}
+              add:
+                {{- range . }}
+                - {{ . }}
+                {{- end }}
+              {{- end }}
+              {{- with .Values.realtime.capabilities.drop }}
+              drop:
+                {{- range . }}
+                - {{ . }}
+                {{- end }}
+              {{- end }}
+            {{- end }}
           volumeMounts:
             - name: foyer-state
-              mountPath: /root/.local/share
+              mountPath: /home/foyer/.local/share
             - name: foyer-config
               mountPath: /etc/foyer
               readOnly: true
@@ -121,10 +144,10 @@ spec:
           command: ["/bin/sh", "-eu", "-c"]
           args:
             - |
-              prlimit --pid $$ --rtprio={{ .Values.realtime.rtprio }}:{{ .Values.realtime.rtprio }} || \
+              prlimit --pid $$$$ --rtprio={{ .Values.realtime.rtprio }}:{{ .Values.realtime.rtprio }} || \
                 echo "[rt] prlimit rtprio failed — continuing without RT (jitter likely)" >&2
               {{- if .Values.realtime.memlockUnlimited }}
-              prlimit --pid $$ --memlock=unlimited:unlimited || \
+              prlimit --pid $$$$ --memlock=unlimited:unlimited || \
                 echo "[rt] prlimit memlock failed — continuing" >&2
               {{- end }}
               exec /usr/bin/tini -- /usr/local/bin/foyer-entrypoint
@@ -149,9 +172,9 @@ spec:
             - name: RUST_LOG
               value: {{ .Values.runtime.rustLog | quote }}
             - name: HOME
-              value: /root
+              value: /home/foyer
             - name: XDG_DATA_HOME
-              value: /root/.local/share
+              value: /home/foyer/.local/share
             {{- with .Values.runtime.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -200,7 +223,7 @@ spec:
           {{- end }}
           volumeMounts:
             - name: foyer-state
-              mountPath: /root/.local/share
+              mountPath: /home/foyer/.local/share
             - name: projects
               mountPath: {{ .Values.runtime.jailPath }}
             - name: foyer-config
@@ -208,18 +231,18 @@ spec:
               readOnly: true
             {{- if and $webOverlay.enabled (eq $webOverlay.kind "image") }}
             - name: web-overlay
-              mountPath: /root/.local/share/foyer/web
+              mountPath: /home/foyer/.local/share/foyer/web
             {{- end }}
             {{- if and $webOverlay.enabled (eq $webOverlay.kind "pvc") }}
             - name: web-overlay
-              mountPath: /root/.local/share/foyer/web
+              mountPath: /home/foyer/.local/share/foyer/web
               {{- with $webOverlay.pvc.subPath }}
               subPath: {{ . | quote }}
               {{- end }}
             {{- end }}
             {{- if and $webOverlay.enabled (eq $webOverlay.kind "imageVolume") }}
             - name: web-overlay
-              mountPath: /root/.local/share/foyer/web
+              mountPath: /home/foyer/.local/share/foyer/web
               readOnly: true
             {{- end }}
 
