@@ -608,6 +608,11 @@ ardour cmd='help' *args='':
 autovocoder cmd='help' *args='':
     ./scripts/dev/autovocoder.sh {{cmd}} {{args}}
 
+# Pull latest upstream autovocoder (`main`) and reinstall LV2 bundle — overrides
+# AUTOVOCODER_REF for this invocation only (see `.env` for daily default).
+autovocoder-update *args='':
+    AUTOVOCODER_REF=main ./scripts/dev/autovocoder.sh ensure {{args}}
+
 shim cmd='help' *args='':
     ./scripts/dev/shim.sh {{cmd}} {{args}}
 
@@ -616,3 +621,210 @@ tw cmd='help' *args='':
 
 jack cmd='help' *args='':
     ./scripts/dev/jack.sh {{cmd}} {{args}}
+
+# ─────────────────────────── helm / kube ───────────────────────────
+#
+# Helpers for deploying the chart at charts/foyer-studio. They are
+# deliberately thin around `helm install/upgrade` + a few discovery
+# steps (kube-context, IngressClass, current-commit image tag) so a
+# fresh dev gets a sane default deploy in one command, while power
+# users keep every native helm knob via `{{args}}` passthrough.
+#
+# Configuration sources for the deployment domain (highest precedence
+# first):
+#   1. $FOYER_DOMAIN in the current shell env
+#   2. FOYER_DOMAIN=... in .env.local at the repo root
+#   3. FOYER_DOMAIN=... in .env at the repo root
+#   4. literal default "app.foyer.io"
+#
+# Other env knobs (all optional):
+#   FOYER_HELM_VALUES   path to an extra values.yaml (passed as -f)
+#   FOYER_IMAGE_REPO    override image.repository
+#   FOYER_IMAGE_TAG     override image.tag (skips ghcr probe)
+#   FOYER_TLS_SECRET    pre-existing TLS Secret name to reference
+#   FOYER_INGRESS_CLASS bypass autodetect; pass through verbatim
+#   FOYER_USE_GATEWAY=1 deploy via Gateway API (HTTPRoute attach style)
+#                       instead of Ingress; combine with
+#                       FOYER_GATEWAY_NAME / FOYER_GATEWAY_NAMESPACE.
+
+# Print the active kube context (or fail with a meaningful message if
+# none is set / the API is unreachable). Both helm-deploy and
+# helm-uninstall short-circuit through this.
+_kube-precheck:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v kubectl >/dev/null 2>&1; then
+        echo "==> kubectl not on PATH. Install it (.devcontainer/Dockerfile installs one) or rebuild the dev container." >&2
+        exit 1
+    fi
+    if ! command -v helm >/dev/null 2>&1; then
+        echo "==> helm not on PATH. Install it (.devcontainer/Dockerfile installs one) or rebuild the dev container." >&2
+        exit 1
+    fi
+    if ! ctx=$(kubectl config current-context 2>/dev/null); then
+        echo "==> No active kube context." >&2
+        echo "    Drop a kubeconfig in place (e.g. \$KUBECONFIG=/path/to/cfg, or merge into ~/.kube/config)" >&2
+        echo "    then 'kubectl config use-context <ctx>' before re-running this recipe." >&2
+        exit 1
+    fi
+    if ! kubectl --request-timeout=5s version >/dev/null 2>&1; then
+        echo "==> kube context '$ctx' is set but the API server is unreachable (5s timeout)." >&2
+        echo "    Check cluster reachability: kubectl cluster-info" >&2
+        exit 1
+    fi
+    echo "$ctx"
+
+# Resolve FOYER_DOMAIN with the precedence documented above.
+_resolve-domain:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${FOYER_DOMAIN:-}" ]; then
+        echo "$FOYER_DOMAIN"; exit 0
+    fi
+    for f in .env.local .env; do
+        if [ -f "$f" ]; then
+            v=$( (grep -E '^FOYER_DOMAIN=' "$f" || true) | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+            if [ -n "$v" ]; then echo "$v"; exit 0; fi
+        fi
+    done
+    echo "app.foyer.io"
+
+# Probe ghcr.io for a tag matching the current commit. Order:
+#   main-<short-sha>  → snapshot-<short-sha> → latest
+# Falls back to "latest" if none of the per-commit tags exist (e.g.
+# CI hasn't pushed yet, or the local tree is dirty / behind).
+_probe-image-tag repo='ghcr.io/hotspoons/foyer-studio':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{repo}}"
+    repo_path="${repo#ghcr.io/}"
+    sha=$(git rev-parse --short=7 HEAD 2>/dev/null || true)
+    if [ -z "$sha" ]; then
+        echo "latest"; exit 0
+    fi
+    # GHCR token endpoint accepts an anonymous request for public repos.
+    token=$(curl -fsS --max-time 10 \
+        "https://ghcr.io/token?scope=repository:${repo_path}:pull&service=ghcr.io" 2>/dev/null \
+        | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' || true)
+    if [ -z "$token" ]; then
+        # Anonymous probe failed (private repo, registry hiccup). Fall
+        # back to latest — pulling will use whatever auth Helm/kubelet
+        # already has configured.
+        echo "latest"; exit 0
+    fi
+    for tag in "main-$sha" "snapshot-$sha" "latest"; do
+        if curl -fsS -o /dev/null --max-time 10 -I \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${repo_path}/manifests/${tag}" 2>/dev/null; then
+            echo "$tag"; exit 0
+        fi
+    done
+    echo "latest"
+
+# Detect the cluster's default IngressClass. Honors the canonical
+# `ingressclass.kubernetes.io/is-default-class=true` annotation; if no
+# IngressClass is annotated, falls back to whichever class exists
+# first; if no IngressClass exists at all, returns empty (Helm will
+# leave the field unset and the cluster's resolution logic decides).
+_detect-ingress-class:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${FOYER_INGRESS_CLASS:-}" ]; then
+        echo "$FOYER_INGRESS_CLASS"; exit 0
+    fi
+    cls=$(kubectl get ingressclass -o jsonpath='{.items[?(@.metadata.annotations.ingressclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' 2>/dev/null || true)
+    if [ -z "$cls" ]; then
+        cls=$(kubectl get ingressclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    fi
+    echo "$cls"
+
+# Render the chart locally for inspection (no cluster access needed).
+helm-render *args='':
+    helm template foyer-studio charts/foyer-studio {{args}}
+
+# Lint the chart.
+helm-lint:
+    helm lint charts/foyer-studio
+
+# Install or upgrade the chart on the active context. The recipe
+# discovers a default IngressClass + a current-commit image tag and
+# threads them through as --set flags. Override any of those via the
+# environment knobs documented at the top of the helm section.
+helm-deploy release='foyer' namespace='foyer-studio' *args='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ctx=$(just _kube-precheck)
+    domain=$(just _resolve-domain)
+    repo="${FOYER_IMAGE_REPO:-ghcr.io/hotspoons/foyer-studio}"
+    if [ -n "${FOYER_IMAGE_TAG:-}" ]; then
+        tag="$FOYER_IMAGE_TAG"
+    else
+        tag=$(just _probe-image-tag "$repo")
+    fi
+    cls=$(just _detect-ingress-class)
+    echo "==> context:       $ctx"
+    echo "==> namespace:     {{namespace}}  (release: {{release}})"
+    echo "==> domain:        $domain"
+    echo "==> image:         $repo:$tag"
+    if [ "${FOYER_USE_GATEWAY:-0}" = "1" ]; then
+        echo "==> expose:        Gateway API (HTTPRoute attach)"
+    else
+        echo "==> expose:        Ingress (class: ${cls:-<cluster default>})"
+    fi
+    set_args=(
+        --set "image.repository=${repo}"
+        --set "image.tag=${tag}"
+        --set "expose.host=${domain}"
+    )
+    if [ -n "${FOYER_TLS_SECRET:-}" ]; then
+        set_args+=(--set "expose.tls.secretName=${FOYER_TLS_SECRET}")
+    fi
+    if [ "${FOYER_USE_GATEWAY:-0}" = "1" ]; then
+        set_args+=(
+            --set "expose.ingress.enabled=false"
+            --set "expose.gateway.enabled=true"
+            --set "expose.gateway.parentRef.name=${FOYER_GATEWAY_NAME:-gateway}"
+        )
+        if [ -n "${FOYER_GATEWAY_NAMESPACE:-}" ]; then
+            set_args+=(--set "expose.gateway.parentRef.namespace=${FOYER_GATEWAY_NAMESPACE}")
+        fi
+    elif [ -n "$cls" ]; then
+        set_args+=(--set "expose.ingress.className=${cls}")
+    fi
+    if [ -n "${FOYER_HELM_VALUES:-}" ]; then
+        set_args+=(-f "$FOYER_HELM_VALUES")
+    fi
+    helm upgrade --install \
+        "{{release}}" charts/foyer-studio \
+        --namespace "{{namespace}}" --create-namespace \
+        "${set_args[@]}" \
+        {{args}}
+
+# Uninstall the release. Keeps the underlying PV (reclaim policy is
+# Retain) — pass FOYER_DELETE_PV=1 to also `kubectl delete pv` the
+# bound volume after the helm uninstall lands.
+helm-uninstall release='foyer' namespace='foyer-studio':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ctx=$(just _kube-precheck)
+    echo "==> context:   $ctx"
+    echo "==> namespace: {{namespace}}  (release: {{release}})"
+    pvc_name=""
+    pv_name=""
+    if pvc_name=$(kubectl -n "{{namespace}}" get pvc \
+        -l "app.kubernetes.io/instance={{release}},foyer.io/role=projects" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) && [ -n "$pvc_name" ]; then
+        pv_name=$(kubectl -n "{{namespace}}" get pvc "$pvc_name" \
+            -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)
+    fi
+    helm uninstall "{{release}}" --namespace "{{namespace}}"
+    if [ -n "$pv_name" ]; then
+        if [ "${FOYER_DELETE_PV:-0}" = "1" ]; then
+            echo "==> deleting underlying PV $pv_name (FOYER_DELETE_PV=1)"
+            kubectl delete pv "$pv_name" --ignore-not-found
+        else
+            echo "==> projects PV retained: $pv_name"
+            echo "    (set FOYER_DELETE_PV=1 to also delete it)"
+        fi
+    fi

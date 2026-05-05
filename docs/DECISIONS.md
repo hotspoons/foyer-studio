@@ -2219,3 +2219,127 @@ no plugin chrome) and "performer UI" (only the tracks they're
 named on) won't fit through a media-query-shaped hole either,
 and we'll end up forking ui-full anyway — but with media queries
 embedded in it.
+
+## 46. Helm chart ships in-tree at `charts/foyer-studio/` rather than as a sibling repo
+
+**Status.** Adopted 2026-05-05.
+
+**Context.** Foyer is moving past Cloud-Run-only deploys. Studios
+running their own clusters, hobbyists on a homelab, and SaaS-style
+multi-tenant deploys all want to install Foyer with one command and
+get the same opinionated topology each time: persistent `/projects`
+PVC, single-instance pod, RT caps, Cloudflare tunnel keys in a
+Secret, an optional drop-in custom UI tree, and either an Ingress
+or a Gateway API HTTPRoute exposing it. There were three places
+that artifact could live: a sibling helm-chart-only repo, a
+ChartMuseum-style published-only artifact, or in-tree alongside
+the source.
+
+**Decision.** In-tree at `charts/foyer-studio/`. `just helm-deploy`
+discovers a default `IngressClass`, probes GHCR for a
+current-commit image tag (`main-<sha>` → `snapshot-<sha>` →
+`latest`), pulls the deployment domain from
+`$FOYER_DOMAIN`/`.env.local`/`.env`/`app.foyer.io` in that order,
+and shells out to `helm upgrade --install`. `just helm-uninstall`
+removes the release but leaves the bound PV behind unless
+`FOYER_DELETE_PV=1` is passed. Both recipes refuse to run if
+there's no active kube context, with a meaningful warning.
+
+**Why this is in caps for future agents.** The same training
+gravity that pulls Helm authors toward "one chart per repo" gives
+you a chart whose CRDs drift from the schema the Rust side ships,
+because the chart updates on a different cadence than the source
+it deploys. Keeping the chart in-tree means a schema bump or a
+new secret-shaped config field that needs a Secret key gets caught
+in the same PR — `helm template` is part of the verify gate, and
+the chart's `image.repository` defaults track the same GHCR repo
+that CI publishes from. We pay one cost: the chart's `appVersion`
+has to be bumped on releases, but a single-line edit to
+`Chart.yaml` is cheap compared to debugging a chart that templates
+references to a config field the running binary doesn't know
+about.
+
+**Per-toggle rationale (the things future-you will want to argue
+about):**
+
+* **Single-instance only, no `replicaCount`.** Foyer holds an
+  in-memory session graph and a Unix-socket pair to the C++ shim.
+  Two pods would split clients across incoherent backends; the
+  WebSocket store would diverge, the projects PVC's
+  `ReadWriteOnce` mode would fight a second binder. We ship
+  `replicas: 1` + `strategy: Recreate` so a rolling update fails
+  loudly rather than transiently double-binding the volume. If
+  multi-instance ever becomes interesting it'll be sharded by
+  *project*, not load-balanced — different chart shape entirely.
+
+* **Retain enforced via post-install Job, not via custom
+  StorageClass.** Forking a StorageClass for every install would
+  let us set `reclaimPolicy: Retain` natively, but it'd need
+  cluster-admin to land each one and would multiply identical
+  classes across deployments. A Helm post-install Job that
+  patches the bound PV to Retain regardless of source class is
+  one cluster-scoped RBAC binding (clean up on uninstall, hook
+  delete-policy `before-hook-creation,hook-succeeded`) and works
+  on any provisioner. The jail PVC contract is "you don't lose
+  projects on uninstall" — the patch is the cheapest way to
+  honor it.
+
+* **Default config as Secret, not ConfigMap.** Cloudflare and
+  ngrok tunnel sections carry account tokens. Even when those
+  fields are empty in the chart's defaults, the *shape* is a
+  Secret; treating it as a ConfigMap once and migrating later
+  would mean leaking everyone's tokens through `kubectl get cm
+  -o yaml` history. A Secret mounted via init-container copy
+  into `$XDG_DATA_HOME/foyer/` lets the binary's existing XDG
+  loader find it without changing code.
+
+* **Web overlay = three modes.** `kind: image` (init-container
+  pulls an OCI image, copies its `/web` into an emptyDir mounted
+  at the foyer state path) is the portable default. `kind:
+  imageVolume` is exposed for clusters with the k8s 1.33 beta
+  `image:` VolumeSource feature gate enabled. `kind: pvc` covers
+  the studio-with-its-own-UI-tree case. Default is "none" because
+  the bundled UI is what 95% of installs want.
+
+* **Realtime via `prlimit` + caps, not RuntimeClass.** Kubernetes
+  doesn't let a PodSpec set rtprio/memlock ulimits the way podman
+  does. The portable answer is `CAP_SYS_NICE` + `CAP_IPC_LOCK` +
+  a wrapper that calls `prlimit` on PID 1 before exec'ing the
+  real entrypoint. PSA-`restricted` namespaces will reject the
+  cap adds; users on those clusters flip `realtime.enabled=false`
+  and accept the audio jitter, OR move the namespace into a
+  RuntimeClass that bumps the limits. Shipping a RuntimeClass
+  CRD ourselves would require cluster-admin on every install
+  for a tunable that most of the time the kubelet's default
+  config already covers.
+
+* **Expose: Ingress XOR Gateway, top-level `host` + `tls.*`.**
+  Two surfaces, mutually exclusive at template time (helpers fail
+  with a meaningful error if both are enabled). Inside the gateway
+  surface, `style: attach` emits only an HTTPRoute pointing at a
+  user-managed Gateway; `style: listenerSet` emits a ListenerSet
+  on a parent Gateway plus an HTTPRoute attached to that listener.
+  ListenerSet supports both the experimental
+  `gateway.networking.x-k8s.io/v1alpha1` (`XListenerSet`) and the
+  GA `gateway.networking.k8s.io/v1` (`ListenerSet`) APIs via a
+  single toggle — the GA API rolled out in v1.3 but a lot of
+  clusters still ship the experimental channel CRDs only.
+
+* **Multi-release scoping.** Every named resource (Service,
+  Deployment, PVC, Secret, ServiceAccount, ClusterRole,
+  ClusterRoleBinding, Job, Ingress, HTTPRoute, ListenerSet) is
+  derived from `.Release.Name` via the `foyer-studio.fullname`
+  helper. Two installs into the same namespace stay disjoint.
+  The cluster-scoped objects (the pv-retain ClusterRole +
+  Binding) embed the namespace via the SA reference, so two
+  releases in different namespaces don't fight over a binding
+  either.
+
+**Failure mode if re-litigated.** "We'll publish the chart to a
+ChartMuseum and version it independently." That's a fine plan
+once the chart's surface is stable enough that schema drift is
+unlikely. We're not there — Foyer is still adding wire-schema
+fields most weeks. Drift between a versioned-elsewhere chart and
+the source it deploys is a bug class we don't need yet. Revisit
+when the schema rate-of-change drops and the chart isn't tracking
+new config knobs every release.

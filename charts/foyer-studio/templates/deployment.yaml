@@ -1,0 +1,256 @@
+{{- $fullName := include "foyer-studio.fullname" . -}}
+{{- $cfgSecret := include "foyer-studio.configSecretName" . -}}
+{{- $webOverlay := .Values.webOverlay -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "foyer-studio.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "foyer-studio.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Roll the pod automatically when the config Secret content
+        # changes — Helm doesn't track Secret data otherwise.
+        checksum/config: {{ include (print $.Template.BasePath "/secret-config.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "foyer-studio.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      initContainers:
+        # ── (1) Seed the secret-mounted config.yaml into the runtime
+        #        XDG path the binary actually reads. Mounting the
+        #        Secret directly at $XDG_DATA_HOME/foyer/ would shadow
+        #        every other state file the runtime writes (recents,
+        #        logs, web extraction). We copy on first start instead;
+        #        a Secret-content change rolls the pod (see the
+        #        checksum annotation above) which re-runs this init.
+        - name: seed-config
+          image: {{ include "foyer-studio.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              dest="${XDG_DATA_HOME:-$HOME/.local/share}/foyer"
+              mkdir -p "${dest}"
+              cp /etc/foyer/{{ .Values.config.yamlKey }} "${dest}/config.yaml"
+              chmod 0600 "${dest}/config.yaml"
+              echo "[seed-config] wrote ${dest}/config.yaml"
+          env:
+            - name: HOME
+              value: /root
+            - name: XDG_DATA_HOME
+              value: /root/.local/share
+          volumeMounts:
+            - name: foyer-state
+              mountPath: /root/.local/share
+            - name: foyer-config
+              mountPath: /etc/foyer
+              readOnly: true
+
+        {{- if and $webOverlay.enabled (eq $webOverlay.kind "image") }}
+        # ── (2) Pull the user's custom UI from an OCI image and copy
+        #        its `${sourcePath}` into the web overlay emptyDir.
+        #        Foyer's CLI honors $XDG_DATA_HOME/foyer/web/ as the
+        #        served root when --web-root is unset; we plant the
+        #        files there so it picks them up at boot.
+        - name: web-overlay-fetch
+          image: "{{ $webOverlay.image.repository }}:{{ $webOverlay.image.tag }}"
+          imagePullPolicy: {{ $webOverlay.image.pullPolicy }}
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              src={{ $webOverlay.image.sourcePath | quote }}
+              dest=/overlay
+              if [ ! -d "${src}" ]; then
+                echo "[web-overlay] ${src} missing in image — refusing to ship a half-empty UI" >&2
+                exit 1
+              fi
+              cp -aR "${src}/." "${dest}/"
+              echo "[web-overlay] copied $(find ${dest} -type f | wc -l) files"
+          volumeMounts:
+            - name: web-overlay
+              mountPath: /overlay
+        {{- end }}
+
+      containers:
+        - name: foyer
+          image: {{ include "foyer-studio.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.realtime.enabled }}
+          # Bump rtprio + memlock at PID 1 before exec'ing the real
+          # entrypoint. Requires SYS_NICE + IPC_LOCK (granted via
+          # securityContext.capabilities.add). prlimit is part of
+          # util-linux which the runtime image already carries.
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              prlimit --pid $$ --rtprio={{ .Values.realtime.rtprio }}:{{ .Values.realtime.rtprio }} || \
+                echo "[rt] prlimit rtprio failed — continuing without RT (jitter likely)" >&2
+              {{- if .Values.realtime.memlockUnlimited }}
+              prlimit --pid $$ --memlock=unlimited:unlimited || \
+                echo "[rt] prlimit memlock failed — continuing" >&2
+              {{- end }}
+              exec /usr/bin/tini -- /usr/local/bin/foyer-entrypoint
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.runtime.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.runtime.port | quote }}
+            - name: FOYER_BACKEND
+              value: {{ .Values.runtime.backend | quote }}
+            - name: FOYER_JAIL
+              value: {{ .Values.runtime.jailPath | quote }}
+            - name: FOYER_JACK_MODE
+              value: {{ .Values.runtime.jackMode | quote }}
+            {{- if eq .Values.runtime.jackMode "netjack" }}
+            - name: FOYER_NETJACK_HOST
+              value: {{ .Values.runtime.netjackHost | quote }}
+            {{- end }}
+            - name: RUST_LOG
+              value: {{ .Values.runtime.rustLog | quote }}
+            - name: HOME
+              value: /root
+            - name: XDG_DATA_HOME
+              value: /root/.local/share
+            {{- with .Values.runtime.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            {{- $secCtx := omit .Values.containerSecurityContext "capabilities" -}}
+            {{- toYaml $secCtx | nindent 12 }}
+            {{- if .Values.realtime.enabled }}
+            capabilities:
+              {{- with .Values.realtime.capabilities.add }}
+              add:
+                {{- range . }}
+                - {{ . }}
+                {{- end }}
+              {{- end }}
+              {{- with .Values.realtime.capabilities.drop }}
+              drop:
+                {{- range . }}
+                - {{ . }}
+                {{- end }}
+              {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.httpPath }}
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          {{- end }}
+          volumeMounts:
+            - name: foyer-state
+              mountPath: /root/.local/share
+            - name: projects
+              mountPath: {{ .Values.runtime.jailPath }}
+            - name: foyer-config
+              mountPath: /etc/foyer
+              readOnly: true
+            {{- if and $webOverlay.enabled (eq $webOverlay.kind "image") }}
+            - name: web-overlay
+              mountPath: /root/.local/share/foyer/web
+            {{- end }}
+            {{- if and $webOverlay.enabled (eq $webOverlay.kind "pvc") }}
+            - name: web-overlay
+              mountPath: /root/.local/share/foyer/web
+              {{- with $webOverlay.pvc.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+            {{- end }}
+            {{- if and $webOverlay.enabled (eq $webOverlay.kind "imageVolume") }}
+            - name: web-overlay
+              mountPath: /root/.local/share/foyer/web
+              readOnly: true
+            {{- end }}
+
+      volumes:
+        - name: foyer-state
+          emptyDir: {}
+        - name: foyer-config
+          secret:
+            secretName: {{ $cfgSecret }}
+            defaultMode: 0400
+        - name: projects
+          {{- if .Values.persistence.projects.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "foyer-studio.projectsPvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if $webOverlay.enabled }}
+        {{- if eq $webOverlay.kind "image" }}
+        - name: web-overlay
+          emptyDir: {}
+        {{- else if eq $webOverlay.kind "pvc" }}
+        - name: web-overlay
+          persistentVolumeClaim:
+            claimName: {{ $webOverlay.pvc.existingClaim | required "webOverlay.pvc.existingClaim is required when webOverlay.kind=pvc" }}
+        {{- else if eq $webOverlay.kind "imageVolume" }}
+        - name: web-overlay
+          # Kubernetes 1.33+ image VolumeSource. Cluster needs the
+          # ImageVolume feature gate enabled (beta in 1.33).
+          image:
+            reference: "{{ $webOverlay.imageVolume.repository }}:{{ $webOverlay.imageVolume.tag }}"
+            pullPolicy: {{ $webOverlay.imageVolume.pullPolicy }}
+        {{- end }}
+        {{- end }}

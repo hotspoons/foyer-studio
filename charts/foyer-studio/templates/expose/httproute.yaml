@@ -1,0 +1,53 @@
+{{- if .Values.expose.gateway.enabled -}}
+{{- $fullName := include "foyer-studio.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+{{- $parent := .Values.expose.gateway.parentRef -}}
+{{- $style := .Values.expose.gateway.style -}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+  {{- with .Values.expose.gateway.httpRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- if eq $style "listenerSet" }}
+    # Attach to the listener we just minted on the ListenerSet.
+    - group: {{ if .Values.expose.gateway.listenerSet.experimental -}}gateway.networking.x-k8s.io{{- else -}}gateway.networking.k8s.io{{- end }}
+      kind: {{ if .Values.expose.gateway.listenerSet.experimental -}}XListenerSet{{- else -}}ListenerSet{{- end }}
+      name: {{ $fullName | quote }}
+      sectionName: {{ .Values.expose.gateway.httpRoute.listenerName | quote }}
+    {{- else }}
+    # Attach style — bind directly to a user-managed Gateway. The
+    # named listener / sectionName must already exist on it.
+    - name: {{ $parent.name | quote }}
+      {{- with $parent.namespace }}
+      namespace: {{ . | quote }}
+      {{- end }}
+      {{- with $parent.sectionName }}
+      sectionName: {{ . | quote }}
+      {{- end }}
+      {{- with $parent.port }}
+      port: {{ . }}
+      {{- end }}
+    {{- end }}
+  hostnames:
+    - {{ .Values.expose.host | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: "/"
+      {{- with .Values.expose.gateway.httpRoute.filters }}
+      filters:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      backendRefs:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+{{- end -}}

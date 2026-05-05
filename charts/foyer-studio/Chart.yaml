@@ -1,0 +1,24 @@
+apiVersion: v2
+name: foyer-studio
+description: |
+  Foyer Studio — a web-native control surface for Ardour. Single-instance
+  deployment with a persistent /projects PVC (Retain enforced), a default
+  config Secret (cloudflare tunnel keys live here), an optional web/
+  overlay (PVC or OCI image), realtime caps for jitter-free audio, and an
+  expose surface that toggles between a classic Ingress and the Gateway
+  API (HTTPRoute attach OR ListenerSet, X / non-X CRDs both supported).
+type: application
+version: 0.1.0
+appVersion: "latest"
+home: https://github.com/hotspoons/foyer-studio
+sources:
+  - https://github.com/hotspoons/foyer-studio
+keywords:
+  - audio
+  - daw
+  - ardour
+  - control-surface
+  - realtime
+maintainers:
+  - name: Foyer Studio
+    url: https://github.com/hotspoons/foyer-studio

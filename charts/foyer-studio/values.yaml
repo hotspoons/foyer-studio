@@ -1,0 +1,317 @@
+# Default values for foyer-studio.
+#
+# A single deployment is one Foyer instance. Multiple releases in the
+# same namespace stay disjoint because every resource name is derived
+# from `.Release.Name` via the helpers in templates/_helpers.tpl
+# (see `foyer-studio.fullname`). Don't hard-code names anywhere in
+# this chart.
+#
+# Sticker-grade design notes that would silently bite future authors:
+#
+#   * Single-instance only. `replicaCount` is intentionally not exposed:
+#     Foyer holds an in-memory session graph and a Unix-socket pair to
+#     the C++ shim; horizontal scaling would split clients across
+#     incoherent backends. We ship `replicas: 1` and `strategy: Recreate`
+#     to make rolling updates fail loudly rather than transiently
+#     double-bind the projects volume.
+#
+#   * The projects PVC is Retain-enforced regardless of the StorageClass
+#     chosen (see templates/pv-retain-hook.yaml). Some StorageClasses
+#     default to Delete; rather than fork StorageClasses the chart runs
+#     a post-install/post-upgrade Job that patches the bound PV's
+#     persistentVolumeReclaimPolicy to Retain.
+#
+#   * Realtime defaults assume containerd's stock seccomp profile + an
+#     unrestricted (or `baseline`) PodSecurity policy. PSA `restricted`
+#     namespaces will reject SYS_NICE/IPC_LOCK; flip realtime.enabled
+#     off and accept the audio jitter, or move the namespace into a
+#     RuntimeClass that bumps rtprio/memlock.
+
+# ────────────────────────── image ──────────────────────────
+image:
+  repository: ghcr.io/hotspoons/foyer-studio
+  # Empty `tag` falls back to `.Chart.AppVersion`. The just helm-deploy
+  # recipe will probe ghcr at deploy time for a tag matching the current
+  # commit (main-<sha> > snapshot-<sha> > latest) and pass it as
+  # `--set image.tag=<resolved>`.
+  tag: ""
+  pullPolicy: IfNotPresent
+  # Optional: list of secret names with .dockerconfigjson for private
+  # registries. Foyer's official image is public; leave empty unless
+  # you mirror it.
+  pullSecrets: []
+
+# ────────────────────────── pod basics ──────────────────────────
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  # If empty, a name is derived from the release.
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Optional: priorityClassName, topologySpreadConstraints, etc. Stub
+# them as empty so a downstream values.yaml can fill them without
+# re-templating.
+priorityClassName: ""
+
+# ────────────────────────── realtime / RT ──────────────────────────
+# Audio glitches at any context switch the JACK thread doesn't own.
+# `prlimit` raises rtprio + memlock at PID 1 inside the pod (the
+# entrypoint runs `tini` then `jackd` then `foyer`; everything
+# inherits). Caps SYS_NICE + IPC_LOCK let `prlimit` actually take.
+realtime:
+  enabled: true
+  # rtprio ceiling for SCHED_FIFO/RR threads (jackd, libpbd workers).
+  rtprio: 95
+  # memlock=-1 means unlimited (RLIMIT_MEMLOCK). Required so JACK can
+  # mlock its DMA buffers without paging.
+  memlockUnlimited: true
+  # Extra capabilities to add. SYS_NICE is required for SCHED_FIFO;
+  # IPC_LOCK is required for unlimited memlock; AUDIO_WRITE is a no-op
+  # in containers but harmless. `drop` clears every other capability
+  # the runtime might grant by default.
+  capabilities:
+    add: ["SYS_NICE", "IPC_LOCK"]
+    drop: ["ALL"]
+
+# ────────────────────────── runtime config ──────────────────────────
+# The container respects $FOYER_BACKEND and $FOYER_JAIL (see Dockerfile).
+# Override env entries to flip backends, point at an external JACK,
+# tune log levels, etc.
+runtime:
+  backend: "ardour"          # ardour | stub | host
+  jailPath: "/projects"      # mounted PVC path, also $FOYER_JAIL
+  port: 3838                 # container port; $PORT
+  jackMode: "embedded"       # embedded | shm | netjack
+  netjackHost: ""            # only used when jackMode=netjack
+  rustLog: "info"            # RUST_LOG
+  extraEnv: []
+    # - name: FOYER_DISABLE_TUNNEL
+    #   value: "1"
+
+# ────────────────────────── default config Secret ──────────────────
+# The Foyer binary reads $XDG_DATA_HOME/foyer/config.yaml on boot
+# (see crates/foyer-config/src/lib.rs). The chart materialises that
+# file from a Secret because the cloudflare/ngrok tunnel sections can
+# carry account tokens. An init container copies it into the runtime
+# XDG path on first start so the upstream loader finds it; a config
+# update + pod recreate refreshes it.
+config:
+  # When create=true the chart renders a Secret from `defaults` /
+  # `tunnel` / `extra` below. Set false and supply `existingSecret`
+  # to bring your own out-of-band Secret.
+  create: true
+  existingSecret: ""
+  # The key inside the Secret holding config.yaml's contents. Helm
+  # `--set-file config.yamlOverride=path/to/config.yaml` injects a
+  # file directly without merging into the templated body.
+  yamlKey: "config.yaml"
+  yamlOverride: ""
+  # Templated body — minimal default that starts a quick cloudflare
+  # tunnel on first launch and otherwise no-ops.
+  defaults:
+    server:
+      bind: "0.0.0.0:3838"
+    jail:
+      root: "/projects"
+  tunnel:
+    cloudflare:
+      enabled: false
+      # Pick exactly one mode: api_token + zone (auto-named tunnel),
+      # tunnel_token (pre-created), or leave both empty for a quick
+      # *.trycloudflare.com tunnel.
+      api_token: ""
+      account_id: ""
+      zone_id: ""
+      tunnel_name: ""
+      tunnel_token: ""
+      hostname: ""
+    ngrok:
+      enabled: false
+      authtoken: ""
+      hostname: ""
+  # Anything you want spliced verbatim into the rendered YAML. Useful
+  # for roles, RBAC overrides, etc. without re-templating.
+  extra: {}
+
+# ────────────────────────── persistent storage ──────────────────────────
+persistence:
+  projects:
+    enabled: true
+    # Empty -> cluster default StorageClass. Foyer's only requirement
+    # is ReadWriteOnce; any block-or-file class will do.
+    storageClassName: ""
+    accessModes: ["ReadWriteOnce"]
+    size: "20Gi"
+    # Annotations applied to the PVC. Most users won't need this.
+    annotations: {}
+    # Bring-your-own PVC: skip creation and bind to an existing claim.
+    existingClaim: ""
+    # Whether to enforce reclaimPolicy=Retain on the BOUND PV via a
+    # post-install/post-upgrade Job. Disable only if your cluster's
+    # PV reclaim policy is already Retain everywhere or you're using
+    # an existing claim whose underlying PV you don't want patched.
+    retainPolicy: true
+
+# ────────────────────────── web overlay ──────────────────────────
+# Foyer normally serves $XDG_DATA_HOME/foyer/web/ (auto-extracted from
+# the binary). This block lets an operator drop a custom UI tree there
+# without forking the image. Disabled by default.
+#
+# kind: none      — vanilla, ship-image UI (default)
+# kind: pvc       — mount an existing PVC at the web path
+# kind: image     — pull an OCI image at boot, copy its `/web` into
+#                   an emptyDir at the web path. Most portable.
+# kind: imageVolume — k8s 1.33+ beta `image:` VolumeSource. Cleaner
+#                     but feature-gated; users with the gate enabled
+#                     get a read-only direct mount.
+webOverlay:
+  enabled: false
+  kind: "none"
+  pvc:
+    existingClaim: ""
+    subPath: ""
+  image:
+    repository: ""
+    tag: "latest"
+    pullPolicy: IfNotPresent
+    # Path inside the OCI image whose contents become the web root.
+    # Defaults to `/web` to match Foyer's repo tree. The init copies
+    # `${sourcePath}/.` into the emptyDir.
+    sourcePath: "/web"
+  imageVolume:
+    repository: ""
+    tag: "latest"
+    pullPolicy: IfNotPresent
+    # Subpath within the image. `image:` VolumeSource doesn't support
+    # subPath, but we expose this so users with paths can choose.
+    subPath: ""
+
+# ────────────────────────── service ──────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+  # nodePort / loadBalancerIP optional; only relevant when type != ClusterIP.
+  nodePort: null
+  annotations: {}
+
+# ────────────────────────── expose ──────────────────────────
+# Mutually exclusive: exactly one of expose.ingress.enabled and
+# expose.gateway.enabled may be true. Both off ⇒ ClusterIP only.
+# Top-level `host` and `tls.*` percolate to whichever mode is on.
+expose:
+  # Top-level — same shape regardless of which surface you pick.
+  host: "app.foyer.io"
+  tls:
+    # When enabled, Ingress gets `tls:` block; HTTPRoute is attached
+    # via a TLS listener (the listener carries its own certificateRef).
+    enabled: true
+    # Reference an existing TLS Secret. If empty AND certManagerIssuerRef
+    # is set, the chart annotates the resource so cert-manager mints one.
+    secretName: ""
+    certManager:
+      enabled: false
+      # `kind` must be Issuer or ClusterIssuer.
+      issuerRef:
+        kind: ClusterIssuer
+        name: letsencrypt-prod
+        group: cert-manager.io
+
+  ingress:
+    enabled: true
+    # Empty -> cluster default IngressClass. The just helm-deploy
+    # recipe probes for one and passes --set if found.
+    className: ""
+    annotations: {}
+    # Path on the Ingress. Foyer mounts at /, the WebSocket upgrades
+    # are sub-paths (/ws, /ws/audio/*) so a single Prefix rule covers
+    # everything.
+    path: "/"
+    pathType: "Prefix"
+    # Extra hosts to attach (will share the same backend service).
+    extraHosts: []
+
+  gateway:
+    enabled: false
+    # `attach` — emit only an HTTPRoute referencing an existing parent
+    # Gateway. `listenerSet` — emit a ListenerSet that creates per-host
+    # listeners on a parent Gateway, plus an HTTPRoute attached to that
+    # listener. Use listenerSet for tenant-self-service flows, attach
+    # for centrally-managed Gateways.
+    style: "attach"
+    parentRef:
+      # Required for both styles.
+      name: "gateway"
+      namespace: ""
+      sectionName: ""
+      port: null
+    # ListenerSet API:
+    #   gateway.networking.x-k8s.io/v1alpha1 / kind: XListenerSet  (experimental)
+    #   gateway.networking.k8s.io/v1        / kind: ListenerSet    (GA in v1.3)
+    # Both schemas are isomorphic for our usage; pick by the toggle below.
+    listenerSet:
+      experimental: false   # true -> XListenerSet (X / v1alpha1)
+      # Optional: override allowedRoutes namespaces selector. Defaults
+      # to Same so the route lives next to the listener.
+      allowedRoutes:
+        namespaces:
+          from: "Same"
+    httpRoute:
+      annotations: {}
+      # Set if you need to override the route's parent listener name
+      # under a ListenerSet style.
+      listenerName: "https"
+      # Filters applied to the route (auth headers, redirects, etc.).
+      filters: []
+
+# ────────────────────────── probes ──────────────────────────
+probes:
+  startup:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    failureThreshold: 60       # 5 min ceiling — first launch extracts web/
+  readiness:
+    enabled: true
+    httpPath: "/variants.json"
+    periodSeconds: 5
+    failureThreshold: 3
+  liveness:
+    enabled: true
+    tcp: true
+    periodSeconds: 30
+    failureThreshold: 3
+
+# ────────────────────────── pod security ──────────────────────────
+# We default to runAsNonRoot=false because the container's entrypoint
+# bumps rtprio via prlimit, which needs CAP_SYS_NICE on the *running*
+# uid. The image switches to a non-root uid for the foyer process
+# itself once limits are set. Override if your cluster admin demands
+# a strict SecurityContextConstraint.
+podSecurityContext:
+  fsGroup: 1000
+  fsGroupChangePolicy: "OnRootMismatch"
+containerSecurityContext:
+  runAsNonRoot: false
+  runAsUser: 0
+  allowPrivilegeEscalation: true   # required by SYS_NICE
+  readOnlyRootFilesystem: false
+  seccompProfile:
+    type: RuntimeDefault

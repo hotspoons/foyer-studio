@@ -1,0 +1,121 @@
+{{- if and .Values.persistence.projects.enabled .Values.persistence.projects.retainPolicy -}}
+{{/*
+Post-install/post-upgrade Job that flips the bound PV's reclaim policy
+to Retain regardless of the StorageClass default. This is the only
+generic way to honor the chart contract — a StorageClass authored
+elsewhere may default to Delete, and PVCs cannot override that.
+
+The job:
+  1. Waits up to 5 minutes for the PVC to reach Bound state.
+  2. Reads the bound .spec.volumeName.
+  3. Patches the PV with reclaimPolicy=Retain.
+
+It must run after the PVC exists (post-install hook). For an upgrade
+we re-run because a fresh-bound PV from a recreated PVC also needs
+the patch.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "foyer-studio.fullname" . }}-pv-retain
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "foyer-studio.fullname" . }}-pv-retain
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "foyer-studio.fullname" . }}-pv-retain
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "foyer-studio.fullname" . }}-pv-retain
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "foyer-studio.fullname" . }}-pv-retain
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "foyer-studio.fullname" . }}-pv-retain
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "foyer-studio.selectorLabels" . | nindent 8 }}
+        foyer.io/job: pv-retain
+    spec:
+      serviceAccountName: {{ include "foyer-studio.fullname" . }}-pv-retain
+      restartPolicy: OnFailure
+      containers:
+        - name: patch
+          image: bitnami/kubectl:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-eu", "-c"]
+          args:
+            - |
+              PVC={{ include "foyer-studio.projectsPvcName" . | quote }}
+              NS={{ .Release.Namespace | quote }}
+              echo "[pv-retain] waiting for PVC ${NS}/${PVC} to bind…"
+              for i in $(seq 1 60); do
+                phase=$(kubectl -n "${NS}" get pvc "${PVC}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+                pv=$(kubectl -n "${NS}" get pvc "${PVC}" -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)
+                if [ "${phase}" = "Bound" ] && [ -n "${pv}" ]; then
+                  echo "[pv-retain] bound -> ${pv}"
+                  break
+                fi
+                echo "[pv-retain] phase=${phase:-<none>} pv=${pv:-<none>} (attempt ${i}/60)"
+                sleep 5
+              done
+              if [ -z "${pv:-}" ]; then
+                echo "[pv-retain] PVC never bound; bailing" >&2
+                exit 1
+              fi
+              current=$(kubectl get pv "${pv}" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}')
+              if [ "${current}" = "Retain" ]; then
+                echo "[pv-retain] ${pv} already Retain — nothing to do"
+                exit 0
+              fi
+              echo "[pv-retain] patching ${pv}: ${current} -> Retain"
+              kubectl patch pv "${pv}" --type=merge \
+                -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+              echo "[pv-retain] done"
+{{- end -}}

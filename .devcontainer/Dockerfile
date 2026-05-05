@@ -272,6 +272,42 @@ RUN curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors
       | BUN_INSTALL=/usr/local bash \
     && bun --version
 
+# Install kubectl + helm (arch-aware) for the helm-deploy / helm-uninstall
+# just recipes against any reachable cluster. Completion files are dropped
+# into /etc/bash_completion.d so a fresh shell picks them up via the
+# bash_completion sourcing block in vscode's bashrc. The `k` alias is
+# wired up the same way kubectl docs recommend — `complete -F __start_kubectl k`
+# — so tab-completion on `k get …` works identically to `kubectl get …`.
+RUN ARCH=$(uname -m) \
+    && case $ARCH in \
+         x86_64)  KARCH="amd64" ;; \
+         aarch64) KARCH="arm64" ;; \
+         *) echo "Unknown architecture: $ARCH" && exit 1 ;; \
+       esac \
+    && KUBECTL_VER=$(curl -fsSL --retry 5 --retry-delay 5 --max-time 30 https://dl.k8s.io/release/stable.txt) \
+    && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+         "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/${KARCH}/kubectl" \
+         -o /usr/local/bin/kubectl \
+    && chmod 0755 /usr/local/bin/kubectl \
+    && HELM_VER="v3.16.3" \
+    && tmp=$(mktemp -d) \
+    && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
+         "https://get.helm.sh/helm-${HELM_VER}-linux-${KARCH}.tar.gz" -o "$tmp/helm.tgz" \
+    && tar -xzf "$tmp/helm.tgz" -C "$tmp" \
+    && install -m 0755 "$tmp/linux-${KARCH}/helm" /usr/local/bin/helm \
+    && rm -rf "$tmp" \
+    && install -d -m 0755 /etc/bash_completion.d \
+    && kubectl completion bash > /etc/bash_completion.d/kubectl \
+    && helm completion bash > /etc/bash_completion.d/helm \
+    && printf '%s\n' \
+         '# k alias for kubectl + completion wiring' \
+         'alias k=kubectl' \
+         'if command -v kubectl &>/dev/null && [ -n "${BASH_VERSION:-}" ]; then' \
+         '  complete -o default -F __start_kubectl k 2>/dev/null || true' \
+         'fi' \
+         > /etc/profile.d/k-alias.sh \
+    && chmod 0644 /etc/profile.d/k-alias.sh
+
 # Install fastfetch (arch-aware)
 RUN ARCH=$(uname -m) \
     && case $ARCH in \
@@ -325,6 +361,9 @@ RUN { \
       echo ''; \
       echo '# Just completion'; \
       echo 'command -v just &>/dev/null && source <(just --completions bash)'; \
+      echo ''; \
+      echo '# kubectl + helm + k alias completions'; \
+      echo '[ -f /etc/profile.d/k-alias.sh ] && . /etc/profile.d/k-alias.sh'; \
       echo ''; \
       echo '# Cargo env'; \
       echo '[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"'; \

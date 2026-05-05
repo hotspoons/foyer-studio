@@ -1,0 +1,55 @@
+{{- if and .Values.expose.ingress.enabled (not .Values.expose.gateway.enabled) -}}
+{{- $fullName := include "foyer-studio.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+{{- $tls := .Values.expose.tls -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.expose.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if and $tls.enabled $tls.certManager.enabled }}
+    cert-manager.io/{{ $tls.certManager.issuerRef.kind | lower }}: {{ $tls.certManager.issuerRef.name | quote }}
+    {{- end }}
+spec:
+  {{- with .Values.expose.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- if $tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.expose.host | quote }}
+        {{- range .Values.expose.ingress.extraHosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ if $tls.secretName }}{{ $tls.secretName | quote }}{{ else }}{{ printf "%s-tls" $fullName | quote }}{{ end }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.expose.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.expose.ingress.path | quote }}
+            pathType: {{ .Values.expose.ingress.pathType }}
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+    {{- range .Values.expose.ingress.extraHosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: {{ $.Values.expose.ingress.path | quote }}
+            pathType: {{ $.Values.expose.ingress.pathType }}
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+    {{- end }}
+{{- end -}}

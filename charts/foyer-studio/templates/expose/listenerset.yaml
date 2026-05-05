@@ -1,0 +1,52 @@
+{{- if and .Values.expose.gateway.enabled (eq .Values.expose.gateway.style "listenerSet") -}}
+{{- $fullName := include "foyer-studio.fullname" . -}}
+{{- $tls := .Values.expose.tls -}}
+{{- $ls := .Values.expose.gateway.listenerSet -}}
+{{- $parent := .Values.expose.gateway.parentRef -}}
+{{/*
+ListenerSet API surface — `experimental: true` renders the v1alpha1
+"X-prefixed" kind from the experimental channel; `false` renders the
+GA kind from gateway.networking.k8s.io/v1. Their shapes are the same
+for our usage. Pick the one your cluster's Gateway API CRDs install.
+*/}}
+{{- if $ls.experimental }}
+apiVersion: gateway.networking.x-k8s.io/v1alpha1
+kind: XListenerSet
+{{- else }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: ListenerSet
+{{- end }}
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+spec:
+  parentRef:
+    name: {{ $parent.name | quote }}
+    {{- with $parent.namespace }}
+    namespace: {{ . | quote }}
+    {{- end }}
+    {{- with $parent.sectionName }}
+    sectionName: {{ . | quote }}
+    {{- end }}
+  listeners:
+    - name: {{ .Values.expose.gateway.httpRoute.listenerName | quote }}
+      hostname: {{ .Values.expose.host | quote }}
+      port: {{ if $tls.enabled }}443{{ else }}80{{ end }}
+      protocol: {{ if $tls.enabled }}HTTPS{{ else }}HTTP{{ end }}
+      {{- if $tls.enabled }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ if $tls.secretName }}{{ $tls.secretName | quote }}{{ else }}{{ printf "%s-tls" $fullName | quote }}{{ end }}
+            {{- if $tls.certManager.enabled }}
+            # cert-manager will provision this Secret; the issuerRef
+            # is on the (separately-rendered) Certificate resource.
+            {{- end }}
+      {{- end }}
+      allowedRoutes:
+        namespaces:
+          from: {{ $ls.allowedRoutes.namespaces.from | quote }}
+{{- end -}}

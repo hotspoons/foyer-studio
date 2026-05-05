@@ -1,0 +1,36 @@
+{{- $tls := .Values.expose.tls -}}
+{{- if and $tls.enabled $tls.certManager.enabled (not $tls.secretName) -}}
+{{- $fullName := include "foyer-studio.fullname" . -}}
+{{/*
+Render a cert-manager Certificate when:
+  * TLS is enabled, AND
+  * cert-manager integration is enabled, AND
+  * the user did NOT supply a pre-existing TLS Secret.
+
+For the Ingress path, the issuer annotation is sufficient — cert-manager
+auto-creates a Certificate from the Ingress's tls.secretName. For the
+Gateway path the controller doesn't watch HTTPRoute/ListenerSet for
+issuer annotations the same way, so we mint the Certificate explicitly.
+Rendering it for both paths is idempotent.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ printf "%s-tls" $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "foyer-studio.labels" . | nindent 4 }}
+spec:
+  secretName: {{ printf "%s-tls" $fullName }}
+  dnsNames:
+    - {{ .Values.expose.host | quote }}
+    {{- if .Values.expose.ingress.enabled }}
+    {{- range .Values.expose.ingress.extraHosts }}
+    - {{ . | quote }}
+    {{- end }}
+    {{- end }}
+  issuerRef:
+    kind: {{ $tls.certManager.issuerRef.kind }}
+    name: {{ $tls.certManager.issuerRef.name | quote }}
+    group: {{ $tls.certManager.issuerRef.group }}
+{{- end -}}
