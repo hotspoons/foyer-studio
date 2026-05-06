@@ -2343,3 +2343,64 @@ fields most weeks. Drift between a versioned-elsewhere chart and
 the source it deploys is a bug class we don't need yet. Revisit
 when the schema rate-of-change drops and the chart isn't tracking
 new config knobs every release.
+
+## 47. Audio stream is canonical for the displayed playhead, not the control plane
+
+The DAW emits `transport.position` ControlUpdates at ~30 Hz and
+the audio frames carrying the corresponding speaker-out samples
+arrive 200–400 ms later (encode → WS hop → jitter buffer →
+AudioWorklet quantum). Painting the playhead from the control
+echoes makes it race ahead of what the user is hearing. Painting
+it from the audio frames makes it match.
+
+**Decision.** Each `/ws/audio/:stream_id` frame (V2 wire format)
+carries the engine's `transport_pos_samples` at the first sample
+of the frame plus a sidecar `server_mono_ns` at capture. The
+browser pairs that with a periodic `Command::ClockProbe` /
+`Event::ClockProbeReply` exchange (NTP-style single bounce,
+minimum-RTT estimator) to convert server monotonic onto its own
+`performance.now()` timeline. The displayed playhead is then a
+function of the most-recent frame's transport position plus
+elapsed wall-clock minus the worklet's measured playback delay
+(`buffered_samples / sr + outputLatency`). Result: playhead
+trails the speaker by zero, not by the full pipeline latency.
+
+Seek freezes are explicit — `audioClock.noteSeek(target)` pins
+the displayed value at the new position until an audio frame
+arrives confirming the engine has reached it (within ~100 ms
+tolerance). Without this the playhead jumps forward and then
+visibly slides backward as the audio catches up.
+
+Idle-drift watchdog: when no fresh audio frames arrive for >1 s
+AND the engine reports playing AND the gap between control-
+derived and audio-derived position grows past 200 ms, the
+listener tears down + restarts the audio WS. Long idle stretches
+accumulate clock skew between the engine's audio clock and the
+browser's `AudioContext` (10–50 ppm crystal drift × tens of
+minutes = a visible second). Reconnecting flushes the encoder +
+jitter buffer and reseeds the alignment. The principled fix —
+an adaptive PI loop on the resample ratio — is logged as PLAN
+follow-up; the watchdog is the backstop that makes the user-
+visible bug go away today.
+
+Reverse direction (browser → DAW recording) gets the same
+treatment: ingress packets carry an 8-byte `client_send_ms`
+header, the sidecar computes one-way latency against the clock-
+probe-derived offset, tracks per-stream median, and stamps it
+into `Region.ingress_latency_ms` so post-recording auto-shift
+can subtract the transport latency without manual calibration.
+
+**Wire bumps.** Egress frame header grew from 12 to 29 bytes
+(added `version`, `transport_pos_samples`, `server_mono_ns`).
+Ingress frame got an 8-byte prefix (`client_send_ms`). Both ends
+ship together so this isn't a back-compat concern. The version
+byte is forward-gating for future V3 changes.
+
+**Failure mode if re-litigated.** "Just speed up the audio path
+to match control updates." The audio path's inherent latency is
+not a bug — it's the encode/jitter/worklet budget that lets the
+stream survive a sneeze on the wifi. Treating it as a bug to
+eliminate produces glitches; treating it as a constant to
+compensate for produces alignment. The broadcast world settled
+this argument decades ago: delay video to match audio, not the
+reverse.

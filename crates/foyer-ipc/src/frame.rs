@@ -8,7 +8,14 @@ use thiserror::Error;
 pub enum FrameKind {
     /// MessagePack-encoded [`Envelope<Control>`].
     Control = 0x01,
-    /// Interleaved PCM audio frame carrying `[stream_id u32 LE][pcm bytes]`.
+    /// Interleaved PCM audio frame:
+    /// `[stream_id u32 LE][transport_pos i64 LE][f32 PCM bytes...]`.
+    /// `transport_pos = -1` is the "engine didn't supply one this
+    /// callback" sentinel — the sidecar's egress encoder then
+    /// falls back to polling the backend's transport position.
+    /// Shims that can read the engine's transport sample at audio-
+    /// callback time stamp it directly so the browser-side
+    /// playhead aligns sample-accurately with the audio stream.
     Audio = 0x02,
 }
 

@@ -71,7 +71,7 @@ MasterTap::can_support_io_configuration (const ChanCount& in, ChanCount& out)
 
 void
 MasterTap::run (BufferSet& bufs,
-                samplepos_t /*start_sample*/,
+                samplepos_t start_sample,
                 samplepos_t /*end_sample*/,
                 double /*speed*/,
                 pframes_t nframes,
@@ -82,6 +82,14 @@ MasterTap::run (BufferSet& bufs,
 	// The audio thread has a hard deadline; anything non-trivial here
 	// costs dropouts.
 	const std::uint64_t n = _run_calls.fetch_add (1, std::memory_order_relaxed);
+	// Snapshot the engine transport position for this audio cycle.
+	// `start_sample` is the engine's transport sample at the FIRST
+	// frame of this block — exactly what the browser's playhead
+	// needs to line up with the speaker output. The drain loop
+	// reads this atomic and stamps it onto each outgoing IPC
+	// audio frame.
+	_last_transport_sample.store (
+	    static_cast<std::int64_t> (start_sample), std::memory_order_relaxed);
 	// First-call diagnostic ONLY — tells us whether Ardour's
 	// process chain is even invoking our run() method. Gated to
 	// one emission because PBD::warning allocates + locks and
@@ -193,7 +201,7 @@ MasterTap::run (BufferSet& bufs,
 }
 
 void
-MasterTap::silence (samplecnt_t nframes, samplepos_t /*start_sample*/)
+MasterTap::silence (samplecnt_t nframes, samplepos_t start_sample)
 {
 	// RT THREAD. Same constraints as run(): memcpy-only, no locks,
 	// no logging. Ardour dispatches into silence() instead of run()
@@ -204,6 +212,12 @@ MasterTap::silence (samplecnt_t nframes, samplepos_t /*start_sample*/)
 	// and the browser's opus decoder + AudioContext fall out of
 	// sync (or the WS server side times out on lag).
 	const std::uint64_t n = _silence_calls.fetch_add (1, std::memory_order_relaxed);
+	// Even when the route is silent the engine's transport may
+	// still be advancing (transport rolling, master output
+	// muted) — keep the displayed playhead correct by stamping
+	// the same way as run() does.
+	_last_transport_sample.store (
+	    static_cast<std::int64_t> (start_sample), std::memory_order_relaxed);
 	if (n == 0) {
 		PBD::warning << "foyer_shim: [audio] stream_id=" << _stream_id
 		             << " FIRST silence() fire — nframes=" << nframes << endmsg;
@@ -363,16 +377,33 @@ MasterTap::drain_loop ()
 		const std::size_t got = _ring->read (scratch.data (), avail);
 		if (got == 0) continue;
 
-		// Pack stream_id (u32 LE) + f32 PCM bytes. Matches the
-		// format the Rust side's `foyer_ipc::unpack_audio` expects.
+		// Pack `[stream_id u32 LE][transport_pos i64 LE][pcm bytes]`.
+		// Matches the format Rust's `foyer_ipc::unpack_audio`
+		// expects (single PCM frame kind on the wire — there is no
+		// "stamped" variant; this IS the format). The transport
+		// position is whatever the most recent run()/silence() call
+		// stamped — bounded staleness ≈ one audio cycle (~5–20 ms),
+		// far better than the 30 Hz polled cache the sidecar would
+		// fall back to without it.
+		const std::int64_t transport_pos =
+		    _last_transport_sample.load (std::memory_order_relaxed);
 		const std::size_t pcm_bytes = got * sizeof (float);
 		std::vector<std::uint8_t> payload;
-		payload.resize (4 + pcm_bytes);
+		payload.resize (12 + pcm_bytes);
 		payload[0] = (_stream_id      ) & 0xff;
 		payload[1] = (_stream_id >> 8 ) & 0xff;
 		payload[2] = (_stream_id >> 16) & 0xff;
 		payload[3] = (_stream_id >> 24) & 0xff;
-		std::memcpy (payload.data () + 4, scratch.data (), pcm_bytes);
+		const auto tp_u = static_cast<std::uint64_t> (transport_pos);
+		payload[4]  = (tp_u      ) & 0xff;
+		payload[5]  = (tp_u >> 8 ) & 0xff;
+		payload[6]  = (tp_u >> 16) & 0xff;
+		payload[7]  = (tp_u >> 24) & 0xff;
+		payload[8]  = (tp_u >> 32) & 0xff;
+		payload[9]  = (tp_u >> 40) & 0xff;
+		payload[10] = (tp_u >> 48) & 0xff;
+		payload[11] = (tp_u >> 56) & 0xff;
+		std::memcpy (payload.data () + 12, scratch.data (), pcm_bytes);
 
 		_shim.ipc ().send (foyer_ipc::FrameKind::Audio, payload);
 		_samples_sent.fetch_add (got, std::memory_order_relaxed);

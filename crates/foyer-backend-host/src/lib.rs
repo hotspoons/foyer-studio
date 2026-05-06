@@ -66,6 +66,10 @@ impl Backend for HostBackend {
         self.client.cached_sample_rate()
     }
 
+    fn transport_position_samples(&self) -> u64 {
+        self.client.cached_position_samples()
+    }
+
     async fn snapshot(&self) -> Result<Session, BackendError> {
         self.client
             .request_snapshot()
@@ -734,19 +738,29 @@ impl Backend for HostBackend {
         region_id: EntityId,
         samples_per_peak: u32,
     ) -> Result<WaveformPeaks, BackendError> {
-        // If the shim fed us a `source_path` for this region, decode the
-        // file with symphonia and decimate to the requested tier. The
-        // cache lookup is populated by the reader task as it sees
-        // `RegionsList` / `RegionUpdated` events — so a `load_waveform`
-        // call for a region the client hasn't listed yet falls through
-        // to the placeholder, which is fine.
-        if let Some(region) = self.client.region_by_id(&region_id).await {
+        // Symphonia decoding is CPU-bound: parsing RIFF/MP4 headers
+        // and running the codec executes synchronously and routinely
+        // burns 100s of ms on a real take. Running it on the same
+        // tokio worker that drives the audio encode loop and the
+        // shim IPC reader starves both — when the user scroll-zooms
+        // a timeline, the resulting flurry of `list_waveform`
+        // requests blocks the executor long enough that the
+        // browser's audio-frame idle watchdog trips, then the
+        // listener's `open_egress` reconnect can't get through
+        // either (`/ws/audio/<id> requested but hub has no such
+        // stream after 6 s wait`). Move every symphonia call to the
+        // blocking pool so the async runtime stays responsive.
+        let region = self.client.region_by_id(&region_id).await;
+        if let Some(region) = region {
             if !region.source_segments.is_empty() {
-                match waveform::decode_peaks_merged(
-                    &region.source_segments,
-                    region_id.clone(),
-                    samples_per_peak,
-                ) {
+                let segments = region.source_segments.clone();
+                let region_id_for_decode = region_id.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    waveform::decode_peaks_merged(&segments, region_id_for_decode, samples_per_peak)
+                })
+                .await
+                .map_err(|e| BackendError::Other(format!("blocking pool: {e}")))?;
+                match result {
                     Ok(peaks) => return Ok(peaks),
                     Err(e) => {
                         tracing::warn!(
@@ -757,17 +771,26 @@ impl Backend for HostBackend {
                 }
             }
             if let Some(path) = region.source_path.as_deref() {
-                match waveform::decode_peaks(
-                    std::path::Path::new(path),
-                    region_id.clone(),
-                    samples_per_peak,
-                    region.source_offset_samples.unwrap_or(0),
-                    region.length_samples,
-                ) {
+                let path = std::path::PathBuf::from(path);
+                let region_id_for_decode = region_id.clone();
+                let source_offset = region.source_offset_samples.unwrap_or(0);
+                let length_samples = region.length_samples;
+                let result = tokio::task::spawn_blocking(move || {
+                    waveform::decode_peaks(
+                        &path,
+                        region_id_for_decode,
+                        samples_per_peak,
+                        source_offset,
+                        length_samples,
+                    )
+                })
+                .await
+                .map_err(|e| BackendError::Other(format!("blocking pool: {e}")))?;
+                match result {
                     Ok(peaks) => return Ok(peaks),
                     Err(e) => {
                         tracing::warn!(
-                            "symphonia decode failed for {region_id:?} ({path}): {e} — \
+                            "symphonia decode failed for {region_id:?}: {e} — \
                              falling back to synthesized peaks"
                         );
                     }

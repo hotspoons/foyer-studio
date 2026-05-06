@@ -95,6 +95,16 @@ struct Shared {
     /// and peak-cache decisions). Defaults to the schema constant
     /// until the first snapshot arrives.
     sample_rate: std::sync::atomic::AtomicU32,
+    /// Latest `transport.position` value the shim has reported — in
+    /// samples, mirrored off the control plane's tick stream. Read
+    /// from `HostBackend::transport_position_samples()` so the audio
+    /// egress encoder can stamp each outbound frame with timecode the
+    /// browser uses to align playhead-to-stream. Stored as `u64`;
+    /// updates lag the engine by one tick (~30 ms typical) which is
+    /// fine for the polled fallback path. Once the shim attaches
+    /// per-frame `transport_pos_samples` directly to `PcmFrame`, the
+    /// encoder prefers that and ignores this cache.
+    position_samples: std::sync::atomic::AtomicU64,
     /// For audio.* commands, which arrive asynchronously: a registry of in-flight
     /// requests keyed by stream_id, resolved when the matching event comes back.
     pending_egress: Mutex<HashMap<u32, oneshot::Sender<Result<(), ClientError>>>>,
@@ -170,6 +180,7 @@ impl HostClient {
             out_tx,
             events: events_tx,
             sample_rate: std::sync::atomic::AtomicU32::new(foyer_schema::DEFAULT_SAMPLE_RATE),
+            position_samples: std::sync::atomic::AtomicU64::new(0),
             pending_egress: Mutex::new(HashMap::new()),
             pending_ingress: Mutex::new(HashMap::new()),
             pending_latency: Mutex::new(HashMap::new()),
@@ -237,6 +248,16 @@ impl HostClient {
     pub fn cached_sample_rate(&self) -> u32 {
         self.shared
             .sample_rate
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Latest known `transport.position` in samples. Updated whenever
+    /// the reader task observes a `ControlUpdate` with the
+    /// `transport.position` id, or when a fresh `SessionSnapshot`
+    /// lands. Returns 0 before the first observation.
+    pub fn cached_position_samples(&self) -> u64 {
+        self.shared
+            .position_samples
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -357,7 +378,12 @@ impl HostClient {
         tokio::spawn(async move {
             while let Some(frame) = rx_pcm.recv().await {
                 let bytes = f32_to_le_bytes(&frame.samples);
-                let payload = pack_audio(frame.stream_id, &bytes);
+                // Ingress (browser → DAW) doesn't have a meaningful
+                // transport position to attach — the browser is
+                // generating samples that haven't entered the
+                // engine timeline yet. Pass `None` so the sentinel
+                // is encoded.
+                let payload = pack_audio(frame.stream_id, frame.transport_pos_samples, &bytes);
                 if out_tx
                     .send(WriteItem::Audio(frame.stream_id, payload))
                     .await
@@ -988,17 +1014,47 @@ where
                 handle_incoming(&shared, env).await;
             }
             FrameKind::Audio => {
-                if let Some((stream_id, pcm_bytes)) = unpack_audio(&frame.payload) {
+                if let Some((stream_id, transport_pos, pcm_bytes)) = unpack_audio(&frame.payload) {
                     let samples = le_bytes_to_f32(pcm_bytes);
                     if let Some(AudioRoute::Egress(tx)) =
                         shared.audio_routes.lock().await.get(&stream_id)
                     {
-                        let _ = tx.send(PcmFrame { stream_id, samples }).await;
+                        // `transport_pos = Some(_)` when the shim
+                        // attached a sample-accurate position;
+                        // `None` (sentinel `-1`) when it didn't and
+                        // the egress encoder will fall back to the
+                        // polled cache.
+                        let _ = tx
+                            .send(PcmFrame {
+                                stream_id,
+                                samples,
+                                transport_pos_samples: transport_pos,
+                            })
+                            .await;
                     }
                 }
             }
         }
     }
+}
+
+/// Mirror a `transport.position` ControlUpdate into the shared
+/// position cache so `HostBackend::transport_position_samples()`
+/// returns it without an extra snapshot round-trip. Silently
+/// ignores other ids and non-float values.
+fn cache_position_from_update(shared: &Arc<Shared>, update: &foyer_schema::ControlUpdate) {
+    if update.id.as_str() != "transport.position" {
+        return;
+    }
+    let foyer_schema::ControlValue::Float(p) = update.value else {
+        return;
+    };
+    if !p.is_finite() || p < 0.0 {
+        return;
+    }
+    shared
+        .position_samples
+        .store(p as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
 async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
@@ -1013,9 +1069,26 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     shared
                         .sample_rate
                         .store(session.sample_rate, std::sync::atomic::Ordering::Relaxed);
+                    if let foyer_schema::ControlValue::Float(p) =
+                        session.transport.position_beats.value
+                    {
+                        if p.is_finite() && p >= 0.0 {
+                            shared
+                                .position_samples
+                                .store(p as u64, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                     let waiters = std::mem::take(&mut *shared.pending_snapshot.lock().await);
                     for w in waiters {
                         let _ = w.send((**session).clone());
+                    }
+                }
+                Event::ControlUpdate { update } => {
+                    cache_position_from_update(shared, update);
+                }
+                Event::MeterBatch { values } => {
+                    for u in values {
+                        cache_position_from_update(shared, u);
                     }
                 }
                 Event::AudioEgressStarted { stream_id } => {

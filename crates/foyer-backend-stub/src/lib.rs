@@ -217,6 +217,20 @@ impl Backend for StubBackend {
         self.sample_rate.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    fn transport_position_samples(&self) -> u64 {
+        // Read the latest position the meter tick wrote into
+        // `transport.position_beats` — same value the WS layer would
+        // ship as a `ControlUpdate`. Try-lock so this stays a hot,
+        // sync read; if the meter tick is mid-update we just return 0
+        // for one frame (sub-millisecond latency miss, inaudible).
+        // Stored as a Float in `position_beats` despite the name —
+        // see `state.rs::tick_meters`.
+        if let Ok(state) = self.state.try_lock() {
+            return state.position_samples_now().unwrap_or_default();
+        }
+        0
+    }
+
     async fn snapshot(&self) -> Result<Session, BackendError> {
         Ok(self.state.lock().await.session_clone())
     }
@@ -291,7 +305,11 @@ impl Backend for StubBackend {
                         samples.push(s);
                     }
                 }
-                if tx.send(PcmFrame { stream_id, samples }).await.is_err() {
+                if tx
+                    .send(PcmFrame::untimed(stream_id, samples))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -1004,12 +1022,7 @@ mod tests {
             )
             .await
             .unwrap();
-        tx.send(PcmFrame {
-            stream_id: 2,
-            samples: vec![0.1; 64],
-        })
-        .await
-        .unwrap();
+        tx.send(PcmFrame::untimed(2, vec![0.1; 64])).await.unwrap();
         // wait a scheduling beat
         tokio::time::sleep(Duration::from_millis(50)).await;
         drop(tx);

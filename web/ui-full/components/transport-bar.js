@@ -231,6 +231,24 @@ export class TransportBar extends LitElement {
     // Repaint when RBAC state changes so gated buttons appear /
     // disappear when the user logs in.
     this._offRbac = onRbacChange(() => this.requestUpdate());
+    // The audio-derived playhead is a function of wall-clock time
+    // (it interpolates from the most-recent audio frame's stamped
+    // position). Without a tick, the bar would only repaint on
+    // control updates (~30 Hz) and the audio-derived part would
+    // visibly stutter. Tie a requestAnimationFrame loop to the
+    // component's lifetime — cheap (one requestUpdate per frame
+    // when transport is playing, gated to no-op when stopped).
+    const tick = () => {
+      this._rafHandle = requestAnimationFrame(tick);
+      // Only repaint when transport is reportedly playing AND we
+      // have an audio clock available — otherwise the rAF tick is
+      // wasted work since the position won't change between
+      // control updates.
+      const playing = !!window.__foyer?.store?.state?.controls?.get("transport.playing");
+      const haveAudio = !!window.__foyer?.audioClock?.snapshot()?.hasAudioClock;
+      if (playing && haveAudio) this.requestUpdate();
+    };
+    this._rafHandle = requestAnimationFrame(tick);
     // Repaint when the host assigns / unassigns this browser as the
     // source for a track — that drives the mic button's visibility.
     this._onSourceChange = () => this.requestUpdate();
@@ -245,6 +263,10 @@ export class TransportBar extends LitElement {
     store?.removeEventListener("peers", this._onSourceChange);
     store?.removeEventListener("greeting", this._onSourceChange);
     this._offRbac?.();
+    if (this._rafHandle) {
+      cancelAnimationFrame(this._rafHandle);
+      this._rafHandle = null;
+    }
     super.disconnectedCallback();
   }
 
@@ -264,6 +286,23 @@ export class TransportBar extends LitElement {
   }
 
   /**
+   * Best-known displayed playhead in samples.
+   *
+   * Prefers the audio-derived clock when one is available — that's
+   * the value that matches what the user is hearing through the
+   * speakers, instead of the control-plane position which races
+   * ahead by the audio-pipeline latency. Falls back to the
+   * control-plane value when the audio path isn't running (Listen
+   * off, no master tap installed, shim doesn't attach transport
+   * timecode, etc). See web/core/audio/audio-clock.js.
+   */
+  _displayedPositionSamples() {
+    const audio = globalThis.__foyer?.audioClock?.derivedPositionSamples?.();
+    if (Number.isFinite(audio) && audio != null) return audio;
+    return Number(this._posCtl?.value || 0);
+  }
+
+  /**
    * Format the current playhead as M:SS.mmm (or H:MM:SS.mmm for sessions
    * over an hour long). Reads transport.position (samples) and the
    * session's sample rate from `session.sample_rate` (typed schema
@@ -271,7 +310,7 @@ export class TransportBar extends LitElement {
    * for older payloads.
    */
   _formatClockTime() {
-    const samples = Number(this._posCtl?.value || 0);
+    const samples = this._displayedPositionSamples();
     const sr = Number(
       window.__foyer?.store?.state?.session?.sample_rate
         || window.__foyer?.store?.state?.session?.meta?.sample_rate
@@ -297,7 +336,7 @@ export class TransportBar extends LitElement {
    * microticks. Returns "—" when the inputs aren't valid yet.
    */
   _formatBarBeat() {
-    const samples = Number(this._posCtl?.value || 0);
+    const samples = this._displayedPositionSamples();
     const sr = Number(
       window.__foyer?.store?.state?.session?.sample_rate
         || window.__foyer?.store?.state?.session?.meta?.sample_rate

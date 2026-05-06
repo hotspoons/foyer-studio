@@ -55,10 +55,36 @@ pub enum BackendError {
 }
 
 /// A PCM audio frame in the host's native format, interleaved.
+///
+/// `transport_pos_samples` carries the engine's transport position
+/// (samples since session start) at the moment the **first sample**
+/// of this frame was captured. `None` is permitted: shims that don't
+/// yet attach it leave it unset and the sidecar falls back to polling
+/// `Backend::transport_position_samples()` at encode time. Sample-
+/// accurate values from the shim are preferred when available because
+/// they let the browser align its displayed playhead to the audio
+/// stream rather than racing ahead of it. See
+/// `crates/foyer-server/src/audio.rs` for how this is forwarded into
+/// the `/ws/audio/:stream_id` wire frame header.
 #[derive(Debug, Clone)]
 pub struct PcmFrame {
     pub stream_id: u32,
     pub samples: Vec<f32>,
+    pub transport_pos_samples: Option<u64>,
+}
+
+impl PcmFrame {
+    /// Construct a frame with no transport position attached. The
+    /// vast majority of producers (test tones, fallbacks) have no
+    /// way to know the engine's position; encoders fall back to a
+    /// polled value.
+    pub fn untimed(stream_id: u32, samples: Vec<f32>) -> Self {
+        Self {
+            stream_id,
+            samples,
+            transport_pos_samples: None,
+        }
+    }
 }
 
 /// Receiver half used for egress streams (backend → sidecar).
@@ -100,6 +126,28 @@ pub trait Backend: Send + Sync + 'static {
     /// loop ranges) should read this instead of hard-coding 48k.
     fn sample_rate(&self) -> u32 {
         foyer_schema::DEFAULT_SAMPLE_RATE
+    }
+
+    /// Best-effort current transport position in audio samples (at
+    /// `sample_rate()`), measured from session start. Used by the
+    /// audio egress path to stamp outbound frames with timecode the
+    /// browser can use to align its displayed playhead with the
+    /// audio stream — without this, the playhead races ahead by the
+    /// full encode + transport + jitter-buffer + worklet latency
+    /// chain (typically 200–400 ms) because the control-plane
+    /// `transport.position` echo arrives well before the audio
+    /// frames it nominally describes.
+    ///
+    /// This is the FALLBACK path. Backends that get sample-accurate
+    /// position from the engine should attach it directly to each
+    /// `PcmFrame.transport_pos_samples`; the encoder prefers that
+    /// over the polled value because the polled value is only
+    /// process-rate-accurate (~10 ms drift on a 100 Hz tick).
+    /// Default returns 0 — fine for backends without transport
+    /// state (the browser then falls back to control-plane
+    /// position, which is what older shims give us anyway).
+    fn transport_position_samples(&self) -> u64 {
+        0
     }
 
     async fn snapshot(&self) -> Result<Session, BackendError>;

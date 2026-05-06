@@ -324,7 +324,7 @@ async fn probe_audio_egress(state: Arc<AppState>) -> Result<String, String> {
         .spawn_test_tone_source(fmt, Duration::from_millis(300));
     state
         .audio_hub
-        .open_stream(stream_id, AudioSource::Master, fmt, 48_000, rx)
+        .open_stream(stream_id, AudioSource::Master, fmt, 48_000, rx, None)
         .await
         .map_err(|e| format!("open: {e}"))?;
 

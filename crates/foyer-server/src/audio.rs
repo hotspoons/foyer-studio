@@ -32,11 +32,37 @@
 //! `HostBackend::open_egress` stream.
 //!
 //! The wire framing on `/ws/audio/:stream_id` is:
-//!   ┌────────────────┬────────────────────┬─────────────────┐
-//!   │ u32 big-endian │ u64 big-endian     │ opus payload    │
-//!   │ stream_id      │ capture timestamp  │ (variable size) │
-//!   │                │ (microseconds)     │                 │
-//!   └────────────────┴────────────────────┴─────────────────┘
+//!
+//! ```text
+//!   ┌────────────────┬──────────────────┬──────────────────┬─────────────────┬─────────────────┐
+//!   │ u32 big-endian │ u64 big-endian   │ i64 big-endian   │ u64 big-endian  │ opus payload    │
+//!   │ stream_id      │ capture ts (µs   │ transport_pos    │ server monotonic│ (variable size) │
+//!   │                │ Unix epoch)      │ samples (-1=N/A) │ ns at capture   │                 │
+//!   └────────────────┴──────────────────┴──────────────────┴─────────────────┴─────────────────┘
+//! ```
+//!
+//! Header: 28 bytes (4 + 8 + 8 + 8). All consumers ship from this
+//! repo so there's no back-compat ceremony — when the wire shape
+//! has to change again we'll bump the bundled `web/` and the
+//! sidecar in lockstep.
+//!
+//! `transport_pos_samples`: the engine's transport position (in
+//! audio samples since session start) at the moment the FIRST sample
+//! of this frame was captured. Negative (`-1`) means "not available"
+//! — the backend doesn't expose transport state, or the shim hasn't
+//! attached per-frame timing yet. The browser uses this to align its
+//! displayed playhead to the audio stream rather than racing ahead
+//! of it: the playhead becomes the captured position of whichever
+//! frame is currently coming out of the speaker, plus the elapsed
+//! wall-clock interval since that frame's playout time.
+//!
+//! `server_mono_ns`: the sidecar's monotonic clock at the same
+//! moment. Combined with the client's `Command::ClockProbe` /
+//! `Event::ClockProbeReply` exchange, the browser can convert
+//! between server monotonic and its own `performance.now()` — used
+//! for the audio-derived playhead's per-frame playout-time
+//! computation, for buffer-fill drift correction, and for the idle-
+//! drift watchdog.
 //!
 //! Browser side reads `stream_id`, feeds `timestamp` to WebCodecs
 //! (`EncodedAudioChunk.timestamp`), decodes via `AudioDecoder`, pumps
@@ -52,6 +78,11 @@ use tokio::task::JoinHandle;
 
 use crate::audio_opus::{encoded_chunk_frame_size, OpusFrameEncoder};
 
+/// Header size in bytes: u32 stream_id + u64 timestamp + i64
+/// transport_pos + u64 server_mono = 28. See module docs for the
+/// field layout.
+pub const AUDIO_WIRE_HEADER_BYTES: usize = 4 + 8 + 8 + 8;
+
 /// One Opus-encoded packet, ready to send to WS subscribers.
 #[derive(Debug, Clone)]
 pub struct EncodedPacket {
@@ -61,6 +92,14 @@ pub struct EncodedPacket {
     /// media clock — drift is dealt with by the AudioWorklet's jitter
     /// buffer, not here.
     pub timestamp_us: u64,
+    /// Engine transport position in samples at capture time, or
+    /// `None` when the backend can't supply one. Encoded on the wire
+    /// as `i64` with `-1` representing `None`.
+    pub transport_pos_samples: Option<u64>,
+    /// Sidecar monotonic clock at capture, in nanoseconds since
+    /// process start. Paired with the client's clock-probe-derived
+    /// offset to compute drift.
+    pub server_mono_ns: u64,
     pub opus: Vec<u8>,
 }
 
@@ -73,6 +112,14 @@ pub struct StreamState {
     /// Encode task — dropping the hub handle drops this, which
     /// triggers the mpsc close + encode_loop exit.
     encode_task: JoinHandle<()>,
+    /// Drift-control channel into the encoder. The browser sends
+    /// `AudioBufferReport` at 1 Hz; the WS dispatch turns those
+    /// into a target buffer-level error and forwards the resulting
+    /// ppm-nudge through this sender. The encoder consumes nudges
+    /// non-blockingly between input frames. `None` when the stream
+    /// has no resampler attached (matched rates) — drift correction
+    /// is unnecessary in that case.
+    drift_tx: Option<mpsc::Sender<f64>>,
 }
 
 /// Sidecar-owned registry of live egress streams. One `AudioHub` per
@@ -109,6 +156,16 @@ impl AudioHub {
         format: AudioFormat,
         pcm_source_rate: u32,
         mut pcm_rx: mpsc::Receiver<foyer_backend::PcmFrame>,
+        // Backend reference for polling transport position when the
+        // incoming `PcmFrame.transport_pos_samples` is `None` (the
+        // common case until shims attach per-frame timing). `Weak`
+        // so the encode loop doesn't pin the backend across a
+        // backend swap. The encoder runs the polled value through
+        // a per-chunk frame-count adjustment so the position
+        // attached to chunk N reflects "first sample of chunk N",
+        // not "now"; both forms are documented at the top of this
+        // module.
+        backend: Option<std::sync::Weak<dyn foyer_backend::Backend>>,
     ) -> Result<broadcast::Sender<EncodedPacket>, String> {
         let mut streams = self.streams.lock().await;
         if streams.contains_key(&stream_id) {
@@ -155,6 +212,17 @@ impl AudioHub {
         let (tx, _) = broadcast::channel(self.broadcast_depth);
         let tx_for_task = tx.clone();
         let codec = format.codec;
+        // Drift-correction channel — populated only when there's a
+        // resampler to nudge. Bounded queue so a slow encoder
+        // can't get spammed by a fast feedback loop. Bursts > 8
+        // unread nudges drop the oldest (try_send + warn); the
+        // controller reapplies the latest signal next tick.
+        let (drift_tx, mut drift_rx) = mpsc::channel::<f64>(8);
+        let drift_handle = if egress_resampler.is_some() {
+            Some(drift_tx)
+        } else {
+            None
+        };
 
         // Encode loop: batch incoming PCM into `frame_size`-sample
         // chunks, encode (or repack verbatim for RawF32Le), broadcast.
@@ -165,8 +233,52 @@ impl AudioHub {
             let channels = format.channels as usize;
             let samples_per_frame = frame_size * channels;
             let mut pending: Vec<f32> = Vec::with_capacity(samples_per_frame * 2);
+            // Per-input-frame position. Set fresh for every input
+            // PcmFrame; all output chunks drained from one input
+            // frame share the same value. Don't advance it
+            // mid-input — a polled value represents the engine's
+            // CURRENT state, not a sample-rate progression, and
+            // advancing produced visible bouncing-at-rest when the
+            // shim sent multi-chunk-sized PcmFrames (one polled
+            // read of e.g. 240000 → emit 240000 → 240960 → 241920
+            // for three drained chunks → next input frame resets to
+            // 240000 → bounce). When a sample-accurate shim
+            // attaches `transport_pos_samples` to each PcmFrame,
+            // the per-frame anchor is what we want to use anyway —
+            // sub-input-frame chunks share it because they're all
+            // from the same capture moment.
+            let mut transport_anchor: Option<u64> = None;
             let mut chunks_seen: u64 = 0;
             while let Some(frame) = pcm_rx.recv().await {
+                // Drain any pending drift nudges between input
+                // frames — non-blocking so the audio path stays
+                // hot. Nudges are cumulative on the resampler;
+                // applying them here means the feedback loop
+                // converges between input frames rather than
+                // racing inside one.
+                while let Ok(delta_ppm) = drift_rx.try_recv() {
+                    if let Some(ref mut r) = resampler {
+                        let _ = r.nudge_ratio_relative(delta_ppm);
+                    }
+                }
+                if let Some(p) = frame.transport_pos_samples {
+                    transport_anchor = Some(p);
+                } else if let Some(weak) = backend.as_ref() {
+                    if let Some(b) = weak.upgrade() {
+                        let polled = b.transport_position_samples();
+                        // Treat 0 as "not yet seeded" rather than a
+                        // real position — the host backend's cache
+                        // defaults to 0 before any ControlUpdate
+                        // lands, and a frame that says "engine is
+                        // at sample 0" early in a session would
+                        // make the browser's playhead jerk back to
+                        // the start. Carry over the previous anchor
+                        // until we see a real value.
+                        if polled > 0 {
+                            transport_anchor = Some(polled);
+                        }
+                    }
+                }
                 let chunk = if let Some(ref mut r) = resampler {
                     match r.push(&frame.samples) {
                         Ok(v) => v,
@@ -239,6 +351,8 @@ impl AudioHub {
                     let pkt = EncodedPacket {
                         stream_id,
                         timestamp_us: epoch_micros(),
+                        transport_pos_samples: transport_anchor,
+                        server_mono_ns: monotonic_nanos(),
                         opus: payload,
                     };
                     let _ = tx_for_task.send(pkt);
@@ -254,9 +368,39 @@ impl AudioHub {
                 format,
                 packets: tx.clone(),
                 encode_task,
+                drift_tx: drift_handle,
             }),
         );
         Ok(tx)
+    }
+
+    /// Forward a drift-correction nudge to the named stream's
+    /// encoder. Cheap: the channel is bounded, sends are
+    /// non-blocking, and missed nudges are fine — the controller
+    /// fires every second and reapplies. Returns `false` when the
+    /// stream isn't open or has no resampler attached.
+    pub async fn nudge_stream_ratio(&self, stream_id: u32, delta_ppm: f64) -> bool {
+        let streams = self.streams.lock().await;
+        let Some(s) = streams.get(&stream_id) else {
+            return false;
+        };
+        let Some(ref tx) = s.drift_tx else {
+            // Same-rate path — no resampler, no ratio to nudge.
+            // Browser's adaptive controller will see the buffer
+            // hold steady (or drift naturally) and stop sending
+            // signals after its own deadband kicks in.
+            return false;
+        };
+        match tx.try_send(delta_ppm) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::debug!(
+                    "drift-ctl queue full on stream {stream_id}; encoder will catch up next tick"
+                );
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
     }
 
     /// Close a stream. Cancels the encode task; WS subscribers get
@@ -341,10 +485,7 @@ impl AudioHub {
                         samples.push(s * gain);
                     }
                 }
-                let pcm = foyer_backend::PcmFrame {
-                    stream_id: 0,
-                    samples,
-                };
+                let pcm = foyer_backend::PcmFrame::untimed(0, samples);
                 if tx.send(pcm).await.is_err() {
                     break;
                 }
@@ -370,11 +511,32 @@ fn epoch_micros() -> u64 {
 /// Serialize an `EncodedPacket` into the binary wire format documented
 /// at the top of this file. Used by the WS audio handler.
 pub fn pack_wire(packet: &EncodedPacket) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12 + packet.opus.len());
+    let mut out = Vec::with_capacity(AUDIO_WIRE_HEADER_BYTES + packet.opus.len());
     out.extend_from_slice(&packet.stream_id.to_be_bytes());
     out.extend_from_slice(&packet.timestamp_us.to_be_bytes());
+    let transport_signed: i64 = match packet.transport_pos_samples {
+        Some(p) if p <= i64::MAX as u64 => p as i64,
+        // Out of range or unknown → -1 sentinel. Sample positions
+        // wrapping past 2^63 imply >2 million years at 192 kHz, so
+        // this is purely a defensive cap rather than a realistic
+        // failure mode.
+        _ => -1,
+    };
+    out.extend_from_slice(&transport_signed.to_be_bytes());
+    out.extend_from_slice(&packet.server_mono_ns.to_be_bytes());
     out.extend_from_slice(&packet.opus);
     out
+}
+
+/// Sidecar monotonic clock in nanoseconds since process start. Used
+/// to stamp outbound audio frames; the browser converts to its own
+/// `performance.now()` clock via the offset measured by the periodic
+/// clock-probe exchange.
+pub fn monotonic_nanos() -> u64 {
+    use std::sync::OnceLock;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = EPOCH.get_or_init(Instant::now);
+    Instant::now().saturating_duration_since(*epoch).as_nanos() as u64
 }
 
 #[cfg(test)]
@@ -382,17 +544,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wire_roundtrip() {
+    fn wire_roundtrip_with_transport() {
         let pkt = EncodedPacket {
             stream_id: 42,
             timestamp_us: 0xdeadbeefcafe,
+            transport_pos_samples: Some(96_000),
+            server_mono_ns: 1_234_567_890,
             opus: vec![1, 2, 3, 4, 5],
         };
         let bytes = pack_wire(&pkt);
-        assert_eq!(bytes.len(), 12 + 5);
+        assert_eq!(bytes.len(), AUDIO_WIRE_HEADER_BYTES + 5);
         assert_eq!(&bytes[..4], &42u32.to_be_bytes());
         assert_eq!(&bytes[4..12], &0xdeadbeefcafe_u64.to_be_bytes());
-        assert_eq!(&bytes[12..], &[1u8, 2, 3, 4, 5]);
+        assert_eq!(&bytes[12..20], &96_000_i64.to_be_bytes());
+        assert_eq!(&bytes[20..28], &1_234_567_890_u64.to_be_bytes());
+        assert_eq!(&bytes[28..], &[1u8, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn wire_encodes_unknown_transport_as_minus_one() {
+        let pkt = EncodedPacket {
+            stream_id: 1,
+            timestamp_us: 0,
+            transport_pos_samples: None,
+            server_mono_ns: 0,
+            opus: vec![],
+        };
+        let bytes = pack_wire(&pkt);
+        let mut tp = [0u8; 8];
+        tp.copy_from_slice(&bytes[12..20]);
+        assert_eq!(i64::from_be_bytes(tp), -1);
     }
 
     #[tokio::test]
@@ -401,7 +582,7 @@ mod tests {
         let fmt = AudioFormat::new(48_000, 2, 128);
         let (_tx, rx) = mpsc::channel(4);
         let bcast = hub
-            .open_stream(7, AudioSource::Master, fmt, 48_000, rx)
+            .open_stream(7, AudioSource::Master, fmt, 48_000, rx, None)
             .await
             .expect("open");
         assert!(bcast.receiver_count() == 0);

@@ -55,22 +55,35 @@ pub fn decode_control(buf: &[u8]) -> Result<Envelope<Control>, rmp_serde::decode
     rmp_serde::from_slice(buf)
 }
 
-/// Pack an audio PCM payload into the inner audio-frame body layout
-/// (`[stream_id u32 LE][pcm bytes]`).
-pub fn pack_audio(stream_id: u32, pcm: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + pcm.len());
+/// Pack an audio frame body:
+/// `[stream_id u32 LE][transport_pos i64 LE][pcm bytes]`.
+/// `transport_pos = None` encodes the `-1` sentinel meaning
+/// "engine didn't supply one this callback" — the sidecar then
+/// falls back to its polled transport-position cache.
+pub fn pack_audio(stream_id: u32, transport_pos: Option<u64>, pcm: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + pcm.len());
     out.extend_from_slice(&stream_id.to_le_bytes());
+    let tp: i64 = match transport_pos {
+        Some(p) if p <= i64::MAX as u64 => p as i64,
+        _ => -1,
+    };
+    out.extend_from_slice(&tp.to_le_bytes());
     out.extend_from_slice(pcm);
     out
 }
 
-/// Unpack an audio-frame body into (stream_id, pcm bytes).
-pub fn unpack_audio(body: &[u8]) -> Option<(u32, &[u8])> {
-    if body.len() < 4 {
+/// Unpack an audio body into (stream_id, transport_pos, pcm bytes).
+/// `transport_pos = None` if the producer encoded the `-1` sentinel.
+pub fn unpack_audio(body: &[u8]) -> Option<(u32, Option<u64>, &[u8])> {
+    if body.len() < 12 {
         return None;
     }
     let sid = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-    Some((sid, &body[4..]))
+    let tp = i64::from_le_bytes([
+        body[4], body[5], body[6], body[7], body[8], body[9], body[10], body[11],
+    ]);
+    let transport = if tp < 0 { None } else { Some(tp as u64) };
+    Some((sid, transport, &body[12..]))
 }
 
 #[cfg(test)]
@@ -113,7 +126,7 @@ mod tests {
     #[tokio::test]
     async fn audio_frame_round_trip() {
         let pcm: Vec<u8> = (0..256).map(|i| (i & 0xff) as u8).collect();
-        let body = pack_audio(42, &pcm);
+        let body = pack_audio(42, Some(96_000), &pcm);
         let frame = Frame {
             kind: FrameKind::Audio,
             payload: body,
@@ -125,9 +138,18 @@ mod tests {
         let mut rx = duplex(buf);
         let got = read_frame(&mut rx).await.unwrap().unwrap();
         assert_eq!(got.kind, FrameKind::Audio);
-        let (sid, pcm_back) = unpack_audio(&got.payload).unwrap();
+        let (sid, tp, pcm_back) = unpack_audio(&got.payload).unwrap();
         assert_eq!(sid, 42);
+        assert_eq!(tp, Some(96_000));
         assert_eq!(pcm_back, &pcm[..]);
+    }
+
+    #[tokio::test]
+    async fn audio_frame_unstamped_sentinel() {
+        let pcm: Vec<u8> = (0..16).map(|i| (i & 0xff) as u8).collect();
+        let body = pack_audio(7, None, &pcm);
+        let (_, tp, _) = unpack_audio(&body).unwrap();
+        assert_eq!(tp, None);
     }
 
     #[tokio::test]

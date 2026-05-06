@@ -23,12 +23,14 @@ mod cloudflared_dl;
 mod dev;
 mod files;
 mod import_audio;
+mod ingress_latency;
 mod ingress_ws;
 mod jail;
 pub mod orphans;
 mod plugin_gui_ws;
 mod recents;
 mod ring;
+pub mod session_recovery;
 mod session_scrub;
 mod sessions;
 mod tunnel;
@@ -74,6 +76,11 @@ pub trait BackendSpawner: Send + Sync + 'static {
     /// Build a new backend. `project_path` is jail-relative (or absolute
     /// — the spawner decides how to resolve it). `sample_rate` is an optional
     /// hint for stub launches / demos; Ardour ignores it today.
+    /// Crash-recovery artifacts in the project directory are
+    /// expected to have been archived by the WS layer (see
+    /// [`crate::session_recovery`]) before this is called — the
+    /// spawner can assume the directory is in a state Ardour will
+    /// open without popping its native recovery modal.
     async fn launch(
         &self,
         backend_id: &str,
@@ -203,6 +210,13 @@ pub(crate) struct IngressSink {
     pub client_sample_rate: u32,
     pub engine_sample_rate: u32,
     pub channels: u16,
+    /// Engine-level port name the backend allocated for this
+    /// stream (e.g. `ardour:foyer-ingress-browser-123`). Used to
+    /// resolve `Command::SetTrackInput { port_name }` back to a
+    /// `stream_id` so we can record which track a take is
+    /// flowing into. The recorded mapping drives auto-stamping
+    /// of `Region.ingress_latency_ms` at take-commit time.
+    pub port_name: Option<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -277,6 +291,37 @@ pub(crate) struct AppState {
     /// (on `AudioIngressClose` or server restart) closes the channel
     /// and the backend tears the sink down from its side.
     pub(crate) ingress_senders: Mutex<HashMap<u32, IngressSink>>,
+    /// Per-stream ingress latency samples. The ingress WS handler
+    /// records `(server_recv_mono_ns - client_send_mono_ns)` from
+    /// each binary frame's header (after subtracting the
+    /// most-recent clock-probe offset). Recording-finalize reads
+    /// the median to stamp the resulting region with
+    /// `Region.ingress_latency_ms`. See `ingress_latency.rs`.
+    pub(crate) ingress_latency: Arc<ingress_latency::IngressLatencyTracker>,
+    /// Track id → ingress stream id. Populated when a
+    /// `SetTrackInput` succeeds against a known ingress sink port,
+    /// dropped on `AudioIngressClose`. Read by the per-session
+    /// event pump to look up which stream's latency stat applies
+    /// to a freshly-committed region. Shared by Arc with the
+    /// SessionRegistry so the pumps don't need a back-reference
+    /// to AppState.
+    pub(crate) track_ingress: Arc<Mutex<HashMap<EntityId, u32>>>,
+    /// Smoothed `(client_mono_ns - server_mono_ns)` from the most-
+    /// recent `Command::ClockProbe`. Updated on every probe handle.
+    /// Stored as i64 because the offset can swing either direction
+    /// depending on which side's clock was started first. Atomic so
+    /// the ingress hot path can read without locking.
+    pub(crate) clock_offset_ns: std::sync::atomic::AtomicI64,
+    /// Per-stream integral state for the egress drift-correction
+    /// controller. Keyed by `stream_id`; each entry holds the
+    /// running sum of `(buffered - target)` errors observed so the
+    /// PI control law's I-term has memory across feedback ticks.
+    /// Populated lazily on the first `AudioBufferReport` for a
+    /// stream and dropped when the stream closes (the audio_hub's
+    /// `close_stream` doesn't touch it; the entry just lives until
+    /// next sidecar restart, which is fine because the
+    /// `nudge_stream_ratio` call short-circuits on missing streams).
+    pub(crate) drift_integral: Mutex<HashMap<u32, f64>>,
     /// In-app chat + PTT state. Decoupled from the DAW — messages and
     /// push-to-talk audio fan out purely client-to-client via the
     /// sidecar. See `chat.rs` for the wire format.
@@ -556,10 +601,14 @@ impl Server {
         let (ptt_tx, _) = broadcast::channel::<Vec<u8>>(BROADCAST_CAP);
         let ring = Arc::new(RwLock::new(DeltaRing::new(RING_CAP)));
         let next_seq = Arc::new(AtomicU64::new(1));
+        let ingress_latency = Arc::new(ingress_latency::IngressLatencyTracker::new());
+        let track_ingress = Arc::new(Mutex::new(HashMap::<EntityId, u32>::new()));
         let sessions = Arc::new(SessionRegistry::new(
             tx.clone(),
             ring.clone(),
             next_seq.clone(),
+            ingress_latency.clone(),
+            track_ingress.clone(),
         ));
         let state = Arc::new(AppState {
             cached_snapshot: RwLock::new(None),
@@ -576,6 +625,10 @@ impl Server {
             tls_enabled: std::sync::atomic::AtomicBool::new(false),
             audio_hub: Arc::new(audio::AudioHub::new()),
             ingress_senders: Mutex::new(HashMap::new()),
+            ingress_latency,
+            track_ingress,
+            clock_offset_ns: std::sync::atomic::AtomicI64::new(0),
+            drift_integral: Mutex::new(HashMap::new()),
             chat: chat::ChatState::new(),
             track_browser_sources: RwLock::new(HashMap::new()),
             ptt_tx,

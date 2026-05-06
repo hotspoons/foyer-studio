@@ -194,11 +194,38 @@ class AudioController extends EventTarget {
       // Opus entirely. Same flag the mixer used to read directly.
       const params = new URLSearchParams(location.search);
       const codec = params.get("audio_codec") || "opus";
+      // Pull the audio-clock + clock-sync singletons off
+      // window.__foyer (set by bootstrap.js). Audio listener uses
+      // them to feed per-frame timing into the audio-derived
+      // playhead and to convert server monotonic timestamps onto
+      // the local performance.now() timeline.
+      const audioClock = globalThis.__foyer?.audioClock || null;
+      const clockSync = globalThis.__foyer?.clockSync || null;
       this._listener = new AudioListener({
         ws: this._ws,
         baseUrl,
         sourceKind: "master",
         codec,
+        audioClock,
+        clockSync,
+        // Idle-drift watchdog reconnect: tear down + restart this
+        // listener. The audio-clock fires this when the gap between
+        // control-derived and audio-derived position exceeds the
+        // threshold AND no audio frame has arrived in over a
+        // second — symptom of a wedged jitter buffer or a long
+        // network stall after a tab-background. Restart goes
+        // through the controller's start/stop so the user pref
+        // bookkeeping stays consistent.
+        onWatchdogReconnect: ({ driftMs, idleMs }) => {
+          console.warn(
+            `[audio-controller] watchdog reconnect — drift=${driftMs.toFixed(1)} ms idle=${idleMs.toFixed(0)} ms`,
+          );
+          this.stop({ silent: true })
+            .then(() => this.start({ silent: true }))
+            .catch((e) =>
+              console.warn("[audio-controller] watchdog restart failed:", e),
+            );
+        },
       });
       await this._listener.start();
       this._on = true;

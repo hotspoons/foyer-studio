@@ -236,7 +236,20 @@ export class AudioIngress {
     this._workletNode.port.onmessage = (ev) => {
       if (!this._audioWs || this._audioWs.readyState !== WebSocket.OPEN) return;
       const buf = ev.data;
-      this._audioWs.send(buf.buffer);
+      // Prepend the 8-byte `client_send_ms` (f64 LE) header expected
+      // by /ws/ingress/:stream_id. We stamp on the main thread at
+      // receipt of the worklet message; the queueing delay between
+      // worklet post and main-thread receipt is small (~quantum-
+      // bounded, single-digit ms) and constant across packets, so
+      // it cancels out of the median latency the server tracks.
+      // Doing it on the main thread keeps the worklet's hot-path
+      // budget free of cross-thread clock alignment math.
+      const header = new Float64Array(1);
+      header[0] = performance.now();
+      const out = new Uint8Array(8 + buf.byteLength);
+      out.set(new Uint8Array(header.buffer), 0);
+      out.set(new Uint8Array(buf.buffer), 8);
+      this._audioWs.send(out.buffer);
     };
   }
 

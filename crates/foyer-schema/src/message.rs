@@ -161,6 +161,29 @@ pub enum Event {
         code: String,
         message: String,
     },
+    /// Reply to `Command::ProbeSessionRecovery`. `artifacts` is empty
+    /// when the project has nothing to recover and the launch can
+    /// proceed silently; non-empty when the user should be prompted
+    /// to choose Recover or Ignore. The browser sets
+    /// `LaunchProject.recover_crash` from the prompt's outcome.
+    SessionRecoveryAvailable {
+        project_path: String,
+        artifacts: Vec<SessionRecoveryArtifact>,
+    },
+    /// Reply to `Command::ClockProbe`. Echoes the client's send
+    /// timestamp verbatim so the requester can compute round-trip
+    /// time, alongside the server's monotonic clock at the moment
+    /// the request was handled. The client uses
+    /// `(t_recv - t_send) / 2` as the one-way latency estimate and
+    /// `server_mono_ns - (t_send + rtt/2 in ns)` as the offset
+    /// between its `performance.now()` clock and the server's
+    /// monotonic clock — same shape as a single-bounce NTP round.
+    /// Sent as a unicast event to the requesting connection (not
+    /// broadcast); other clients should not see it.
+    ClockProbeReply {
+        client_ts_ms: f64,
+        server_mono_ns: u64,
+    },
 
     // ───── introspection responses ───────────────────────────────────────
     /// Reply to `Command::ListActions`. Clients use this to populate menus,
@@ -673,6 +696,35 @@ pub struct RecentEntry {
     pub opened_at: u64,
 }
 
+/// One Ardour crash-recovery artifact found next to a project file
+/// (`.history` = autosaved undo state, `.pending` = uncommitted dirty
+/// delta written between autosaves). The browser uses these entries
+/// to render the "Recover or Ignore" prompt before launching.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionRecoveryArtifact {
+    /// Filename relative to the project directory (e.g.
+    /// `Sessionname.history`). Display-only — the server resolves
+    /// the actual path itself when archiving.
+    pub name: String,
+    /// `"history"` or `"pending"`. The UI shows them differently
+    /// because `.pending` data is more "actually unsaved work" while
+    /// `.history` is the autosave-time snapshot.
+    pub kind: String,
+    pub size_bytes: u64,
+    /// Last-modified time in Unix epoch milliseconds. Drives the
+    /// "modified Xm ago" hint in the prompt so users can tell when
+    /// the crash actually happened.
+    pub mtime_unix_ms: u64,
+    /// `true` when the file on disk is a `.bak.<stamp>` archive
+    /// from a previous foyer sweep (no live file present). The
+    /// browser still surfaces the recovery prompt but adapts the
+    /// copy to "an earlier foyer run archived these — restore?".
+    /// On Recover, the server renames the highest-stamped bak
+    /// back to the live name before launching.
+    #[serde(default)]
+    pub archived: bool,
+}
+
 /// An orphaned session discovered on sidecar startup. Either the shim
 /// is still running but Foyer lost track of it (can reattach), or the
 /// shim's pid is dead and we have leftover registry/crash data to
@@ -696,6 +748,17 @@ pub struct OrphanInfo {
     /// dismissed) and show "N attempts" metadata.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub started_at: u64,
+    /// `true` when the project directory still has crash-recovery
+    /// artifacts on disk (live `.history` / `.pending`, or legacy
+    /// `.bak.<stamp>` clutter from earlier foyer sweeps). Drives
+    /// the welcome-screen tag: rows with `has_recovery_data=true`
+    /// keep the alarming "Crashed" label because there's
+    /// genuinely something to recover; rows where this is `false`
+    /// are stale registry leftovers from an earlier interruption
+    /// whose data has already been archived, and get the softer
+    /// "Was interrupted" label.
+    #[serde(default)]
+    pub has_recovery_data: bool,
 }
 
 fn is_zero_u64(n: &u64) -> bool {
@@ -752,6 +815,54 @@ pub enum Command {
     Subscribe,
     /// Request a fresh snapshot (resync).
     RequestSnapshot,
+    /// Probe the client↔server clock offset (NTP-style single bounce).
+    /// `client_ts_ms` is the client's `performance.now()` (or any
+    /// monotonic milliseconds clock) at send time. The server replies
+    /// immediately with `Event::ClockProbeReply { client_ts_ms,
+    /// server_mono_ns }` — `client_ts_ms` echoed verbatim so the
+    /// requester can compute RTT, `server_mono_ns` sampled at handle
+    /// time. Used by the browser to align audio-frame timecodes
+    /// (which carry `server_mono_ns` in their header) with its own
+    /// playback clock so the displayed transport position trails
+    /// the audio stream rather than racing ahead of it. Cheap;
+    /// expected to fire ~5 times on connect to seed the offset and
+    /// then once every few minutes to track drift.
+    ClockProbe {
+        client_ts_ms: f64,
+    },
+    /// Ask the sidecar whether `project_path` has Ardour crash-
+    /// recovery artifacts (`.history` / `.pending` files) that
+    /// would block a clean launch. The server replies with
+    /// `Event::SessionRecoveryAvailable`. Browser fires this
+    /// before every `LaunchProject` so the user can choose to
+    /// recover or discard the crash state instead of having
+    /// Ardour pop its native (and headless-deploy-fatal) modal.
+    ProbeSessionRecovery {
+        project_path: String,
+    },
+    /// Periodic feedback from the browser's audio listener about
+    /// the worklet jitter buffer's fill level on a given egress
+    /// stream. The sidecar's egress encoder runs a slow PI loop
+    /// against this signal and adjusts its resampler ratio (via
+    /// `foyer_audio::InterleavedResampler::nudge_ratio_relative`)
+    /// to absorb crystal skew between the engine's audio clock and
+    /// the browser's `AudioContext` clock. Without this, a long-
+    /// running session accumulates seconds of drift between the
+    /// audio stream and the DAW state — visible as the playhead
+    /// progressively falling behind.
+    ///
+    /// `buffered_samples` is the worklet ring's `available` count
+    /// at observation time; `target_samples` is the priming-target
+    /// the worklet aims for. The error `(buffered - target)`
+    /// drives the controller: positive → buffer is filling →
+    /// encoder is producing faster than client consumes → nudge
+    /// resample ratio DOWN; negative → encoder lagging → nudge UP.
+    /// Fired at 1 Hz once the audio stream is steady-state.
+    AudioBufferReport {
+        stream_id: u32,
+        buffered_samples: u32,
+        target_samples: u32,
+    },
     /// Open a named undo group. Subsequent mutations (region delete,
     /// plugin move, etc.) land in the same `UndoTransaction` until a
     /// matching `UndoGroupEnd` is received. One undo step unwinds

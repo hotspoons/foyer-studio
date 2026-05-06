@@ -670,6 +670,9 @@ fn command_tag(cmd: &Command) -> &'static str {
     match cmd {
         Command::Subscribe => "subscribe",
         Command::RequestSnapshot => "request_snapshot",
+        Command::ClockProbe { .. } => "clock_probe",
+        Command::ProbeSessionRecovery { .. } => "probe_session_recovery",
+        Command::AudioBufferReport { .. } => "audio_buffer_report",
         Command::UndoGroupBegin { .. } => "undo_group_begin",
         Command::UndoGroupEnd => "undo_group_end",
         Command::ControlSet { .. } => "control_set",
@@ -892,6 +895,118 @@ async fn dispatch_command(
                     },
                 )
                 .await;
+            }
+        }
+        Command::ClockProbe { client_ts_ms } => {
+            // NTP-style single bounce. Sample server's monotonic clock
+            // ASAP, echo the client timestamp back so the requester
+            // can compute (recv - send) / 2 as the one-way latency
+            // estimate. Reply rides the broadcast bus (cheap — tiny
+            // payload, ~5/connect) so we don't have to plumb a
+            // unicast back-channel through dispatch_command; clients
+            // filter the reply by matching the echoed `client_ts_ms`.
+            let server_mono_ns = crate::audio::monotonic_nanos();
+            // Best-effort offset cache: assume the probe round-trip
+            // is symmetric and use the simplest one-bounce estimate
+            // `client_mono - server_mono`. The browser refines its
+            // own estimate over multiple probes; the server-side
+            // cache exists so the ingress hot path has SOMETHING
+            // to subtract before the browser has finished its first
+            // probe round (otherwise the first second of a recording
+            // would have wildly wrong latency stamps). Subsequent
+            // probes overwrite this with the latest sample — no
+            // smoothing on the server side, the median latency
+            // tracker absorbs noise downstream.
+            let client_ns = (client_ts_ms * 1_000_000.0) as i64;
+            let offset_ns = client_ns.saturating_sub(server_mono_ns as i64);
+            state.clock_offset_ns.store(offset_ns, Ordering::Relaxed);
+            broadcast_event(
+                state,
+                Event::ClockProbeReply {
+                    client_ts_ms,
+                    server_mono_ns,
+                },
+            )
+            .await;
+        }
+        Command::ProbeSessionRecovery { project_path } => {
+            // Resolve `project_path` against the jail (when configured)
+            // so we read the same file Ardour will open. No jail =
+            // dev/LAN mode, treat it as already-absolute. The probe
+            // is a directory scan, no I/O over the wire and no spawn
+            // — safe to run inline.
+            let abs = match state.jail.as_ref() {
+                Some(jail) => jail.root().join(project_path.trim_start_matches('/')),
+                None => std::path::PathBuf::from(&project_path),
+            };
+            let artifacts = crate::session_recovery::probe(&abs);
+            tracing::info!(
+                "probe_session_recovery: path={} → resolved {} → {} artifact(s) found",
+                project_path,
+                abs.display(),
+                artifacts.len(),
+            );
+            broadcast_event(
+                state,
+                Event::SessionRecoveryAvailable {
+                    project_path,
+                    artifacts,
+                },
+            )
+            .await;
+        }
+        Command::AudioBufferReport {
+            stream_id,
+            buffered_samples,
+            target_samples,
+        } => {
+            // Slow PI controller against the worklet's buffer-fill
+            // signal. Goal: keep `buffered ≈ target` across long-
+            // running sessions where engine-clock vs AudioContext-
+            // clock skew (10–50 ppm) would otherwise drift the
+            // queue toward overrun or underrun. We translate
+            // observed error into a ratio nudge in ppm:
+            //
+            //   Kp = 0.2 ppm per 100-sample error (≈ 2 ms @ 48k)
+            //   Ki = 0.02 ppm per (100-sample-second) accumulated
+            //   deadband: ±960 samples (~20 ms) — below this the
+            //   loop sleeps; the buffer naturally absorbs sub-frame
+            //   variation.
+            //
+            // The numbers are conservative on purpose: the
+            // controller only has to absorb ppm-level skew, not
+            // chase short-term jitter. Reports come in at 1 Hz so
+            // the loop converges in tens of seconds — well below
+            // the timescale at which user-visible drift would
+            // accumulate.
+            let target = target_samples as f64;
+            let buffered = buffered_samples as f64;
+            let error = buffered - target;
+            const DEADBAND_SAMPLES: f64 = 960.0;
+            const KP_PPM_PER_100SAMPLES: f64 = 0.2;
+            const KI_PPM_PER_100SAMPLE_S: f64 = 0.02;
+            const I_CLAMP: f64 = 50_000.0; // bounds runaway integral
+            let nudge_ppm = if error.abs() < DEADBAND_SAMPLES {
+                0.0
+            } else {
+                let mut integ = state.drift_integral.lock().await;
+                let i = integ.entry(stream_id).or_insert(0.0);
+                *i = (*i + error).clamp(-I_CLAMP, I_CLAMP);
+                let p_term = error / 100.0 * KP_PPM_PER_100SAMPLES;
+                let i_term = *i / 100.0 * KI_PPM_PER_100SAMPLE_S;
+                // Sign convention: when buffered > target the
+                // browser is ahead of the encoder — encoder should
+                // PRODUCE LESS audio per unit time → DOWN-rate the
+                // effective ratio (out_hz / in_hz) → push fewer
+                // output samples per input sample. So negative
+                // nudge for positive error.
+                -(p_term + i_term)
+            };
+            if nudge_ppm.abs() > 0.0 {
+                let _ = state
+                    .audio_hub
+                    .nudge_stream_ratio(stream_id, nudge_ppm)
+                    .await;
             }
         }
         Command::Subscribe | Command::RequestSnapshot => {
@@ -1296,6 +1411,7 @@ async fn dispatch_command(
                             client_sample_rate: client_sr,
                             engine_sample_rate: engine_sr,
                             channels: ch,
+                            port_name: ack.port_name.clone(),
                         },
                     );
                     broadcast_event(
@@ -1326,6 +1442,13 @@ async fn dispatch_command(
             // channel; the backend's ingress loop exits and the port
             // (or stub capture) tears down from its side.
             state.ingress_senders.lock().await.remove(&stream_id);
+            // Strip every track→stream entry that pointed at this
+            // stream so subsequent regions on those tracks don't
+            // get auto-stamped with a dead stream's stale latency.
+            {
+                let mut map = state.track_ingress.lock().await;
+                map.retain(|_, sid| *sid != stream_id);
+            }
             broadcast_event(state, Event::AudioIngressClosed { stream_id }).await;
         }
         Command::AudioEgressStart { .. }
@@ -1447,6 +1570,29 @@ async fn dispatch_command(
                         );
                         let _ = state.sessions.close(&existing_id).await;
                     }
+                }
+            }
+            // Sweep any crash-recovery artifacts (live `.history` /
+            // `.pending` AND legacy `.bak.<stamp>` clutter) into a
+            // hidden timestamped subfolder before Ardour can see
+            // them. The browser already prompted the user via
+            // `ProbeSessionRecovery`; if they wanted the data they
+            // hit "abort + download" and we never reached this
+            // dispatch. Anything still here at launch time is by
+            // definition consenting to be archived.
+            if let Some(p) = path {
+                let abs = match state.jail.as_ref() {
+                    Some(jail) => jail
+                        .root()
+                        .join(p.to_string_lossy().trim_start_matches('/')),
+                    None => p.to_path_buf(),
+                };
+                let n = crate::session_recovery::archive(&abs);
+                if n > 0 {
+                    tracing::info!(
+                        "launch_project: archived {n} crash-recovery artifact(s) at {}",
+                        abs.display(),
+                    );
                 }
             }
             match spawner.launch(&backend_id, path, sample_rate).await {
@@ -1637,15 +1783,49 @@ async fn dispatch_command(
                     },
                 )
                 .await;
-            } else if let Err(e) = backend.set_track_input(track_id, port_name).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "set_track_input_failed".into(),
-                        message: e.to_string(),
-                    },
-                )
-                .await;
+            } else {
+                // Mirror the assignment into the track→ingress map
+                // BEFORE the backend call so the auto-stamp path
+                // sees it the moment a region commits. Find which
+                // ingress sink owns this port_name; if none, clear
+                // any prior mapping for the track. Empty port_name
+                // also clears (auto-connect default — no longer
+                // browser-sourced).
+                {
+                    let want_port = port_name.as_deref().filter(|s| !s.is_empty());
+                    let mut map = state.track_ingress.lock().await;
+                    if let Some(pn) = want_port {
+                        let sinks = state.ingress_senders.lock().await;
+                        let matched = sinks
+                            .iter()
+                            .find(|(_, s)| s.port_name.as_deref() == Some(pn))
+                            .map(|(id, _)| *id);
+                        match matched {
+                            Some(sid) => {
+                                map.insert(track_id.clone(), sid);
+                            }
+                            None => {
+                                // Port belongs to something other
+                                // than a browser ingress — strip
+                                // any stale mapping for this
+                                // track.
+                                map.remove(&track_id);
+                            }
+                        }
+                    } else {
+                        map.remove(&track_id);
+                    }
+                }
+                if let Err(e) = backend.set_track_input(track_id, port_name).await {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "set_track_input_failed".into(),
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
             }
         }
         Command::ListPorts { direction } => {
@@ -1832,10 +2012,25 @@ async fn dispatch_command(
                     return Ok(());
                 }
             };
-            let pcm_source_rate = state.backend().await.sample_rate();
+            let backend_arc = state.backend().await;
+            let pcm_source_rate = backend_arc.sample_rate();
+            // Hand the encoder a Weak so it can poll
+            // `transport_position_samples()` for frames the shim
+            // hasn't tagged with sample-accurate timing. The Weak
+            // dies cleanly when the backend is swapped, so a stale
+            // encoder never pins an old backend.
+            let backend_weak = std::sync::Arc::downgrade(&backend_arc);
+            drop(backend_arc);
             match state
                 .audio_hub
-                .open_stream(stream_id, source.clone(), format, pcm_source_rate, rx)
+                .open_stream(
+                    stream_id,
+                    source.clone(),
+                    format,
+                    pcm_source_rate,
+                    rx,
+                    Some(backend_weak),
+                )
                 .await
             {
                 Ok(_) => {
