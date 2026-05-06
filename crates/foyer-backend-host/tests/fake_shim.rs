@@ -241,7 +241,7 @@ async fn spawn_fake_shim(path: PathBuf, cfg: ShimConfig) {
                     .unwrap();
                     if let Some(pcm) = &cfg.egress_payload {
                         let bytes = f32_to_le_bytes(pcm);
-                        let body = pack_audio(stream_id, &bytes);
+                        let body = pack_audio(stream_id, None, &bytes);
                         write_frame(
                             &mut w,
                             &Frame {
@@ -425,12 +425,7 @@ async fn ingress_sink_opens_and_accepts_frames() {
         )
         .await
         .unwrap();
-    tx.send(PcmFrame {
-        stream_id: 9,
-        samples: vec![0.5; 64],
-    })
-    .await
-    .unwrap();
+    tx.send(PcmFrame::untimed(9, vec![0.5; 64])).await.unwrap();
     // Sanity: the helpers are symmetric.
     let bytes = f32_to_le_bytes(&[0.5, -0.25]);
     let back = le_bytes_to_f32(&bytes);

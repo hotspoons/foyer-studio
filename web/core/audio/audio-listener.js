@@ -24,7 +24,9 @@ const VERBOSE = false;
 // stream, packets are deinterleaved inline and fed to the same
 // worklet via `_sendToWorklet`.
 
-const FRAME_HEADER_BYTES = 12;
+// Wire header — see crates/foyer-server/src/audio.rs.
+//   u32 stream_id | u64 ts_us | i64 transport_pos | u64 server_mono_ns
+const FRAME_HEADER_BYTES = 28;
 
 // Browser-side audio ingress preferences. Stored in localStorage so
 // the choice survives reloads. Rich's M6 note: "disable Opus
@@ -65,6 +67,15 @@ export class AudioListener {
     this.baseUrl = opts.baseUrl;
     this.sourceKind = opts.sourceKind;
     this.sourceId = opts.sourceId;
+    // Optional audio-derived clock + clock-sync injection. When
+    // both are present the listener pushes per-frame transport
+    // metadata into the clock so the displayed playhead can trail
+    // the speaker output instead of racing ahead by the encode +
+    // jitter + worklet latency. Absent → silent fallback (control-
+    // plane position drives the UI as before).
+    this.audioClock = opts.audioClock || null;
+    this.clockSync = opts.clockSync || null;
+    this.onWatchdogReconnect = opts.onWatchdogReconnect || null;
     // Codec & sample rate are user-selectable via the browser audio
     // config pref (viz-settings.js). Defaults are Opus @ 48 kHz for
     // bandwidth-friendly streaming; "raw_f32_le" skips the codec and
@@ -197,6 +208,37 @@ export class AudioListener {
         if (typeof window !== "undefined" && window.__foyer) {
           window.__foyer.audioStats = m;
         }
+        // Feed playback delay into the audio-derived clock so the
+        // displayed playhead accounts for the worklet's jitter
+        // buffer + driver-reported output latency.
+        if (this.audioClock) {
+          this.audioClock.setPlaybackDelay(
+            Number(m.buffered) || 0,
+            Number(this.ctx?.outputLatency) || 0,
+          );
+        }
+        // Emit a buffer-fill report to the sidecar's drift
+        // controller. Stats fire ~once per second from the
+        // worklet (see audio-worklet.js). Target is the priming
+        // window — that's the operating point the worklet
+        // primes to and that the sidecar should hold the buffer
+        // at. Skipped during priming or if we don't yet have a
+        // ws (mid-teardown).
+        if (
+          this.ws
+          && this._running
+          && Number.isFinite(m.buffered)
+          && m.buffered > 0
+        ) {
+          // ~200 ms target — matches `primeSamples` in the worklet.
+          const target = Math.floor(this.format.sample_rate * 0.2);
+          this.ws.send({
+            type: "audio_buffer_report",
+            stream_id: this.streamId,
+            buffered_samples: m.buffered,
+            target_samples: target,
+          });
+        }
         if (VERBOSE) {
           console.info(
             `[audio-listener] worklet stats — buffered=${m.buffered} ` +
@@ -248,11 +290,15 @@ export class AudioListener {
     this.audioWs.onmessage = (ev) => this._onPacket(ev.data);
     this.audioWs.onclose  = (ev) => console.info(`[audio-listener] audio ws closed code=${ev.code} reason='${ev.reason}'`);
     this.audioWs.onerror  = (e) => console.error("[audio-listener] audio ws error:", e);
+    if (this.audioClock && this.onWatchdogReconnect) {
+      this.audioClock.startWatchdog({ onReconnect: this.onWatchdogReconnect });
+    }
   }
 
   async stop() {
     if (!this._running) return;
     this._running = false;
+    if (this.audioClock) this.audioClock.stopWatchdog();
     // Teardown order matters. Previously the symptom of a sloppy
     // shutdown was "each Listen restart hears more pops than the
     // last" — stale decoders kept firing output callbacks into
@@ -306,17 +352,50 @@ export class AudioListener {
     const view = new DataView(buf);
     const streamId = view.getUint32(0, false);
     if (streamId !== this.streamId) return;
+    // u64 ts_us at offset 4; not used by playback (decoder timestamps
+    // are derived from the cumulative Opus increment) but available
+    // for future wall-clock-based diagnostics.
+    // i64 transport_pos at offset 12; -1 sentinel = unknown.
+    const transportHi = view.getInt32(12, false);
+    const transportLoU32 = view.getUint32(16, false);
+    // BigInt avoids the f64 round-trip losing low bits on large
+    // sample positions (a long session at 192 kHz can exceed 2^53).
+    let transportPosSamples;
+    if (transportHi === -1 && transportLoU32 === 0xffffffff) {
+      transportPosSamples = -1;
+    } else {
+      const big = (BigInt(transportHi) << 32n) | BigInt(transportLoU32);
+      transportPosSamples = Number(big);
+    }
+    const serverMonoHi = view.getUint32(20, false);
+    const serverMonoLo = view.getUint32(24, false);
+    const serverMonoNs =
+      Number((BigInt(serverMonoHi) << 32n) | BigInt(serverMonoLo));
+    // Feed the audio-derived clock. capturedAtClientMs = serverMono
+    // converted onto our `performance.now()` via clock-sync. Until
+    // the offset converges this returns null and AudioClock falls
+    // back to "treat the frame as having arrived now" — see
+    // audio-clock.js.
+    if (this.audioClock && transportPosSamples >= 0) {
+      const capturedAtClientMs = this.clockSync
+        ? this.clockSync.serverMonoNsToClientMs(serverMonoNs)
+        : null;
+      this.audioClock.noteFrame({
+        transportPosSamples,
+        capturedAtClientMs,
+        sampleRate: this.format.sample_rate,
+      });
+    }
     // Diagnostic: log the first few packets + every 500th after that.
     // Helps distinguish "audio never arrives" from "audio arrives but
     // isn't audible" (a common AudioContext-suspended footgun).
     this._pktCount = (this._pktCount || 0) + 1;
     if (VERBOSE && (this._pktCount <= 5 || this._pktCount % 500 === 0)) {
       console.info(
-        `[audio-listener] pkt #${this._pktCount} bytes=${buf.byteLength} ctx=${this.ctx?.state}`,
+        `[audio-listener] pkt #${this._pktCount} bytes=${buf.byteLength} ` +
+        `ctx=${this.ctx?.state} transport_pos=${transportPosSamples}`,
       );
     }
-    // 8-byte capture timestamp (microseconds) follows; unused by the
-    // naive playback path but wired for the jitter-buffer upgrade.
     const payload = buf.slice(FRAME_HEADER_BYTES);
 
     if (this.codec === "opus" && this.decoder) {

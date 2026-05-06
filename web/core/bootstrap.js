@@ -26,6 +26,8 @@ import { ChatStore } from "./chat.js";
 import { installTransportReturn } from "./transport-return.js";
 import { attach as attachRecents } from "./recents.js";
 import { audioController } from "./audio/master-controller.js";
+import { ClockSync } from "./audio/clock-sync.js";
+import { AudioClock } from "./audio/audio-clock.js";
 import { pickUiVariant, sniffEnv, getUiVariant } from "./registry/ui-variants.js";
 import { setFeatures } from "./registry/features.js";
 import { setActiveVariant } from "./registry/widgets.js";
@@ -67,6 +69,48 @@ export function bootFoyerCore(opts = {}) {
   // was undefined (only `ui-full/app.js` was wiring it up).
   audioController.attach(ws, store);
 
+  // Clock-sync + audio-derived transport timeline. Together these
+  // make the displayed playhead match the speaker output instead of
+  // racing ahead by the audio pipeline's latency. See
+  // ./audio/clock-sync.js + ./audio/audio-clock.js for the design.
+  const clockSync = new ClockSync({ ws });
+  clockSync.start();
+  const audioClock = new AudioClock();
+  // Mirror control-plane transport state into the audio clock so its
+  // watchdog + seek-freeze logic can compare control vs. audio.
+  store.addEventListener("envelope", (ev) => {
+    const body = ev.detail?.body;
+    if (!body) return;
+    if (body.type === "control_update") {
+      const u = body.update;
+      if (u?.id === "transport.position") {
+        audioClock.noteControlPosition(
+          Number(u.value) || 0,
+          !!store.state.controls.get("transport.playing"),
+        );
+      } else if (u?.id === "transport.playing") {
+        audioClock.noteControlPosition(
+          Number(store.state.controls.get("transport.position") || 0),
+          !!u.value,
+        );
+      }
+    } else if (body.type === "meter_batch") {
+      for (const u of body.values || []) {
+        if (u?.id === "transport.position") {
+          audioClock.noteControlPosition(
+            Number(u.value) || 0,
+            !!store.state.controls.get("transport.playing"),
+          );
+        }
+      }
+    }
+  });
+  // Local seeks freeze the displayed playhead so it doesn't visibly
+  // backtrack while the audio stream catches up.
+  ws.addEventListener("transport_seek_request", (ev) => {
+    audioClock.noteSeek(Number(ev.detail?.value) || 0);
+  });
+
   // Fallback-timer handle — cleared the moment the greeting arrives,
   // because the timer's job is "server is dead, paint something," NOT
   // "variant is slow to mount." Over a Cloudflare tunnel the handshake
@@ -104,6 +148,8 @@ export function bootFoyerCore(opts = {}) {
     ws,
     chat,
     audio: audioController,
+    clockSync,
+    audioClock,
     mountVariant,
     unmountVariant,
   });

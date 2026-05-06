@@ -272,6 +272,7 @@ fn synthesize_for(track_id: &EntityId, sample_rate: u32) -> Vec<Region> {
             fade_out_samples: None,
             fade_in_shape: None,
             fade_out_shape: None,
+            ingress_latency_ms: None,
         });
     }
     out

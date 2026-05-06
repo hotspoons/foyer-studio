@@ -485,6 +485,19 @@ impl StubState {
         Some(t.clone())
     }
 
+    /// Read-only snapshot of `transport.position_beats` as samples
+    /// (despite the name, the stub stores samples there). Returns
+    /// `None` only when the field doesn't hold a numeric value —
+    /// i.e. never, in practice; the option is just a defensive
+    /// fallthrough so callers can map it to "no position known."
+    pub(crate) fn position_samples_now(&self) -> Option<u64> {
+        match self.session.transport.position_beats.value {
+            ControlValue::Float(f) if f.is_finite() && f >= 0.0 => Some(f as u64),
+            ControlValue::Int(i) if i >= 0 => Some(i as u64),
+            _ => None,
+        }
+    }
+
     fn find_param_mut(&mut self, id: &EntityId) -> Option<&mut Parameter> {
         // Transport first.
         let t = &mut self.session.transport;

@@ -107,7 +107,7 @@ NOT edit `index.html` or `boot.js`.
   [`registerUiVariant`](web/core/registry/ui-variants.js).
 - **Decisions get logged.** Real architectural tradeoffs go in
   [docs/DECISIONS.md](docs/DECISIONS.md) as a new numbered entry.
-  Don't re-litigate in six months. Current entry count ≥ 43.
+  Don't re-litigate in six months. Current entry count ≥ 47.
 - **`just` over one-off scripts.** If it's worth doing twice, it's
   a recipe in the [Justfile](Justfile).
 - **Server is the RBAC enforcement point.** Client-side gating

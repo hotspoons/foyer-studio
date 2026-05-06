@@ -175,6 +175,19 @@ private:
 	std::atomic<std::int64_t>  _cycle_delta_max_ns { 0 };
 	std::atomic<std::uint32_t> _cycle_nframes_last { 0 };
 
+	// Sample-accurate transport position at the start of the most
+	// recent run() / silence() callback, in audio samples since
+	// session start. The drain thread reads this and packs it into
+	// each outgoing IPC audio frame so the sidecar's egress
+	// encoder can stamp the browser-bound `/ws/audio` packets with
+	// per-frame timecode — the browser then aligns its displayed
+	// playhead to the audio stream rather than racing ahead of it.
+	// `-1` is the wire sentinel for "engine didn't supply one".
+	// Initialized to -1 so frames drained before the first audio
+	// callback (none should exist, but defensively) carry the
+	// sentinel rather than a confusing "0 = session start".
+	std::atomic<std::int64_t>  _last_transport_sample { -1 };
+
 	void drain_loop ();
 };
 

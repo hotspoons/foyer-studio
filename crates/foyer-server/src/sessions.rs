@@ -81,6 +81,12 @@ pub(crate) struct SessionRegistry {
     /// though the registry stores canonical absolutes internally.
     /// `None` = no jail → leave paths as-is.
     pub(crate) jail_root: RwLock<Option<PathBuf>>,
+    /// Shared with `AppState` so per-session event pumps can
+    /// auto-stamp `Region.ingress_latency_ms` on regions committed
+    /// while a browser ingress is recording into the track. The
+    /// track→stream map tells us which stream's stats apply.
+    pub(crate) ingress_latency: Arc<crate::ingress_latency::IngressLatencyTracker>,
+    pub(crate) track_ingress: Arc<Mutex<HashMap<EntityId, u32>>>,
 }
 
 impl SessionRegistry {
@@ -88,6 +94,8 @@ impl SessionRegistry {
         tx: broadcast::Sender<Envelope<Event>>,
         ring: Arc<RwLock<DeltaRing>>,
         next_seq: Arc<AtomicU64>,
+        ingress_latency: Arc<crate::ingress_latency::IngressLatencyTracker>,
+        track_ingress: Arc<Mutex<HashMap<EntityId, u32>>>,
     ) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
@@ -95,6 +103,8 @@ impl SessionRegistry {
             ring,
             next_seq,
             jail_root: RwLock::new(None),
+            ingress_latency,
+            track_ingress,
         }
     }
 
@@ -370,6 +380,20 @@ impl SessionRegistry {
 ///
 /// When the stream exits naturally we remove the session entry so
 /// "already open by path" checks cannot focus a dead backend.
+/// Resolve "is a browser currently recording into this track, and
+/// if so what's its observed ingress latency?". Returns `None`
+/// when no ingress is wired to the track or the latency tracker
+/// hasn't accumulated enough samples for a reliable median yet —
+/// in either case the region's `ingress_latency_ms` stays
+/// `None` and the UI knows the take wasn't auto-shifted.
+async fn lookup_track_latency(reg: &SessionRegistry, track_id: &EntityId) -> Option<f32> {
+    let stream_id = {
+        let map = reg.track_ingress.lock().await;
+        map.get(track_id).copied()?
+    };
+    reg.ingress_latency.median_ms(stream_id)
+}
+
 async fn pump_session(
     backend: Arc<dyn Backend>,
     reg: Arc<SessionRegistry>,
@@ -377,11 +401,38 @@ async fn pump_session(
     dirty: Arc<AtomicBool>,
 ) -> Result<(), foyer_backend::BackendError> {
     let mut stream = backend.subscribe().await?;
-    while let Some(event) = stream.next().await {
+    while let Some(mut event) = stream.next().await {
         // Mirror dirty-state changes onto the entry so
         // `SessionInfo.dirty` stays fresh without polling.
         if let Event::SessionDirtyChanged { dirty: d } = &event {
             dirty.store(*d, Ordering::Relaxed);
+        }
+        // Auto-stamp `Region.ingress_latency_ms` on regions
+        // committed while a browser ingress is actively recording
+        // into the track. We look up the active stream id from
+        // the track→stream map populated by SetTrackInput, then
+        // ask the latency tracker for its median. Regions that
+        // already carry a value (shim-side stamping in some
+        // future world, or replay during snapshot) are left
+        // alone.
+        match &mut event {
+            Event::RegionUpdated { region } if region.ingress_latency_ms.is_none() => {
+                if let Some(ms) = lookup_track_latency(&reg, &region.track_id).await {
+                    region.ingress_latency_ms = Some(ms);
+                }
+            }
+            Event::RegionsList {
+                track_id, regions, ..
+            } => {
+                if let Some(ms) = lookup_track_latency(&reg, track_id).await {
+                    for r in regions.iter_mut() {
+                        if r.ingress_latency_ms.is_none() {
+                            r.ingress_latency_ms = Some(ms);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
         let seq = reg.next_seq.fetch_add(1, Ordering::Relaxed);
         let env = Envelope {

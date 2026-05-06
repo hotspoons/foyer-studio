@@ -162,6 +162,25 @@ export class WelcomeScreen extends LitElement {
       background: color-mix(in oklab, #fbbf24 10%, var(--color-surface-elevated));
     }
     section.orphans h3 { color: #fbbf24; }
+    /* When every orphan in the list has already had its crash data
+       archived (the registry entry persists but there's nothing to
+       recover from disk), drop the warning tone entirely — it's
+       informational, not actionable. The user can still Reopen /
+       Dismiss; we just stop dressing it up as an emergency. */
+    section.orphans.orphans-stale {
+      border-color: var(--color-border);
+      background: var(--color-surface-elevated);
+    }
+    section.orphans.orphans-stale h3 { color: var(--color-text-muted); }
+    section.orphans.orphans-stale .reattach {
+      background: var(--color-surface);
+      color: var(--color-text);
+      border: 1px solid var(--color-border);
+    }
+    section.orphans.orphans-stale .badge {
+      background: color-mix(in oklab, var(--color-text-muted) 25%, transparent);
+      color: var(--color-text-muted);
+    }
     .orphan-row .reattach {
       background: #fbbf24; color: #000;
       border: 1px solid #fbbf24;
@@ -177,6 +196,10 @@ export class WelcomeScreen extends LitElement {
       background: color-mix(in oklab, #fbbf24 30%, transparent);
       color: #fbbf24;
       margin-right: 6px;
+    }
+    .orphan-detail .attempt-tag {
+      font-size: 10px;
+      color: var(--color-text-muted);
     }
     .orphan-row .expand {
       background: transparent;
@@ -475,9 +498,29 @@ export class WelcomeScreen extends LitElement {
           <span class="sub">Open a project to start mixing, or pick up where you left off.</span>
         </header>
 
-        ${orphanGroups.length > 0 ? html`
-          <section class="orphans">
-            <h3>⚠ Unfinished sessions found</h3>
+        ${orphanGroups.length > 0 ? (() => {
+          // The banner used to say "⚠ Unfinished sessions found" /
+          // "Crashed" unconditionally — alarming in the genuine
+          // "you have unsaved work to recover" case AND in the
+          // benign "stale registry entry, data already archived"
+          // case. Server now flags `has_recovery_data` per orphan;
+          // when nothing in the list still has data on disk, we
+          // drop the warning tone entirely. The user can still
+          // Reopen / Dismiss; it's just no longer dressed up as
+          // an emergency.
+          const anyData = orphanGroups.some(
+            (g) => g.entries.some((e) => e.has_recovery_data),
+          );
+          const headerText = anyData
+            ? "⚠ Unfinished sessions found"
+            : "Recently interrupted sessions";
+          const tagFor = (entry) => {
+            if (entry.kind === "running") return "Still running";
+            return entry.has_recovery_data ? "Crashed" : "Was interrupted";
+          };
+          return html`
+          <section class=${`orphans${anyData ? "" : " orphans-stale"}`}>
+            <h3>${headerText}</h3>
             <div class="orphan-list">
               ${orphanGroups.map((g) => {
                 const p = g.primary;
@@ -493,7 +536,7 @@ export class WelcomeScreen extends LitElement {
                       </div>
                       <div class="path">${p.path || ""}</div>
                     </div>
-                    <span class="tag">${p.kind === "running" ? "Still running" : "Crashed"}${multi ? ` · ${formatWhen(p.started_at)}` : ""}</span>
+                    <span class="tag">${tagFor(p)}${multi ? ` · ${formatWhen(p.started_at)}` : ""}</span>
                     <div>
                       ${multi ? html`
                         <button class="expand" @click=${() => this._toggleGroup(g)}>
@@ -515,6 +558,7 @@ export class WelcomeScreen extends LitElement {
                           <span class="kind ${o.kind}">${o.kind === "running" ? "●" : "×"}</span>
                           <span class="when">${formatWhen(o.started_at)}</span>
                           <span>${o.pid ? `pid ${o.pid}` : "no pid"}</span>
+                          <span class="attempt-tag">${tagFor(o)}</span>
                           <button class="expand"
                                   title="Pick this specific attempt"
                                   @click=${() => this._pickAttempt(g, o)}>
@@ -527,8 +571,8 @@ export class WelcomeScreen extends LitElement {
                 `;
               })}
             </div>
-          </section>
-        ` : null}
+          </section>`;
+        })() : null}
 
         <div class="actions">
           <button class="cta" @click=${() => this._browse()}>

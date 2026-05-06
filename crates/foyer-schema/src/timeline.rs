@@ -98,6 +98,15 @@ pub struct Region {
     pub fade_in_shape: Option<FadeShape>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fade_out_shape: Option<FadeShape>,
+    /// Median one-way ingress latency observed (browser → DAW) while
+    /// recording the take this region came from, in milliseconds.
+    /// Carried so post-recording auto-shift can subtract the
+    /// transport latency without the user calibrating manually. The
+    /// sidecar measures it from per-packet `client_send_ms` headers
+    /// against a clock-probe-estimated client/server offset; absent
+    /// for regions not sourced from a browser ingress capture.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ingress_latency_ms: Option<f32>,
 }
 
 /// Minimal viewport/scale info UIs need to lay out regions consistently.
@@ -206,6 +215,7 @@ mod tests {
             fade_out_samples: None,
             fade_in_shape: None,
             fade_out_shape: None,
+            ingress_latency_ms: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         let back: Region = serde_json::from_str(&j).unwrap();

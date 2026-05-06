@@ -119,6 +119,12 @@ pub async fn scan_orphans() -> Vec<OrphanInfo> {
             }
             "crashed"
         };
+        // Probe the project dir for live or archived crash data so
+        // the UI can decide whether the alarming "Crashed" tag is
+        // warranted. A stale registry entry whose dir we've already
+        // swept is just informational — no work is at risk.
+        let has_recovery_data = !entry.project_path.is_empty()
+            && !crate::session_recovery::probe(Path::new(&entry.project_path)).is_empty();
         out.push(OrphanInfo {
             id: EntityId::new(&entry.session_id),
             backend_id: if entry.backend_id.is_empty() {
@@ -140,6 +146,7 @@ pub async fn scan_orphans() -> Vec<OrphanInfo> {
                 Some(entry.socket_path)
             },
             started_at: entry.started_at,
+            has_recovery_data,
         });
     }
     out

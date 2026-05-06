@@ -465,15 +465,47 @@ master bus at all.
 
 ## Bugs
 
-- [ ] Time marker (see head) doesn't align with MIDI, and it doesn't align with audio
+- [x] Time marker (see head) doesn't align with MIDI, and it doesn't align with audio
   output. Need a stream-delay function that every real-time surface (meters,
   visualizations, seek heads) routes through — set the delay once per session,
   all displays stay consistent. Bluetooth audio stacks solve this already; crib
   from a video-jitter-buffer reference implementation.
-- [ ] Some expensive operations like reversing regions cause pent up lantency to occur in
+  - **Shipped 2026-05-06.** End-to-end audio-derived playhead. Wire layer:
+    `/ws/audio/:stream_id` frames carry `transport_pos_samples` + sidecar
+    `server_mono_ns` per packet (28-byte header in
+    [audio.rs](../crates/foyer-server/src/audio.rs)); IPC `FrameKind::Audio`
+    body now `[stream_id u32][transport_pos i64][pcm]`. Ardour shim's
+    [master_tap.cc](../shims/ardour/src/master_tap.cc) snapshots
+    `start_sample` per audio cycle and the drain loop packs it. Browser:
+    [clock-sync.js](../web/core/audio/clock-sync.js) runs an NTP-style
+    bounce (min-RTT estimator) over `Command::ClockProbe` /
+    `Event::ClockProbeReply`; [audio-clock.js](../web/core/audio/audio-clock.js)
+    keeps a queue of recent frames and `derivedPositionSamples()` returns
+    the position of whichever frame is currently hitting the speaker
+    (`playoutAt = arrivedAt + buffered/sr + outputLatency`). Transport-bar
+    + timeline `_renderPlayhead` prefer the audio-derived value, fall back
+    to control-plane state when audio isn't running. Logged in
+    [DECISIONS.md §47](DECISIONS.md).
+- [x] Some expensive operations like reversing regions cause pent up lantency to occur in
   the back end, and there is a several second lag in the audio output from the remote monitor
-  to the back end (and visibly on the timeline) - we need to detect this and reset the 
+  to the back end (and visibly on the timeline) - we need to detect this and reset the
   monitoring if there is a big build up of buffers, and maybe emit a message to the user
+  - **Shipped 2026-05-06.** Two-part fix.
+    - Detection + reset: idle-drift watchdog in
+      [audio-clock.js](../web/core/audio/audio-clock.js) — when
+      `transport.playing` is true AND no audio frames have arrived for >1 s
+      AND the gap between control-plane and audio-derived position exceeds
+      200 ms, the listener tears down + restarts the audio WS (with a 1 s
+      cooldown to prevent storms).
+    - Steady-state drift: per-stream PI controller against the worklet
+      buffer-fill signal. Browser fires `Command::AudioBufferReport` at 1 Hz
+      from worklet stats; server runs Kp=0.2 ppm / Ki=0.02 ppm with a
+      960-sample deadband and forwards ppm-nudges into the resampler
+      ratio via [`InterleavedResampler::nudge_ratio_relative`](../crates/foyer-audio/src/lib.rs).
+    - Root-cause trigger fix: `load_waveform` symphonia calls now run on
+      `tokio::task::spawn_blocking` so a scroll-zoom flurry can't starve
+      the audio encode loop / `open_egress` IPC (was reproducing as
+      `/ws/audio/<id> requested but hub has no such stream after 6 s wait`).
 - [ ] Loop button quirk: main loop button loops last selection when no selection active
   - Transport-bar toggle uses `controlSet("transport.looping", !loop)` (absolute boolean).
     When no explicit selection exists, Ardour's `loop_toggle()` falls back to the previous
@@ -547,7 +579,35 @@ master bus at all.
       into one transaction. Separate concern from the group API.
 
 ## Long term
-- [ ] Wire in crashed session recovery (currently just ignored, crash data deleted)
+- [x] Wire in crashed session recovery (currently just ignored, crash data deleted)
+  - **Shipped 2026-05-06 (option D — abort + offline recovery).**
+    Browser-driven probe + prompt before `LaunchProject`. New
+    [session_recovery.rs](../crates/foyer-server/src/session_recovery.rs)
+    module exposes `probe()` (lists live `.history` / `.pending`
+    AND legacy `.bak.<stamp>` clutter from earlier sweeps) and
+    `archive()` (moves everything into a hidden timestamped
+    subfolder `.foyer-crash-archive/<YYYYMMDD-HHMMSS>/`).
+    [session-launch.js](../web/ui-core/session-launch.js) probes
+    over WS before every guarded launch; if artifacts exist it
+    prompts: **Open (archive crash data)** / **Abort & download
+    project** / **Cancel**. The download path hits
+    `/sessions/export?path=…` so the user can recover offline
+    (open the archive in a desktop Ardour, accept its native
+    "Recover from crash" dialog, save). Schema gains
+    `Command::ProbeSessionRecovery`, `Event::SessionRecoveryAvailable`,
+    and `SessionRecoveryArtifact`. Bootstrap-time auto-open at
+    startup also runs `archive()` via `preflight_session` so
+    headless deploys boot without Ardour's modal blocking;
+    `FOYER_KEEP_CRASH_RECOVERY=1` env var is the override.
+  - **Why option D vs in-foyer recovery:** Ardour's recovery
+    flow runs inside libardour during `Session::load_state` —
+    there's no `--recover` CLI flag, no env var skip, and the
+    GTK dialog is the only entry point. Reproducing it on our
+    side would mean reimplementing chunks of `Session::set_state`.
+    Bridging to xpra so the user can click Ardour's dialog
+    manually is feasible (the projection runs at :14500) but
+    introduces another UX surface. Option D is honest:
+    foyer can't replay; foyer ships you the data so you can.
 - [ ] Scope RBAC denials to offender + admins
   - Today `forbidden_for_role` / `auth_required` errors broadcast to every connected
     client, so a viewer can see another viewer's denial banner flash by. Clean fix: add

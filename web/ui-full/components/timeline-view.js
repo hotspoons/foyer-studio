@@ -800,6 +800,17 @@ export class TimelineView extends LitElement {
       this.requestUpdate();
     };
     window.addEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
+    // rAF tick so the audio-derived playhead animates smoothly
+    // between control updates while transport is playing. Cheap
+    // (one repaint per frame, gated below); skipped when nothing
+    // would change visually.
+    const playheadTick = () => {
+      this._playheadRaf = requestAnimationFrame(playheadTick);
+      const playing = !!window.__foyer?.store?.state?.controls?.get("transport.playing");
+      const haveAudio = !!window.__foyer?.audioClock?.snapshot()?.hasAudioClock;
+      if (playing && haveAudio) this.requestUpdate();
+    };
+    this._playheadRaf = requestAnimationFrame(playheadTick);
   }
 
   _applyGridColors() {
@@ -870,6 +881,10 @@ export class TimelineView extends LitElement {
     this._wfCache?.dispose();
     window.__foyer?.store?.removeEventListener("control", this._onStoreControl);
     window.__foyer?.store?.removeEventListener("selection", this._onStoreSelection);
+    if (this._playheadRaf) {
+      cancelAnimationFrame(this._playheadRaf);
+      this._playheadRaf = null;
+    }
     super.disconnectedCallback();
   }
 
@@ -2716,7 +2731,16 @@ export class TimelineView extends LitElement {
 
   _renderPlayhead() {
     const sr = this._sampleRate();
-    const x = HEAD_WIDTH + (this._playheadSamples / sr) * this._zoom;
+    // Prefer the audio-derived position when available — it tracks
+    // the speaker output rather than the control-plane echo, so the
+    // visible playhead lines up with what the user is hearing
+    // instead of leading by 200–400 ms (encode + WS hop + jitter
+    // buffer + worklet quantum). Falls back to control-plane
+    // `_playheadSamples` when the audio path isn't running.
+    const audio = globalThis.__foyer?.audioClock?.derivedPositionSamples?.();
+    const samples = (Number.isFinite(audio) && audio != null)
+      ? audio : this._playheadSamples;
+    const x = HEAD_WIDTH + (samples / sr) * this._zoom;
     return html`<div class="playhead" style="left:${x}px"></div>`;
   }
 

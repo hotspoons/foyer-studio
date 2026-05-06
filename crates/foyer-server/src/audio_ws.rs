@@ -6,7 +6,14 @@
 //!
 //!   u32 be  stream_id
 //!   u64 be  capture timestamp (microseconds since Unix epoch)
+//!   i64 be  transport position in samples at capture (-1 if unknown)
+//!   u64 be  sidecar monotonic clock at capture (nanoseconds)
 //!   bytes   payload (opus or raw f32 LE, per the stream's codec)
+//!
+//! Header is 28 bytes. See `audio.rs` for the full rationale
+//! (transport timecode and monotonic clock are what let the browser
+//! align its displayed playhead to the audio stream rather than
+//! racing ahead of it).
 //!
 //! We don't read inbound messages — the control plane stays on
 //! `/ws`. If the client wants to stop the stream it sends

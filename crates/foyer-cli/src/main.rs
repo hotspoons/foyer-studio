@@ -194,7 +194,14 @@ enum Command {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                // Default: info for our crates, but mute symphonia's
+                // chatty per-chunk announcements ("ignoring unknown
+                // chunk: tag=JUNK") which fire at WARN-rate during a
+                // multi-region zoom and drown the actually-useful
+                // log output.
+                "info,symphonia_format_riff=warn,symphonia_core=warn".into()
+            }),
         )
         .init();
 
@@ -654,6 +661,13 @@ async fn serve(
             // SessionRegistry, so close-session escalation doesn't
             // apply. Subsequent `LaunchProject` commands go through
             // the swap path and DO register a terminator.
+            // Bootstrap path has no UI to prompt with — `preflight_session`
+            // sweeps any crash-recovery artifacts into the hidden
+            // `.foyer-crash-archive/<stamp>/` subfolder so headless
+            // deploys boot without Ardour's modal blocking. Power users
+            // can opt out with `FOYER_KEEP_CRASH_RECOVERY=1`. Runtime
+            // `LaunchProject` calls go through the browser-driven
+            // probe + prompt before reaching this path.
             spawner
                 .launch(&backend.id, project.as_deref(), None)
                 .await
@@ -1731,67 +1745,30 @@ fn preflight_session(
             );
         }
     }
-    // Sweep Ardour's crash-recovery breadcrumbs out of the session
-    // dir BEFORE Ardour opens it. Without this Ardour blocks at
-    // session load with a "Recover from crash / Ignore crash data"
-    // modal — fatal in container deploys (Cloud Run, headless Xvfb)
-    // where there's no human to dismiss it. Files are renamed (not
-    // deleted) so a power user who actually wants the recovery can
-    // mv them back. Opt-out: set `FOYER_KEEP_CRASH_RECOVERY=1`.
-    if std::env::var_os("FOYER_KEEP_CRASH_RECOVERY").map_or(true, |v| v.is_empty()) {
-        archive_crash_recovery_artifacts(&dir);
+    // Sweep Ardour's crash-recovery breadcrumbs into a hidden
+    // subfolder BEFORE Ardour opens the session. Without this
+    // Ardour blocks at session load with a "Recover from crash /
+    // Ignore crash data" modal — fatal in container deploys (Cloud
+    // Run, headless Xvfb) where there's no human to dismiss it.
+    // The runtime `LaunchProject` path also sweeps from the WS
+    // server side after asking the user; the call here covers the
+    // bootstrap auto-open path (CLI `--open <session>` at startup)
+    // where there's no UI to prompt yet. Power users who really
+    // want Ardour's modal can set `FOYER_KEEP_CRASH_RECOVERY=1`
+    // (rare; useful when poking at the dev container directly).
+    let keep_via_env = std::env::var_os("FOYER_KEEP_CRASH_RECOVERY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !keep_via_env {
+        let n = foyer_server::session_recovery::archive(&dir);
+        if n > 0 {
+            tracing::info!(
+                "preflight_session: archived {n} crash-recovery artifact(s) at {} (set FOYER_KEEP_CRASH_RECOVERY=1 to opt out)",
+                dir.display(),
+            );
+        }
     }
     (dir, name)
-}
-
-/// Rename `*.pending` and `*.history` next to a session file to
-/// timestamped `.bak.<stamp>` siblings. Ardour ignores files with
-/// non-`.pending`/`.history` extensions, so this is enough to skip
-/// the crash-recovery dialog without losing data — recover by
-/// removing the `.bak.<stamp>` suffix. Errors are logged and
-/// swallowed; this is a best-effort preflight.
-fn archive_crash_recovery_artifacts(session_dir: &Path) {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let entries = match std::fs::read_dir(session_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if ext != "pending" && ext != "history" {
-            continue;
-        }
-        let parent = match path.parent() {
-            Some(p) => p,
-            None => continue,
-        };
-        let original_name = match path.file_name().and_then(|s| s.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        let bak = parent.join(format!("{original_name}.bak.{stamp}"));
-        match std::fs::rename(&path, &bak) {
-            Ok(()) => {
-                tracing::info!(
-                    "foyer: archived crash-recovery artifact {} → {} (set FOYER_KEEP_CRASH_RECOVERY=1 to opt out)",
-                    path.display(),
-                    bak.display(),
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "foyer: failed to archive {} for crash-recovery skip: {e}",
-                    path.display(),
-                );
-            }
-        }
-    }
 }
 
 /// Step 1 of `preflight_session`: if the session file is missing,
