@@ -160,7 +160,13 @@ async fn save(list: &[RecentEntry]) {
 /// with the same `path` already exists it's removed first so we don't
 /// have duplicates. Returns the updated list so callers can broadcast
 /// without an extra read.
-pub async fn touch(mut entry: RecentEntry) -> Vec<RecentEntry> {
+///
+/// `default_backend_id` fills in `entry.backend_id` when the caller
+/// hasn't set one — typically the registered profile-registry
+/// default (currently `"ardour"`). Passed in rather than hardcoded
+/// so a multi-DAW build with a different default doesn't write
+/// misleading rows.
+pub async fn touch(mut entry: RecentEntry, default_backend_id: Option<&str>) -> Vec<RecentEntry> {
     if entry.path.is_empty() {
         // Skip path-less launches (stub backend with no path) — they'd
         // collide with each other on the empty-string key.
@@ -173,7 +179,9 @@ pub async fn touch(mut entry: RecentEntry) -> Vec<RecentEntry> {
         entry.name = path_tail(&entry.path);
     }
     if entry.backend_id.is_empty() {
-        entry.backend_id = "ardour".to_string();
+        if let Some(id) = default_backend_id {
+            entry.backend_id = id.to_string();
+        }
     }
     let mut list = load().await;
     list.retain(|e| e.path != entry.path);

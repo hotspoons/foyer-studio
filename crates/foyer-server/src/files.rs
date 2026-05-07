@@ -56,7 +56,20 @@ pub(crate) async fn serve_file(
         Ok(b) => b,
         Err(_) => return (StatusCode::NOT_FOUND, "couldn't read").into_response(),
     };
-    let mime = guess_mime(&canon);
+    // Profiles get first crack at the MIME type so a backend can
+    // claim its own project file extension (`.ardour` →
+    // `application/xml`); fall back to the generic guesser for
+    // common non-DAW extensions.
+    let ext_lower = canon
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let profiles = state.profiles().await;
+    let mime = profiles
+        .iter()
+        .find_map(|p| p.mime_for_extension(&ext_lower))
+        .unwrap_or_else(|| guess_mime(&canon));
     ([(header::CONTENT_TYPE, mime)], bytes).into_response()
 }
 
@@ -97,7 +110,7 @@ fn guess_mime(p: &Path) -> &'static str {
     match ext.as_str() {
         "md" | "markdown" => "text/markdown; charset=utf-8",
         "json" => "application/json; charset=utf-8",
-        "xml" | "ardour" | "svg" => "application/xml; charset=utf-8",
+        "xml" | "svg" => "application/xml; charset=utf-8",
         "yaml" | "yml" => "application/yaml; charset=utf-8",
         "html" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",

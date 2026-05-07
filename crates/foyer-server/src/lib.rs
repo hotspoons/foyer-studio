@@ -15,6 +15,7 @@ mod archive;
 mod audio;
 mod audio_opus;
 mod audio_ws;
+pub mod backend_profile;
 mod capabilities;
 pub(crate) mod chat;
 mod cloudflare_api;
@@ -37,6 +38,7 @@ mod tunnel;
 mod tunnel_provider;
 pub(crate) mod ws;
 
+pub use backend_profile::{ArdourProfile, BackendProfile, BackendProfileRegistry, StubProfile};
 pub use jail::{Jail, JailError};
 pub use session_scrub::{restore_quarantined_xml, ScrubXmlError};
 
@@ -256,6 +258,15 @@ pub(crate) struct AppState {
     pub(crate) active_backend_id: RwLock<Option<String>>,
     /// Optional spawner so clients can launch/swap backends over WS.
     pub(crate) spawner: Option<Arc<dyn BackendSpawner>>,
+    /// Per-backend filesystem profile registry. Consulted at moments
+    /// when there's no live `Backend` to ask — orphan scan, jail
+    /// browse, upload sanitizer, crash-recovery prompt before
+    /// launch. Populated by the embedder (CLI / desktop) at startup
+    /// with the profiles it bundles. Default-initialized to the
+    /// builtin set (`ardour` + `stub`) so test harnesses and
+    /// in-process tooling that skip the explicit registration step
+    /// still get sensible behavior.
+    pub(crate) profiles: Arc<RwLock<Arc<BackendProfileRegistry>>>,
     /// Background task that pumps events from the current backend into
     /// the broadcast channel. Stored so `swap_backend` can abort and
     /// respawn it when the backend changes.
@@ -450,6 +461,13 @@ impl AppState {
         self.cached_snapshot.read().await.clone()
     }
 
+    /// Cheap clone of the current backend-profile registry. Release
+    /// the read lock before any long-running filesystem op so a
+    /// concurrent `set_profile_registry` doesn't stall.
+    pub(crate) async fn profiles(&self) -> Arc<BackendProfileRegistry> {
+        self.profiles.read().await.clone()
+    }
+
     /// Get a cheap clone of the current backend trait-object. Release
     /// the read lock before awaiting anything on the returned `Arc`
     /// so a concurrent `swap_backend` isn't blocked on us.
@@ -618,6 +636,9 @@ impl Server {
             backend: RwLock::new(backend),
             active_backend_id: RwLock::new(None),
             spawner,
+            profiles: Arc::new(RwLock::new(Arc::new(
+                BackendProfileRegistry::with_builtins(),
+            ))),
             pump_handle: Mutex::new(None),
             jail: None,
             attached_socket: RwLock::new(None),
@@ -677,6 +698,14 @@ impl Server {
         *self.state.roles_policy.write().await = cfg;
     }
 
+    /// Replace the default backend-profile registry. The CLI calls
+    /// this after collecting profiles from config so multi-DAW
+    /// builds can register a Reaper / Bitwig profile alongside the
+    /// builtin Ardour + Stub. Idempotent — last writer wins.
+    pub async fn set_profile_registry(&self, registry: BackendProfileRegistry) {
+        *self.state.profiles.write().await = Arc::new(registry);
+    }
+
     /// Record which backend entry is currently live. Called by the CLI
     /// after it builds the initial backend from config so the picker UI
     /// knows what's active.
@@ -703,7 +732,8 @@ impl Server {
         if let Err(e) = orphans::ensure_registry_dir() {
             tracing::warn!("orphan registry dir not usable: {e}");
         }
-        let orphans = orphans::scan_orphans().await;
+        let profiles = self.state.profiles().await;
+        let orphans = orphans::scan_orphans(profiles).await;
         if !orphans.is_empty() {
             tracing::info!("detected {} orphan session(s)", orphans.len());
         }
@@ -714,8 +744,19 @@ impl Server {
         // Attach the jail if configured. Errors here are fatal — a misconfigured
         // jail should refuse to boot rather than silently allow everything.
         if let Some(root) = &config.jail_root {
-            let jail = Jail::new(root.clone())
+            let mut jail = Jail::new(root.clone())
                 .map_err(|e| ServerError::Io(std::io::Error::other(e.to_string())))?;
+            // Apply the registered profiles' session extensions so
+            // the picker labels Reaper / Bitwig / etc. folders too,
+            // not just `.ardour` ones.
+            let profiles = self.state.profiles().await;
+            jail.set_session_extensions(
+                profiles
+                    .all_session_extensions()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            );
             Arc::get_mut(&mut self.state)
                 .expect("AppState not yet shared")
                 .jail = Some(jail);
