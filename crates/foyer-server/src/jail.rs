@@ -23,6 +23,13 @@ pub enum JailError {
 pub struct Jail {
     root: PathBuf,
     root_canon: PathBuf,
+    /// File extensions (no leading dot) that mark a directory as a
+    /// session. Snapshot of every registered backend profile's
+    /// `session_file_extensions()` at the moment the Jail is built;
+    /// `Server` refreshes it whenever the profile registry changes.
+    /// Empty = no folders ever flagged as `SessionDir` (the picker
+    /// just shows them as plain directories).
+    session_extensions: Vec<String>,
 }
 
 impl Jail {
@@ -33,11 +40,25 @@ impl Jail {
         Ok(Self {
             root: root_canon.clone(),
             root_canon,
+            // Default to recognizing `.ardour` so call sites that
+            // build a bare `Jail::new(...)` (tests, embedders that
+            // haven't touched the profile registry) match the old
+            // hardcoded behavior. The runtime path on `Server::run`
+            // overwrites this from the registered profile registry.
+            session_extensions: vec!["ardour".to_string()],
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Replace the session-file extensions the jail considers when
+    /// labeling folders as `SessionDir`. Called by `Server::run`
+    /// after the profile registry has been populated so the picker
+    /// reflects whichever DAW profiles the embedder has registered.
+    pub fn set_session_extensions(&mut self, exts: Vec<String>) {
+        self.session_extensions = exts;
     }
 
     pub fn browse(&self, rel: &str, show_hidden: bool) -> Result<PathListing, JailError> {
@@ -69,7 +90,7 @@ impl Jail {
                     let is_dir = dent.file_type().map(|t| t.is_dir()).unwrap_or(false);
                     let rel_path = path_join_rel(&rel, &name);
                     let (kind, session_name) = if is_dir {
-                        if let Some(sn) = find_session_in(&entry_path) {
+                        if let Some(sn) = find_session_in(&entry_path, &self.session_extensions) {
                             (FsEntryKind::SessionDir, Some(sn))
                         } else {
                             (FsEntryKind::Dir, None)
@@ -95,7 +116,7 @@ impl Jail {
             };
             let mut session_name = None;
             if meta.is_dir() {
-                if let Some(sn) = find_session_in(&entry_path) {
+                if let Some(sn) = find_session_in(&entry_path, &self.session_extensions) {
                     kind = FsEntryKind::SessionDir;
                     session_name = Some(sn);
                 }
@@ -136,8 +157,8 @@ impl Jail {
 
     /// True when `rel` (jail-relative, normalized) points at an existing path
     /// that cannot be used as a fresh "Save session as" target: either a file
-    /// already sits there, or the directory already holds an Ardour session
-    /// (`*.ardour`). Missing paths return false.
+    /// already sits there, or the directory already holds a session file in
+    /// any registered backend's format. Missing paths return false.
     pub fn existing_session_save_conflict(&self, rel: &Path) -> Result<bool, JailError> {
         if rel.as_os_str().is_empty() {
             return Ok(false);
@@ -153,7 +174,7 @@ impl Jail {
         if !canon.is_dir() {
             return Ok(true);
         }
-        Ok(find_session_in(&canon).is_some())
+        Ok(find_session_in(&canon, &self.session_extensions).is_some())
     }
 }
 
@@ -191,21 +212,33 @@ fn path_join_rel(rel: &Path, name: &str) -> String {
     }
 }
 
-fn find_session_in(dir: &Path) -> Option<String> {
+/// Walk `dir` looking for any file whose extension matches one of
+/// `extensions` (no leading dot). Returns the file stem of the
+/// preferred match, or `None` if nothing matched. Backend-agnostic
+/// — caller supplies which extensions to recognize via the
+/// jail's registered profile registry.
+fn find_session_in(dir: &Path, extensions: &[String]) -> Option<String> {
+    if extensions.is_empty() {
+        return None;
+    }
     let dir_stem = dir.file_name()?.to_str()?.to_string();
     let rd = std::fs::read_dir(dir).ok()?;
     let mut stems: Vec<String> = Vec::new();
     for dent in rd.flatten() {
         let n = dent.file_name().to_string_lossy().into_owned();
-        if let Some(stem) = n.strip_suffix(".ardour") {
-            stems.push(stem.to_string());
+        for ext in extensions {
+            let suffix = format!(".{ext}");
+            if let Some(stem) = n.strip_suffix(&suffix) {
+                stems.push(stem.to_string());
+                break;
+            }
         }
     }
     if stems.is_empty() {
         return None;
     }
-    // Prefer `session_dir/session_dir.ardour` — one folder often accumulates
-    // several `.ardour` files (templates, "Save As" leftovers). Readdir order
+    // Prefer `session_dir/session_dir.<ext>` — one folder often accumulates
+    // several project files (templates, "Save As" leftovers). Readdir order
     // is unstable; without this the picker label can hide the folder identity.
     if let Some(p) = stems.iter().find(|s| *s == &dir_stem) {
         return Some((*p).clone());

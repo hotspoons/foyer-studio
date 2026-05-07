@@ -13,10 +13,13 @@
 //! attach.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foyer_schema::{EntityId, OrphanInfo};
 use serde::{Deserialize, Serialize};
+
+use crate::backend_profile::BackendProfileRegistry;
 
 /// On-disk shape of a session registry entry. The shim writes this
 /// and the sidecar reads it. Kept deliberately flat + forward-compat
@@ -75,7 +78,16 @@ pub fn ensure_registry_dir() -> std::io::Result<PathBuf> {
 /// Scan the registry directory, classify each entry, return the
 /// resulting `OrphanInfo` list. IO errors are logged but not fatal —
 /// a missing / unreadable directory just means "no orphans".
-pub async fn scan_orphans() -> Vec<OrphanInfo> {
+///
+/// `profiles` supplies the per-backend filesystem profile we ask
+/// "does this project have crash data on disk?" — without it the
+/// scan can't decide whether the alarming "Crashed" tag is
+/// warranted, and we'd be stuck either lying ("no recovery data
+/// ever") or unconditionally calling Ardour-specific helpers. The
+/// profile id comes from the registry entry; legacy entries with an
+/// empty `backend_id` fall through to the registry's default
+/// (typically `ardour`).
+pub async fn scan_orphans(profiles: Arc<BackendProfileRegistry>) -> Vec<OrphanInfo> {
     let dir = registry_dir();
     let mut out = Vec::new();
     let entries = match tokio::fs::read_dir(&dir).await {
@@ -123,15 +135,22 @@ pub async fn scan_orphans() -> Vec<OrphanInfo> {
         // the UI can decide whether the alarming "Crashed" tag is
         // warranted. A stale registry entry whose dir we've already
         // swept is just informational — no work is at risk.
+        //
+        // Dispatch through the profile so a Reaper / Bitwig orphan
+        // doesn't get probed with Ardour's `.history` rules.
+        let resolved_backend_id = if entry.backend_id.is_empty() {
+            profiles.default_id().unwrap_or("").to_string()
+        } else {
+            entry.backend_id.clone()
+        };
         let has_recovery_data = !entry.project_path.is_empty()
-            && !crate::session_recovery::probe(Path::new(&entry.project_path)).is_empty();
+            && profiles
+                .get_or_default(&resolved_backend_id)
+                .map(|p| !p.probe_recovery(Path::new(&entry.project_path)).is_empty())
+                .unwrap_or(false);
         out.push(OrphanInfo {
             id: EntityId::new(&entry.session_id),
-            backend_id: if entry.backend_id.is_empty() {
-                "ardour".into()
-            } else {
-                entry.backend_id.clone()
-            },
+            backend_id: resolved_backend_id,
             path: entry.project_path,
             name: if entry.project_name.is_empty() {
                 entry.session_id.clone()

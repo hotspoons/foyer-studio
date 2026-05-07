@@ -244,13 +244,24 @@ pub(crate) async fn upload(
         None => staging.clone(),
     };
 
-    // Scrub `.ardour` XML files before the project leaves the
+    // Scrub session-format files before the project leaves the
     // tempdir. A failure here aborts the upload — tempdir cleanup
     // erases the half-extracted tree. See `session_scrub.rs` for
-    // what the scrubber accepts/rejects.
+    // what the Ardour scrubber accepts/rejects; other backends'
+    // scrubbers (when added) are reachable via the same profile
+    // registry without touching this dispatch.
+    //
+    // Today we route through the registry default (Ardour). Once
+    // the upload endpoint gains a `?backend_id=` parameter (or the
+    // body declares one), key off that instead so a Reaper upload
+    // doesn't get walked by Ardour-only path validators.
+    let profile = state.profiles().await.get_or_default("");
     let scrub_report = match tokio::task::spawn_blocking({
         let project_src = project_src.clone();
-        move || session_scrub::scrub_project_dir(&project_src)
+        move || match profile {
+            Some(p) => p.scrub_project(&project_src),
+            None => Ok(session_scrub::ScrubReport::default()),
+        }
     })
     .await
     {

@@ -931,15 +931,28 @@ async fn dispatch_command(
         }
         Command::ProbeSessionRecovery { project_path } => {
             // Resolve `project_path` against the jail (when configured)
-            // so we read the same file Ardour will open. No jail =
-            // dev/LAN mode, treat it as already-absolute. The probe
-            // is a directory scan, no I/O over the wire and no spawn
-            // — safe to run inline.
+            // so we read the same file the host DAW will open. No
+            // jail = dev/LAN mode, treat it as already-absolute. The
+            // probe is a directory scan, no I/O over the wire and no
+            // spawn — safe to run inline.
+            //
+            // Dispatch through the registry default profile rather
+            // than calling Ardour-specific helpers directly. The
+            // welcome screen fires this before any backend is
+            // attached, so we have no `backend_id` to key on; the
+            // registry's default (typically Ardour) is the right
+            // answer for now. When the wire schema grows a
+            // `backend_id` field on ProbeSessionRecovery, dispatch
+            // off that instead.
             let abs = match state.jail.as_ref() {
                 Some(jail) => jail.root().join(project_path.trim_start_matches('/')),
                 None => std::path::PathBuf::from(&project_path),
             };
-            let artifacts = crate::session_recovery::probe(&abs);
+            let profiles = state.profiles().await;
+            let artifacts = profiles
+                .get_or_default("")
+                .map(|p| p.probe_recovery(&abs))
+                .unwrap_or_default();
             tracing::info!(
                 "probe_session_recovery: path={} → resolved {} → {} artifact(s) found",
                 project_path,
@@ -1262,15 +1275,19 @@ async fn dispatch_command(
                             .clone()
                             .unwrap_or_default()
                     };
-                    let recents = crate::recents::touch(foyer_schema::RecentEntry {
-                        path: crate::recents::normalize_path(
-                            &display_rel,
-                            Some(jail_root.as_path()),
-                        ),
-                        name: String::new(),
-                        backend_id,
-                        opened_at: 0,
-                    })
+                    let profiles = state.profiles().await;
+                    let recents = crate::recents::touch(
+                        foyer_schema::RecentEntry {
+                            path: crate::recents::normalize_path(
+                                &display_rel,
+                                Some(jail_root.as_path()),
+                            ),
+                            name: String::new(),
+                            backend_id,
+                            opened_at: 0,
+                        },
+                        profiles.default_id(),
+                    )
                     .await;
                     broadcast_event(state, Event::RecentsList { recents }).await;
                 }
@@ -1526,12 +1543,19 @@ async fn dispatch_command(
                                 // we never write a host-absolute
                                 // path back to the UI.
                                 let jail_root = state.sessions.jail_root.read().await.clone();
-                                let recents = crate::recents::touch(foyer_schema::RecentEntry {
-                                    path: crate::recents::normalize_path(raw, jail_root.as_deref()),
-                                    name: String::new(),
-                                    backend_id: backend_id.clone(),
-                                    opened_at: 0,
-                                })
+                                let profiles = state.profiles().await;
+                                let recents = crate::recents::touch(
+                                    foyer_schema::RecentEntry {
+                                        path: crate::recents::normalize_path(
+                                            raw,
+                                            jail_root.as_deref(),
+                                        ),
+                                        name: String::new(),
+                                        backend_id: backend_id.clone(),
+                                        opened_at: 0,
+                                    },
+                                    profiles.default_id(),
+                                )
                                 .await;
                                 broadcast_event(state, Event::RecentsList { recents }).await;
 
@@ -1587,11 +1611,19 @@ async fn dispatch_command(
                         .join(p.to_string_lossy().trim_start_matches('/')),
                     None => p.to_path_buf(),
                 };
-                let n = crate::session_recovery::archive(&abs);
+                // Dispatch via the per-backend profile so a
+                // non-Ardour launch doesn't sweep files the wrong
+                // DAW would have wanted to keep.
+                let profiles = state.profiles().await;
+                let n = profiles
+                    .get_or_default(&backend_id)
+                    .map(|prof| prof.archive_recovery(&abs))
+                    .unwrap_or(0);
                 if n > 0 {
                     tracing::info!(
-                        "launch_project: archived {n} crash-recovery artifact(s) at {}",
+                        "launch_project: archived {n} crash-recovery artifact(s) at {} ({})",
                         abs.display(),
+                        backend_id,
                     );
                 }
             }
@@ -1627,12 +1659,16 @@ async fn dispatch_command(
                         // same project end up as two distinct
                         // recents.json entries.
                         let jail_root = state.sessions.jail_root.read().await.clone();
-                        let recents = crate::recents::touch(foyer_schema::RecentEntry {
-                            path: crate::recents::normalize_path(&p, jail_root.as_deref()),
-                            name: String::new(),
-                            backend_id: touch_backend,
-                            opened_at: 0,
-                        })
+                        let profiles = state.profiles().await;
+                        let recents = crate::recents::touch(
+                            foyer_schema::RecentEntry {
+                                path: crate::recents::normalize_path(&p, jail_root.as_deref()),
+                                name: String::new(),
+                                backend_id: touch_backend,
+                                opened_at: 0,
+                            },
+                            profiles.default_id(),
+                        )
                         .await;
                         broadcast_event(state, Event::RecentsList { recents }).await;
                     }
