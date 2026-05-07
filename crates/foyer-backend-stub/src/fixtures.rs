@@ -594,7 +594,9 @@ pub(crate) fn initial_session() -> Session {
             },
             punch_in: None,
             punch_out: None,
-            metronome: None,
+            metronome: Some(toggle("transport.metronome", "Metronome")),
+            metronome_gain: Some(fader("metronome.gain", -6.0)),
+            metronome_peak: Some(EntityId::new("metronome.meter")),
             sync_source: None,
             // Server-authoritative return-on-stop mode. Default is
             // "leave" (no auto-seek on stop) because that's what
@@ -623,7 +625,7 @@ pub(crate) fn initial_session() -> Session {
         groups: vec![],
         dirty: false,
         sample_rate: foyer_schema::DEFAULT_SAMPLE_RATE,
-        ppqn: Some(960),
+        ppqn: Some(1920),
         meta: serde_json::json!({ "project": "demo" }),
     }
 }
@@ -641,11 +643,15 @@ pub(crate) fn empty_session() -> Session {
 
 /// Peak meters for every track — a flat list so the stub state can iterate cheaply.
 pub(crate) fn peak_meter_ids(session: &Session) -> Vec<EntityId> {
-    session
+    let mut out: Vec<EntityId> = session
         .tracks
         .iter()
         .filter_map(|t| t.peak_meter.clone())
-        .collect()
+        .collect();
+    if let Some(id) = session.transport.metronome_peak.clone() {
+        out.push(id);
+    }
+    out
 }
 
 /// Seed meter values for initial state.

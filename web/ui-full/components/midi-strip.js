@@ -19,6 +19,15 @@ export class MidiStrip extends LitElement {
   static properties = {
     notes: { attribute: false },
     color: { type: String },
+    // Region the notes belong to. Needed so the strip can scale the
+    // x axis by the REGION'S tick length instead of the last note's
+    // tick position — without this, resizing the region (which keeps
+    // the notes anchored in absolute time) would visibly stretch the
+    // mini-viz because every note was being normalized against the
+    // moving `tMax` (last-note end). Audio waveforms don't do this:
+    // they paint at fixed sample offsets and just leave empty space
+    // past the final transient. The MIDI strip should match.
+    region: { attribute: false },
   };
 
   static styles = css`
@@ -39,6 +48,7 @@ export class MidiStrip extends LitElement {
     super();
     this.notes = null;
     this.color = "";
+    this.region = null;
     this._ro = null;
     this._onPrefs = () => this._draw();
   }
@@ -74,16 +84,24 @@ export class MidiStrip extends LitElement {
     const notes = this.notes || [];
     if (notes.length === 0) return;
 
-    // Determine time bounds (we plot note start + length against the
-    // region's own timeline, which starts at start_ticks=0).
-    let tMax = 0;
+    // Pitch bounds straight from the note list — the y-axis is not
+    // affected by region resize so it's safe to range over notes.
+    let noteEndMax = 0;
     let pLo = 127, pHi = 0;
     for (const n of notes) {
       const end = (n.start_ticks || 0) + (n.length_ticks || 0);
-      if (end > tMax) tMax = end;
+      if (end > noteEndMax) noteEndMax = end;
       if (n.pitch < pLo) pLo = n.pitch;
       if (n.pitch > pHi) pHi = n.pitch;
     }
+    // Time bounds: prefer the REGION'S length in ticks so the viz
+    // behaves like a fixed window over the underlying notes (matching
+    // how audio waveforms render — sample positions don't move when
+    // the region's edge is dragged). Falls back to the last-note end
+    // when we can't compute the region tick length, which preserves
+    // the legacy behavior on hosts that don't surface a useful
+    // region.length_samples + session tempo / sample rate / ppqn.
+    const tMax = this._regionTicks() || noteEndMax;
     if (tMax <= 0) return;
     // Pad pitch range a hair so notes aren't flush to edges.
     if (pHi - pLo < 1) { pLo = Math.max(0, pLo - 1); pHi = Math.min(127, pHi + 1); }
@@ -95,8 +113,15 @@ export class MidiStrip extends LitElement {
     ctx.fillStyle = color;
 
     for (const n of notes) {
-      const x0 = Math.floor(((n.start_ticks || 0) / tMax) * w);
-      const x1 = Math.max(x0 + 1, Math.floor(((n.start_ticks + n.length_ticks) / tMax) * w));
+      const startTick = n.start_ticks || 0;
+      const endTick = startTick + (n.length_ticks || 0);
+      // Notes that fall past the region's right edge get clipped at
+      // the canvas edge — same visual as a waveform when the region
+      // is trimmed shorter than its source.
+      const x0 = Math.floor(Math.min(1, startTick / tMax) * w);
+      const x1Raw = Math.floor(Math.min(1, endTick / tMax) * w);
+      const x1 = Math.max(x0 + 1, x1Raw);
+      if (x0 >= w) continue;
       const y  = Math.floor((pHi - n.pitch) * rowH);
       const nh = Math.max(1, rowH - 1);
       // Alpha: 1-shading baseline + shading × velocity/127 so at
@@ -107,6 +132,33 @@ export class MidiStrip extends LitElement {
       ctx.fillRect(x0, y, x1 - x0, nh);
     }
     ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Region's length expressed in MIDI ticks. Derived from
+   * `region.length_samples` + the active session's tempo, sample
+   * rate, and ppqn. Returns 0 when any of those aren't available
+   * (the caller falls back to the last-note end so the strip still
+   * paints something on legacy hosts that don't surface tempo).
+   */
+  _regionTicks() {
+    const r = this.region;
+    if (!r || !Number.isFinite(r.length_samples) || r.length_samples <= 0) return 0;
+    const session = globalThis.__foyer?.store?.state?.session;
+    if (!session) return 0;
+    const sr = Number(session.sample_rate || session.meta?.sample_rate || 0);
+    // PPQN default matches Ardour's `Temporal::ticks_per_beat` (1920)
+    // — that's the scale `Beats::to_ticks()` and the server's
+    // `expand_sequencer_layout` both encode notes at. The pre-2026-05
+    // 960 fallback was off by 2x and showed up as notes positioned
+    // at half their correct x inside the strip.
+    const ppqn = Number(session.ppqn || 1920);
+    const controls = globalThis.__foyer?.store?.state?.controls;
+    const tempo = Number(controls?.get?.("transport.tempo") ?? session.transport?.tempo?.value ?? 0);
+    if (!sr || !ppqn || !tempo) return 0;
+    // ticks_per_sample = ppqn * tempo / (sr * 60)
+    const ticksPerSample = (ppqn * tempo) / (sr * 60);
+    return Number(r.length_samples) * ticksPerSample;
   }
 
   render() {

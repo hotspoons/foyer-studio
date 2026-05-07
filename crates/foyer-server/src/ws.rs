@@ -2441,93 +2441,122 @@ async fn dispatch_command(
         }
 
         Command::SetSequencerLayout { region_id, layout } => {
-            // Three-phase: (1) persist the layout metadata on the
-            // host (writes into the region's `_extra_xml`),
-            // (2) resize the region to fit the arrangement extent
-            // so the song timeline reflects pattern placements,
-            // (3) expand the layout into notes and ship a single
-            // ReplaceRegionNotes so the region's MIDI matches.
-            //
-            // Keeping generation server-side per Rich's 2026-04-21
-            // redesign: layout is the source of truth; notes (and
-            // length) are derived. Every connected client sees the
-            // same notes because they all reconcile off the same
+            // Layout is the source of truth; notes are derived from it
+            // by `expand_sequencer_layout`. Every connected client sees
+            // the same notes because they all reconcile off the same
             // `RegionUpdated` echo from the shim.
-            // PPQN MUST match what Ardour uses internally
-            // (`Temporal::ticks_per_beat = 1920`). Earlier code
-            // passed 960 here and the shim's resize math also used
-            // 960 — both wrong by a factor of 2 vs Ardour's actual
-            // tick scale, so notes played at double-time and the
-            // region length came out half the intended duration.
             //
-            // `active == false` means the client is *deactivating*
-            // the sequencer (converting to MIDI) — persist the
-            // metadata but DON'T regenerate notes. The region's
-            // current notes stay in place and become the
-            // authoritative content. `active == true` (default)
-            // keeps the old behavior: regen notes from the layout.
-            let is_active = layout.active;
-            let notes = foyer_schema::expand_sequencer_layout(&layout, 1920);
-            // Region length = arrangement extent in ticks → samples
-            // at the session's sample rate. We don't know the SR
-            // here for sure (each backend may answer differently);
-            // use a tempo-aware conversion via 480 ticks/quarter
-            // standard PPQN at 120 bpm = 4 ticks per ms = 4
-            // samples/ms at 1 kHz; for MIDI ticks → audio samples
-            // we let the shim handle the conversion since it knows
-            // the session's tempo map. Pass the tick count through
-            // a special-cased RegionPatch the shim interprets.
-            let length_ticks = foyer_schema::sequencer_layout_length_ticks(&layout, 1920);
-            if let Err(e) = state
-                .backend()
-                .await
-                .set_sequencer_layout(region_id.clone(), layout)
-                .await
-            {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "set_sequencer_layout_failed".into(),
-                        message: e.to_string(),
-                    },
-                )
-                .await;
-                return Ok(());
-            }
-            // Best-effort resize. Tick-to-sample lives in the shim;
-            // pass the tick count under a separate field in the
-            // RegionPatch so the shim's UpdateRegion handler can
-            // convert with the live tempo map. UpdateRegion
-            // currently takes `length_samples` only — until the
-            // schema gains `length_ticks`, the frontend's job is to
-            // size the pattern in seconds and let the user adjust
-            // via the timeline. For now we log the desired length
-            // so it shows up in diagnostics; native resize lands
-            // alongside `length_ticks` schema support.
-            tracing::debug!(
-                "sequencer regenerate: region={region_id:?} active={is_active} notes={} length_ticks={length_ticks}",
-                notes.len(),
-            );
-            // Only regenerate notes when the layout is active.
-            // Deactivation (active=false) leaves existing notes
-            // untouched so piano-roll edits can take over.
-            if is_active {
-                if let Err(e) = state
-                    .backend()
-                    .await
-                    .replace_region_notes(region_id, notes)
+            // PPQN MUST match what Ardour uses internally
+            // (`Temporal::ticks_per_beat = 1920`). Earlier code passed
+            // 960 here and the shim's resize math also used 960 — both
+            // wrong by a factor of 2 vs Ardour's actual tick scale, so
+            // notes played at double-time and the region length came
+            // out half the intended duration.
+            //
+            // **Idempotency + coalesce.** Earlier this handler ran the
+            // full pipeline (XML persist + `replace_region_notes`) on
+            // every WS frame from the editor — every cell click, every
+            // velocity wheel tick, every tempo-tick auto-persist. The
+            // shim's `replace_region_notes` rewrites the live MIDI
+            // model via `apply_diff_command_as_commit`, which fires
+            // `PropertyChange::ContentsChanged` and invalidates the
+            // playback iterator mid-bar; that's why notes played hit-
+            // or-miss while the sequencer view was open and only
+            // settled after editing stopped. Convert-to-MIDI was
+            // stable because it sets `active=false` and the regen path
+            // skips itself. Now both paths skip when the layout is
+            // unchanged, and both defer to a single per-region
+            // debounce so a fast drag across cells produces exactly
+            // one regen at the end.
+            let coalescer = state.sequencer_coalescer.clone();
+            let new_version = {
+                let mut guard = coalescer.lock().await;
+                let entry = guard.entry(region_id.clone()).or_default();
+                if entry.last_rendered.as_ref() == Some(&layout) {
+                    // Same layout we last shipped to the shim. Skip
+                    // entirely — no XML write, no notes rewrite, no
+                    // broadcast. This is the gate that catches tempo-
+                    // tick auto-persists (the editor re-emits the
+                    // current layout on every `transport.tempo`
+                    // event) and any region_updated round-trip that
+                    // bounces an unchanged blob back at us.
+                    return Ok(());
+                }
+                entry.version = entry.version.wrapping_add(1);
+                entry.version
+            };
+
+            let state_for_task = state.clone();
+            let region_id_for_task = region_id;
+            let layout_for_task = layout;
+            tokio::spawn(async move {
+                // Reset-on-arrival debounce: a follow-up edit within
+                // this window bumps `version` again, and on fire we
+                // bail because our captured `new_version` is no
+                // longer the latest.
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+                {
+                    let guard = state_for_task.sequencer_coalescer.lock().await;
+                    if guard.get(&region_id_for_task).map(|s| s.version) != Some(new_version) {
+                        return;
+                    }
+                }
+
+                let is_active = layout_for_task.active;
+                let notes = foyer_schema::expand_sequencer_layout(&layout_for_task, 1920);
+                let length_ticks =
+                    foyer_schema::sequencer_layout_length_ticks(&layout_for_task, 1920);
+                tracing::debug!(
+                    "sequencer regenerate: region={:?} active={} notes={} length_ticks={}",
+                    region_id_for_task,
+                    is_active,
+                    notes.len(),
+                    length_ticks,
+                );
+
+                let backend = state_for_task.backend().await;
+                if let Err(e) = backend
+                    .set_sequencer_layout(region_id_for_task.clone(), layout_for_task.clone())
                     .await
                 {
                     broadcast_event(
-                        state,
+                        &state_for_task,
                         Event::Error {
-                            code: "replace_region_notes_failed".into(),
+                            code: "set_sequencer_layout_failed".into(),
                             message: e.to_string(),
                         },
                     )
                     .await;
+                    return;
                 }
-            }
+                if is_active {
+                    if let Err(e) = backend
+                        .replace_region_notes(region_id_for_task.clone(), notes)
+                        .await
+                    {
+                        broadcast_event(
+                            &state_for_task,
+                            Event::Error {
+                                code: "replace_region_notes_failed".into(),
+                                message: e.to_string(),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                }
+                // Mark the layout we just rendered as the new
+                // baseline. Re-check the version under the lock —
+                // if a newer arrival landed between our regen and
+                // here, leave `last_rendered` alone so its task
+                // doesn't get falsely idempotency-skipped.
+                let mut guard = state_for_task.sequencer_coalescer.lock().await;
+                if let Some(entry) = guard.get_mut(&region_id_for_task) {
+                    if entry.version == new_version {
+                        entry.last_rendered = Some(layout_for_task);
+                    }
+                }
+            });
         }
         Command::ReplaceRegionNotes { region_id, notes } => {
             if let Err(e) = state
@@ -2547,6 +2576,12 @@ async fn dispatch_command(
             }
         }
         Command::ClearSequencerLayout { region_id } => {
+            // Drop the coalescer entry so a future re-arm doesn't get
+            // idempotency-skipped against a stale `last_rendered`. The
+            // version bump matters too: any in-flight debounced regen
+            // for this region will see a missing entry on fire and
+            // bail (treating it as a stale capture).
+            state.sequencer_coalescer.lock().await.remove(&region_id);
             if let Err(e) = state
                 .backend()
                 .await

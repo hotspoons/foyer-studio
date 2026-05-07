@@ -423,6 +423,34 @@ pub(crate) struct AppState {
     /// Sliding-window rate limiter — without this, an attacker on the
     /// public tunnel can brute-force credentials at line speed.
     pub(crate) login_gate: tokio::sync::Mutex<HashMap<IpAddr, LoginAttempts>>,
+    /// Per-region debounce + idempotency state for `SetSequencerLayout`.
+    /// Each WS frame from a beat-sequencer cell click would otherwise run
+    /// the full pipeline (XML persist + `replace_region_notes`), and the
+    /// shim's `replace_region_notes` rewrites the live MIDI model via
+    /// `apply_diff_command_as_commit` — which fires `ContentsChanged`
+    /// and invalidates Ardour's playback iterators mid-bar. Result was
+    /// hit-or-miss note playback while the editor was open. We coalesce
+    /// here: bump the per-region version on arrival, defer the regen,
+    /// and skip outright when the layout matches the last one rendered.
+    pub(crate) sequencer_coalescer: Arc<Mutex<HashMap<EntityId, SequencerCoalesceState>>>,
+}
+
+/// Tracking state for the sequencer SetSequencerLayout coalescer.
+/// One entry per region that has ever been edited this session.
+#[derive(Default)]
+pub(crate) struct SequencerCoalesceState {
+    /// Last layout we successfully shipped to the shim. An incoming
+    /// SetSequencerLayout that compares equal to this is dropped on
+    /// the floor — neither the XML persist nor the notes regen runs.
+    /// Tempo-change auto-persists ([beat-sequencer.js] `_onStoreControl`)
+    /// re-emit the same layout on every tempo tick; this is the gate
+    /// that keeps those from thrashing the MIDI model.
+    pub last_rendered: Option<foyer_schema::SequencerLayout>,
+    /// Bumped on every SetSequencerLayout arrival. Each debounced
+    /// task captures the version at scheduling time and aborts on
+    /// fire if a newer arrival has bumped it again, so a fast drag
+    /// across cells produces exactly one regen at the end.
+    pub version: u64,
 }
 
 /// One IP's recent login attempt count. Reset when the window expires.
@@ -518,6 +546,15 @@ impl AppState {
         *self.backend.write().await = next.clone();
         *self.active_backend_id.write().await = Some(backend_id.clone());
         *self.cached_snapshot.write().await = None;
+        // Drop the sequencer-regen coalescer's per-region cache.
+        // `last_rendered` is a "we already shipped this layout to the
+        // shim" mark, which is meaningful only for the OLD session's
+        // shim state. Carrying it across a swap means an idempotent
+        // tickle for the new session (sent because the new project's
+        // MidiModel hasn't been re-expanded yet) gets falsely
+        // skipped, leaving the timeline mini-strip blank until the
+        // user opens the sequencer manually.
+        self.sequencer_coalescer.lock().await.clear();
 
         // Abort the legacy one-shot pump if any. New sessions get
         // their own pump spawned by the registry, so we don't
@@ -671,6 +708,7 @@ impl Server {
             default_ui_variant: None,
             xpra_available: probe_xpra_available(),
             login_gate: tokio::sync::Mutex::new(HashMap::new()),
+            sequencer_coalescer: Arc::new(Mutex::new(HashMap::new())),
         });
         Self { state }
     }

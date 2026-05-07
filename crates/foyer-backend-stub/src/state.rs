@@ -523,6 +523,16 @@ impl StubState {
                 return Some(p);
             }
         }
+        if let Some(p) = t.metronome.as_mut() {
+            if p.id == *id {
+                return Some(p);
+            }
+        }
+        if let Some(p) = t.metronome_gain.as_mut() {
+            if p.id == *id {
+                return Some(p);
+            }
+        }
         for track in &mut self.session.tracks {
             for p in [
                 &mut track.gain,

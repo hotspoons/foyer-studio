@@ -451,6 +451,11 @@ export function openPluginFloat(pluginInstance) {
         id: pluginInstance.id,
         props: { pluginId: pluginInstance.id },
       },
+      viewKind: "plugin-panel",
+      viewProps: {
+        pluginId: pluginInstance.id,
+        trackId: owning?.trackId || "",
+      },
       onReuse: (existingPanel) => {
         if (!existingPanel) return;
         existingPanel.plugin = pluginInstance;

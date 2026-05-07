@@ -109,6 +109,8 @@ fn fake_session() -> Session {
             punch_in: None,
             punch_out: None,
             metronome: None,
+            metronome_gain: None,
+            metronome_peak: None,
             sync_source: None,
             return_mode: None,
         },

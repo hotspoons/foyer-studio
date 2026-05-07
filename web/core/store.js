@@ -230,6 +230,59 @@ export class Store extends EventTarget {
     this.state.sequencerTrackIds = next;
   }
 
+  /**
+   * On project open, sequencer-backed MIDI regions need their notes
+   * re-expanded from the saved layout so they land at the current
+   * PPQN scale. Two cases that both want the same fix:
+   *
+   *   1. Empty `notes` — the layout XML is in Ardour's session file
+   *      but the live MidiModel hasn't been re-expanded for this
+   *      session run, so the timeline mini-strip paints nothing.
+   *   2. **Notes present but at the wrong PPQN scale** — projects
+   *      saved before the 2026-05-07 PPQN fix wrote notes at
+   *      ~960 PPQN ticks. After the fix the wire format settled on
+   *      Ardour's native 1920, so the existing notes appear at half
+   *      their correct horizontal position until something
+   *      regenerates them. (User report 2026-05-07: dragging a
+   *      sequencer region's edge "renders differently" — that's
+   *      this regen kicking in via the resize path; we want the
+   *      same regen on first load.)
+   *
+   * Tickle: for each active sequencer region in this regions_list,
+   * round-trip a `set_sequencer_layout` with the existing layout.
+   * The server's coalescer is keyed on (region_id, last_rendered);
+   * `swap_backend` clears it on session change so the first tickle
+   * always proceeds. The shim writes fresh notes at the current
+   * PPQN, a `region_updated` with the corrected notes lands, and
+   * the strip paints correctly without needing a manual nudge.
+   *
+   * One-shot per region: tracked in `_sequencerTickled` so a
+   * later regions_list reply (e.g. after an unrelated edit) doesn't
+   * re-fire and create a feedback loop. The set is bounded — even
+   * a heavy session has a few dozen sequencer regions at most.
+   */
+  _tickleEmptySequencerRegions(list) {
+    if (!Array.isArray(list) || list.length === 0) return;
+    if (!this._sequencerTickled) this._sequencerTickled = new Set();
+    const ws = this._ws;
+    if (!ws || typeof ws.send !== "function") return;
+    for (const r of list) {
+      if (!r?.id) continue;
+      const layout = r.foyer_sequencer;
+      if (!layout || layout.active === false) continue;
+      if (this._sequencerTickled.has(r.id)) continue;
+      this._sequencerTickled.add(r.id);
+      try {
+        ws.send({ type: "set_sequencer_layout", region_id: r.id, layout });
+      } catch (e) {
+        // Drop the tickle mark so a later attempt can retry — the
+        // ws may have been transiently down (reconnect mid-load).
+        this._sequencerTickled.delete(r.id);
+        console.warn("sequencer tickle failed", r.id, e);
+      }
+    }
+  }
+
   // ── multi-session helpers ───────────────────────────────────────
   /** Resolve the SessionInfo for the session this tab is currently
    *  viewing, or `null` if none. */
@@ -423,6 +476,10 @@ export class Store extends EventTarget {
         for (const k of [
           "playing", "recording", "looping",
           "tempo", "time_signature_num", "time_signature_den", "position_beats",
+          // Optional fields — `walk` is null-safe via the typeof check
+          // above, so a backend that doesn't surface these (legacy
+          // snapshots) just skips them.
+          "metronome", "metronome_gain",
         ]) walk(t[k]);
         for (const tr of s.tracks || []) {
           walk(tr.gain);
@@ -642,6 +699,7 @@ export class Store extends EventTarget {
         const list = Array.isArray(body.regions) ? body.regions : [];
         this.state.regionsByTrack.set(body.track_id, list);
         this._recomputeSequencerTracks();
+        this._tickleEmptySequencerRegions(list);
         this._emit();
         break;
       }

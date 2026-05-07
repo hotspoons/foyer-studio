@@ -272,9 +272,22 @@ pub struct Transport {
     pub punch_in: Option<Parameter>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub punch_out: Option<Parameter>,
-    /// Audible metronome toggle.
+    /// Audible metronome toggle. When truthy, the click is enabled at the
+    /// engine; the UI also uses this to gate the dedicated metronome
+    /// mixer strip. The strip's "M" button writes back to the same id
+    /// — there's no separate click-mute concept in Ardour, and a
+    /// duplicate-purpose parameter would just drift.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub metronome: Option<Parameter>,
+    /// Metronome click gain (dB). Independent of `metronome` so the
+    /// strip's fader can ride alongside the on/off toggle.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub metronome_gain: Option<Parameter>,
+    /// Metronome click peak meter id. Drives the strip's level meter
+    /// alongside the fader; backends without a click bus leave this
+    /// `None`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub metronome_peak: Option<EntityId>,
     /// External sync source ("internal" | "jack" | "mtc" | "ltc" | "mclk").
     /// Free-form so hosts that invent new sync modes can stream them
     /// through without a schema bump.
@@ -438,6 +451,8 @@ mod tests {
                 punch_in: None,
                 punch_out: None,
                 metronome: None,
+                metronome_gain: None,
+                metronome_peak: None,
                 sync_source: None,
                 return_mode: None,
             },
@@ -479,7 +494,7 @@ mod tests {
             groups: vec![],
             dirty: false,
             sample_rate: 96_000,
-            ppqn: Some(960),
+            ppqn: Some(1920),
             meta: serde_json::json!({ "project": "demo" }),
         };
 

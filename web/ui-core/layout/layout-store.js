@@ -3,6 +3,7 @@
 
 import * as Tree from "./tile-tree.js";
 import { slotBounds } from "./slots.js";
+import { sessionScope } from "foyer-core/session-scope.js";
 
 /**
  * Sane first-open slot defaults per view, borrowed from pro-DAW
@@ -32,7 +33,20 @@ const DEFAULT_STICKY_SLOT = {
   // pin the modal to a workspace region — not what we want.
 };
 
-const CUR_KEY = "foyer.layout.current.v1";
+// `CUR_KEY` is the active tile tree. As of 2026-05-07 the key is
+// session-scoped — opening a different .ardour project no longer
+// inherits the previous project's tile composition (which might
+// reference per-session entities like a track editor pinned to a
+// trackId that doesn't exist here). The bare key is used as the
+// default for the launcher (no session loaded yet) and as a one-time
+// fallback when a freshly-loaded session has nothing recorded — so
+// existing users don't lose their layout the first time they switch
+// projects after this change ships.
+const CUR_KEY_BASE = "foyer.layout.current.v1";
+function curKey() {
+  const scope = sessionScope();
+  return scope === "default" ? CUR_KEY_BASE : `${CUR_KEY_BASE}@${scope}`;
+}
 const NAMED_KEY = "foyer.layout.named.v1";
 const FOCUS_KEY = "foyer.layout.focus.v1";
 const FLOAT_KEY = "foyer.layout.floating.v1";
@@ -60,11 +74,49 @@ function mkFloatId() {
   return `f_${Date.now().toString(36)}_${_floatId.toString(36)}`;
 }
 
+/// Identity key for tile-tree leaf dedup. Returns a string drawn from
+/// whichever per-entity id the view carries (track / region / plugin)
+/// or empty when the view has no per-instance state — `mixer` and
+/// `timeline` are the same node every time, so a duplicate landing
+/// from `sendToTiles` does NOT focus an existing leaf (we'd otherwise
+/// surface the wrong "you already have this" feel for the user's
+/// "split mixer right" action).
+function _identityKey(view, props) {
+  if (!props) return "";
+  const candidates = ["trackId", "regionId", "pluginId", "path"];
+  for (const k of candidates) {
+    const v = props[k];
+    if (typeof v === "string" && v.length > 0) return `${view}::${k}=${v}`;
+  }
+  return "";
+}
+
 export class LayoutStore extends EventTarget {
   constructor() {
     super();
-    this.tree = Tree.deserialize(this._read(CUR_KEY)) || Tree.defaultTree();
+    // Read the session-scoped tile tree, falling back to the
+    // pre-scoping global key on miss (one-time migration for users
+    // upgrading from before 2026-05-07; subsequent edits write to the
+    // scoped key so each project keeps its own composition).
+    this.tree =
+      Tree.deserialize(this._read(curKey())) ||
+      Tree.deserialize(this._read(CUR_KEY_BASE)) ||
+      Tree.defaultTree();
     this.focusId = this._read(FOCUS_KEY) || Tree.leaves(this.tree)[0]?.id || null;
+    // Re-hydrate when the active session changes (project switch /
+    // first snapshot landing). Without this the user-facing tree
+    // stays at whatever the launcher had when LayoutStore was built,
+    // and the per-project distinction is invisible.
+    if (typeof window !== "undefined") {
+      this._lastSessionScope = sessionScope();
+      const onStoreChange = () => this._maybeReloadForSessionChange();
+      window.__foyer?.store?.addEventListener?.("change", onStoreChange);
+      // The data store may not exist yet at construction (bootstrap
+      // ordering); retry once on the next tick.
+      setTimeout(() => {
+        try { window.__foyer?.store?.addEventListener?.("change", onStoreChange); } catch {}
+      }, 0);
+    }
     this.named = (() => {
       try { return JSON.parse(localStorage.getItem(NAMED_KEY) || "{}") || {}; }
       catch { return {}; }
@@ -180,9 +232,44 @@ export class LayoutStore extends EventTarget {
     this.dispatchEvent(new CustomEvent("change"));
   }
 
+  /**
+   * On `currentSessionId` change, swap the in-memory tile tree to the
+   * one persisted under the new project's scope. First-load fallback:
+   * if the new project has no scoped entry yet, copy from whichever
+   * the previous scope used (so a user opening project B for the
+   * first time inherits A's familiar layout instead of getting the
+   * default mixer/timeline split).
+   */
+  _maybeReloadForSessionChange() {
+    if (typeof sessionScope !== "function") return;
+    const next = sessionScope();
+    if (next === this._lastSessionScope) return;
+    const prevKey = this._lastSessionScope === "default"
+      ? CUR_KEY_BASE
+      : `${CUR_KEY_BASE}@${this._lastSessionScope}`;
+    const nextKey = next === "default" ? CUR_KEY_BASE : `${CUR_KEY_BASE}@${next}`;
+    this._lastSessionScope = next;
+    let raw = this._read(nextKey);
+    let inheritedFromPrev = false;
+    if (!raw) {
+      raw = this._read(prevKey);
+      inheritedFromPrev = true;
+    }
+    const parsed = Tree.deserialize(raw);
+    if (!parsed) return;
+    this.tree = parsed;
+    if (!Tree.leaves(parsed).some((l) => l.id === this.focusId)) {
+      this.focusId = Tree.leaves(parsed)[0]?.id || null;
+    }
+    // Don't persist back into the previous scope — _persist() reads
+    // curKey() which already returns the new one.
+    if (inheritedFromPrev) this._persist();
+    this.dispatchEvent(new CustomEvent("change"));
+  }
+
   _persist() {
     try {
-      localStorage.setItem(CUR_KEY, Tree.serialize(this.tree));
+      localStorage.setItem(curKey(), Tree.serialize(this.tree));
       if (this.focusId) localStorage.setItem(FOCUS_KEY, this.focusId);
       localStorage.setItem(NAMED_KEY, JSON.stringify(this.named));
       localStorage.setItem(FLOAT_KEY, JSON.stringify(this._floating));
@@ -769,6 +856,66 @@ export class LayoutStore extends EventTarget {
     this.tree = next;
     if (added) this.focusId = added.id;
     this._emit();
+  }
+
+  /**
+   * Add a leaf for `view` (with `props`) to the tile tree, returning the
+   * new leaf's id. Used by the foyer-window "Send to tile layer" button:
+   * a floating widget closes itself and re-mounts as a tile in the grid.
+   *
+   * Placement strategy:
+   *   · Empty tree → become the root.
+   *   · Otherwise  → split alongside the focused leaf in the
+   *                  direction that keeps tiles closer to a square
+   *                  aspect (row-split when the focus is wider than
+   *                  tall, column-split otherwise).
+   *
+   * Idempotent on `(view, props.path | trackId | regionId | pluginId)`:
+   * a second call with the same identity focuses the existing leaf
+   * instead of stacking a duplicate. Mirrors `openWindow`'s
+   * storage-key-based dedup so the affordance is the same on both
+   * sides of the float/tile boundary.
+   */
+  sendToTiles(view, props = {}) {
+    if (!view) return null;
+    const key = _identityKey(view, props);
+    if (key) {
+      for (const lf of Tree.leaves(this.tree || { kind: "leaf", id: "_", view: "" })) {
+        if (lf.view === view && _identityKey(view, lf.props) === key) {
+          this.focusId = lf.id;
+          this._emit();
+          return lf.id;
+        }
+      }
+    }
+    if (!this.tree || Tree.leaves(this.tree).length === 0) {
+      const root = Tree.leaf(view, props);
+      this.tree = root;
+      this.focusId = root.id;
+      this._emit();
+      return root.id;
+    }
+    const focusId = this.focusId || Tree.leaves(this.tree)[0]?.id;
+    if (!focusId) return null;
+    // Pick a split direction that keeps the focus tile from collapsing
+    // into a sliver. The container exposes a `tileLeafRect(id)` lookup
+    // that reads the rendered DOMRect even though tile-leaf elements
+    // sit inside a shadow root (`document.querySelector` from here
+    // wouldn't pierce the boundary). Default to row when no rect is
+    // available — wider-than-tall is the common DAW layout.
+    let direction = "row";
+    try {
+      const rect = window.__foyer?.tileLeafRect?.(focusId);
+      if (rect && rect.height > rect.width) direction = "column";
+    } catch {}
+    const next = Tree.splitLeaf(this.tree, focusId, direction, view, "after", props);
+    const added = Tree.leaves(next).find(
+      (l) => !Tree.leaves(this.tree).some((p) => p.id === l.id),
+    );
+    this.tree = next;
+    if (added) this.focusId = added.id;
+    this._emit();
+    return added?.id || null;
   }
 
   closeFocused(opts = {}) {

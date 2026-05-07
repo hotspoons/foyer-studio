@@ -31,6 +31,7 @@
 #include "ardour/audio_port.h"
 #include "ardour/audioengine.h"
 #include "ardour/automation_control.h"
+#include "ardour/dB.h"
 #include "ardour/automation_list.h"
 #include "ardour/delivery.h"
 #include "ardour/gain_control.h"
@@ -41,6 +42,7 @@
 #include "ardour/processor.h"
 #include "ardour/region.h"
 #include "ardour/midi_track.h"
+#include "ardour/rc_configuration.h"
 #include "ardour/route.h"
 #include "ardour/route_group.h"
 #include "ardour/send.h"
@@ -517,13 +519,17 @@ encode_transport_state (Session& session)
 	// even when we haven't actually started). `!transport_stopped()`
 	// reflects the FSM state machine directly — matches what "the
 	// play button should be lit" really means.
+	const bool clicking = ARDOUR::Config && ARDOUR::Config->get_clicking ();
+	const float click_gain_lin = ARDOUR::Config ? ARDOUR::Config->get_click_gain () : 1.0f;
+	const float click_gain_db = accurate_coefficient_to_dB (click_gain_lin);
 	return envelope_event ([&] (Out& o) {
 		o.map (3);
 		o.str ("dir");  o.str ("event");
 		o.str ("type"); o.str ("meter_batch");
 		o.str ("values");
-		// Fields: tempo, playing, recording, looping, position
-			o.array (5);
+		// Fields: tempo, playing, recording, looping, position,
+		// metronome on/off, metronome gain (dB).
+			o.array (7);
 
 			o.map (2);
 			o.str ("id");    o.str ("transport.tempo");
@@ -552,6 +558,20 @@ encode_transport_state (Session& session)
 			o.map (2);
 			o.str ("id");    o.str ("transport.position");
 			o.str ("value"); o.f64 (static_cast<double> (session.transport_sample ()));
+
+			// Metronome: live values from RCConfiguration so the toggle
+			// + click-gain fader stay synced even when changed from
+			// Ardour's own UI. There's no per-strip "click mute" in
+			// Ardour proper — we report `clicking == false` as the mute
+			// state too, so the strip's M button rides off the same
+			// switch as the transport-bar metronome icon.
+			o.map (2);
+			o.str ("id");    o.str ("transport.metronome");
+			o.str ("value"); o.b (clicking);
+
+			o.map (2);
+			o.str ("id");    o.str ("metronome.gain");
+			o.str ("value"); o.f64 (static_cast<double> (click_gain_db));
 	});
 }
 
@@ -605,10 +625,13 @@ encode_session_snapshot (Session& session,
 		o.str ("session");
 
 		// Session { schema_version, transport, tracks, groups, dirty,
-		// sample_rate, meta }. `sample_rate` was promoted out of the
-		// `meta` JSON blob so consumers don't have to fish through
-		// untyped data — see `Session.sample_rate` in foyer-schema.
-		o.map (7);
+		// sample_rate, ppqn, meta }. `sample_rate` was promoted out
+		// of the `meta` JSON blob so consumers don't have to fish
+		// through untyped data — see `Session.sample_rate` in
+		// foyer-schema. `ppqn` carries Ardour's `ticks_per_beat`
+		// (1920) so clients render note ticks correctly without the
+		// stale 960 hardcode.
+		o.map (8);
 		o.str ("schema_version"); o.array (2); o.u (0); o.u (1);
 
 		// Transport is a struct; map keys are Rust field names, values are Parameter structs.
@@ -634,8 +657,14 @@ encode_session_snapshot (Session& session,
 			o.str ("value"); o.b (v);
 		};
 
+		const bool clicking = ARDOUR::Config && ARDOUR::Config->get_clicking ();
+		const float click_gain_lin = ARDOUR::Config ? ARDOUR::Config->get_click_gain () : 1.0f;
+		const float click_gain_db = accurate_coefficient_to_dB (click_gain_lin);
+
 		o.str ("transport");
-		o.map (7);
+		// 7 base fields + metronome (toggle) + metronome_gain
+		// (continuous, dB) + metronome_peak (id).
+		o.map (10);
 		// NB: `transport_rolling()` reads truthy on a fresh session
 		// because the FSM's default speed is non-zero; `!transport_stopped()`
 		// also reads truthy while the FSM is transiently in
@@ -650,6 +679,26 @@ encode_session_snapshot (Session& session,
 		o.str ("time_signature_num"); emit_param_num  ("transport.ts.num",    "TS Num",   "discrete",   4.0);
 		o.str ("time_signature_den"); emit_param_num  ("transport.ts.den",    "TS Den",   "discrete",   4.0);
 		o.str ("position_beats");     emit_param_num  ("transport.position",  "Position", "meter",      static_cast<double> (session.transport_sample ()));
+		// Metronome: typed parameters so the UI knows this host
+		// supports a click. `metronome_peak` is just an EntityId
+		// (string) — no Parameter wrapping — matching the schema.
+		o.str ("metronome");          emit_param_bool ("transport.metronome", "Metronome",                                        clicking);
+		o.str ("metronome_gain");
+		{
+			// Continuous fader, dB units, [-60, +6] range to match the
+			// rest of Foyer's gain controls. The `scale` field rides
+			// the param's curve (decibels) so future surfaces that key
+			// off it pick the right log mapping.
+			o.map (7);
+			o.str ("id");    o.str ("metronome.gain");
+			o.str ("kind");  o.str ("continuous");
+			o.str ("label"); o.str ("Click Gain");
+			o.str ("scale"); o.str ("decibels");
+			o.str ("unit");  o.str ("dB");
+			o.str ("range"); o.array (2); o.f64 (-60.0); o.f64 (6.0);
+			o.str ("value"); o.f64 (static_cast<double> (click_gain_db));
+		}
+		o.str ("metronome_peak");     o.str ("metronome.meter");
 
 		// Per-track emission — includes loaded plugin instances with their
 		// full parameter sets so the generic web plugin panel can render them
@@ -967,6 +1016,13 @@ encode_session_snapshot (Session& session,
 
 		o.str ("dirty"); o.b (session.dirty ());
 		o.str ("sample_rate"); o.u (static_cast<std::uint32_t> (session.sample_rate ()));
+		// Note ticks emitted via `Beats::to_ticks()` use Ardour's
+		// internal PPQN (`Temporal::ticks_per_beat`, currently 1920).
+		// Surface it explicitly so clients don't have to rely on a
+		// stale 960 default — without this, the timeline mini-strip
+		// rendered MIDI notes at half their correct horizontal
+		// position because its tick→pixel conversion assumed 960.
+		o.str ("ppqn"); o.u (static_cast<std::uint32_t> (Temporal::ticks_per_beat));
 		o.str ("meta"); o.nil ();
 	});
 }

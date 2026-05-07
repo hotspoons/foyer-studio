@@ -197,6 +197,58 @@ export class TileLeaf extends LitElement {
       color: #fff;
       opacity: 0.9;
     }
+
+    /* Missing-entity placeholder for widgets in the tile layer whose
+     * referenced track / region / plugin has been deleted since they
+     * were docked. Same shape as an empty tile state, plus quick
+     * actions to either float the broken tile (so the user can
+     * inspect what remains) or close it outright. */
+    .missing-entity {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      flex: 1 1 auto;
+      padding: 24px;
+      color: var(--color-text-muted);
+      text-align: center;
+    }
+    .missing-entity-title {
+      font-family: var(--font-sans);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--color-text);
+    }
+    .missing-entity-body {
+      font-size: 11px;
+      max-width: 360px;
+      line-height: 1.4;
+    }
+    .missing-entity-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .missing-entity-actions button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font: inherit;
+      font-family: var(--font-sans);
+      font-size: 11px;
+      padding: 6px 10px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      background: var(--color-surface);
+      color: var(--color-text);
+      cursor: pointer;
+    }
+    .missing-entity-actions button:hover {
+      border-color: var(--color-accent);
+      color: var(--color-text);
+      background: var(--color-surface-elevated);
+    }
   `;
 
   constructor() {
@@ -291,7 +343,40 @@ export class TileLeaf extends LitElement {
 
   _float() {
     this.store?.focus(this.leaf.id);
+    // Widget-class views (track editor, MIDI editor, beat sequencer,
+    // plugin panel, …) belong in foyer-window chrome when they're
+    // not in the tile grid — the user gets the same Send-to-tile
+    // button and dock entry the float started with, AND foyer-window
+    // bumps the global z-stack on connect, so the new float lands
+    // above any other open widget windows.
+    //
+    // Tile-class views (mixer, timeline) have no `floatSpawn` and
+    // fall through to the legacy floating-tiles renderer; the
+    // `raiseFloatToGlobalFront` call below tops it above existing
+    // floats so the user can grab the new window. Without that bump
+    // a freshly-torn tile lands BELOW any open foyer-window
+    // (whose default z is 1000+) and the user can't drag it.
+    const meta = viewCatalog().get(this.leaf.view);
+    if (meta?.floatSpawn) {
+      const props = this.leaf.props || {};
+      // Remove the leaf BEFORE spawning the float so the widget's
+      // openWindow dedupe sees no existing tile and stages the
+      // window as a fresh launch.
+      this.store?.removeLeaf(this.leaf.id, { allowEmpty: true });
+      try { meta.floatSpawn(props); } catch (e) { console.warn("floatSpawn failed", e); }
+      return;
+    }
     this.store?.floatFocused();
+    // Find the floating entry we just created (latest by z) and
+    // raise it to the global front so foyer-windows don't occlude
+    // it. floatFocused emits a change synchronously, so by the time
+    // we read `_floating` here the new entry is already in there.
+    const floats = this.store?.floating?.() || [];
+    const top = floats.reduce(
+      (best, f) => ((f.z | 0) > (best?.z | 0) ? f : best),
+      null,
+    );
+    if (top?.id) this.store?.raiseFloatToGlobalFront?.(top.id);
   }
 
   /**
@@ -304,8 +389,10 @@ export class TileLeaf extends LitElement {
     ev.preventDefault();
     ev.stopPropagation();
     this.store?.focus(this.leaf.id);
+    const meta = viewCatalog().get(this.leaf.view);
+    const canFloat = !!meta?.floatSpawn;
     const items = [
-      { heading: viewCatalog().get(this.leaf.view)?.label || this.leaf.view },
+      { heading: meta?.label || this.leaf.view },
       {
         label: "Change view…",
         icon: "adjustments-horizontal",
@@ -322,17 +409,19 @@ export class TileLeaf extends LitElement {
         icon: "split-below",
         action: () => { this._menuMode = "split-column"; this.requestUpdate(); },
       },
-      { separator: true },
-      {
-        label: "Float (detach)",
-        icon: "arrow-top-right-on-square",
-        action: () => this._float(),
-      },
-      {
-        label: "Dock to slot…",
-        icon: "squares-2x2",
-        action: () => this._dockTarget(),
-      },
+      ...(canFloat ? [
+        { separator: true },
+        {
+          label: "Pop out as floating window",
+          icon: "arrow-top-right-on-square",
+          action: () => this._float(),
+        },
+        {
+          label: "Dock to slot…",
+          icon: "squares-2x2",
+          action: () => this._dockTarget(),
+        },
+      ] : []),
       { separator: true },
       {
         label: "Close tile",
@@ -415,6 +504,18 @@ export class TileLeaf extends LitElement {
     // Tear-out path: remove the leaf and ALLOW the tree to be empty. The
     // default backfill-with-mixer used to kick in here, which looked like
     // "the window I dragged duplicated itself in place."
+    //
+    // Widget-class views (track editor, MIDI editor, beat sequencer,
+    // …) keep using drop-zones / `openFloating` here so the user
+    // gets the slot-snap landing they expect from a header drag.
+    // The view registry's `elementTag` fallback in
+    // `<foyer-floating-tiles>::_renderView` makes the body render
+    // correctly even though those views weren't in the original
+    // hardcoded switch, so the slotted entry behaves the same as
+    // a native mixer/timeline tear-out — and `_renderWindow`'s
+    // dock-back button checks `meta.floatSpawn` to decide whether
+    // "popping out" converts the slot entry into a foyer-window
+    // (widget views) or re-docks into the tile tree (native).
     this.store?.removeLeaf(this.leaf.id, { allowEmpty: true });
     const id = this.store?.openFloating(view, props, placement);
     if (!id) return;
@@ -464,6 +565,15 @@ export class TileLeaf extends LitElement {
 
   render() {
     const meta = viewCatalog().get(this.leaf.view) || { id: this.leaf.view, label: this.leaf.view, icon: "document" };
+    // Pop-out chrome button is only meaningful for views that can be
+    // converted into a foyer-window — i.e., views the registry knows
+    // how to re-spawn as a float (`floatSpawn`). Native tile-class
+    // views (mixer, timeline) have no foyer-window equivalent; the
+    // legacy floating-tiles layer can hold them but that's not what
+    // the user wants from this affordance — they want a real window
+    // they can drag around. Hide the button there rather than offer
+    // a useless action.
+    const canFloat = !!meta.floatSpawn;
     return html`
       <header
         @click=${() => this._focus()}
@@ -476,12 +586,13 @@ export class TileLeaf extends LitElement {
           <span class="label">${meta.label}</span>
         </button>
         <span class="spacer"></span>
+        ${canFloat ? html`
+          <button @click=${(e) => { e.stopPropagation(); this._float(); }}
+                  title="Pop out as floating window">
+            ${icon("arrow-top-right-on-square", 12)}
+          </button>
+        ` : null}
         <button @click=${this._close} title="Close tile">${icon("close", 12)}</button>
-        <!-- Split / Float / Dock-to-slot buttons removed 2026-04-25.
-             Identical actions are reachable from the right-click
-             context menu and the top "+ New" menu, so the chrome was
-             pure visual noise on every tile. (Rich, TODO #50.) -->
-
       </header>
       <div class="body"
            @pointerdown=${() => this._focus()}
@@ -618,6 +729,36 @@ export class TileLeaf extends LitElement {
         <code>registerView({ id: "${v}", elementTag: "my-element" })</code>.
       </div>`;
     }
+    // Widgets joined into the tile layer (track editor, MIDI editor,
+    // beat sequencer, plugin panel, …) reference per-session entities
+    // by id. If the underlying track / region / plugin has been deleted
+    // since the leaf was added, render a "source is gone" placeholder
+    // instead of mounting the widget against a stale id — the widget
+    // would otherwise either crash on a null lookup or render an empty
+    // shell that's indistinguishable from a still-loading state.
+    if (meta.checkAvailable && session) {
+      const status = meta.checkAvailable(this.leaf.props || {}, session);
+      if (status && !status.ok) {
+        // Float button on a missing-entity placeholder only helps if
+        // there's a foyer-window factory to land in — for native tile
+        // views without one, just offer Close.
+        const canFloat = !!meta.floatSpawn;
+        return html`<div class="missing-entity">
+          <div class="missing-entity-title">${status.title || "Source missing"}</div>
+          <div class="missing-entity-body">${status.body || "The item this tile referenced is no longer in the session."}</div>
+          <div class="missing-entity-actions">
+            ${canFloat ? html`
+              <button @click=${this._float} title="Pop out as a floating window">
+                ${icon("arrow-top-right-on-square", 12)} Float
+              </button>
+            ` : null}
+            <button @click=${this._close} title="Close this tile">
+              ${icon("x-mark", 12)} Close
+            </button>
+          </div>
+        </div>`;
+      }
+    }
     // Static-html + unsafeStatic lets Lit treat `<${tag}>` as a stable
     // template part: same tag across renders = same DOM node, so the
     // mounted element's lifecycle (connected/disconnected/state) isn't
@@ -627,8 +768,21 @@ export class TileLeaf extends LitElement {
     // audio-listener contexts all re-mounted on every store change,
     // producing a Listen-start loop + the screen-flash on refresh.
     const tag = unsafeStatic(meta.elementTag);
-    const path = this.leaf.props?.path || "";
-    return staticHtml`<${tag} .session=${session} .path=${path}></${tag}>`;
+    const props = this.leaf.props || {};
+    const path = props.path || "";
+    // Pass every widget-relevant id through. Lit assigns these as JS
+    // properties on the element; views that don't declare them get a
+    // harmless extra property and ignore it. Means new widget kinds
+    // can opt in by reading `.trackId` / `.regionId` / `.pluginId`
+    // from the leaf without touching this template.
+    return staticHtml`<${tag}
+      .session=${session}
+      .path=${path}
+      .trackId=${props.trackId || ""}
+      .regionId=${props.regionId || ""}
+      .pluginId=${props.pluginId || ""}
+      .initialTab=${props.initialTab || ""}
+    ></${tag}>`;
   }
 }
 customElements.define("foyer-tile-leaf", TileLeaf);

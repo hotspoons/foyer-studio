@@ -528,6 +528,105 @@ master bus at all.
 
 ## UI shape
 
+- [x] Add in ability to move floating windows into and out of the tile view layer (so change their
+  window class) - this would allow you to snap a sequencer or a MIDI roll into a tile and
+  use the tile view semantics to layout the screen. This should persist per project on the client
+  side. The dock back into tile tree button doesn't really work right, but it is a good opportunity
+  to use that as a control on floating windows to send them to the tile layer, then an opposite 
+  button to pop them out of the tile layer. Right now the tile layer has just two windows, it
+  could use some friends, especially on ultrawide monitors
+  - **Shipped 2026-05-07.** Bidirectional class swap between
+    `<foyer-window>` (floating) and tile-tree leaves (gridded).
+    - **Float → Tile.** Each `openWindow` spawn site (track editor,
+      MIDI editor, beat sequencer, plugin panel, console, diagnostics)
+      now passes `viewKind` + `viewProps` to the window factory. The
+      window header grows a "Send to tile layer" button
+      (`arrow-down-left-on-square`) when those are set; clicking it
+      calls `LayoutStore.sendToTiles(viewKind, viewProps)` which
+      splits a leaf alongside the focused tile and closes the float.
+      Direction picker reads the focus tile's live `getBoundingClientRect`
+      via the new `window.__foyer.tileLeafRect(id)` lookup (registered
+      from `<foyer-tile-container>`); wider-than-tall focus → row split,
+      otherwise column. Idempotent on
+      `(view, trackId|regionId|pluginId|path)` — a second send focuses
+      the existing leaf instead of stacking a duplicate. See
+      [layout-store.js](../web/ui-core/layout/layout-store.js) `sendToTiles`,
+      [window.js](../web/ui-core/widgets/window.js) `_sendToTiles`.
+    - **Tile → Float.** Tile-leaf header gains an
+      `arrow-top-right-on-square` button next to Close that calls
+      `_float()` (existed in the right-click menu; now also in chrome).
+      [tile-leaf.js](../web/ui-core/layout/tile-leaf.js).
+    - **View registry.** New
+      [widget-tile-views.js](../web/ui-full/components/widget-tile-views.js)
+      registers `track-editor` / `midi-editor` / `beat-sequencer` /
+      `plugin-panel` / `console` / `diagnostics` against their
+      existing element tags. Tile-leaf's `_renderBody` now passes
+      `.trackId` / `.regionId` / `.pluginId` / `.initialTab` from
+      `leaf.props` so the same widget element renders identically in
+      a tile and in a foyer-window.
+    - **Missing-entity placeholder.** Each registered widget view
+      ships a `checkAvailable(props, session)` predicate. When a tile
+      references a deleted track / region / plugin (project switch,
+      manual delete), tile-leaf renders a "Track is gone" / "Region
+      is gone" placeholder with Float / Close buttons instead of
+      mounting the widget against a stale id.
+    - **Per-project persistence.** Tile-tree storage key is now
+      session-scoped (`foyer.layout.current.v1@<scope>`). The bare
+      key is the launcher default + a one-time fallback so existing
+      users don't lose their layout on first project open after this
+      ships. Project switch (`currentSessionId` change) swaps the
+      in-memory tree to the new project's persisted tree, falling
+      back to the previous project's layout when the new project has
+      nothing recorded yet (so opening B for the first time inherits
+      A's familiar layout).
+    - **Z-order on conversion.** A freshly-floated tile (or a window
+      that just came back via the float→tile→float round-trip) lands
+      on top of every other open foyer-window so the user can grab
+      it. Two-part fix: (1) tile-leaf's `_float` calls
+      `raiseFloatToGlobalFront` after spawning a tile-class float
+      (mixer/timeline tear-outs through floating-tiles); (2) the
+      foyer-window constructor now bumps `bumpGlobalStackZ`
+      unconditionally on connect (was gated on `!isRehydrating()`,
+      which suppressed bumps for ~4 s after boot — repeated
+      `rehydrateWindows()` fires kept `_rehydratingDeep > 0` and
+      stranded user-initiated spawns at the CSS default z=1000).
+      Reload doesn't preserve the pre-reload z-order regardless,
+      so the guard had no real upside.
+    - **Pop-out button gating.** Native tile-class views (mixer,
+      timeline) don't render the chrome pop-out button or the
+      "Pop out / Dock to slot" right-click items, because there's
+      no foyer-window equivalent for them — the legacy `floatFocused`
+      path drops them in the floating-tiles layer (a tile-grid
+      concept), which doesn't give the user the grab-and-drag
+      window they actually wanted. The button shows only when the
+      view registers a `floatSpawn` (i.e., the widgets that came
+      from a foyer-window in the first place). Same gate hides the
+      Float button on the missing-entity placeholder for native
+      views — only Close is offered there.
+    - **Drop-zone landing for widget tear-outs.** Header drag on a
+      widget tile keeps the drop-zones / slot-snap UX so dropping
+      into right-half / center / etc. lands the widget in that
+      slot. Two pieces required to make it actually render: (a)
+      `<foyer-floating-tiles>::_renderView` falls back to the view
+      registry's `elementTag` (with `.trackId` / `.regionId` /
+      `.pluginId` / `.path` / `.initialTab` props plumbed through)
+      when no hardcoded case matches — covers any registered view,
+      not just the original mixer/timeline/console set; without
+      this, a slot-dropped beat-sequencer rendered "Unknown view:
+      beat-sequencer" because the switch had no matching case.
+      (b) The header's dock-back button on a widget-class entry
+      now reads as "Pop out as floating window"
+      (`arrow-top-right-on-square`) and converts the slotted entry
+      into a foyer-window via the registered `floatSpawn` —
+      consistent with the user's "popping out should convert it
+      back to a widget not a tile" preference. Native views
+      (mixer / timeline) keep the original "Dock back into tile
+      tree" behavior.
+    - **Specs.**
+      [tile-window-class.spec.js](../tests-ui/specs/tile-window-class.spec.js)
+      covers the round-trip + missing-entity placeholder + dedup-by-identity
+      + freshly-floated-window-on-top.
+
 - [x] UX for floating windows vs tiles (tiles being core UI)
   - Widgets layer shipped (DECISION 42 + the 2026-04-25 push). Track editor, plugin
     configs, beat sequencer, MIDI editor, console, diagnostics all share `<foyer-window>`

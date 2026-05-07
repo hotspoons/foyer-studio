@@ -572,6 +572,7 @@ export class TransportBar extends LitElement {
     if (Number.isFinite(v)) window.__foyer.ws.controlSet("transport.tempo", v);
   };
 
+
   /**
    * The transport-bar mic button only appears while the host has
    * assigned this browser as the source for at least one track. When

@@ -102,6 +102,15 @@ export class FoyerWindow extends LitElement {
     // Default initial dimensions if nothing stored.
     initWidth:   { type: Number, attribute: "init-width" },
     initHeight:  { type: Number, attribute: "init-height" },
+    // Optional view registration: when set, the header grows a "Send
+    // to tile layer" button that converts this floating window into a
+    // tile in the workspace tree (using `viewKind` as the registered
+    // view id and `viewProps` as the per-leaf props). Leave both unset
+    // for one-off windows that have no tile equivalent (e.g. modal
+    // confirms). Marked `state` so they're reactive but not reflected
+    // to attributes — JSON props don't round-trip through HTML attrs.
+    viewKind:    { state: true },
+    viewProps:   { state: true },
   };
 
   static styles = css`
@@ -239,6 +248,8 @@ export class FoyerWindow extends LitElement {
     this.minimized = false;
     this.initWidth = 960;
     this.initHeight = 640;
+    this.viewKind = "";
+    this.viewProps = null;
 
     this._x = 0; this._y = 0;
     this._w = this.initWidth; this._h = this.initHeight;
@@ -348,7 +359,16 @@ export class FoyerWindow extends LitElement {
     // Fresh mounts must win over peers that already have an inline z from
     // click-to-raise; otherwise a new Track editor stays at :host 1000
     // behind a wall of plugin windows (Rich, 2026-05).
-    if (!isRehydrating()) this._bumpGlobalZIndex();
+    //
+    // Bump unconditionally (was gated on `!isRehydrating()` to "avoid
+    // shuffling z-order on reload" but reload doesn't preserve the
+    // pre-reload z-order anyway — all windows arrive at the CSS
+    // default of 1000 with no inline override). The guard had the
+    // unintended effect of suppressing bumps for ~4s after boot
+    // (rehydrateWindows fires repeatedly through that window) so
+    // user-initiated tile→float spawns inside that grace period
+    // landed *underneath* peers and the user couldn't drag them.
+    this._bumpGlobalZIndex();
     if (!stored) {
       requestAnimationFrame(() => {
         if (!this.isConnected) return;
@@ -409,6 +429,23 @@ export class FoyerWindow extends LitElement {
 
   _emitClose() {
     this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
+  }
+
+  /**
+   * Convert this floating window into a tile in the workspace tree.
+   * Mounts a leaf for `viewKind` with `viewProps`, then closes the
+   * window — the tile takes over rendering of the underlying widget.
+   *
+   * No-op when no view kind has been registered: the window has no
+   * tile equivalent, so the button doesn't render in that case
+   * either (gated in `render()`).
+   */
+  _sendToTiles() {
+    if (!this.viewKind) return;
+    const layout = window.__foyer?.layout;
+    if (!layout?.sendToTiles) return;
+    layout.sendToTiles(this.viewKind, this.viewProps || {});
+    this._emitClose();
   }
 
   _clampToViewport() {
@@ -535,6 +572,12 @@ export class FoyerWindow extends LitElement {
           ${this.icon ? html`<span class="title-icon">${icon(this.icon, 14)}</span>` : null}
           <h2>${this.title || ""}</h2>
           <span class="spacer"></span>
+          ${this.viewKind ? html`
+            <button title="Send to tile layer"
+                    @click=${() => this._sendToTiles()}>
+              ${icon("arrow-down-left-on-square", 14)}
+            </button>
+          ` : null}
           <button title="Minimize to dock"
                   @click=${() => { this.minimized = true; this._persist();
                     window.__foyer?.layout?.setExternalMinimized?.(this._layoutId, true); }}>
@@ -635,6 +678,19 @@ export function registerWindowKind(kind, factory) {
   if (typeof factory === "function") FACTORIES.set(kind, factory);
 }
 
+/**
+ * Invoke a registered window factory by kind. Returns true if the
+ * kind exists. Used by tile-leaf's float-out path to re-spawn a
+ * widget tile back into a foyer-window without each callsite
+ * needing a hardcoded import to the right factory module.
+ */
+export function spawnWindowKind(kind, props = {}) {
+  const fn = FACTORIES.get(kind);
+  if (!fn) return false;
+  try { fn(props); } catch (e) { console.warn("spawnWindowKind failed", kind, e); }
+  return true;
+}
+
 // Re-entry guard. Some factories are async (dynamic-import the heavy
 // editor modules), and they trigger envelope traffic on mount. The
 // store rebroadcasts that as a "change" event, which our app shell
@@ -682,7 +738,7 @@ export function rehydrateWindows() {
   }
 }
 
-export function openWindow({ title, icon, storageKey, content, width, height, backdrop = false, onReuse, persist }) {
+export function openWindow({ title, icon, storageKey, content, width, height, backdrop = false, onReuse, persist, viewKind, viewProps }) {
   const fromRehydrate = isRehydrating();
   // Reveal the widgets layer for any user-initiated open. Rehydrate
   // intentionally skips this so a reload doesn't override the user's
@@ -720,6 +776,8 @@ export function openWindow({ title, icon, storageKey, content, width, height, ba
         } catch {}
       }
       if (title) existing.title = title;
+      if (viewKind) existing.viewKind = viewKind;
+      if (viewProps) existing.viewProps = viewProps;
       // User re-opened an existing window — bring it above other widgets.
       if (!fromRehydrate) {
         try { existing._bumpGlobalZIndex?.(); } catch {}
@@ -746,6 +804,8 @@ export function openWindow({ title, icon, storageKey, content, width, height, ba
   if (width) w.initWidth = width;
   if (height) w.initHeight = height;
   if (backdrop) w.backdrop = true;
+  if (viewKind) w.viewKind = viewKind;
+  if (viewProps) w.viewProps = viewProps;
   if (content) w.appendChild(content);
   if (persist?.kind) _recordOpen(persist);
   const close = () => {

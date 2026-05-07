@@ -20,6 +20,9 @@ import { icon } from "foyer-ui-core/icons.js";
 // float renders. Alternate UIs register their own, and tile-leaf /
 // floating-tiles create elements by tag at render time via the
 // view registry. No hardcoded list here.
+import { html as staticHtml, unsafeStatic } from "lit/static-html.js";
+import { listViews } from "foyer-core/registry/views.js";
+
 import "./text-preview.js";
 import "./slot-picker.js";
 
@@ -313,8 +316,22 @@ export class FloatingTiles extends LitElement {
     // aren't subject to the widgets-layer visibility flag. Only
     // widget-class entries (Console, Diagnostics, Track editor,
     // Beat sequencer, …) respect `widgetsVisible` (DECISION 42).
+    //
+    // Exception: when no session is loaded (launcher mode), tile-
+    // class entries that the user previously tore out of the tree
+    // are suppressed — they have nothing to bind to (the mixer's
+    // empty "Waiting for session…" state and the timeline's blank
+    // ruler aren't useful), and they otherwise paint over the
+    // welcome screen, hiding the way back to the project picker.
+    // The entries stay in `_floating` (not deleted) so they pop
+    // back when a session lands.
     const layerVisible = this.store?.widgetsVisible?.() ?? true;
-    const showWidget = (e) => e.kind !== "widget" || layerVisible;
+    const sessionsCount = globalThis.__foyer?.store?.state?.sessions?.length ?? 0;
+    const inLauncher = sessionsCount === 0;
+    const showWidget = (e) => {
+      if (inLauncher && e.kind !== "widget") return false;
+      return e.kind !== "widget" || layerVisible;
+    };
     const shown = this._entries.filter((e) => !e.minimized && showWidget(e));
     const minimized = this._entries.filter((e) => e.minimized && showWidget(e));
     const topId = shown.length ? shown[shown.length - 1].id : null;
@@ -482,13 +499,32 @@ export class FloatingTiles extends LitElement {
           >
             ${icon("minus", 12)}
           </button>
-          <button
-            title="Dock back into tile tree"
-            @pointerdown=${(ev) => ev.stopPropagation()}
-            @click=${() => this.store.dockFloat(e.id)}
-          >
-            ${icon("arrow-down-left-on-square", 12)}
-          </button>
+          ${(() => {
+            // Widget-class views with a `floatSpawn` should pop out
+            // as a foyer-window — the user wants the dialog-class
+            // window chrome (drag, resize, send-to-tile button)
+            // rather than another tile-tree leaf they'd have to
+            // float again. Native tile views (mixer / timeline)
+            // keep the dock-back-to-tree behavior.
+            const meta = listViews().find((v) => v.id === e.view);
+            const canFloatAsWindow = !!meta?.floatSpawn;
+            if (canFloatAsWindow) {
+              return html`<button
+                title="Pop out as floating window"
+                @pointerdown=${(ev) => ev.stopPropagation()}
+                @click=${() => this._popOutAsWindow(e, meta)}
+              >
+                ${icon("arrow-top-right-on-square", 12)}
+              </button>`;
+            }
+            return html`<button
+              title="Dock back into tile tree"
+              @pointerdown=${(ev) => ev.stopPropagation()}
+              @click=${() => this.store.dockFloat(e.id)}
+            >
+              ${icon("arrow-down-left-on-square", 12)}
+            </button>`;
+          })()}
           <button
             title="Close"
             @pointerdown=${(ev) => ev.stopPropagation()}
@@ -509,6 +545,20 @@ export class FloatingTiles extends LitElement {
         <div class="h se" @pointerdown=${(ev) => this._startResize(ev, e, "se")}></div>
       </div>
     `;
+  }
+
+  /**
+   * Convert a slotted floating-tiles entry for a widget view into a
+   * free-floating `<foyer-window>` (using the registered `floatSpawn`
+   * factory) and remove the original entry. Mirrors the chrome
+   * pop-out button on a tile leaf — same destination, just from the
+   * other surface so the round-trip is fully bidirectional.
+   */
+  _popOutAsWindow(entry, meta) {
+    if (!meta?.floatSpawn) return;
+    const props = entry.props || {};
+    this.store.removeFloat(entry.id);
+    try { meta.floatSpawn(props); } catch (err) { console.warn("popOutAsWindow failed", err); }
   }
 
   _renderView(e) {
@@ -547,10 +597,32 @@ export class FloatingTiles extends LitElement {
           .trackName=${info.trackName}
         ></foyer-plugin-panel>`;
       }
-      default:
+      default: {
+        // Fall back to the view registry so any view registered via
+        // `registerView({ id, elementTag })` renders here too. Covers
+        // widget-class views (track editor, MIDI editor, beat
+        // sequencer, plugin panel, …) that landed in floating-tiles
+        // via a drop-zone slot drop or a persisted entry from before
+        // the tile-leaf tear-out was rerouted to `floatSpawn`. Same
+        // prop pass-through pattern as `<foyer-tile-leaf>` so the
+        // mounted element gets `trackId` / `regionId` / `pluginId`.
+        const meta = listViews().find((v) => v.id === e.view);
+        if (meta?.elementTag) {
+          const tag = unsafeStatic(meta.elementTag);
+          const props = e.props || {};
+          return staticHtml`<${tag}
+            .session=${session}
+            .path=${props.path || ""}
+            .trackId=${props.trackId || ""}
+            .regionId=${props.regionId || ""}
+            .pluginId=${props.pluginId || ""}
+            .initialTab=${props.initialTab || ""}
+          ></${tag}>`;
+        }
         return html`<div style="padding:20px;color:var(--color-text-muted)">
           Unknown view: ${e.view}
         </div>`;
+      }
     }
   }
 

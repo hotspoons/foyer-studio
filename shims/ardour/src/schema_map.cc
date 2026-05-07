@@ -746,8 +746,10 @@ describe_region (const Region& r, const std::string& track_id)
 				nd.velocity = note->velocity ();
 				nd.channel  = note->channel ();
 				// Evoral::Note<Temporal::Beats>: times are in musical
-				// beats. Convert to ticks (default 960 PPQN via
-				// Temporal::ticks_per_beat) for the wire schema.
+				// beats. `Beats::to_ticks()` (no arg) returns ticks
+				// at `Beats::PPQN = Temporal::ticks_per_beat = 1920`.
+				// The session snapshot's `ppqn` field carries this
+				// scale so clients render notes at the right x.
 				nd.start_ticks  = static_cast<std::uint64_t> (note->time ().to_ticks ());
 				nd.length_ticks = static_cast<std::uint64_t> (note->length ().to_ticks ());
 				d.notes.push_back (nd);
