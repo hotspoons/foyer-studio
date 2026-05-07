@@ -1988,14 +1988,43 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// first widens the verify window so the new offset
 				// passes. (region.cc:1999-2012; learned the hard way
 				// in DuplicateRegionRange.)
+				//
+				// Pre-convert all three timecnt_t/timepos_t inputs to
+				// the region's own time domain. MIDI playlists run on
+				// `BeatTime` while the wire format always carries
+				// samples — `Temporal::timecnt_t::from_samples()` and
+				// `Temporal::timepos_t(samplepos_t)` both produce
+				// `AudioTime` values. `Region::set_length_internal`
+				// (region.cc:589-611) hits an early-return when the
+				// input timecnt's time_domain doesn't match the
+				// playlist's: it retags the OLD length and discards
+				// the new one, with no error. So MIDI region resize
+				// drag was a silent no-op — the shim "applied" a
+				// length the model never accepted, then encoded the
+				// unchanged length back to the UI, which snapped the
+				// optimistic preview back to its original size.
+				// `timecnt_t::set_time_domain` runs the value through
+				// `TempoMap::use()` so the samples land as the right
+				// number of beats. Same idiom as
+				// `Region::trim_to_internal` (region.cc:1128-1131).
+				const Temporal::TimeDomain region_td = hit.region->time_domain ();
 				if (snap.has_patch_length) {
-					hit.region->set_length (Temporal::timecnt_t::from_samples (static_cast<Temporal::samplepos_t> (snap.patch_length)));
+					auto length = Temporal::timecnt_t::from_samples (
+						static_cast<Temporal::samplepos_t> (snap.patch_length));
+					length.set_time_domain (region_td);
+					hit.region->set_length (length);
 				}
 				if (snap.has_patch_source_offset) {
-					hit.region->set_start (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_source_offset)));
+					auto offset = Temporal::timepos_t (
+						static_cast<Temporal::samplepos_t> (snap.patch_source_offset));
+					offset.set_time_domain (region_td);
+					hit.region->set_start (offset);
 				}
 				if (snap.has_patch_start) {
-					hit.region->set_position (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.patch_start)));
+					auto pos = Temporal::timepos_t (
+						static_cast<Temporal::samplepos_t> (snap.patch_start));
+					pos.set_time_domain (region_td);
+					hit.region->set_position (pos);
 				}
 				if (snap.has_patch_name) {
 					hit.region->set_name (snap.patch_name);
@@ -2396,8 +2425,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					return;
 				}
 				if (snap.dup_has_length) {
-					clone->set_length (Temporal::timecnt_t::from_samples (
-						static_cast<Temporal::samplepos_t> (snap.dup_length_samples)));
+					// Same time-domain trap as UpdateRegion above:
+					// `Region::set_length_internal` silently discards the
+					// new length when the timecnt's domain doesn't match
+					// the playlist's. Pre-convert into the clone's own
+					// domain so MIDI duplicate-with-length actually
+					// resizes the clone.
+					auto length = Temporal::timecnt_t::from_samples (
+						static_cast<Temporal::samplepos_t> (snap.dup_length_samples));
+					length.set_time_domain (clone->time_domain ());
+					clone->set_length (length);
 				}
 				playlist->clear_changes ();
 				playlist->add_region (clone, Temporal::timepos_t (

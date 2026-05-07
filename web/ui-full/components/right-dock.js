@@ -33,6 +33,8 @@ const _spawnConsole = () => {
     title: "Console", icon: "command-line", storageKey: "console-widget",
     content: el, width: 720, height: 480,
     persist: { kind: "console", id: "console", props: {} },
+    viewKind: "console",
+    viewProps: {},
   });
 };
 const _spawnDiagnostics = () => {
@@ -41,6 +43,8 @@ const _spawnDiagnostics = () => {
     title: "Diagnostics", icon: "check-circle", storageKey: "diagnostics-widget",
     content: el, width: 720, height: 520,
     persist: { kind: "diagnostics", id: "diagnostics", props: {} },
+    viewKind: "diagnostics",
+    viewProps: {},
   });
 };
 registerWindowKind("console", _spawnConsole);
@@ -110,6 +114,8 @@ registerWindowKind("midi-editor", (props) => {
       content: editor,
       width: 1040, height: 680,
       persist: { kind: "midi-editor", id: "midi-editor", props: { regionId: found.region.id } },
+      viewKind: "midi-editor",
+      viewProps: { regionId: found.region.id, trackId: found.trackId || "" },
       onReuse: (existing) => _retargetMidiEditor(existing, found),
     });
   });
@@ -140,6 +146,8 @@ registerWindowKind("beat-sequencer", (props) => {
       content: seq,
       width: 1100, height: 560,
       persist: { kind: "beat-sequencer", id: "beat-sequencer", props: { regionId: found.region.id } },
+      viewKind: "beat-sequencer",
+      viewProps: { regionId: found.region.id, trackId: found.trackId || "" },
       onReuse: (existing) => _retargetBeatSequencer(existing, found),
     });
   });

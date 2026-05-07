@@ -546,6 +546,15 @@ impl AppState {
         *self.backend.write().await = next.clone();
         *self.active_backend_id.write().await = Some(backend_id.clone());
         *self.cached_snapshot.write().await = None;
+        // Drop the sequencer-regen coalescer's per-region cache.
+        // `last_rendered` is a "we already shipped this layout to the
+        // shim" mark, which is meaningful only for the OLD session's
+        // shim state. Carrying it across a swap means an idempotent
+        // tickle for the new session (sent because the new project's
+        // MidiModel hasn't been re-expanded yet) gets falsely
+        // skipped, leaving the timeline mini-strip blank until the
+        // user opens the sequencer manually.
+        self.sequencer_coalescer.lock().await.clear();
 
         // Abort the legacy one-shot pump if any. New sessions get
         // their own pump spawned by the registry, so we don't

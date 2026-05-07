@@ -40,7 +40,12 @@ import "foyer-ui-core/widgets/number-scrub.js";
 // Side-strip embedded body — see `_toggleStrip` + render().
 import "./midi-manager.js";
 
-const PPQN = 960;
+// Matches Ardour's `Temporal::ticks_per_beat` and the
+// `expand_sequencer_layout` PPQN the server uses to render this
+// layout to MIDI notes. The pre-2026-05 960 hardcode was off by 2x
+// — beat-sequencer step ticks would have come out at half the
+// shim's actual scale.
+const PPQN = 1920;
 const PREVIEW_PREF_KEY = "foyer.beat.preview.v1";
 const ARR_HEIGHT_KEY = "foyer.beat.arr-height.v1";
 const PRESETS_KEY = "foyer.beat.presets.v1";

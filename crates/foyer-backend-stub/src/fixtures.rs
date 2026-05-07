@@ -625,7 +625,7 @@ pub(crate) fn initial_session() -> Session {
         groups: vec![],
         dirty: false,
         sample_rate: foyer_schema::DEFAULT_SAMPLE_RATE,
-        ppqn: Some(960),
+        ppqn: Some(1920),
         meta: serde_json::json!({ "project": "demo" }),
     }
 }

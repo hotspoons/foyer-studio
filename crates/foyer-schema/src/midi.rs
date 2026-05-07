@@ -7,8 +7,14 @@
 //!
 //! Ticks (not samples) are the time unit for notes — MIDI time is musical
 //! time, and the host's tempo map maps ticks → samples at render time. One
-//! beat = 960 ticks by default (PPQN). Clients should not hard-code PPQN;
-//! `Session.ppqn` will carry it when the shim starts emitting it.
+//! beat = 1920 ticks by default (PPQN). This matches Ardour's
+//! internal `Temporal::ticks_per_beat` (libs/temporal/temporal/types.h);
+//! the shim's `note->time().to_ticks()` and the server's
+//! `expand_sequencer_layout` calls both encode at 1920. The legacy
+//! 960 default that lived here through 2026-04 was off by 2x and
+//! showed up as MIDI notes positioned at ~half the correct spot
+//! inside the timeline mini-strip — fixed 2026-05-07. Clients
+//! should pull `Session.ppqn` when set; the fallback is 1920.
 
 use serde::{Deserialize, Serialize};
 
@@ -323,9 +329,8 @@ impl Default for SequencerLayout {
 /// ask on 2026-04-21: sequencer state *drives* note generation,
 /// not the other way around).
 ///
-/// * `ppqn` is the project's ticks-per-quarter (always 960 in
-///   Ardour as of 9.x; pulled from session state if that ever
-///   changes).
+/// * `ppqn` is the project's ticks-per-quarter (1920 in Ardour 9.x —
+///   `Temporal::ticks_per_beat` — passed explicitly by callers).
 /// * Cells whose row index falls outside the declared rows array
 ///   are silently dropped — they'd be stale data from an earlier
 ///   layout.

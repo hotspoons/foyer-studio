@@ -494,7 +494,7 @@ mod tests {
             groups: vec![],
             dirty: false,
             sample_rate: 96_000,
-            ppqn: Some(960),
+            ppqn: Some(1920),
             meta: serde_json::json!({ "project": "demo" }),
         };
 

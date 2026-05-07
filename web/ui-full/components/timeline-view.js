@@ -1337,6 +1337,8 @@ export class TimelineView extends LitElement {
         width: 1100,
         height: 560,
         persist: { kind: "beat-sequencer", id: "beat-sequencer", props: { regionId: region?.id } },
+        viewKind: "beat-sequencer",
+        viewProps: { regionId: region?.id, trackId },
         // Same reasoning as the MIDI editor — retarget the live
         // sequencer to the new region rather than spawning a dup.
         onReuse: (existingSeq) => {
@@ -2879,7 +2881,7 @@ export class TimelineView extends LitElement {
                  @dblclick=${(e) => { e.stopPropagation(); this._openRegionEditor(r); }}
                  @contextmenu=${(e) => this._regionContextMenu(e, r)}>
               ${isMidi
-                ? html`<foyer-midi-strip class="viz" .notes=${r.notes || []} .color=${track.color || ""}></foyer-midi-strip>`
+                ? html`<foyer-midi-strip class="viz" .notes=${r.notes || []} .region=${r} .color=${track.color || ""}></foyer-midi-strip>`
                 : html`<foyer-waveform-gl class="viz" data-id=${r.id}></foyer-waveform-gl>`}
               ${cutOverlay}
               <div class="name">${r.name}</div>
@@ -3257,6 +3259,8 @@ export class TimelineView extends LitElement {
         width: 1040,
         height: 680,
         persist: { kind: "midi-editor", id: "midi-editor", props: { regionId: region?.id } },
+        viewKind: "midi-editor",
+        viewProps: { regionId: region?.id, trackId },
         // Reusing an already-open MIDI editor: retarget the live
         // editor element to the newly-clicked region instead of
         // letting openWindow swap nodes (which would orphan the
@@ -3755,6 +3759,29 @@ export class TimelineView extends LitElement {
           id: r.id,
           patch,
         });
+        // Sequencer-owned regions: extending the region's right edge
+        // grows the timeline lozenge but the layout's arrangement is
+        // still bounded by its old bar count, so `expand_sequencer_layout`
+        // only emits notes for the original extent and the new portion
+        // plays silent. Loop the existing arrangement to fill the new
+        // bars — Hydrogen-style "more of the same beat" — and ship a
+        // set_sequencer_layout. Server-side coalescer will absorb it
+        // into the same regen the update_region above triggers.
+        if (mode === "resize-right"
+            && r.length_samples > o.len
+            && r.foyer_sequencer
+            && r.foyer_sequencer.active !== false) {
+          const extended = this._loopSequencerArrangementToFit(
+            r.foyer_sequencer, r.length_samples,
+          );
+          if (extended) {
+            window.__foyer?.ws?.send({
+              type: "set_sequencer_layout",
+              region_id: r.id,
+              layout: extended,
+            });
+          }
+        }
       }
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
@@ -3771,6 +3798,116 @@ export class TimelineView extends LitElement {
       if (f) return f;
     }
     return null;
+  }
+
+  /**
+   * Repeat a sequencer layout's arrangement until it covers
+   * `newLengthSamples` of region. Returns a fresh layout object the
+   * caller can ship via `set_sequencer_layout`, or `null` when no
+   * extension is needed (or the inputs aren't enough to compute bars).
+   *
+   * Bar duration is derived from `pattern_steps`/`resolution` plus the
+   * session tempo + sample rate — same beat math as `_renderQuantGrid`.
+   * The original arrangement's extent (`maxBar + 1`) is the loop unit;
+   * each subsequent loop copies every original slot at `slot.bar +
+   * loop * extent`. Truncates at the bar that crosses
+   * `newLengthSamples` so we don't write slots past the visible region.
+   */
+  _loopSequencerArrangementToFit(layout, newLengthSamples) {
+    if (!layout || layout.active === false) return null;
+    const arr = Array.isArray(layout.arrangement) ? layout.arrangement : [];
+    if (arr.length === 0) return null;
+    const patternSteps = Math.max(1, Math.round(Number(layout.pattern_steps) || 16));
+    const resolution = Math.max(1, Math.round(Number(layout.resolution) || 4));
+    const ctls = window.__foyer?.store?.state?.controls;
+    const tempo = Number(ctls?.get?.("transport.tempo")) || 120;
+    if (!Number.isFinite(tempo) || tempo <= 0) return null;
+    const sr = this._sampleRate();
+    if (!sr) return null;
+    const beatSec = 60 / tempo;
+    const barBeats = patternSteps / resolution;
+    const barSamples = barBeats * beatSec * sr;
+    if (!Number.isFinite(barSamples) || barSamples <= 0) return null;
+    const newTotalBars = Math.max(1, Math.ceil(newLengthSamples / barSamples));
+    let curMaxBar = -1;
+    for (const s of arr) {
+      const b = Number(s?.bar) || 0;
+      if (b > curMaxBar) curMaxBar = b;
+    }
+    const curExtent = curMaxBar + 1;
+    if (curExtent <= 0) return null;
+    if (newTotalBars <= curExtent) return null;
+
+    // Find the smallest period `P` such that the existing arrangement
+    // is a CLEAN repetition of bars [0, P) — every bar in
+    // [P, curExtent) is identical to its counterpart `period` bars
+    // earlier, and `curExtent % P === 0` (the existing arrangement
+    // covers exactly K full repetitions of the unit).
+    //
+    // If no such P exists, the arrangement isn't a loopable
+    // pattern and we return null — caller leaves the new bars empty
+    // rather than smearing a non-repeating arrangement past its
+    // intended end (the user's "we'll get dubious patterning"
+    // concern, 2026-05-07).
+    const sigOf = (b) => {
+      const slots = [];
+      for (const s of arr) {
+        if ((Number(s?.bar) || 0) !== b) continue;
+        slots.push(`${s.pattern_id}|${Number(s.arrangement_row) || 0}`);
+      }
+      slots.sort();
+      return slots.join(",");
+    };
+    let period = null;
+    if (curExtent === 1) {
+      // Trivial loop — a single-bar arrangement is treated as a
+      // 1-bar unit that repeats. The strict "must show ≥2 reps"
+      // rule below would block this (period === curExtent), but
+      // a single drum bar IS what the user means by "the loop".
+      period = 1;
+    } else {
+      // Otherwise require period ≤ curExtent / 2 — i.e. the existing
+      // arrangement must contain at least two full repetitions of
+      // the unit. Without that, what we'd be "looping" is a
+      // one-shot arrangement the user composed once with no
+      // intention of repeating, and extending produces the
+      // dubious patterning Rich called out (2026-05-07).
+      const maxPeriod = Math.floor(curExtent / 2);
+      for (let p = 1; p <= maxPeriod; p++) {
+        if (curExtent % p !== 0) continue;
+        let ok = true;
+        for (let b = p; b < curExtent; b++) {
+          if (sigOf(b) !== sigOf(b - p)) { ok = false; break; }
+        }
+        if (ok) { period = p; break; }
+      }
+    }
+    if (period === null) return null;
+
+    // Extend by full periods only — no partial trailing unit. If the
+    // new region length is, say, 7.3 bars and the period is 2, we
+    // fill bars [0, 6) and leave [6, 7.3) empty. The user resizes
+    // again or shrinks the region to lock in the loop count.
+    const numUnits = Math.floor(newTotalBars / period);
+    const filledBars = numUnits * period;
+    if (filledBars <= curExtent) return null;
+
+    // Capture the canonical unit (slots in bars [0, period)) and
+    // replicate forward.
+    const unitSlots = arr.filter((s) => (Number(s.bar) || 0) < period);
+    const next = JSON.parse(JSON.stringify(layout));
+    const startUnit = curExtent / period;
+    for (let unitIdx = startUnit; unitIdx < numUnits; unitIdx++) {
+      for (const slot of unitSlots) {
+        const newBar = (Number(slot.bar) || 0) + unitIdx * period;
+        next.arrangement.push({
+          pattern_id: slot.pattern_id,
+          bar: newBar,
+          arrangement_row: Number(slot.arrangement_row) || 0,
+        });
+      }
+    }
+    return next;
   }
 
   _patchRegionLocally(region) {

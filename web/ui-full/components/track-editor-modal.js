@@ -824,6 +824,12 @@ export function openTrackEditor(trackId, options = {}) {
     },
     width: 720,
     height: 640,
+    // Tile-layer integration: the foyer-window shows a "Send to tile
+    // layer" button that converts the float into a track-editor tile
+    // mounted alongside mixer/timeline. Same `viewKind` is what
+    // tile-leaf looks up in the view registry.
+    viewKind: "track-editor",
+    viewProps: { trackId, initialTab: options.tab || "" },
     // Retarget the existing element instead of swapping it. Without
     // this every rehydrate pass would disconnect+reconnect the modal,
     // re-firing its connectedCallback's `list_ports` request — and

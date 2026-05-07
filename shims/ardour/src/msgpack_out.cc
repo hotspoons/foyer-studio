@@ -625,10 +625,13 @@ encode_session_snapshot (Session& session,
 		o.str ("session");
 
 		// Session { schema_version, transport, tracks, groups, dirty,
-		// sample_rate, meta }. `sample_rate` was promoted out of the
-		// `meta` JSON blob so consumers don't have to fish through
-		// untyped data — see `Session.sample_rate` in foyer-schema.
-		o.map (7);
+		// sample_rate, ppqn, meta }. `sample_rate` was promoted out
+		// of the `meta` JSON blob so consumers don't have to fish
+		// through untyped data — see `Session.sample_rate` in
+		// foyer-schema. `ppqn` carries Ardour's `ticks_per_beat`
+		// (1920) so clients render note ticks correctly without the
+		// stale 960 hardcode.
+		o.map (8);
 		o.str ("schema_version"); o.array (2); o.u (0); o.u (1);
 
 		// Transport is a struct; map keys are Rust field names, values are Parameter structs.
@@ -1013,6 +1016,13 @@ encode_session_snapshot (Session& session,
 
 		o.str ("dirty"); o.b (session.dirty ());
 		o.str ("sample_rate"); o.u (static_cast<std::uint32_t> (session.sample_rate ()));
+		// Note ticks emitted via `Beats::to_ticks()` use Ardour's
+		// internal PPQN (`Temporal::ticks_per_beat`, currently 1920).
+		// Surface it explicitly so clients don't have to rely on a
+		// stale 960 default — without this, the timeline mini-strip
+		// rendered MIDI notes at half their correct horizontal
+		// position because its tick→pixel conversion assumed 960.
+		o.str ("ppqn"); o.u (static_cast<std::uint32_t> (Temporal::ticks_per_beat));
 		o.str ("meta"); o.nil ();
 	});
 }

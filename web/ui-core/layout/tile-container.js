@@ -48,6 +48,31 @@ export class TileContainer extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this.store?.addEventListener("change", this._onStoreChange);
+    // Expose a leaf-rect lookup on the global handle so layout-store's
+    // `sendToTiles` can pick a sensible split direction without having
+    // to pierce nested shadow roots from outside this component.
+    if (typeof globalThis !== "undefined") {
+      const f = globalThis.__foyer || (globalThis.__foyer = {});
+      f.tileLeafRect = (id) => {
+        if (!id) return null;
+        const root = this.shadowRoot;
+        if (!root) return null;
+        // The tile tree can nest, so a recursive walk through nested
+        // tile-container shadow roots is required to find a leaf in
+        // any branch — not just direct children of this container.
+        const stack = [root];
+        while (stack.length) {
+          const r = stack.pop();
+          if (!r) continue;
+          const hit = r.querySelector(`foyer-tile-leaf[data-leaf-id="${CSS.escape(id)}"]`);
+          if (hit) return hit.getBoundingClientRect();
+          for (const el of r.querySelectorAll("foyer-tile-container")) {
+            if (el.shadowRoot) stack.push(el.shadowRoot);
+          }
+        }
+        return null;
+      };
+    }
   }
 
   disconnectedCallback() {
@@ -90,7 +115,7 @@ export class TileContainer extends LitElement {
       `;
     }
     if (n.kind === "leaf") {
-      return html`<foyer-tile-leaf .leaf=${n} .store=${this.store}></foyer-tile-leaf>`;
+      return html`<foyer-tile-leaf data-leaf-id=${n.id} .leaf=${n} .store=${this.store}></foyer-tile-leaf>`;
     }
     this.setAttribute("direction", n.direction);
     const children = [];

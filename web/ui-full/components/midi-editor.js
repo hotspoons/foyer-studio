@@ -402,7 +402,9 @@ export class MidiEditor extends LitElement {
     this.regionName = "";
     this.readOnly = false;
     this.sequencerLayout = null;
-    this.ppqn = 960;
+    // Match Ardour's `Temporal::ticks_per_beat` (the wire format the
+    // shim emits notes at). The legacy 960 default was off by 2x.
+    this.ppqn = 1920;
     this._zoomIdx = nearestIdx(H_ZOOM_LEVELS, 0.0167);
     this._rowIdx  = nearestIdx(V_ROW_HEIGHTS, 14);
     // Side-strip preference (instruments/patches drawer). Sticky
@@ -1151,7 +1153,7 @@ export class MidiEditor extends LitElement {
     const notes = (this._localNotes || []).filter(
       (n) => n.pitch >= this._pitchLo && n.pitch <= this._pitchHi,
     );
-    const ppqn = this.ppqn || 960;
+    const ppqn = this.ppqn || 1920;
     const totalTicks = Math.max(
       notes.reduce((m, n) => Math.max(m, (n.start_ticks || 0) + (n.length_ticks || 0)), 0),
       ppqn * 16,
