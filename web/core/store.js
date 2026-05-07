@@ -423,6 +423,10 @@ export class Store extends EventTarget {
         for (const k of [
           "playing", "recording", "looping",
           "tempo", "time_signature_num", "time_signature_den", "position_beats",
+          // Optional fields — `walk` is null-safe via the typeof check
+          // above, so a backend that doesn't surface these (legacy
+          // snapshots) just skips them.
+          "metronome", "metronome_gain",
         ]) walk(t[k]);
         for (const tr of s.tracks || []) {
           walk(tr.gain);

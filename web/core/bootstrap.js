@@ -24,6 +24,7 @@ import { FoyerWs } from "./ws.js";
 import { Store } from "./store.js";
 import { ChatStore } from "./chat.js";
 import { installTransportReturn } from "./transport-return.js";
+import { installBackTrap } from "./back-trap.js";
 import { attach as attachRecents } from "./recents.js";
 import { audioController } from "./audio/master-controller.js";
 import { ClockSync } from "./audio/clock-sync.js";
@@ -62,6 +63,10 @@ export function bootFoyerCore(opts = {}) {
   chat.attach();
   attachRecents(store);
   installTransportReturn({ store, ws });
+  // Capture stray browser-back gestures (engineers reach for "rewind
+  // to start" and overshoot into the chrome arrow) and re-route them
+  // to a transport rewind instead of unmounting the page.
+  installBackTrap({ store, ws });
   // Master-bus listen controller. Lives at the core layer (not in any
   // ui-* variant) so the phone shell, the desktop shell, and any
   // future variant all share one singleton — without this the phone

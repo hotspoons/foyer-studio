@@ -22,9 +22,12 @@ static constexpr bool LOG_TRANSPORT_TICK = false;
 #include "ardour/chan_count.h"
 #include "ardour/monitor_control.h"
 #include "ardour/midi_track.h"
+#include "ardour/audio_port.h"
 #include "ardour/playlist.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
+#include "ardour/port.h"
+#include "ardour/rc_configuration.h"
 #include "ardour/region.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
@@ -254,6 +257,18 @@ SignalBridge::subscribe_all ()
 	    std::bind<void> (&SignalBridge::on_dirty_changed, this),
 	    _shim.event_loop ());
 
+	// RCConfiguration::ParameterChanged fires on every Config-> setter
+	// (including `clicking` and `click_gain`). We re-emit the transport
+	// state so a metronome flip triggered from Ardour's own GUI lights
+	// up the Foyer transport-bar button + mixer strip immediately,
+	// rather than waiting for the next 30 Hz tick.
+	if (ARDOUR::Config) {
+		ARDOUR::Config->ParameterChanged.connect (
+		    _connections, MISSING_INVALIDATOR,
+		    std::bind<void> (&SignalBridge::on_rc_parameter_changed, this, std::placeholders::_1),
+		    _shim.event_loop ());
+	}
+
 	// Defer the initial walk of routes to `Session::SessionLoaded`.
 	// Why not walk now:
 	//   `subscribe_all` runs from `FoyerShim::set_active(true)`,
@@ -389,6 +404,37 @@ SignalBridge::on_session_loaded ()
 			tick->activate ();
 			self->_ingress_tick = tick;
 			PBD::warning << "foyer_shim: ingress tick processor installed on master_out" << endmsg;
+
+			// Route the metronome click into the master bus so the
+			// browser-side Listen tap (which streams the master
+			// output) actually hears it. Out of the box Ardour
+			// connects click_io straight to the first two physical
+			// playback ports, bypassing the master bus entirely —
+			// fine on a workstation with attached speakers, useless
+			// in Foyer's cloud / devcontainer / remote-control
+			// deployment where the user only has the browser.
+			//
+			// Idempotent: `IO::connect` is a no-op when the link is
+			// already in place, so this can run on every session
+			// load without piling up duplicate connections.
+			auto click_io = s.click_io ();
+			auto master_in = master->input ();
+			if (click_io && master_in) {
+				const uint32_t n = std::min (
+				    click_io->n_ports ().n_total (),
+				    master_in->n_ports ().n_total ());
+				for (uint32_t i = 0; i < n; ++i) {
+					auto src = click_io->nth (i);
+					auto dst = master_in->nth (i);
+					if (!src || !dst) continue;
+					if (click_io->connect (src, dst->name (), &s) != 0) {
+						PBD::warning << "foyer_shim: click_io->" << dst->name ()
+						             << " connect failed" << endmsg;
+					}
+				}
+				PBD::warning << "foyer_shim: routed click_io into master input ("
+				             << n << " ch)" << endmsg;
+			}
 		});
 	}
 }
@@ -713,6 +759,18 @@ void
 SignalBridge::on_dirty_changed ()
 {
 	auto bytes = msgpack_out::encode_session_dirty_changed (_shim.session ().dirty ());
+	_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+}
+
+void
+SignalBridge::on_rc_parameter_changed (std::string const& name)
+{
+	// Only re-emit transport when an rc-config setting we actually
+	// surface to the UI flips. Other RCConfiguration changes (mouse
+	// behavior, autoconnect prefs, font scaling) are background noise
+	// for our wire.
+	if (name != "clicking" && name != "click-gain") return;
+	auto bytes = msgpack_out::encode_transport_state (_shim.session ());
 	_shim.ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 }
 

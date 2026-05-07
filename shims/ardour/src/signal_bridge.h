@@ -136,6 +136,7 @@ private:
 	void on_region_removed (std::weak_ptr<ARDOUR::Region>, std::string track_id);
 	void on_route_presentation_changed (std::string track_id);
 	void on_dirty_changed ();
+	void on_rc_parameter_changed (std::string const& name);
 
 	void subscribe_all ();
 	void subscribe_controls_on_route (ARDOUR::Route&);

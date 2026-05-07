@@ -34,6 +34,7 @@
 #include "ardour/strip_silence.h"
 #include "ardour/dB.h"
 #include "ardour/interthread_info.h"
+#include "ardour/rc_configuration.h"
 
 #include <cmath>
 
@@ -1757,6 +1758,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						    Temporal::Tempo (bpm, bpm, 4.0));
 						Temporal::TempoMap::update (tmap);
 						PBD::warning << "foyer_shim: updated transport tempo to " << bpm << endmsg;
+					} else if (snap.id == "transport.metronome") {
+						// `Config::clicking` is the engine-level click
+						// switch; ParameterChanged fires from inside
+						// `set_clicking`, which signal_bridge subscribes
+						// to so the UI sees the new value when the
+						// toggle is flipped from Ardour's own GUI.
+						if (ARDOUR::Config) {
+							ARDOUR::Config->set_clicking (on);
+							PBD::warning << "foyer_shim: set clicking=" << on << endmsg;
+						}
 					} else {
 						PBD::warning << "foyer_shim: transport id not handled: " << snap.id << endmsg;
 					}
@@ -1767,6 +1778,20 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					             << " stopped=" << session.transport_stopped ()
 					             << "}" << endmsg;
 				});
+				break;
+			}
+
+			// Special case: `metronome.gain` is held on the global
+			// RCConfiguration as a linear coefficient. Convert dB →
+			// coefficient and stash it; ParameterChanged will fire and
+			// signal_bridge re-emits the value to peers.
+			if (cmd.id == "metronome.gain") {
+				const double db = std::max (-60.0, std::min (6.0, cmd.value));
+				const float coeff = static_cast<float> (dB_to_coefficient (db));
+				if (ARDOUR::Config) {
+					ARDOUR::Config->set_click_gain (coeff);
+					PBD::warning << "foyer_shim: set click_gain=" << db << " dB" << endmsg;
+				}
 				break;
 			}
 

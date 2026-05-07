@@ -4,7 +4,13 @@
 
 import { LitElement, html, css } from "lit";
 import "./track-strip.js";
+import "./metronome-strip.js";
 import { DENSITIES, loadMixerSettings, saveMixerSettings } from "foyer-core/mixer-density.js";
+import {
+  isMetronomeStripShown,
+  setMetronomeStripShown,
+  onMetronomeStripPrefChange,
+} from "foyer-core/metronome-strip-pref.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { icon } from "foyer-ui-core/icons.js";
 // AudioListener is owned by foyer-core/audio/master-controller.js now;
@@ -252,6 +258,18 @@ export class Mixer extends LitElement {
     return !!window.__foyer?.audio?.isOn?.();
   }
 
+  /** Show the dedicated click strip iff the engine surfaces a
+   *  `transport.metronome` parameter AND the per-client UI preference
+   *  is on. The schema field is the gate so legacy hosts (no
+   *  metronome support) never get the strip; the localStorage pref
+   *  is what the transport-bar icon writes. Engine clicking state
+   *  (the M button on the strip) is independent of visibility. */
+  _showMetronome() {
+    const session = this.session || window.__foyer?.store?.state?.session;
+    if (!session?.transport?.metronome) return false;
+    return isMetronomeStripShown();
+  }
+
   connectedCallback() {
     super.connectedCallback();
     // The mixer no longer owns the listener — `audioController`
@@ -262,10 +280,15 @@ export class Mixer extends LitElement {
     window.__foyer?.store?.addEventListener("change", this._onStoreChange);
     this._onAudioChange = () => this.requestUpdate();
     window.__foyer?.audio?.addEventListener?.("change", this._onAudioChange);
+    // Strip visibility is a per-client pref managed by the
+    // transport-bar metronome icon (localStorage). Repaint when the
+    // pref flips so the strip mounts/unmounts without a reload.
+    this._offMetronomePref = onMetronomeStripPrefChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
     window.__foyer?.audio?.removeEventListener?.("change", this._onAudioChange);
+    this._offMetronomePref?.();
     super.disconnectedCallback();
   }
 
@@ -309,6 +332,24 @@ export class Mixer extends LitElement {
 
   _setDensity(k) { this._density = k; this._save(); }
   _setMode(m)    { this._widthMode = m; this._save(); }
+
+  /// Backend surfaces a metronome only when the engine actually
+  /// supports one — Ardour does, the launcher's empty stub does too,
+  /// older snapshots may not. The popup hides the row entirely when
+  /// the field is missing rather than offering a toggle that opens
+  /// an empty strip.
+  _hasMetronomeShape() {
+    const t = (this.session || window.__foyer?.store?.state?.session)?.transport;
+    return !!t?.metronome;
+  }
+
+  _setMetronomeShown(v) {
+    setMetronomeStripShown(v);
+    // Mixer subscribes to the pref in connectedCallback, so the
+    // strip mounts/unmounts on its own. Force one repaint here so
+    // the popup's Show/Hide active class flips immediately.
+    this.requestUpdate();
+  }
 
   _onChannelResize(ev) {
     const { trackId, width, delta, startWidth, final, resizeAll } = ev.detail || {};
@@ -388,6 +429,23 @@ export class Mixer extends LitElement {
                 @click=${() => this._setMode("fixed")}
               >Fixed</button>
             </div>
+            ${this._hasMetronomeShape() ? html`
+              <div class="mx-section-label">Metronome strip</div>
+              <div class="group">
+                <button
+                  type="button"
+                  class=${isMetronomeStripShown() ? "active" : ""}
+                  title="Show the dedicated click strip docked to the master bus"
+                  @click=${() => this._setMetronomeShown(true)}
+                >Show</button>
+                <button
+                  type="button"
+                  class=${!isMetronomeStripShown() ? "active" : ""}
+                  title="Hide the metronome strip (click engine state is unaffected)"
+                  @click=${() => this._setMetronomeShown(false)}
+                >Hide</button>
+              </div>
+            ` : null}
           </div>
         </details>
         <span style="flex:1"></span>
@@ -432,10 +490,13 @@ export class Mixer extends LitElement {
                     `)}
                   </div>
                 </div>
-                ${masters.length
+                ${(masters.length || this._showMetronome())
                   ? html`
                       <div class="master-gutter"></div>
                       <div class="master-section">
+                        ${this._showMetronome() ? html`
+                          <foyer-metronome-strip></foyer-metronome-strip>
+                        ` : null}
                         ${masters.map(t => html`
                           <foyer-track-strip
                             .track=${t}
