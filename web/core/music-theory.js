@@ -61,8 +61,15 @@ export function chordIntervals(digit, modShift, modCtrl, scaleRoot, scaleMode, r
     4: { major: [0, 5, 7],          minor: [0, 3, 5, 7],       third: [0, 5, 7, 10] },    // 7sus4
     5: { major: [0, 7],             minor: [0, 3, 6],          third: [0, 4, 8] },        // pwr / dim / aug
     6: { major: [0, 4, 7, 9],       minor: [0, 3, 7, 9],       third: [0, 4, 7, 9, 14] }, // maj6/min6/6/9
-    7: { major: [0, 4, 7, 11],      minor: [0, 3, 7, 10],      third: [0, 4, 7, 10] },    // dom7
-    9: { major: [0, 4, 7, 11, 14],  minor: [0, 3, 7, 10, 14],  third: [0, 4, 7, 10, 14] },// dom9
+    // Bare "7" / "9" chord names are dominant by convention (E7 = E G# B D),
+    // so the default `major` branch carries dom7 / dom9 — that's what
+    // people guess when they hold the digit and click. The maj7 / maj9
+    // flavours (the specifically-jazzy ones) sit on the shift+ctrl
+    // `third` slot. Earlier, this was inverted — default produced
+    // maj7 ([0,4,7,11]) which surprised every player who reached for a
+    // basic dominant 7. (Reported 2026-05-08.)
+    7: { major: [0, 4, 7, 10],      minor: [0, 3, 7, 10],      third: [0, 4, 7, 11] },    // dom7 / m7 / maj7
+    9: { major: [0, 4, 7, 10, 14],  minor: [0, 3, 7, 10, 14],  third: [0, 4, 7, 11, 14] },// dom9 / m9 / maj9
   };
   if (modShift || modCtrl) {
     const tab = CHROMATIC[digit];
