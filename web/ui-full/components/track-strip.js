@@ -16,6 +16,11 @@ import {
   onTrackMicChange,
   toggleTrackTake,
 } from "foyer-core/audio/track-mic.js";
+import {
+  isTrackMidiActive,
+  onTrackMidiChange,
+  toggleTrackMidi,
+} from "foyer-core/midi/track-midi.js";
 
 // Curated palette for the "Set color" submenu. Close to DAW defaults so
 // colors carry some semantic weight (reds for drums, blues for bass,
@@ -308,6 +313,7 @@ export class TrackStrip extends LitElement {
     // shared registry is on globalThis but state changes need an
     // explicit nudge to invalidate render.
     this._unsubTrackMic = onTrackMicChange(() => this.requestUpdate());
+    this._unsubTrackMidi = onTrackMidiChange(() => this.requestUpdate());
     this._syncSelected();
     this.addEventListener("click", this._onStripClick);
     this.addEventListener("dblclick", this._onStripDblClick);
@@ -318,6 +324,8 @@ export class TrackStrip extends LitElement {
     window.__foyer?.ws?.removeEventListener?.("envelope", this._onIngressEnv);
     this._unsubTrackMic?.();
     this._unsubTrackMic = null;
+    this._unsubTrackMidi?.();
+    this._unsubTrackMidi = null;
     this.removeEventListener("click", this._onStripClick);
     this.removeEventListener("dblclick", this._onStripDblClick);
     super.disconnectedCallback();
@@ -327,11 +335,17 @@ export class TrackStrip extends LitElement {
     if (!this.track?.id || this._takeBusy) return;
     this._takeBusy = true;
     try {
-      await toggleTrackTake({
+      const isMidi = this.track.kind === "midi";
+      const args = {
         trackId: this.track.id,
         ws: window.__foyer?.ws,
         store: window.__foyer?.store,
-      });
+      };
+      if (isMidi) {
+        await toggleTrackMidi(args);
+      } else {
+        await toggleTrackTake(args);
+      }
     } finally {
       this._takeBusy = false;
       this.requestUpdate();
@@ -486,15 +500,23 @@ export class TrackStrip extends LitElement {
           ${t.record_arm ? html`
             <foyer-toggle tone="rec" label="●" .on=${rec} @input=${(e) => this._setBool(t.record_arm.id, e.detail.value)}></foyer-toggle>
           ` : null}
-          ${this._showTake() ? html`
-            <foyer-toggle class="take-toggle ${this._takeBusy ? "busy" : ""}"
-                          label="I"
-                          .on=${isTrackMicActive(t.id)}
-                          title=${isTrackMicActive(t.id)
-                            ? "Stop my mic and release this track"
-                            : "Claim this track for my mic — assigns source user + opens browser ingress"}
-                          @input=${this._toggleTake}></foyer-toggle>
-          ` : null}
+          ${this._showTake() ? (() => {
+            const isMidi = t.kind === "midi";
+            const active = isMidi ? isTrackMidiActive(t.id) : isTrackMicActive(t.id);
+            const onTitle = isMidi
+              ? "Stop sending browser MIDI to this track"
+              : "Stop my mic and release this track";
+            const offTitle = isMidi
+              ? "Claim this track for my browser MIDI — devices + on-screen keyboard route here"
+              : "Claim this track for my mic — assigns source user + opens browser ingress";
+            return html`
+              <foyer-toggle class="take-toggle ${this._takeBusy ? "busy" : ""}"
+                            label="I"
+                            .on=${active}
+                            title=${active ? onTitle : offTitle}
+                            @input=${this._toggleTake}></foyer-toggle>
+            `;
+          })() : null}
         </div>
         ${t.monitoring !== undefined && t.monitoring !== null ? html`
           <div class="divider"></div>
@@ -638,7 +660,8 @@ export class TrackStrip extends LitElement {
   /// loss than hiding the affordance from every remote-control
   /// session that isn't routed through a Cloudflare tunnel.
   _showTake() {
-    if (!this.track || this.track.kind !== "audio") return false;
+    if (!this.track) return false;
+    if (this.track.kind !== "audio" && this.track.kind !== "midi") return false;
     if (!isAllowed("control_set")) return false;
     return true;
   }

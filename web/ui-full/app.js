@@ -32,6 +32,8 @@ import "./components/plugins-view.js";
 import "./components/session-view.js";
 import "./components/console-view.js";
 import "./components/diagnostics.js";
+import "./components/midi-devices-panel.js";
+import "./components/soft-keyboard.js";
 import "./components/widget-tile-views.js";
 
 import "./components/status-bar.js";

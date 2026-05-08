@@ -261,6 +261,22 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    async fn send_midi_input(
+        &self,
+        data: Vec<u8>,
+        track_id: Option<EntityId>,
+    ) -> Result<(), BackendError> {
+        // Stub has no engine to feed; record the call so tests can
+        // assert that browser-side Web MIDI plumbing reaches the
+        // backend. Counter is bumped under the same lock that protects
+        // the rest of stub state for a coherent observation in tests.
+        let mut st = self.state.lock().await;
+        st.midi_input_count = st.midi_input_count.saturating_add(1);
+        st.last_midi_input = Some(data);
+        st.last_midi_input_track = track_id;
+        Ok(())
+    }
+
     async fn open_egress(
         &self,
         stream_id: u32,

@@ -405,6 +405,20 @@ export class MainMenu extends LitElement {
               <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("musical-note", 11)}</span>
               <span class="label">Audio pool…</span>
             </div>
+            <div class="item" @click=${() => {
+              this._openMenu = "";
+              import("foyer-ui-core/widgets/window.js").then((m) => m.spawnWindowKind("midi-devices"));
+            }}>
+              <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("musical-note", 11)}</span>
+              <span class="label">MIDI devices…</span>
+            </div>
+            <div class="item" @click=${() => {
+              this._openMenu = "";
+              import("foyer-ui-core/widgets/window.js").then((m) => m.spawnWindowKind("soft-keyboard"));
+            }}>
+              <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("musical-note", 11)}</span>
+              <span class="label">On-screen keyboard…</span>
+            </div>
           ` : null}
           ${cat === "session" ? this._renderCloseSessionItem() : null}
           ${cat === "session" && this._canManageTunnels() ? html`

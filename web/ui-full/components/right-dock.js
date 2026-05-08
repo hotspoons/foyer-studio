@@ -47,8 +47,30 @@ const _spawnDiagnostics = () => {
     viewProps: {},
   });
 };
+const _spawnMidiDevices = () => {
+  const el = document.createElement("foyer-midi-devices-panel");
+  openWindow({
+    title: "MIDI Devices", icon: "musical-note", storageKey: "midi-devices-widget",
+    content: el, width: 540, height: 460,
+    persist: { kind: "midi-devices", id: "midi-devices", props: {} },
+    viewKind: "midi-devices",
+    viewProps: {},
+  });
+};
+const _spawnSoftKeyboard = () => {
+  const el = document.createElement("foyer-soft-keyboard");
+  openWindow({
+    title: "On-screen Keyboard", icon: "musical-note", storageKey: "soft-keyboard-widget",
+    content: el, width: 720, height: 260,
+    persist: { kind: "soft-keyboard", id: "soft-keyboard", props: {} },
+    viewKind: "soft-keyboard",
+    viewProps: {},
+  });
+};
 registerWindowKind("console", _spawnConsole);
 registerWindowKind("diagnostics", _spawnDiagnostics);
+registerWindowKind("midi-devices", _spawnMidiDevices);
+registerWindowKind("soft-keyboard", _spawnSoftKeyboard);
 
 // Track Editor / MIDI Editor / Beat Sequencer factories. The heavy
 // editor modules are lazy-imported at rehydrate time so we don't drag

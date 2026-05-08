@@ -106,6 +106,39 @@ export class FoyerWs extends EventTarget {
   }
 
   /**
+   * Forward a 1–3 byte raw MIDI message to the backend. `bytes` is a
+   * `Uint8Array` (or any iterable of u8); the wire envelope wraps it
+   * as a typed `midi_input` command. Drops are silent on a closed
+   * socket — live MIDI is real-time, queueing a stale note-on past
+   * a reconnect would sound worse than the gap.
+   *
+   * `trackId` is optional. When provided, the shim routes the bytes
+   * directly into that MIDI track's processing chain (per-track
+   * direct injection — same gesture as the audio ingress armed
+   * track). When omitted, the shim writes them onto the shared
+   * `Foyer Web MIDI` virtual port and any track JACK-routed to it
+   * picks them up.
+   *
+   * Returns `true` when the bytes hit the socket; `false` when the
+   * socket isn't open (no outbox queueing for MIDI — see above).
+   */
+  sendMidiInput(bytes, trackId) {
+    if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return false;
+    const arr = bytes instanceof Uint8Array ? Array.from(bytes) : Array.from(bytes || []);
+    if (arr.length === 0 || arr.length > 3) return false;
+    const body = { type: "midi_input", data: arr };
+    if (trackId) body.track_id = trackId;
+    const env = {
+      schema: [0, 1],
+      seq: 0,
+      origin: this.origin,
+      body,
+    };
+    this._ws.send(JSON.stringify(env));
+    return true;
+  }
+
+  /**
    * Send a raw binary frame on the same socket. Used by push-to-talk
    * to relay audio without opening another WS. The caller owns the
    * wire format; see `chat.rs` for the layout used today.

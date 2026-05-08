@@ -740,6 +740,7 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::SetTrackMidiPatch { .. } => "set_track_midi_patch",
         Command::SetSequencerLayout { .. } => "set_sequencer_layout",
         Command::ClearSequencerLayout { .. } => "clear_sequencer_layout",
+        Command::MidiInput { .. } => "midi_input",
         Command::SetTrackInput { .. } => "set_track_input",
         Command::ListPorts { .. } => "list_ports",
         Command::AddSend { .. } => "add_send",
@@ -2596,6 +2597,53 @@ async fn dispatch_command(
                     },
                 )
                 .await;
+            }
+        }
+
+        Command::MidiInput { data, track_id } => {
+            // SysEx and other long messages aren't supported through
+            // the browser bridge yet — keep the wire-side enforcement
+            // tight so a malicious client can't fan out a 64 KB sysex
+            // dump across every connected backend on every key press.
+            // Channel-voice is at most 3 bytes, real-time/SysEx-free.
+            if data.is_empty() || data.len() > 3 {
+                tracing::debug!("midi_input rejected: invalid length {}", data.len());
+                return Ok(());
+            }
+            // Per-track injection requires the sending peer to be the
+            // track's assigned source user (mirrors the audio ingress
+            // ownership model). A peer that hasn't claimed the track
+            // can still write to the shared port — strip the track_id
+            // and forward — so the user gets feedback "you played
+            // something" instead of a silent drop they'd debug.
+            let resolved_track = match track_id {
+                Some(tid) => {
+                    let owner = state
+                        .track_browser_sources
+                        .read()
+                        .await
+                        .get(&tid)
+                        .cloned()
+                        .unwrap_or_default();
+                    if owner == peer_id {
+                        Some(tid)
+                    } else {
+                        tracing::debug!(
+                            "midi_input track_id {} dropped: peer {} is not source-user (owner='{}')",
+                            tid.as_str(), peer_id, owner
+                        );
+                        None
+                    }
+                }
+                None => None,
+            };
+            if let Err(e) = state
+                .backend()
+                .await
+                .send_midi_input(data, resolved_track)
+                .await
+            {
+                tracing::debug!("midi_input dropped: {e}");
             }
         }
 

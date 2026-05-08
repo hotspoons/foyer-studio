@@ -29,6 +29,7 @@ import { attach as attachRecents } from "./recents.js";
 import { audioController } from "./audio/master-controller.js";
 import { ClockSync } from "./audio/clock-sync.js";
 import { AudioClock } from "./audio/audio-clock.js";
+import { getWebMidiService } from "./midi/web-midi.js";
 import { pickUiVariant, sniffEnv, getUiVariant } from "./registry/ui-variants.js";
 import { setFeatures } from "./registry/features.js";
 import { setActiveVariant } from "./registry/widgets.js";
@@ -63,6 +64,13 @@ export function bootFoyerCore(opts = {}) {
   chat.attach();
   attachRecents(store);
   installTransportReturn({ store, ws });
+  // Web MIDI bridge — singleton; construction is cheap and does NOT
+  // ask the browser for permission. The first call to
+  // `webMidi.requestAccess()` (from a panel button or a stored
+  // preference) triggers the prompt. Attaching here so any later
+  // overlay can grab the same instance via `getWebMidiService()`.
+  const webMidi = getWebMidiService();
+  webMidi.attach(ws);
   // Capture stray browser-back gestures (engineers reach for "rewind
   // to start" and overshoot into the chrome arrow) and re-route them
   // to a transport rewind instead of unmounting the page.
@@ -155,6 +163,7 @@ export function bootFoyerCore(opts = {}) {
     audio: audioController,
     clockSync,
     audioClock,
+    webMidi,
     mountVariant,
     unmountVariant,
   });

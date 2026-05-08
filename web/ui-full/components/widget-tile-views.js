@@ -26,6 +26,8 @@ import "./beat-sequencer.js";
 import "./plugin-panel.js";
 import "./console-view.js";
 import "./diagnostics.js";
+import "./midi-devices-panel.js";
+import "./soft-keyboard.js";
 
 /// Float-out helper: pop a widget tile back into a foyer-window
 /// using the existing window-kind factory registered in right-dock /
@@ -152,4 +154,22 @@ registerView({
   elementTag: "foyer-diagnostics",
   order: 90,
   floatSpawn: floatSpawnFor("diagnostics"),
+});
+
+registerView({
+  id: "midi-devices",
+  label: "MIDI Devices",
+  icon: "musical-note",
+  elementTag: "foyer-midi-devices-panel",
+  order: 95,
+  floatSpawn: floatSpawnFor("midi-devices"),
+});
+
+registerView({
+  id: "soft-keyboard",
+  label: "On-screen Keyboard",
+  icon: "musical-note",
+  elementTag: "foyer-soft-keyboard",
+  order: 96,
+  floatSpawn: floatSpawnFor("soft-keyboard"),
 });
