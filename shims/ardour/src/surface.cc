@@ -7,6 +7,8 @@
 #include "pbd/abstract_ui.inc.cc" // instantiate AbstractUI<FoyerShimUIRequest>
 #include "pbd/i18n.h"
 #include "pbd/pthread_utils.h"
+#include "ardour/async_midi_port.h"
+#include "ardour/audioengine.h"
 #include "ardour/session.h"
 #include "ardour/session_event.h"
 
@@ -61,6 +63,25 @@ FoyerShim::set_active (bool yn)
 	if (yn) {
 		_ipc->start ();
 		_bridge->start ();
+		// Register a virtual MIDI source port for the browser bridge.
+		// Users see this in Ardour's track input picker as
+		// "foyer_shim:Foyer Web MIDI" (canonical name follows the same
+		// convention as the generic-MIDI surface's "MIDI Control In").
+		// The dispatcher writes bytes received from the sidecar onto
+		// this port via `AsyncMIDIPort::write`; connected MIDI tracks
+		// see the events on the next process cycle.
+		try {
+			auto p = AudioEngine::instance ()->register_output_port (
+			    DataType::MIDI, _("Foyer Web MIDI"), true);
+			_web_midi_port = std::dynamic_pointer_cast<AsyncMIDIPort> (p);
+			if (!_web_midi_port) {
+				PBD::warning << "foyer_shim: Foyer Web MIDI port registered but cast failed"
+				             << endmsg;
+			}
+		} catch (...) {
+			PBD::warning << "foyer_shim: failed to register Foyer Web MIDI port"
+			             << endmsg;
+		}
 		// Resolve / assign the persistent session UUID and write a
 		// registry entry so the sidecar can find this shim on
 		// next startup (or via reattach if Foyer died without
@@ -85,6 +106,14 @@ FoyerShim::set_active (bool yn)
 	} else {
 		_bridge->stop ();
 		_ipc->stop ();
+		if (_web_midi_port) {
+			try {
+				AudioEngine::instance ()->unregister_port (_web_midi_port);
+			} catch (...) {
+				// Engine may already be torn down on quit; ignore.
+			}
+			_web_midi_port.reset ();
+		}
 		// Clean shutdown — remove our registry entry so the
 		// sidecar doesn't misclassify us as a crashed orphan
 		// on its next startup.

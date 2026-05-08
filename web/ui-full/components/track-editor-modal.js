@@ -267,6 +267,14 @@ export class TrackEditorModal extends LitElement {
     window.__foyer?.store?.addEventListener("peers", this._storeHandler);
     window.__foyer?.store?.addEventListener("track-browser-sources", this._storeHandler);
     window.__foyer?.ws?.addEventListener?.("envelope", this._onEnvelope);
+    // The "Arm browser MIDI" button reflects state owned by the
+    // global track-midi registry; subscribe so the modal repaints
+    // when that flips (this strip, another strip, or the track
+    // editor itself changing the arm).
+    import("foyer-core/midi/track-midi.js").then((m) => {
+      if (!this.isConnected) return;
+      this._unsubMidi = m.onTrackMidiChange(() => this.requestUpdate());
+    });
     // Restore mic state if this track already has a live ingress
     // (modal was closed and reopened).
     if (TRACK_MICS.has(this.trackId)) this._micState = "active";
@@ -283,6 +291,8 @@ export class TrackEditorModal extends LitElement {
     window.__foyer?.store?.removeEventListener("peers", this._storeHandler);
     window.__foyer?.store?.removeEventListener("track-browser-sources", this._storeHandler);
     window.__foyer?.ws?.removeEventListener?.("envelope", this._onEnvelope);
+    this._unsubMidi?.();
+    this._unsubMidi = null;
     super.disconnectedCallback();
   }
 
@@ -577,7 +587,7 @@ export class TrackEditorModal extends LitElement {
               <option value=${currentInput}>${currentInput}</option>` : null}
           </select>
         </div>
-        ${t.kind === "midi" ? null : this._renderMicRow(currentInput)}
+        ${this._renderSourceUserRow(t, currentInput)}
         ${t.kind === "audio" || t.kind === "midi" ? html`
           <div class="row">
             <label>Output bus</label>
@@ -623,6 +633,11 @@ export class TrackEditorModal extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  _renderSourceUserRow(track, currentInput) {
+    if (track?.kind === "midi") return this._renderMidiSourceRow();
+    return this._renderMicRow(currentInput);
   }
 
   _renderMicRow(currentInput) {
@@ -693,6 +708,81 @@ export class TrackEditorModal extends LitElement {
       </div>
     `;
   }
+
+  /**
+   * MIDI version of `_renderMicRow`. Same source-user picker as
+   * audio (it's track-kind-agnostic on the wire) but the
+   * "self is the source" affordance is "Arm browser MIDI" instead
+   * of mic ingress — clicking it routes every byte from this
+   * client's Web MIDI devices + the on-screen keyboard into THIS
+   * track's MIDI chain via direct injection in the shim.
+   */
+  _renderMidiSourceRow() {
+    const store = window.__foyer?.store;
+    const sources = store?.state?.trackBrowserSources;
+    const selfPeerId = store?.state?.selfPeerId || "";
+    const assigned = sources?.get?.(this.trackId) || "";
+    const peers = this._performerPeers();
+    const armed = !!(globalThis.__foyer?.webMidi?.armedTrackId &&
+                     globalThis.__foyer.webMidi.armedTrackId === this.trackId);
+    return html`
+      <div class="row">
+        <label>Source user</label>
+        <select class="fld"
+                .value=${assigned}
+                @change=${(e) => this._onBrowserSourceChange(e.currentTarget.value)}>
+          <option value="">None (off)</option>
+          ${peers.map((p) => html`
+            <option value=${p.id} ?selected=${assigned === p.id}>
+              ${p.id === selfPeerId ? `This machine (${p.label})` : p.label}
+            </option>
+          `)}
+          ${assigned && !peers.find((p) => p.id === assigned) ? html`
+            <option value=${assigned} ?selected=${true}>
+              (offline peer — ${assigned.slice(0, 6)}…)
+            </option>` : null}
+        </select>
+      </div>
+      ${assigned === selfPeerId ? html`
+        <div class="row">
+          <label></label>
+          <button class="mic-btn ${armed ? "on" : ""}"
+                  title=${armed
+                    ? "Stop sending browser MIDI to this track"
+                    : "Arm this track for browser MIDI input"}
+                  @click=${this._toggleBrowserMidi}>
+            ${icon("musical-note", 14)}
+            <span>${armed ? "Disarm browser MIDI" : "Arm browser MIDI"}</span>
+          </button>
+        </div>
+        <div class="row">
+          <label></label>
+          <span class="hint" style="font-size:10px">
+            While armed, every event from your connected MIDI devices
+            (or the on-screen keyboard) lands directly in this track's
+            instrument. Open the on-screen keyboard from
+            <em>Session → On-screen keyboard…</em> if you don't have a
+            controller plugged in.
+          </span>
+        </div>
+      ` : assigned ? html`
+        <div class="row">
+          <label></label>
+          <span class="hint">Waiting for that user to arm their browser MIDI from their track strip.</span>
+        </div>
+      ` : null}
+    `;
+  }
+
+  _toggleBrowserMidi = async () => {
+    const mod = await import("foyer-core/midi/track-midi.js");
+    await mod.toggleTrackMidi({
+      trackId: this.trackId,
+      ws: window.__foyer?.ws,
+      store: window.__foyer?.store,
+    });
+    this.requestUpdate();
+  };
 
   /** Peers eligible to source a track: anyone whose role is
    *  `performer`, `session_controller`, or `admin` — i.e. anyone who
@@ -779,6 +869,12 @@ export class TrackEditorModal extends LitElement {
       if (!isMidiTrack && p.is_midi) continue;
       const n = p.name;
       if (n.startsWith("foyer:")) { foyer.push(p); continue; }
+      // Shim-owned virtual ports live under the `ardour:` JACK
+      // client (register_output_port routes through Ardour's main
+      // engine). The Web-MIDI bridge port is the surface a user
+      // expects to find when they ask "where's the browser keyboard?"
+      // — promote it to the Foyer bucket so it sorts above hardware.
+      if (n === "ardour:Foyer Web MIDI") { foyer.push(p); continue; }
       if (p.is_physical) { hw.push(p); continue; }
       // Filter out Ardour's always-present helper outputs. These
       // aren't useful as track inputs and just clutter the picker.

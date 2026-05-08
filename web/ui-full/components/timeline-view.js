@@ -1906,7 +1906,10 @@ export class TimelineView extends LitElement {
           </span>
         ` : null}
       </div>
-      <div class="scroll" @wheel=${(e) => this._onWheel(e)}>
+      <div class="scroll"
+           @wheel=${(e) => this._onWheel(e)}
+           @pointerdown=${(e) => this._onScrollPointerDown(e)}
+           @auxclick=${(e) => { if (e.button === 1) e.preventDefault(); }}>
         <div class="grid" style="width:${gridWidth}px"
              @pointermove=${(e) => this._onGridHoverMove(e)}
              @pointerleave=${() => { this._hoverSamples = null; this._lastMouseGridX = null; }}>
@@ -3499,6 +3502,52 @@ export class TimelineView extends LitElement {
     const up = () => {
       target.style.cursor = prevCursor;
       try { target.releasePointerCapture?.(ev.pointerId); } catch {}
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  /**
+   * Middle-click + drag inside the scroll area = grab-pan in BOTH
+   * axes — `clientX` delta drives `scrollLeft` (time), `clientY`
+   * delta drives `scrollTop` (track list). Mirrors the gesture every
+   * other DAW timeline + most maps / image viewers use.
+   *
+   * Only fires for `button === 1`; left/right clicks fall through to
+   * region drag, marquee select, context menu, etc. The cursor
+   * flips to `grabbing` for the duration so the user has visual
+   * feedback that they're in pan mode (otherwise a slow drag with no
+   * visible change reads as "did the click register?").
+   *
+   * `auxclick` and `pointerdown` both `preventDefault` the middle
+   * button so the browser doesn't pop its native auto-scroll widget
+   * (the round dot anchor that hijacks the cursor until you click
+   * again — useless here and confusing next to our own pan).
+   */
+  _onScrollPointerDown(ev) {
+    if (ev.button !== 1) return;
+    const scroll = ev.currentTarget;
+    if (!scroll) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const origLeft = scroll.scrollLeft;
+    const origTop = scroll.scrollTop;
+    try { scroll.setPointerCapture?.(ev.pointerId); } catch {}
+    const prevCursor = scroll.style.cursor;
+    scroll.style.cursor = "grabbing";
+    const move = (e) => {
+      scroll.scrollLeft = origLeft - (e.clientX - startX);
+      scroll.scrollTop  = origTop  - (e.clientY - startY);
+    };
+    const up = () => {
+      scroll.style.cursor = prevCursor;
+      try { scroll.releasePointerCapture?.(ev.pointerId); } catch {}
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);

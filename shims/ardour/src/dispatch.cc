@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "ardour/async_midi_port.h"
 #include "ardour/audio_port.h"
 #include "ardour/audioregion.h"
 #include "ardour/automation_control.h"
@@ -439,6 +440,7 @@ struct DecodedCmd
 		LoadPluginPreset,
 		SetSequencerLayout,
 		ClearSequencerLayout,
+		MidiInput,
 		AudioIngressOpen,
 		AudioIngressClose,
 		DuplicateRegion,
@@ -685,6 +687,13 @@ struct DecodedCmd
 	};
 	DecodedAutoPoint auto_point;           // AddAutomationPoint / DeleteAutomationPoint
 	std::vector<DecodedAutoPoint> auto_points; // ReplaceAutomationLane
+
+	// MidiInput payload — raw 1–3 byte MIDI message off the wire,
+	// destined for the shim's `Foyer Web MIDI` virtual port. Capped
+	// at 8 bytes so a misbehaving client can't OOM us; channel-voice
+	// messages never exceed 3.
+	std::uint8_t  midi_bytes[8] = {0};
+	std::uint8_t  midi_byte_count = 0;
 };
 
 // Read an int64 that may be positive or negative on the wire —
@@ -1495,6 +1504,27 @@ decode (const std::vector<std::uint8_t>& buf)
 					// string (save in place). Non-empty → absolute path to
 					// the new session *folder* (parent + final dirname).
 					if (!in.read_nil_or_str (out.id)) return out;
+				} else if (k == "data") {
+					// Command::MidiInput { data: Vec<u8> } — rmp-serde
+					// emits Vec<u8> as a msgpack ARRAY (not bin) so each
+					// byte arrives as a positive fixint (0..127) or
+					// `0xcc` prefixed u8 (128..255). Cap at sizeof
+					// midi_bytes; anything longer is dropped on the
+					// floor (server already rejects >3 byte payloads,
+					// the cap here is belt-and-braces against a wedged
+					// peer that bypasses the server check).
+					std::size_t n = 0;
+					if (!read_array_header (in, n)) return out;
+					std::size_t take = std::min<std::size_t> (n, sizeof (out.midi_bytes));
+					for (std::size_t i = 0; i < take; ++i) {
+						std::uint64_t v = 0;
+						if (!in.read_u64 (v)) return out;
+						out.midi_bytes[i] = static_cast<std::uint8_t> (v & 0xff);
+					}
+					out.midi_byte_count = static_cast<std::uint8_t> (take);
+					for (std::size_t i = take; i < n; ++i) {
+						if (!in.skip_value ()) return out;
+					}
 				} else if (k == "lane_id") {
 					if (!in.read_str (out.lane_id)) return out;
 				} else if (k == "mask") {
@@ -1590,6 +1620,7 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "load_plugin_preset") out.kind = DecodedCmd::Kind::LoadPluginPreset;
 			else if (cmd_type == "set_sequencer_layout")   out.kind = DecodedCmd::Kind::SetSequencerLayout;
 			else if (cmd_type == "clear_sequencer_layout") out.kind = DecodedCmd::Kind::ClearSequencerLayout;
+			else if (cmd_type == "midi_input")             out.kind = DecodedCmd::Kind::MidiInput;
 			else if (cmd_type == "audio_ingress_open")  out.kind = DecodedCmd::Kind::AudioIngressOpen;
 			else if (cmd_type == "audio_ingress_close") out.kind = DecodedCmd::Kind::AudioIngressClose;
 			else if (cmd_type == "duplicate_region")    out.kind = DecodedCmd::Kind::DuplicateRegion;
@@ -3225,6 +3256,60 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					}
 				}
 			});
+			break;
+		}
+		case DecodedCmd::Kind::MidiInput: {
+			// Live MIDI from a browser device. Two routing modes:
+			//
+			// 1. `track_id` set → inject the bytes directly into that
+			//    MIDI track's processing chain via
+			//    `MidiTrack::write_user_immediate_event`. This is the
+			//    MIDI analogue of the audio ingress per-track path:
+			//    bytes land at the track's instrument without the
+			//    user having to wire JACK up by hand. Hops to the
+			//    event loop because route lookup walks the session
+			//    RouteList which expects to be touched on the shim's
+			//    own thread.
+			//
+			// 2. `track_id` empty → write to the shared `Foyer Web
+			//    MIDI` virtual source port. Users can then connect
+			//    track inputs from it the way they'd cable a hardware
+			//    controller. Stays on the IPC reader thread because
+			//    `AsyncMIDIPort::write` locks its own FIFO mutex and
+			//    we want the lowest latency we can manage on
+			//    keypresses.
+			if (cmd.midi_byte_count == 0) break;
+			if (!cmd.track_id.empty ()) {
+				DecodedCmd snap = cmd;
+				FoyerShim* shim = &_shim;
+				_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+					if (snap.track_id.rfind ("track.", 0) != 0) return;
+					const std::string sid = snap.track_id.substr (6);
+					std::shared_ptr<RouteList const> routes =
+					    schema_map::safe_get_routes (shim->session ());
+					std::shared_ptr<MidiTrack> mt;
+					for (auto const& r : *routes) {
+						if (!r) continue;
+						std::ostringstream tmp;
+						tmp << r->id ();
+						if (tmp.str () != sid) continue;
+						mt = std::dynamic_pointer_cast<MidiTrack> (r);
+						break;
+					}
+					if (!mt) return;
+					mt->write_user_immediate_event (
+					    Evoral::MIDI_EVENT,
+					    snap.midi_byte_count,
+					    snap.midi_bytes);
+				});
+				break;
+			}
+			auto port = _shim.web_midi_port ();
+			if (!port) break;
+			port->write (
+			    reinterpret_cast<const MIDI::byte*> (cmd.midi_bytes),
+			    cmd.midi_byte_count,
+			    0);
 			break;
 		}
 		case DecodedCmd::Kind::Undo: {

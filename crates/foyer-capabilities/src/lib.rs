@@ -55,6 +55,12 @@ pub enum FoyerCapability {
     /// Per-region linear gain (`RegionPatch.gain_linear`).
     #[capability("region.gain")]
     RegionGain,
+    /// Browser-side Web MIDI bridge (`Command::MidiInput`). Backends
+    /// that advertise this accept live MIDI bytes from a connected
+    /// browser's MIDI devices and route them onto a virtual source
+    /// port (e.g. "Foyer Web MIDI") that DAW tracks can connect to.
+    #[capability("midi.web_input")]
+    MidiWebInput,
 }
 
 /// `GET /capabilities` — static registry + live feature map.

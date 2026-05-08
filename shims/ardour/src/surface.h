@@ -12,6 +12,10 @@
 #include "pbd/event_loop.h"
 #include "ardour/types.h"
 #include "control_protocol/control_protocol.h"
+
+namespace ARDOUR {
+class AsyncMIDIPort;
+}
 // Pull in TempoMap so do_request can fetch the thread-local read
 // pointer before invoking each queued slot. See do_request below
 // for the full rationale.
@@ -77,6 +81,15 @@ public:
 	Dispatcher&   dispatcher ()    { return *_dispatcher; }
 	SignalBridge& signal_bridge () { return *_bridge; }
 
+	/// Virtual JACK output port that the dispatcher writes
+	/// browser-Web-MIDI bytes onto. Registered as `Foyer Web MIDI`
+	/// when the surface activates so it shows up in Ardour's track
+	/// input picker; users connect MIDI tracks to it the same way
+	/// they would a hardware controller. May be null before activation
+	/// or if engine registration failed (e.g. JACK refused the name —
+	/// the dispatcher then drops MIDI bytes silently).
+	std::shared_ptr<ARDOUR::AsyncMIDIPort> web_midi_port () const { return _web_midi_port; }
+
 	// Publish BasicUI's protected session pointer through a stable accessor.
 	ARDOUR::Session& session () const { return *BasicUI::session; }
 
@@ -98,6 +111,7 @@ private:
 	std::unique_ptr<Dispatcher>   _dispatcher;
 	std::unique_ptr<SignalBridge> _bridge;
 	std::string                   _session_uuid;
+	std::shared_ptr<ARDOUR::AsyncMIDIPort> _web_midi_port;
 };
 
 } // namespace ArdourSurface

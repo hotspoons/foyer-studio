@@ -91,6 +91,21 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn send_midi_input(
+        &self,
+        data: Vec<u8>,
+        track_id: Option<EntityId>,
+    ) -> Result<(), BackendError> {
+        // Fire-and-forget: live MIDI is a real-time stream, dropping
+        // a packet under WS backpressure is preferable to queueing
+        // (a stale note-on after the user already lifted the key
+        // sounds worse than a silent gap).
+        self.client
+            .send_command(Command::MidiInput { data, track_id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn request_quit(&self) -> Result<(), BackendError> {
         self.client
             .send_command(Command::ShimQuit)

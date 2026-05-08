@@ -1309,6 +1309,33 @@ pub enum Command {
         region_id: EntityId,
     },
 
+    /// Live MIDI bytes fed from a browser-attached Web MIDI device into
+    /// the shim. With `track_id` unset the shim writes them onto the
+    /// shared `Foyer Web MIDI` virtual source port (any track whose
+    /// JACK input is connected to it picks them up). With `track_id`
+    /// set the shim routes the bytes directly into THAT track's MIDI
+    /// input — same model as the audio ingress path, where a track
+    /// armed by its source-user receives the browser stream without
+    /// the user having to wire JACK up by hand.
+    ///
+    /// `data` is the wire bytes EXACTLY as they should appear on the
+    /// port (status byte's low nibble already encodes the destination
+    /// channel — per-device channel-remap is applied client-side
+    /// before send so the schema does not have to round-trip a
+    /// channel-preference field). 1–3 bytes for channel voice
+    /// messages; longer for SysEx (which the server may reject for
+    /// safety in a future RBAC pass — TODO: cap at 3 bytes for now
+    /// when wiring through). Fire-and-forget; no echo event.
+    MidiInput {
+        data: Vec<u8>,
+        /// Target a specific MIDI track for direct injection. The
+        /// server will only honour this when the sending peer matches
+        /// the track's `track_browser_source` assignment, mirroring
+        /// the audio ingress access rule.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        track_id: Option<EntityId>,
+    },
+
     /// Route a track's audio input to a named port. `port_name = None`
     /// restores default auto-connect. Shim calls `IO::disconnect()` then
     /// `IO::connect(port, port_name)` on the track's input.

@@ -40,6 +40,18 @@ pub(crate) struct StubState {
     /// `ControlUpdate` events.
     meters: HashMap<EntityId, Parameter>,
     tick: u64,
+    /// How many `Backend::send_midi_input` calls landed since boot.
+    /// Test-only observable; advanced from inside the stub's lock so
+    /// readers see a consistent count alongside `last_midi_input`.
+    pub(crate) midi_input_count: u64,
+    /// Most recent MIDI bytes the stub received from the browser
+    /// bridge. Same lifecycle / visibility rules as
+    /// `midi_input_count`; lets tests assert byte-shape too.
+    pub(crate) last_midi_input: Option<Vec<u8>>,
+    /// Track id the most recent MIDI bytes were targeted at, or
+    /// `None` if the message was a shared-port broadcast. Lets
+    /// tests verify per-track routing decisions made client-side.
+    pub(crate) last_midi_input_track: Option<EntityId>,
 }
 
 impl StubState {
@@ -52,6 +64,9 @@ impl StubState {
             session,
             meters,
             tick: 0,
+            midi_input_count: 0,
+            last_midi_input: None,
+            last_midi_input_track: None,
         }
     }
 
@@ -61,6 +76,9 @@ impl StubState {
             session: fixtures::empty_session(),
             meters: HashMap::new(),
             tick: 0,
+            midi_input_count: 0,
+            last_midi_input: None,
+            last_midi_input_track: None,
         }
     }
 

@@ -612,6 +612,23 @@ pub trait Backend: Send + Sync + 'static {
         ))
     }
 
+    /// Live MIDI bytes from a browser-attached Web MIDI device. The
+    /// host backend pipes these straight to the shim; the stub logs
+    /// and discards. With `track_id` set, the shim routes the bytes
+    /// to that specific MIDI track's input port (matching the audio
+    /// ingress per-track injection model); with `track_id` unset, the
+    /// shim writes them onto a shared virtual MIDI source port that
+    /// users can JACK-route themselves. Default returns Ok(()) so
+    /// minimal backends can ignore the stream without bombarding the
+    /// browser with errors. Per-message; not buffered between calls.
+    async fn send_midi_input(
+        &self,
+        _data: Vec<u8>,
+        _track_id: Option<EntityId>,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     // ─── automation lanes ───────────────────────────────────────────────
     async fn set_automation_mode(
         &self,
