@@ -343,6 +343,47 @@ test("armed track id rides outbound midi_input envelopes", async ({ page }) => {
   expect(observed[2].track_id).toBeUndefined();
 });
 
+test("local monitor only feeds the synth when armed AND the toggle is on", async ({ page }) => {
+  page.setDefaultTimeout(20_000);
+  await page.goto("/");
+  await page.waitForFunction(() => window.__foyer?.store?.state?.status === "open");
+  await page.evaluate((key) => localStorage.removeItem(key), STORAGE_KEY);
+  // Reset the local-monitor pref between specs — workers: 1 means
+  // localStorage carries state across tests in a single run.
+  await page.evaluate(() => localStorage.removeItem("foyer.web-midi.local-monitor.v1"));
+
+  const observed = await page.evaluate(async () => {
+    const wm = window.__foyer.webMidi;
+    const synthFeeds = [];
+    wm.setSynthTap((deviceId, bytes) => {
+      synthFeeds.push({ deviceId, bytes: Array.from(bytes) });
+    });
+    // Pref off + no arm → no feed.
+    wm.inject("virtual:keyboard", [0x90, 60, 100]);
+    const a = synthFeeds.length;
+    // Pref on but no arm → no feed (the arm gate is independent).
+    await wm.setLocalMonitor(true);
+    wm.inject("virtual:keyboard", [0x90, 60, 100]);
+    const b = synthFeeds.length;
+    // Pref on + arm → feed.
+    wm.armTrack("track.lead-1");
+    wm.inject("virtual:keyboard", [0x90, 60, 100]);
+    wm.inject("virtual:keyboard", [0x80, 60, 0]);
+    const c = synthFeeds.length;
+    // Pref off (after toggling) → no more feeds even though armed.
+    await wm.setLocalMonitor(false);
+    wm.inject("virtual:keyboard", [0x90, 64, 100]);
+    const d = synthFeeds.length;
+    return { a, b, c, d, lastBytes: synthFeeds[c - 1]?.bytes };
+  });
+
+  expect(observed.a).toBe(0);     // pref off
+  expect(observed.b).toBe(0);     // pref on but disarmed
+  expect(observed.c).toBe(2);     // armed + on → both events fed
+  expect(observed.d).toBe(2);     // pref off → counter unchanged
+  expect(observed.lastBytes).toEqual([0x80, 60, 0]);
+});
+
 test("toggleTrackMidi claims source-user, arms, and reverses cleanly", async ({ page }) => {
   page.setDefaultTimeout(20_000);
   await page.goto("/");

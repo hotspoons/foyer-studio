@@ -32,6 +32,8 @@ export class MidiDevicesPanel extends LitElement {
     _devices: { state: true, type: Array },
     _granted: { state: true, type: Boolean },
     _unsupported: { state: true, type: Boolean },
+    _localMonitor: { state: true, type: Boolean },
+    _localMonitorState: { state: true, type: String },
   };
 
   static styles = css`
@@ -132,6 +134,37 @@ export class MidiDevicesPanel extends LitElement {
       color: var(--color-success, #2e8b57);
       border-color: currentColor;
     }
+    .monitor-row {
+      display: flex; gap: 10px; align-items: center;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--color-border);
+      background: var(--color-surface-2, var(--color-surface));
+    }
+    .monitor-row .title {
+      flex: 1 1 auto;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .monitor-row .title small {
+      color: var(--color-text-muted);
+      font-size: 11px;
+    }
+    .banner {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+      font-size: 12px;
+      display: flex; gap: 10px; align-items: center;
+    }
+    .banner button.primary {
+      flex: 0 0 auto;
+      padding: 4px 10px;
+      border-radius: var(--radius-sm, 4px);
+      border: 1px solid var(--color-accent);
+      background: var(--color-accent);
+      color: var(--color-on-accent, #fff);
+      cursor: pointer;
+      font: inherit;
+    }
   `;
 
   constructor() {
@@ -140,6 +173,8 @@ export class MidiDevicesPanel extends LitElement {
     this._devices = [];
     this._granted = !!this._svc?.granted;
     this._unsupported = !!this._svc?.unsupported;
+    this._localMonitor = !!this._svc?.localMonitor;
+    this._localMonitorState = "";
     this._onChange = () => this._refresh();
   }
 
@@ -158,6 +193,15 @@ export class MidiDevicesPanel extends LitElement {
     this._granted = this._svc.granted;
     this._unsupported = this._svc.unsupported;
     this._devices = this._svc.listDevices();
+    this._localMonitor = !!this._svc.localMonitor;
+  }
+
+  async _toggleLocalMonitor(ev) {
+    const next = !!ev.target.checked;
+    const state = await this._svc.setLocalMonitor(next);
+    this._localMonitor = next;
+    this._localMonitorState = state || "";
+    this.requestUpdate();
   }
 
   async _enable() {
@@ -173,38 +217,9 @@ export class MidiDevicesPanel extends LitElement {
   }
 
   render() {
-    if (this._unsupported) {
-      return html`
-        <div class="empty">
-          <p>This browser doesn't expose the Web MIDI API. Try the
-          desktop version of Chrome, Edge, or a recent Safari.</p>
-        </div>`;
-    }
-    if (!this._granted) {
-      return html`
-        <div class="empty">
-          <p>Foyer can pipe MIDI from any controller plugged into this
-          browser straight into Ardour through a virtual <em>Foyer Web
-          MIDI</em> port. Click below to grant access — your browser
-          will ask once.</p>
-          <button class="primary" @click=${this._enable}>
-            ${icon("musical-note", { size: 14 })} Enable Web MIDI
-          </button>
-        </div>`;
-    }
-    if (this._devices.length === 0) {
-      return html`
-        <div class="empty">
-          <p>Web MIDI is enabled but no input devices are visible.
-          Plug in a controller (USB or Bluetooth) and it'll appear
-          here automatically.</p>
-        </div>
-        <div class="footer">
-          <span>Routing: connect <strong>Foyer Web MIDI</strong> to
-          a track input in Ardour's routing matrix.</span>
-        </div>`;
-    }
     return html`
+      ${this._renderHeaderBanner()}
+      ${this._renderMonitorRow()}
       <div class="devices">
         ${this._devices.map((d) => this._renderDevice(d))}
       </div>
@@ -213,6 +228,57 @@ export class MidiDevicesPanel extends LitElement {
         <span>Routing: connect <strong>Foyer Web MIDI</strong>
           to a track input in Ardour.</span>
       </div>`;
+  }
+
+  _renderHeaderBanner() {
+    if (this._unsupported) {
+      return html`
+        <div class="banner">
+          <span>Hardware MIDI isn't exposed in this browser.
+          The on-screen keyboard still works — drag a track
+          input from <strong>Foyer Web MIDI</strong> in Ardour.</span>
+        </div>`;
+    }
+    if (!this._granted) {
+      return html`
+        <div class="banner">
+          <span>Plug in a controller? Grant access to enumerate
+          hardware MIDI inputs.</span>
+          <button class="primary" @click=${this._enable}>
+            ${icon("musical-note", 14)} Enable Web MIDI
+          </button>
+        </div>`;
+    }
+    return null;
+  }
+
+  _renderMonitorRow() {
+    // Surface the local-monitor toggle + a hint about why it
+    // matters. Per-client preference: nothing in this row crosses
+    // the WS, so we don't gate on RBAC here.
+    const stateNote = this._localMonitor && this._localMonitorState
+      && this._localMonitorState !== "running" && this._localMonitorState !== "idle"
+      ? html`<small style="color:var(--color-warning,#c09040)">
+          Audio context: ${this._localMonitorState} — try clicking the
+          on-screen keyboard once to start playback.
+        </small>`
+      : null;
+    return html`
+      <label class="monitor-row">
+        <input type="checkbox"
+          .checked=${this._localMonitor}
+          @change=${(e) => this._toggleLocalMonitor(e)}>
+        <span class="title">
+          <span>Hear notes locally (low-latency monitor)</span>
+          <small>
+            While a track is armed, render every note you play in this
+            browser using a built-in synth — bypasses the 200 ms+ engine
+            round-trip. The backend mutes its own monitor for armed
+            tracks so you don't hear yourself twice.
+          </small>
+          ${stateNote}
+        </span>
+      </label>`;
   }
 
   _renderDevice(d) {

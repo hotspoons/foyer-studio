@@ -38,6 +38,29 @@
 const STORAGE_KEY = "foyer.web-midi.devices.v1";
 
 /**
+ * localStorage key for the local-monitor preference. Per-client by
+ * design (audio output device + browser sound stack are local
+ * concerns), so this is NOT routed through backend state. See
+ * CLAUDE.md's "Per-client preferences are a different category"
+ * carve-out.
+ */
+const LOCAL_MONITOR_KEY = "foyer.web-midi.local-monitor.v1";
+
+function loadLocalMonitorPref() {
+  try {
+    return localStorage.getItem(LOCAL_MONITOR_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveLocalMonitorPref(on) {
+  try {
+    localStorage.setItem(LOCAL_MONITOR_KEY, on ? "1" : "0");
+  } catch {}
+}
+
+/**
  * Stable id for the always-present on-screen keyboard. Lives at the
  * same level as a real `MIDIInput` in `listDevices()` so per-device
  * config (channel remap, transpose, velocity curve) applies the same
@@ -176,6 +199,20 @@ class WebMidiService extends EventTarget {
      * cleared via `disarmTrack(id)` / `disarm()`.
      */
     this._armedTrackId = null;
+    /**
+     * Per-client local-monitor preference. When on AND a track is
+     * armed, every outbound MIDI message also feeds an in-browser
+     * synth so the player hears their notes with zero latency
+     * (vs. the 200+ ms round-trip through the engine's egress).
+     * The backend already silences monitoring on browser-sourced
+     * tracks (see `MON OFF` in track-strip.js), so the local synth
+     * IS the sound the player hears while overdubbing.
+     */
+    this._localMonitor = loadLocalMonitorPref();
+    /** Lazily-allocated synth — see `local-synth.js`. */
+    this._synth = null;
+    /** Test seam: invoked with raw bytes whenever the synth would feed. */
+    this._synthTap = null;
   }
 
   /** Wire to a FoyerWs instance. Idempotent — safe to re-attach on variant remount. */
@@ -330,7 +367,61 @@ class WebMidiService extends EventTarget {
   disarm() {
     if (this._armedTrackId === null) return;
     this._armedTrackId = null;
+    if (this._synth) this._synth.panic();
     this._emitChange();
+  }
+
+  /** Current local-monitor preference. */
+  get localMonitor() {
+    return this._localMonitor;
+  }
+
+  /**
+   * Toggle the local-monitor preference. When called from a user
+   * gesture (panel toggle click), we also `resume()` the underlying
+   * `AudioContext` so the very first note plays without the user
+   * having to click again — Chrome / Safari otherwise leave a fresh
+   * context in `suspended` and the player wouldn't hear themselves
+   * until they pressed something else (the panel click is the
+   * gesture, but it's swallowed by the input). Returns the resolved
+   * audio-context state so the panel can show "audio unavailable"
+   * if the platform refuses.
+   */
+  async setLocalMonitor(on) {
+    const next = !!on;
+    if (next === this._localMonitor) return next ? "running" : "idle";
+    this._localMonitor = next;
+    saveLocalMonitorPref(next);
+    if (!next) {
+      if (this._synth) this._synth.panic();
+      this._emitChange();
+      return "idle";
+    }
+    const synth = await this._ensureSynth();
+    let state = "idle";
+    if (synth) {
+      try { state = await synth.resume(); } catch { state = "error"; }
+    }
+    this._emitChange();
+    return state;
+  }
+
+  /** Lazy synth getter; awaits the dynamic import on first use. */
+  async _ensureSynth() {
+    if (this._synth) return this._synth;
+    try {
+      const m = await import("./local-synth.js");
+      this._synth = new m.LocalSynth();
+    } catch (e) {
+      console.warn("[web-midi] local-synth import failed", e);
+      return null;
+    }
+    return this._synth;
+  }
+
+  /** Test seam: tap every set of bytes the local synth would feed. */
+  setSynthTap(fn) {
+    this._synthTap = typeof fn === "function" ? fn : null;
   }
 
   /**
@@ -397,6 +488,16 @@ class WebMidiService extends EventTarget {
       try { this._tap(deviceId, out, this._armedTrackId); } catch {}
     }
     if (this._ws) this._ws.sendMidiInput(out, this._armedTrackId || undefined);
+    // Local monitor: only fires when a track is armed AND the user
+    // has opted in. Without the arm gate the synth would chirp on
+    // every keypress even when the user just wants to test their
+    // controller — confusing and noisy.
+    if (this._localMonitor && this._armedTrackId) {
+      if (this._synthTap) {
+        try { this._synthTap(deviceId, out); } catch {}
+      }
+      if (this._synth) this._synth.feed(out);
+    }
   }
 
   /**
