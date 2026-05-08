@@ -201,6 +201,17 @@ export class MidiDevicesPanel extends LitElement {
     const state = await this._svc.setLocalMonitor(next);
     this._localMonitor = next;
     this._localMonitorState = state || "";
+    // If a track is already armed, the user just changed their
+    // monitoring mode mid-take — sync the backend track's mute so
+    // turning ON local monitor silences the engine path immediately,
+    // and turning OFF unmutes so the user hears the engine again.
+    try {
+      const mod = await import("foyer-core/midi/track-midi.js");
+      mod.applyMuteForArmedTrack({
+        ws: window.__foyer?.ws,
+        store: window.__foyer?.store,
+      });
+    } catch {}
     this.requestUpdate();
   }
 

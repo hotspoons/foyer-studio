@@ -30,7 +30,12 @@ const ATTACK_S  = 0.005;
 const DECAY_S   = 0.15;
 const SUSTAIN   = 0.7;
 const RELEASE_S = 0.15;
-const MASTER_GAIN = 0.22;
+// Loud enough to feel "front of mix" against any backend audio that
+// happens to leak through. The engine track is muted while local
+// monitor is active so doubling shouldn't happen, but if a future
+// session lands with mute already overridden by solo we still want
+// the local synth to be clearly audible.
+const MASTER_GAIN = 0.55;
 
 function midiToHz(note) {
   return 440 * Math.pow(2, (note - 69) / 12);

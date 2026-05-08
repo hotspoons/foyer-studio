@@ -13,6 +13,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { getWebMidiService, VIRTUAL_KEYBOARD_ID } from "foyer-core/midi/web-midi.js";
+import { chordIntervals } from "foyer-core/music-theory.js";
 
 // Two octaves, C-major-relative semitone offsets for the white keys.
 const WHITE_OFFSETS = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24];
@@ -173,6 +174,23 @@ export class SoftKeyboard extends LitElement {
     this._pointerNotes = new Map();
     /** @type {Set<string>} computer keys currently down (so autorepeat doesn't re-trigger). */
     this._keyboardKeysDown = new Set();
+    /**
+     * Digit keys (3..7, 9) currently held — same chord-on-press
+     * convention the piano roll and beat sequencer use. While a
+     * digit is down, the next key/click expands into a chord rooted
+     * at the played pitch. Highest held digit wins (matches the
+     * piano-roll precedence so muscle memory carries over).
+     */
+    this._heldDigits = new Set();
+    /** @type {boolean} */ this._modShift = false;
+    /** @type {boolean} */ this._modCtrl = false;
+    /**
+     * Map<rootPitch, number[]>: every pitch we emitted on the most
+     * recent press of `rootPitch`. Drives release — when the user
+     * lifts the same physical key, every member of the chord gets a
+     * note-off, not just the root.
+     */
+    this._chordRoots = new Map();
     this._onKeyDown = (e) => this._handleKeyDown(e);
     this._onKeyUp = (e) => this._handleKeyUp(e);
     this._onPointerCancel = (e) => this._releasePointer(e.pointerId);
@@ -203,24 +221,76 @@ export class SoftKeyboard extends LitElement {
     this._baseOctave = next;
   }
 
-  _noteOn(note, velocity = this._velocity) {
-    if (note < 0 || note > 127) return;
-    if (this._held.has(note)) return;
-    this._held.add(note);
-    this._held = new Set(this._held);
-    this._svc.inject(VIRTUAL_KEYBOARD_ID, [0x90, note, velocity]);
+  /**
+   * Resolve the active chord intervals from the held-digit + mod
+   * state. Returns `[0]` (just the root) when no digit is held.
+   * Soft keyboard always uses chromatic stacking — there's no scale
+   * picker on this surface yet, so the diatonic mode of
+   * `chordIntervals` would silently fall back to chromatic anyway.
+   */
+  _activeIntervals() {
+    if (this._heldDigits.size === 0) return [0];
+    // Highest digit wins — same convention the piano roll uses.
+    const digit = Math.max(...this._heldDigits);
+    return chordIntervals(digit, this._modShift, this._modCtrl, 0, "chromatic", 0);
   }
 
-  _noteOff(note) {
-    if (note < 0 || note > 127) return;
-    if (!this._held.has(note)) return;
-    this._held.delete(note);
+  /**
+   * Press a key. Resolves a chord from current modifier state and
+   * emits a note-on for each member; tracks them under `rootNote`
+   * so a future `_noteOff(rootNote)` can release the whole chord.
+   * `rootNote` is the visually-clicked pitch — only that key
+   * highlights, even if the chord contains more notes (matches the
+   * piano roll where only the clicked cell is "the click target"
+   * and the rest are derived).
+   */
+  _noteOn(rootNote, velocity = this._velocity) {
+    if (rootNote < 0 || rootNote > 127) return;
+    if (this._chordRoots.has(rootNote)) return;
+    const intervals = this._activeIntervals();
+    const emitted = [];
+    for (const iv of intervals) {
+      const n = rootNote + iv;
+      if (n < 0 || n > 127) continue;
+      if (this._held.has(n)) continue;
+      this._svc.inject(VIRTUAL_KEYBOARD_ID, [0x90, n, velocity]);
+      emitted.push(n);
+      this._held.add(n);
+    }
+    if (emitted.length === 0) return;
+    this._chordRoots.set(rootNote, emitted);
     this._held = new Set(this._held);
-    this._svc.inject(VIRTUAL_KEYBOARD_ID, [0x80, note, 0]);
+  }
+
+  _noteOff(rootNote) {
+    if (rootNote < 0 || rootNote > 127) return;
+    const chord = this._chordRoots.get(rootNote);
+    if (chord) {
+      for (const n of chord) {
+        this._svc.inject(VIRTUAL_KEYBOARD_ID, [0x80, n, 0]);
+        this._held.delete(n);
+      }
+      this._chordRoots.delete(rootNote);
+      this._held = new Set(this._held);
+      return;
+    }
+    // Stray release (e.g. note triggered by a route we don't track):
+    // best-effort cleanup of just the root.
+    if (this._held.has(rootNote)) {
+      this._svc.inject(VIRTUAL_KEYBOARD_ID, [0x80, rootNote, 0]);
+      this._held.delete(rootNote);
+      this._held = new Set(this._held);
+    }
   }
 
   _releaseAllNotes() {
-    for (const n of Array.from(this._held)) this._noteOff(n);
+    for (const root of Array.from(this._chordRoots.keys())) this._noteOff(root);
+    // Anything still held that wasn't a tracked root (defensive).
+    for (const n of Array.from(this._held)) {
+      this._svc.inject(VIRTUAL_KEYBOARD_ID, [0x80, n, 0]);
+    }
+    this._held = new Set();
+    this._chordRoots.clear();
     this._pointerNotes.clear();
     this._keyboardKeysDown.clear();
   }
@@ -232,9 +302,24 @@ export class SoftKeyboard extends LitElement {
     if (e.repeat) return;
     const target = e.target;
     if (target && (target.matches?.("input, textarea, [contenteditable]"))) return;
+    // Track shift/ctrl as chord-shape modifiers — values reflect
+    // current key state; a chord triggered while holding shift
+    // gets `modShift=true` even if the user toggled it after
+    // pressing the digit (the modifier resolves at NOTE press, not
+    // digit press).
+    this._modShift = !!e.shiftKey;
+    this._modCtrl = !!(e.ctrlKey || e.metaKey);
     const k = e.key.toLowerCase();
     if (k === "z") { this._shiftOctave(-1); e.preventDefault(); return; }
     if (k === "x") { this._shiftOctave(+1); e.preventDefault(); return; }
+    // Chord modifier: 3..7, 9. (8 is reserved — `chordIntervals`
+    // doesn't define it and including it would silently fall back
+    // to "no chord", which would surprise users who guessed.)
+    if (/^[34567]$/.test(k) || k === "9") {
+      this._heldDigits.add(Number(k));
+      e.preventDefault();
+      return;
+    }
     const offset = COMPUTER_KEY_MAP[k];
     if (offset === undefined) return;
     if (this._keyboardKeysDown.has(k)) return;
@@ -244,7 +329,13 @@ export class SoftKeyboard extends LitElement {
   }
 
   _handleKeyUp(e) {
+    this._modShift = !!e.shiftKey;
+    this._modCtrl = !!(e.ctrlKey || e.metaKey);
     const k = e.key.toLowerCase();
+    if (/^[34567]$/.test(k) || k === "9") {
+      this._heldDigits.delete(Number(k));
+      return;
+    }
     const offset = COMPUTER_KEY_MAP[k];
     if (offset === undefined) return;
     this._keyboardKeysDown.delete(k);
@@ -333,6 +424,8 @@ export class SoftKeyboard extends LitElement {
         <span><kbd>W</kbd> <kbd>E</kbd> <kbd>T</kbd> <kbd>Y</kbd> <kbd>U</kbd>
           <kbd>O</kbd> <kbd>P</kbd> black keys</span>
         <span><kbd>Z</kbd> / <kbd>X</kbd> octave</span>
+        <span>hold <kbd>3</kbd>…<kbd>9</kbd> for chord
+          (+<kbd>shift</kbd>/<kbd>ctrl</kbd> for variants)</span>
       </div>
     `;
   }
