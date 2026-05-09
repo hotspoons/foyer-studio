@@ -1693,8 +1693,13 @@ Dispatcher::~Dispatcher () = default;
 void
 Dispatcher::on_audio_frame (const std::vector<std::uint8_t>& payload)
 {
-	// Unpack stream_id (u32 LE) + interleaved f32 PCM.
-	if (payload.size () < 4) return;
+	// Unpack `[stream_id u32 LE][transport_pos i64 LE][interleaved f32 PCM]`.
+	// Wire format matches foyer_ipc::pack_audio (formerly just stream_id
+	// + PCM, changed in 2026-05-06 to 12-byte header). If we read from
+	// byte 4 we'd interpret the transport_pos as the first two PCM
+	// samples; for ingress frames that's -1 (0xFF) which decodes as NaN
+	// and maxes out the channel gain.
+	if (payload.size () < 12) return;
 	const std::uint32_t stream_id =
 	      (static_cast<std::uint32_t> (payload[0]))
 	    | (static_cast<std::uint32_t> (payload[1]) << 8)
@@ -1704,8 +1709,8 @@ Dispatcher::on_audio_frame (const std::vector<std::uint8_t>& payload)
 	std::lock_guard<std::mutex> lk (_ingress_mx);
 	auto it = _ingress_ports.find (stream_id);
 	if (it != _ingress_ports.end () && it->second) {
-		const float* samples = reinterpret_cast<const float*> (payload.data () + 4);
-		const std::size_t n_floats = (payload.size () - 4) / sizeof (float);
+		const float* samples = reinterpret_cast<const float*> (payload.data () + 12);
+		const std::size_t n_floats = (payload.size () - 12) / sizeof (float);
 		it->second->push_audio (samples, n_floats);
 	}
 }

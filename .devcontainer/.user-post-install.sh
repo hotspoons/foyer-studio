@@ -93,10 +93,10 @@ log "done — node, bun, playwright (chromium) ready for dev"
 # interactive wizard (API key prompts, etc.). Hermes will still be
 # fully installed and the `hermes` command available; configure it
 # later interactively with `hermes setup` if desired.
-if ! command -v hermes >/dev/null 2>&1; then
-    log "installing Hermes Agent"
-    curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup
-    log "Hermes Agent installed"
-else
-    log "Hermes Agent already installed — skipping"
-fi
+# if ! command -v hermes >/dev/null 2>&1; then
+#     log "installing Hermes Agent"
+#     curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --skip-setup
+#     log "Hermes Agent installed"
+# else
+#     log "Hermes Agent already installed — skipping"
+# fi
