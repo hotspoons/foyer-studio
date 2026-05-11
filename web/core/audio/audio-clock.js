@@ -64,6 +64,17 @@ export class AudioClock extends EventTarget {
     super();
     /** @type {Array<{ transportPos: number, capturedAtClientMs: number, arrivedAtClientMs: number, playoutAtClientMs: number }>} */
     this._frames = [];
+    /**
+     * Independent ring of `{ serverMonoNs, arrivedAtClientMs }` for
+     * sentinel drift lookups. Can't reuse `_frames` because that
+     * ring only fills when the producer attaches a valid
+     * `transportPosSamples` — when transport is stopped the frames
+     * still flow but their position is `-1`, and `noteFrame` skips
+     * them. Sentinel drift detection needs to work while paused
+     * (that's the whole point of the auto-restart logic), so it
+     * has its own ring.
+     */
+    this._sentinelFrames = [];
     // Estimated wall-clock latency between a frame ARRIVING in the
     // worklet and its samples hitting the speaker, in milliseconds.
     // Computed from worklet stats as `buffered/sr + outputLatency`
@@ -95,7 +106,7 @@ export class AudioClock extends EventTarget {
    * — the UI keeps using the control-plane position for that
    * stretch.
    */
-  noteFrame({ transportPosSamples, capturedAtClientMs, sampleRate }) {
+  noteFrame({ transportPosSamples, capturedAtClientMs, serverMonoNs, sampleRate }) {
     if (transportPosSamples == null || transportPosSamples < 0) return;
     if (sampleRate && sampleRate > 0) this._sampleRate = sampleRate;
     const arrivedAt = performance.now();
@@ -112,6 +123,7 @@ export class AudioClock extends EventTarget {
       capturedAtClientMs: captured,
       arrivedAtClientMs: arrivedAt,
       playoutAtClientMs: playoutAt,
+      serverMonoNs,
     });
     if (this._frames.length > FRAME_RING_MAX) this._frames.shift();
     if (this._seekFreezeSamples != null) {
@@ -120,6 +132,47 @@ export class AudioClock extends EventTarget {
         this._seekFreezeSamples = null;
       }
     }
+  }
+
+  /**
+   * Record an audio frame's arrival time keyed by its `serverMonoNs`
+   * correlation id. Always runs — independent of whether the frame
+   * had a usable transport position. Called from the audio listener
+   * for every received packet.
+   */
+  noteSentinelFrame(serverMonoNs) {
+    if (serverMonoNs == null) return;
+    this._sentinelFrames.push({
+      serverMonoNs,
+      arrivedAtClientMs: performance.now(),
+    });
+    if (this._sentinelFrames.length > FRAME_RING_MAX) {
+      this._sentinelFrames.shift();
+    }
+  }
+
+  /**
+   * Look up the client arrival time (performance.now()) of an
+   * audio frame by its `server_mono_ns` correlation id. Used by
+   * the sentinel drift monitor to compute audio-vs-event path
+   * skew. Checks the sentinel-only ring first; falls back to the
+   * transport-derived ring for hosts that happen to be playing
+   * (older callers expected this lookup path).
+   */
+  lookupAudioArrivalMs(serverMonoNs) {
+    if (serverMonoNs == null) return null;
+    // Walk backward — sentinels usually reference recent frames.
+    for (let i = this._sentinelFrames.length - 1; i >= 0; i--) {
+      if (this._sentinelFrames[i].serverMonoNs === serverMonoNs) {
+        return this._sentinelFrames[i].arrivedAtClientMs;
+      }
+    }
+    for (let i = this._frames.length - 1; i >= 0; i--) {
+      if (this._frames[i].serverMonoNs === serverMonoNs) {
+        return this._frames[i].arrivedAtClientMs;
+      }
+    }
+    return null;
   }
 
   /** Worklet stats reporter calls this with the latest buffered-sample count. */
@@ -136,7 +189,9 @@ export class AudioClock extends EventTarget {
   noteSeek(targetSamples) {
     this._seekFreezeSamples = Number(targetSamples) || 0;
     // Clear queued frames — they're from before the seek and would
-    // resolve as "currently playing" until they aged out.
+    // resolve as "currently playing" until they aged out. The
+    // sentinel ring is kept; its job is wall-clock drift detection,
+    // not transport correlation, so a seek doesn't invalidate it.
     this._frames = [];
     this.dispatchEvent(
       new CustomEvent("seek-freeze", { detail: { targetSamples: this._seekFreezeSamples } }),

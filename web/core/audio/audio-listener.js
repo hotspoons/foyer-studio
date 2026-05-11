@@ -37,6 +37,61 @@ const DEFAULT_AUDIO_PREFS = Object.freeze({
   codec: "opus",          // "opus" | "raw_f32_le"
   sampleRate: 48_000,      // 44100 / 48000 / 96000 / 192000
   channels: 2,
+  /**
+   * Sentinel-drift threshold for auto-restarting the audio stream
+   * while transport is paused. The master-controller compares each
+   * `Event::AudioSentinel`'s arrival time against the matching
+   * audio frame's arrival time; when the gap exceeds this many
+   * milliseconds, the stream is torn down and reopened.
+   *
+   * Lower values catch drift earlier but increase the false-positive
+   * rate on jittery tunnels (every Wi-Fi hiccup over a Cloudflare
+   * tunnel adds 50–100 ms). 300 ms was the agent's original
+   * hardcoded value; anywhere from 200–800 ms is reasonable.
+   * Set `0` to disable auto-restart entirely (manual relisten only).
+   */
+  sentinelDriftMs: 300,
+  /**
+   * Estimated backend processing latency, in milliseconds. Used
+   * ONLY by the transport-stop delay (so the engine has time to
+   * write the last in-flight bytes to disk before transport halts).
+   * The per-track RECORD COMPENSATION path doesn't use this — the
+   * shim adds its own internal ring + cycle live so record shifts
+   * adapt to any backend / buffer size automatically.
+   *
+   * Components covered here: sidecar→shim IPC hop + the shim's
+   * `ShimInputPort` prime ring (80 ms; absorbs WS jitter) + one
+   * engine process cycle + record-write overhead. The ring is the
+   * dominant term and is identical between the in-process dummy
+   * backend and JACK, so the default sits just above 80 ms.
+   *
+   * Drop to 90 ms on a tight buffer (e.g. JACK at 64 samples);
+   * raise to 150+ behind a loaded tunnel.
+   */
+  recordStopBackendMs: 100,
+  /**
+   * Depth of the shim's per-stream audio jitter ring, in
+   * milliseconds. Browser → server → shim. The ring sits between
+   * the WS receive thread and Ardour's RT audio thread; bigger
+   * absorbs more browser GC + WS reorder jitter at the cost of
+   * higher monitoring latency (recordings are auto-shifted for
+   * this latency, so the take still lines up; only the foreground
+   * mix the user hears through the engine is delayed). 80 ms is
+   * the shim's compiled default — appropriate for a tunnel.
+   * Loopback / LAN setups commonly drop to 20–30 ms.
+   *
+   * Applies to streams opened AFTER this value lands at the shim.
+   * Existing ports keep whatever depth they were constructed with;
+   * the user gets the new value by toggling Listen / reconnecting.
+   */
+  shimIngressRingPrimeMs: 80,
+  /**
+   * Pure-fudge safety margin appended on top of the measured /
+   * estimated stop-delay components. Default 60 ms; raise on
+   * jittery networks where the median latency under-represents the
+   * 95th percentile that determines a clipped tail.
+   */
+  recordStopSafetyMs: 60,
 });
 
 export function readAudioPrefs() {
@@ -371,6 +426,12 @@ export class AudioListener {
     const serverMonoLo = view.getUint32(24, false);
     const serverMonoNs =
       Number((BigInt(serverMonoHi) << 32n) | BigInt(serverMonoLo));
+    // Sentinel correlation: stash every frame's arrival time
+    // regardless of transport-pos validity so the master-controller's
+    // drift detector can resolve `server_mono_ns` lookups while
+    // playback is paused. Note this BEFORE the transport-gated
+    // `noteFrame` so we don't depend on transportPosSamples.
+    if (this.audioClock) this.audioClock.noteSentinelFrame(serverMonoNs);
     // Feed the audio-derived clock. capturedAtClientMs = serverMono
     // converted onto our `performance.now()` via clock-sync. Until
     // the offset converges this returns null and AudioClock falls
@@ -383,6 +444,7 @@ export class AudioListener {
       this.audioClock.noteFrame({
         transportPosSamples,
         capturedAtClientMs,
+        serverMonoNs,
         sampleRate: this.format.sample_rate,
       });
     }

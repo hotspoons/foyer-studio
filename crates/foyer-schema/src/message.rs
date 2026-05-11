@@ -151,6 +151,32 @@ pub enum Event {
     AudioIngressClosed {
         stream_id: u32,
     },
+    /// Periodic timing sentinel used to correlate the audio egress
+    /// stream with the event/control stream. The server picks a frame
+    /// from the audio encode loop (the `server_mono_ns` timestamp on
+    /// that frame IS the correlation id), then broadcasts this event
+    /// on the JSON event channel. The browser receives the audio frame
+    /// and this event at different wall-clock moments; the delta
+    /// between their arrival times (adjusted for the clock-probe
+    /// offset) is the real-time audio-vs-event path skew.  Multiple
+    /// seconds of skew means we should restart the audio stream.
+    AudioSentinel {
+        stream_id: u32,
+        /// The server's monotonic clock at capture time — the same
+        /// value carried in the matching audio frame's binary header.
+        server_mono_ns: u64,
+        /// Engine transport position at capture time, if known.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        transport_pos_samples: Option<u64>,
+    },
+    /// Server → browser: reply to `RequestIngressLatency`.  Carries
+    /// the median one-way latency observed on this stream's ingress
+    /// WS (in milliseconds).  `None` means no samples yet.
+    IngressLatencyReport {
+        stream_id: u32,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        median_ms: Option<f32>,
+    },
     /// Latest latency calibration result.
     LatencyReport {
         stream_id: u32,
@@ -862,6 +888,44 @@ pub enum Command {
         stream_id: u32,
         buffered_samples: u32,
         target_samples: u32,
+    },
+    /// Browser → server: "what is the current median one-way latency
+    /// for my ingress stream?"  Used by transport-stop delay so the
+    /// UI can delay the stop by exactly the buffer depth.  Replied
+    /// with `Event::IngressLatencyReport`.
+    RequestIngressLatency {
+        stream_id: u32,
+    },
+    /// Browser → server → shim: declare the total capture-side
+    /// latency for an ingress stream, in samples at the engine
+    /// sample rate. The shim sets this on the underlying engine
+    /// input port via `Port::set_private_latency_range`, then
+    /// triggers `Session::update_latency_compensation` so Ardour
+    /// shifts subsequent recordings earlier by this many samples.
+    /// Without this the take lands late by browser-capture + WS +
+    /// shim hop — visible as recorded waveforms sitting to the
+    /// RIGHT of where the user was actually performing relative to
+    /// the playback they heard.
+    ///
+    /// Idempotent / cheap; the browser may resend at any time as
+    /// its measurements stabilise. Setting `samples = 0` clears
+    /// any prior compensation for this stream.
+    SetIngressCaptureLatency {
+        stream_id: u32,
+        samples: u32,
+    },
+    /// Browser → server → shim: tune the depth of the per-stream
+    /// jitter ring inside `ShimInputPort`. Larger values absorb
+    /// more WS / GC jitter at the cost of more capture latency
+    /// (the latency is auto-compensated for recordings via the
+    /// port latency API, but it still adds to the user's foreground
+    /// monitoring delay). Default is 80 ms — appropriate for a
+    /// remote tunnel; users on loopback or LAN typically drop to
+    /// 20–30 ms. Session-wide: the cached value applies to every
+    /// subsequent `AudioIngressOpen`. Backends without an ingress
+    /// ring (stub) ignore.
+    SetIngressRingPrimeMs {
+        ms: u32,
     },
     /// Open a named undo group. Subsequent mutations (region delete,
     /// plugin move, etc.) land in the same `UndoTransaction` until a

@@ -1,10 +1,13 @@
-// Dev-only diagnostics panel. Calls the sidecar's `/dev/run-tests`
-// endpoint (requires `FOYER_DEV=1` at server launch) and renders a
-// per-probe pass/fail list.
+// Dev-only diagnostics panel. Dual-tab:
+//   * Probes — calls the sidecar's `/dev/run-tests` endpoint (requires
+//     `FOYER_DEV=1`) and renders a per-probe pass/fail list.
+//   * Timing — subscribes to the running `audioController` sentinel
+//     stream and shows real-time audio-vs-event drift, clock-sync
+//     state, and audio-clock internals. This tab is always live even
+//     when probes are disabled.
 //
-// The same endpoint is reachable via `curl` from the shell, so Claude
-// (or anyone) can run regressions without opening the browser. This
-// panel is mostly a visual affordance for the human reviewer.
+// Both tabs share the window.__foyer singleton set up by bootstrap.js
+// so they don't need to import deeply into core.
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
@@ -12,12 +15,14 @@ import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 
 export class DiagnosticsView extends LitElement {
   static properties = {
-    _probes:  { state: true, type: Array },
-    _results: { state: true, type: Array },
-    _running: { state: true, type: Boolean },
-    _disabled: { state: true, type: Boolean },
-    _error: { state: true, type: String },
-    _selected: { state: true, type: Object }, // Set<id>
+    _tab:        { state: true, type: String },
+    _probes:     { state: true, type: Array },
+    _results:    { state: true, type: Array },
+    _running:    { state: true, type: Boolean },
+    _disabled:   { state: true, type: Boolean },
+    _error:      { state: true, type: String },
+    _selected:   { state: true, type: Object }, // Set<id>
+    _timing:     { state: true, type: Object },
   };
 
   static styles = css`
@@ -54,6 +59,17 @@ export class DiagnosticsView extends LitElement {
     button.primary {
       background: color-mix(in oklab, var(--color-accent) 25%, var(--color-surface));
       border-color: var(--color-accent);
+    }
+    button.tab {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      padding: 4px 8px;
+    }
+    button.tab.active {
+      color: var(--color-accent);
+      border-bottom-color: var(--color-accent);
     }
     .scroll {
       flex: 1; overflow: auto;
@@ -106,21 +122,106 @@ export class DiagnosticsView extends LitElement {
     }
     .summary .pill.pass { color: var(--color-success, #5cd188); background: color-mix(in oklab, var(--color-success, #5cd188) 14%, transparent); }
     .summary .pill.fail { color: var(--color-danger, #d04040);  background: color-mix(in oklab, var(--color-danger, #d04040) 16%, transparent); }
+    .timing-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      font-family: var(--font-mono);
+    }
+    .timing-table th {
+      text-align: left;
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+    }
+    .timing-table td {
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--color-border);
+      color: var(--color-text);
+    }
+    .timing-table tr:nth-child(even) { background: var(--color-surface-elevated); }
+    .timing-val { white-space: nowrap; }
+    .timing-val.warn { color: var(--color-warning, #d0a040); }
+    .timing-val.danger { color: var(--color-danger, #d04040); }
+    .timing-val.ok { color: var(--color-success, #5cd188); }
   `;
 
   constructor() {
     super();
+    this._tab = "probes";
     this._probes = [];
     this._results = [];
     this._running = false;
     this._disabled = false;
     this._error = "";
     this._selected = new Set();
+    this._timing = null;
+    this._sentinelListener = null;
+    this._tickTimer = null;
   }
 
   connectedCallback() {
     super.connectedCallback();
     this._loadProbes();
+    this._attachTimingListeners();
+    this._tickTimer = setInterval(() => this._refreshTiming(), 500);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._tickTimer) clearInterval(this._tickTimer);
+    this._detachTimingListeners();
+  }
+
+  _attachTimingListeners() {
+    const ctrl = globalThis.__foyer?.audio;
+    if (!ctrl) return;
+    this._sentinelListener = (ev) => this._onSentinel(ev.detail);
+    ctrl.addEventListener("sentinel", this._sentinelListener);
+  }
+
+  _detachTimingListeners() {
+    const ctrl = globalThis.__foyer?.audio;
+    if (ctrl && this._sentinelListener) {
+      ctrl.removeEventListener("sentinel", this._sentinelListener);
+      this._sentinelListener = null;
+    }
+  }
+
+  _onSentinel(detail) {
+    // Dispatched by AudioController when it correlates an audio_sentinel
+    // event with a matching audio frame.
+    this._timing = {
+      ...(this._timing || {}),
+      lastSentinel: detail,
+      sentinelHistory: globalThis.__foyer?.audio?._sentinelHistory?.slice(-10) || [],
+    };
+    this.requestUpdate();
+  }
+
+  _refreshTiming() {
+    const ctrl = globalThis.__foyer?.audio;
+    const clock = globalThis.__foyer?.audioClock;
+    const sync = globalThis.__foyer?.clockSync;
+    const ws = globalThis.__foyer?.ws;
+    const store = globalThis.__foyer?.store;
+
+    if (!clock && !sync) return;
+
+    this._timing = {
+      ...(this._timing || {}),
+      audioClock: clock ? clock.snapshot() : null,
+      clockSync: sync ? {
+        offsetMs: sync.offsetMs,
+        minRttMs: sync.minRttMs,
+      } : null,
+      wsStatus: ws?.status || "unknown",
+      playing: !!store?.state?.controls?.get("transport.playing"),
+      recording: !!store?.state?.controls?.get("transport.recording"),
+      lastStopDelay: globalThis.__foyer?.lastStopDelay || null,
+      lastIngressLatency: globalThis.__foyer?.lastIngressLatency || null,
+    };
+    this.requestUpdate();
   }
 
   async _loadProbes() {
@@ -153,8 +254,6 @@ export class DiagnosticsView extends LitElement {
         idsParam ? `/dev/run-tests?ids=${encodeURIComponent(idsParam)}` : "/dev/run-tests",
       );
       const body = await res.json();
-      // Merge: keep prior results for probes not in this run so the
-      // visual state isn't wiped when the user runs a subset.
       const byId = new Map(this._results.map((r) => [r.id, r]));
       for (const r of body.results) byId.set(r.id, r);
       this._results = Array.from(byId.values());
@@ -171,7 +270,22 @@ export class DiagnosticsView extends LitElement {
     this._selected = s;
   }
 
+  _setTab(t) {
+    this._tab = t;
+  }
+
   render() {
+    return html`
+      <div class="toolbar">
+        <button class="tab ${this._tab === "probes" ? "active" : ""}" @click=${() => this._setTab("probes")}>Probes</button>
+        <button class="tab ${this._tab === "timing" ? "active" : ""}" @click=${() => this._setTab("timing")}>Timing</button>
+        <span class="spacer"></span>
+      </div>
+      ${this._tab === "probes" ? this._renderProbes() : this._renderTiming()}
+    `;
+  }
+
+  _renderProbes() {
     if (this._disabled) {
       return html`
         <div class="banner">
@@ -232,6 +346,127 @@ export class DiagnosticsView extends LitElement {
           <span class="spacer"></span>
         </div>
       ` : null}
+    `;
+  }
+
+  _renderTiming() {
+    const t = this._timing || {};
+    const sentinelHistory = t.sentinelHistory || [];
+    const clock = t.audioClock || {};
+    const sync = t.clockSync || {};
+
+    const lastDrift = t.lastSentinel?.driftMs ?? null;
+    const driftClass = lastDrift == null
+      ? ""
+      : lastDrift > 300 ? "danger"
+      : lastDrift > 100 ? "warn"
+      : "ok";
+
+    return html`
+      <div class="scroll">
+        <table class="timing-table">
+          <tbody>
+            <tr><th colspan="2">Audio sentinel drift (last)</th></tr>
+            <tr>
+              <td>Drift</td>
+              <td class="timing-val ${driftClass}">
+                ${lastDrift != null ? `${lastDrift.toFixed(1)} ms` : "—"}
+              </td>
+            </tr>
+            <tr>
+              <td>Audio arrived</td>
+              <td>${t.lastSentinel?.audioArrivedMs?.toFixed(1) ?? "—"}</td>
+            </tr>
+            <tr>
+              <td>Sentinel arrived</td>
+              <td>${t.lastSentinel?.sentinelArrivedMs?.toFixed(1) ?? "—"}</td>
+            </tr>
+            <tr><th colspan="2">Clock sync</th></tr>
+            <tr>
+              <td>Offset</td>
+              <td>${sync.offsetMs != null ? `${sync.offsetMs.toFixed(2)} ms` : "—"}</td>
+            </tr>
+            <tr>
+              <td>Min RTT</td>
+              <td>${sync.minRttMs != null ? `${sync.minRttMs.toFixed(2)} ms` : "—"}</td>
+            </tr>
+            <tr><th colspan="2">Audio clock</th></tr>
+            <tr>
+              <td>Has audio clock</td>
+              <td>${clock.hasAudioClock ? "yes" : "no"}</td>
+            </tr>
+            <tr>
+              <td>Frames queued</td>
+              <td>${clock.framesQueued ?? "—"}</td>
+            </tr>
+            <tr>
+              <td>Playback delay</td>
+              <td>${clock.playbackDelayMs != null ? `${clock.playbackDelayMs.toFixed(1)} ms` : "—"}</td>
+            </tr>
+            <tr>
+              <td>Derived position</td>
+              <td>${clock.derivedPositionSamples != null ? clock.derivedPositionSamples.toFixed(0) : "—"}</td>
+            </tr>
+            <tr>
+              <td>Control position</td>
+              <td>${clock.controlPositionSamples != null ? clock.controlPositionSamples.toFixed(0) : "—"}</td>
+            </tr>
+            <tr><th colspan="2">Transport</th></tr>
+            <tr>
+              <td>Playing</td>
+              <td>${t.playing ? "yes" : "no"}</td>
+            </tr>
+            <tr>
+              <td>Recording</td>
+              <td>${t.recording ? "yes" : "no"}</td>
+            </tr>
+            <tr>
+              <td>WS status</td>
+              <td>${t.wsStatus}</td>
+            </tr>
+            ${t.lastStopDelay ? html`
+              <tr><th colspan="2">Last record-stop delay</th></tr>
+              <tr><td>Capture (mic + worklet)</td><td>${t.lastStopDelay.captureMs} ms</td></tr>
+              <tr><td>Network (ingress one-way)</td><td>${t.lastStopDelay.networkMs} ms</td></tr>
+              <tr><td>Backend (IPC + cycle + write)</td><td>${t.lastStopDelay.backendMs} ms</td></tr>
+              <tr><td>Jitter cushion</td><td>${t.lastStopDelay.safetyMs} ms</td></tr>
+              <tr><td><strong>Total</strong></td><td><strong>${t.lastStopDelay.totalMs} ms</strong></td></tr>
+            ` : null}
+            ${t.lastIngressLatency ? html`
+              <tr><th colspan="2">Capture compensation (full round-trip)</th></tr>
+              <tr><td>Capture (mic + worklet)</td><td>${t.lastIngressLatency.captureMs} ms</td></tr>
+              <tr><td>Ingress network</td><td>${t.lastIngressLatency.ingressNetworkMs ?? t.lastIngressLatency.networkMs ?? 0} ms</td></tr>
+              <tr><td>Egress network (≈ ingress)</td><td>${t.lastIngressLatency.egressNetworkMs ?? 0} ms</td></tr>
+              <tr><td>Playback delay (worklet + output)</td><td>${t.lastIngressLatency.playbackDelayMs ?? 0} ms</td></tr>
+              <tr><td>Sent to shim</td><td><strong>${t.lastIngressLatency.samplesToShim} samples</strong> = ${t.lastIngressLatency.browserMs} ms @ ${t.lastIngressLatency.engineSampleRate} Hz</td></tr>
+              <tr><td colspan="2" style="font-size:10px;color:var(--color-text-muted)">Shim adds its own ring-prime + engine cycle on top before applying to the port.</td></tr>
+            ` : null}
+          </tbody>
+        </table>
+
+        ${sentinelHistory.length > 0 ? html`
+          <table class="timing-table" style="margin-top: 12px;">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Drift (ms)</th>
+                <th>Server mono (ns ×1e-6)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sentinelHistory.slice().reverse().map((s, i) => html`
+                <tr>
+                  <td>${sentinelHistory.length - i}</td>
+                  <td class="timing-val ${s.driftMs > 300 ? "danger" : s.driftMs > 100 ? "warn" : "ok"}">
+                    ${s.driftMs.toFixed(1)}
+                  </td>
+                  <td>${(s.serverMonoNs / 1e6).toFixed(1)}</td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        ` : html`<div class="banner">No sentinels received yet. Start Listen to generate timing data.</div>`}
+      </div>
     `;
   }
 }

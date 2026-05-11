@@ -157,6 +157,7 @@ export class SettingsModal extends LitElement {
                resamples engine PCM to the rate you pick when it differs from the project.
              </div>`
       : null;
+    const driftMs = Number(a.sentinelDriftMs) || 0;
     return html`
       <div class="section">
         <h3>Browser audio stream</h3>
@@ -182,8 +183,101 @@ export class SettingsModal extends LitElement {
             `)}
           </select>
         </div>
+        <div class="row">
+          <label title="Reopen the audio stream when sentinel events arrive more than this many ms after their matching audio frame. 0 = never auto-restart.">
+            Auto-restart on drift
+          </label>
+          <div class="chip-row">
+            ${[0, 200, 300, 500, 800].map((ms) => html`
+              <button class="chip ${driftMs === ms ? "active" : ""}"
+                      title=${ms === 0
+                        ? "Disable auto-restart — Foyer will never tear down the stream on drift, only on a network drop."
+                        : `Reopen when sentinel drift exceeds ${ms} ms while transport is paused.`}
+                      @click=${() => { writeAudioPrefs({ sentinelDriftMs: ms }); this._refresh(); }}>
+                ${ms === 0 ? "Off" : `${ms} ms`}
+              </button>
+            `)}
+          </div>
+        </div>
         ${hint}
         ${hint2}
+      </div>
+      ${this._renderRecordStopSection(a)}
+    `;
+  }
+
+  _renderRecordStopSection(a) {
+    const backendMs = Number(a.recordStopBackendMs) || 0;
+    const jitterMs  = Number(a.recordStopSafetyMs)  || 0;
+    const ringMs    = Number(a.shimIngressRingPrimeMs) || 0;
+    const RING_TIP =
+      "Depth of the shim's per-stream audio jitter ring. Bigger absorbs more " +
+      "browser GC + WS reorder jitter at the cost of higher live-monitoring " +
+      "latency. Recordings are auto-shifted for this latency, so only the " +
+      "foreground mix you hear through the engine is delayed. 80 ms suits a " +
+      "tunnel; loopback / LAN setups commonly drop to 20–30 ms. Takes effect " +
+      "on the next Listen / record stream you open.";
+    const SECTION_TIP =
+      "When you hit stop while recording browser audio, Foyer waits before the engine " +
+      "actually halts so the last in-flight bytes reach Ardour's record source. " +
+      "Total delay = capture + network + backend + jitter cushion; the first two are " +
+      "measured live (browser baseLatency + ingress one-way median), these two are " +
+      "tunable here. Last computed breakdown shows in Diagnostics → Timing. " +
+      "Per-track record-shift compensation is a separate path that doesn't use these " +
+      "prefs — the shim self-reports its internal latency there.";
+    const BACKEND_TIP =
+      "IPC + shim ring-prime (80 ms; absorbs WS jitter) + one engine process cycle + " +
+      "record-write. The ring is the dominant term and is identical between the " +
+      "in-process dummy backend and JACK, so 100 ms is a good default for both. Drop " +
+      "to ~90 ms on a tight buffer (JACK 64 samples); raise to 150+ on a loaded tunnel.";
+    const JITTER_TIP =
+      "Cushion on top of the measured + estimated components. Raise if you still hear " +
+      "the tail clipped — median latency under-represents the 95th percentile that " +
+      "determines whether a packet missed the deadline.";
+    return html`
+      <div class="section">
+        <h3 title=${SECTION_TIP}>Record stop delay</h3>
+        <div class="row">
+          <label title=${BACKEND_TIP}>Backend (IPC + Ardour cycle)</label>
+          <div class="chip-row">
+            ${[90, 100, 120, 150, 200].map((ms) => html`
+              <button class="chip ${backendMs === ms ? "active" : ""}"
+                      title=${BACKEND_TIP}
+                      @click=${() => { writeAudioPrefs({ recordStopBackendMs: ms }); this._refresh(); }}>
+                ${ms} ms
+              </button>
+            `)}
+          </div>
+        </div>
+        <div class="row">
+          <label title=${JITTER_TIP}>Jitter cushion</label>
+          <div class="chip-row">
+            ${[20, 60, 120, 200].map((ms) => html`
+              <button class="chip ${jitterMs === ms ? "active" : ""}"
+                      title=${JITTER_TIP}
+                      @click=${() => { writeAudioPrefs({ recordStopSafetyMs: ms }); this._refresh(); }}>
+                ${ms} ms
+              </button>
+            `)}
+          </div>
+        </div>
+      </div>
+      <div class="section">
+        <h3 title="Tuning that only applies to the Ardour shim (no-op for the stub backend).">
+          Ardour shim
+        </h3>
+        <div class="row">
+          <label title=${RING_TIP}>Ingress jitter ring</label>
+          <div class="chip-row">
+            ${[20, 30, 50, 80, 120].map((ms) => html`
+              <button class="chip ${ringMs === ms ? "active" : ""}"
+                      title=${RING_TIP}
+                      @click=${() => { writeAudioPrefs({ shimIngressRingPrimeMs: ms }); this._refresh(); }}>
+                ${ms} ms
+              </button>
+            `)}
+          </div>
+        </div>
       </div>
     `;
   }

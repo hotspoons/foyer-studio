@@ -9,6 +9,7 @@
 #ifndef foyer_shim_dispatch_h
 #define foyer_shim_dispatch_h
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -58,6 +59,15 @@ private:
 	// when it's > 0 so the outer group owns the whole batch.
 	// PLAN 177.
 	std::uint32_t _undo_group_depth = 0;
+
+	// Session-wide override for `ShimInputPort::PRIME_THRESHOLD_MS`,
+	// settable via `Command::SetIngressRingPrimeMs`. Read by the
+	// AudioIngressOpen handler when constructing new ports. `0`
+	// (the initial value) means "use the constructor default";
+	// any positive value overrides. Atomic so the IPC reader
+	// thread can update it without locking against the event-loop
+	// thread that reads it.
+	std::atomic<std::uint32_t> _ingress_ring_prime_ms { 0 };
 };
 
 } // namespace ArdourSurface

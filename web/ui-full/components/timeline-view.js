@@ -2752,12 +2752,30 @@ export class TimelineView extends LitElement {
   /** Pixels for the live recording span (punch-in cursor → playhead), or null. */
   _recordingSpanPixels(controls) {
     if (!controls || !controls.get("transport.recording")) return null;
+    // Only render while transport is actually advancing. If the user
+    // is record-armed but paused (or just rewound), there's no
+    // in-progress take to visualise — a stale anchor + a rewound
+    // playhead would otherwise produce a bar stretching from 0 to
+    // wherever the user last recorded, which reads as "we're
+    // recording the whole timeline" (reported 2026-05-08).
+    if (!controls.get("transport.playing")) {
+      this._recordingAnchorSamples = null;
+      return null;
+    }
     const sr = this._sampleRate();
     this._syncRecordingAnchor();
     let recStart = this._recordingAnchorSamples;
     if (!Number.isFinite(recStart)) recStart = controls.get("transport.record_position");
     if (!Number.isFinite(recStart)) recStart = Math.max(0, this._playheadSamples - sr);
     const playhead = this._playheadSamples;
+    // If the playhead is behind the anchor (locate / rewind mid-take),
+    // the take we were tracking is over — reset the anchor so the
+    // placeholder restarts from the new position rather than
+    // back-painting a range we didn't actually record.
+    if (Number.isFinite(recStart) && playhead < recStart) {
+      this._recordingAnchorSamples = playhead;
+      recStart = playhead;
+    }
     const leftPx = HEAD_WIDTH + (Math.min(recStart, playhead) / sr) * this._zoom;
     const widthPx = Math.max(1, (Math.abs(playhead - recStart) / sr) * this._zoom);
     return { leftPx, widthPx };

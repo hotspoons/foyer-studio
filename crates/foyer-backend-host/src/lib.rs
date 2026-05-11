@@ -91,6 +91,24 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn set_ingress_capture_latency(
+        &self,
+        stream_id: u32,
+        samples: u32,
+    ) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::SetIngressCaptureLatency { stream_id, samples })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn set_ingress_ring_prime_ms(&self, ms: u32) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::SetIngressRingPrimeMs { ms })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn send_midi_input(
         &self,
         data: Vec<u8>,

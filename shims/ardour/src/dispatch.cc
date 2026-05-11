@@ -24,6 +24,7 @@
 
 #include "ardour/async_midi_port.h"
 #include "ardour/audio_port.h"
+#include "ardour/audioengine.h"
 #include "ardour/audioregion.h"
 #include "ardour/automation_control.h"
 #include "ardour/delivery.h"
@@ -443,6 +444,8 @@ struct DecodedCmd
 		MidiInput,
 		AudioIngressOpen,
 		AudioIngressClose,
+		SetIngressCaptureLatency,
+		SetIngressRingPrimeMs,
 		DuplicateRegion,
 		DuplicateRegionRange,
 		StretchRegion,
@@ -694,6 +697,13 @@ struct DecodedCmd
 	// messages never exceed 3.
 	std::uint8_t  midi_bytes[8] = {0};
 	std::uint8_t  midi_byte_count = 0;
+
+	// SetIngressCaptureLatency { stream_id, samples } — samples are
+	// in engine frames; the shim writes them into the matching
+	// ingress port's `Port::set_private_latency_range` and triggers
+	// `Session::update_latency_compensation` so future recordings
+	// land at the visually-correct position.
+	std::uint32_t set_latency_samples = 0;
 };
 
 // Read an int64 that may be positive or negative on the wire —
@@ -1442,6 +1452,19 @@ decode (const std::vector<std::uint8_t>& buf)
 					std::uint64_t v = 0;
 					if (!in.read_u64 (v)) return out;
 					out.audio_stream_id = static_cast<std::uint32_t> (v);
+				} else if (k == "samples") {
+					// SetIngressCaptureLatency { stream_id, samples }
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.set_latency_samples = static_cast<std::uint32_t> (v);
+				} else if (k == "ms") {
+					// SetIngressRingPrimeMs { ms } — reuses
+					// `set_latency_samples` as the destination slot
+					// since the two commands carry a single u32
+					// payload each and never co-occur.
+					std::uint64_t v = 0;
+					if (!in.read_u64 (v)) return out;
+					out.set_latency_samples = static_cast<std::uint32_t> (v);
 				} else if (k == "source") {
 					// foyer-schema::AudioSource is a serde-tagged enum
 					// (tag="kind", rename_all="snake_case") — so the
@@ -1622,6 +1645,8 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "clear_sequencer_layout") out.kind = DecodedCmd::Kind::ClearSequencerLayout;
 			else if (cmd_type == "midi_input")             out.kind = DecodedCmd::Kind::MidiInput;
 			else if (cmd_type == "audio_ingress_open")  out.kind = DecodedCmd::Kind::AudioIngressOpen;
+			else if (cmd_type == "set_ingress_capture_latency") out.kind = DecodedCmd::Kind::SetIngressCaptureLatency;
+			else if (cmd_type == "set_ingress_ring_prime_ms")   out.kind = DecodedCmd::Kind::SetIngressRingPrimeMs;
 			else if (cmd_type == "audio_ingress_close") out.kind = DecodedCmd::Kind::AudioIngressClose;
 			else if (cmd_type == "duplicate_region")    out.kind = DecodedCmd::Kind::DuplicateRegion;
 			else if (cmd_type == "duplicate_region_range") out.kind = DecodedCmd::Kind::DuplicateRegionRange;
@@ -3087,11 +3112,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				fsize = std::max (32u, engine_sr * 20u / 1000u);
 			}
 
+			// Honour any `SetIngressRingPrimeMs` the client has
+			// already pushed; 0 means "use the default" (the
+			// constructor falls back to PRIME_THRESHOLD_MS).
+			const std::uint32_t prime_ms =
+			    this->_ingress_ring_prime_ms.load (std::memory_order_relaxed);
 			FoyerShim* shim = &_shim;
-			_shim.call_slot (MISSING_INVALIDATOR, [shim, sid, name, ch, engine_sr, fsize, this] () {
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, sid, name, ch, engine_sr, fsize, prime_ms, this] () {
 				try {
 					auto port = std::make_unique<ShimInputPort> (
-					    *shim, sid, name, ch, engine_sr, fsize);
+					    *shim, sid, name, ch, engine_sr, fsize, prime_ms);
 					std::string engine_port_name;
 					{
 						std::lock_guard<std::mutex> lk (this->_ingress_mx);
@@ -3117,6 +3147,63 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				auto ack = msgpack_out::encode_audio_ingress_closed (sid);
 				shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SetIngressRingPrimeMs: {
+			// Cache for the NEXT `AudioIngressOpen` to apply at port
+			// construction. Existing ports aren't resized live — the
+			// ring is allocated once and the priming threshold can't
+			// shrink safely while audio is in flight. Browser resends
+			// this on every reconnect, so a UI change reaches the
+			// shim before the user opens their next ingress.
+			this->_ingress_ring_prime_ms.store (
+			    cmd.set_latency_samples, std::memory_order_relaxed);
+			break;
+		}
+		case DecodedCmd::Kind::SetIngressCaptureLatency: {
+			// Sets the capture-side latency on the matching soft
+			// ingress port so Ardour's `Route::update_signal_latency()`
+			// → `DiskWriter::_capture_offset` chain shifts recorded
+			// regions earlier by exactly this many samples. Without
+			// this the take lands LATE on the timeline by the full
+			// browser→shim transport latency (browser capture buffer +
+			// WS one-way + IPC + shim ingestion), which the user sees
+			// as "I sang on the playhead but the waveform is offset
+			// to the right of where I expected it".
+			const std::uint32_t sid     = cmd.audio_stream_id;
+			const std::uint32_t samples = cmd.set_latency_samples;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, sid, samples, this] () {
+				ShimInputPort* port = nullptr;
+				{
+					std::lock_guard<std::mutex> lk (this->_ingress_mx);
+					auto it = this->_ingress_ports.find (sid);
+					if (it != this->_ingress_ports.end ()) port = it->second.get ();
+				}
+				if (!port) {
+					PBD::warning << "foyer_shim: set_ingress_capture_latency: "
+					             << "unknown stream_id " << sid << endmsg;
+					return;
+				}
+				port->set_capture_latency (samples);
+				// Force-propagate so the DiskWriter for any track
+				// already wired to this port picks up the new
+				// `_capture_offset` immediately. `Session::update_
+				// latency_compensation` is protected — the public
+				// equivalent is `AudioEngine::latency_callback
+				// (for_playback=false)`, which is exactly the path
+				// the dummy / JACK backends use after a port's
+				// latency range changes. It schedules the session's
+				// internal update_latency() pass on the next event
+				// pump.
+				try {
+					(void) shim;
+					AudioEngine::instance ()->latency_callback (false);
+				} catch (...) {
+					PBD::warning << "foyer_shim: latency_callback threw"
+					             << endmsg;
+				}
 			});
 			break;
 		}
@@ -3396,6 +3483,13 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 								PBD::warning << "foyer_shim: set_track_input: connected "
 								          << port->name () << " → " << snap.patch_input_port << endmsg;
 							}
+						}
+						// Force `ExistingMaterial` alignment so the port's
+						// `_capture_offset` actually moves recordings.
+						// See the parallel call in the `UpdateTrack` handler
+						// for the full rationale.
+						if (auto trk = std::dynamic_pointer_cast<ARDOUR::Track> (route)) {
+							trk->set_align_choice (UseExistingMaterial, true);
 						}
 					}
 				}
@@ -3799,6 +3893,29 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 									PBD::warning << "foyer_shim: update_track: connected "
 									          << port->name () << " → " << snap.patch_input_port << endmsg;
 								}
+							}
+							// CRITICAL: force `ExistingMaterial` alignment on
+							// the track. By default Ardour picks `CaptureTime`
+							// for any track whose input isn't physically /
+							// externally connected (see
+							// `Track::set_align_choice_from_io`). For a
+							// `CaptureTime` track Ardour IGNORES the input
+							// port's `_capture_offset` — the latency value
+							// we set via `Port::set_private_latency_range`
+							// has zero effect, recordings land late by the
+							// full browser→shim transport. `ExistingMaterial`
+							// is what makes `DiskWriter::_first_recordable_sample
+							// += _capture_offset` actually fire.
+							//
+							// We do this unconditionally on every input-port
+							// change. Browser-ingress is the only path that
+							// drives this handler in Foyer today; if a future
+							// path connects a track input to something where
+							// `CaptureTime` is actually wanted (e.g. an
+							// external sequence with its own latency already
+							// baked in), we'll need a switch.
+							if (auto trk = std::dynamic_pointer_cast<ARDOUR::Track> (route)) {
+								trk->set_align_choice (UseExistingMaterial, true);
 							}
 						}
 					}

@@ -89,12 +89,14 @@ ShimInputPort::ShimInputPort (FoyerShim& shim,
                               const std::string& name,
                               std::uint32_t channels,
                               std::uint32_t sample_rate,
-                              std::uint32_t frame_size)
+                              std::uint32_t frame_size,
+                              std::uint32_t prime_ms)
     : _shim (shim)
     , _stream_id (stream_id)
     , _channels (channels == 0 ? 1 : channels)
     , _sample_rate (sample_rate)
     , _frame_size (frame_size == 0 ? 128 : frame_size)
+    , _prime_ms (prime_ms == 0 ? PRIME_THRESHOLD_MS : prime_ms)
 {
 	// Ring sized for ~400 ms of interleaved audio at the given rate.
 	// This is the cushion between push bursts and RT drain; oversized
@@ -105,7 +107,7 @@ ShimInputPort::ShimInputPort (FoyerShim& shim,
 
 	// Priming threshold in INTERLEAVED samples (ring units).
 	_prime_threshold_samples = static_cast<std::uint32_t> (
-	    static_cast<std::uint64_t> (_sample_rate) * PRIME_THRESHOLD_MS * _channels / 1000u);
+	    static_cast<std::uint64_t> (_sample_rate) * _prime_ms * _channels / 1000u);
 
 	// Pre-size the RT scratch buffer. A typical Ardour max block is
 	// 8192 samples — size for 16384 * channels to stay safe without
@@ -134,7 +136,7 @@ ShimInputPort::ShimInputPort (FoyerShim& shim,
 		             << " engine_name=" << _engine_port_name
 		             << " channels=" << _channels
 		             << " sample_rate=" << _sample_rate
-		             << " prime_ms=" << PRIME_THRESHOLD_MS
+		             << " prime_ms=" << _prime_ms
 		             << " slot=" << _registry_slot << endmsg;
 		if (_registry_slot < 0) {
 			PBD::error << "foyer_shim: [ingress] registry FULL (max "
@@ -152,6 +154,55 @@ ShimInputPort::~ShimInputPort ()
 	if (_port) {
 		AudioEngine::instance ()->unregister_port (_port);
 	}
+}
+
+void
+ShimInputPort::set_capture_latency (std::uint32_t samples)
+{
+	if (!_port) return;
+	// Layer the shim-internal contribution on top of what the
+	// browser reported. The browser only knows about its own
+	// pipeline (capture buffer + WS one-way); it can't measure
+	// the engine-side hops, and the static `recordStopBackendMs`
+	// pref was a coarse fudge that drifted on every engine config
+	// change. The shim is the only thing that actually knows:
+	//
+	//   * `_prime_ms` worth of ring depth — sits between
+	//     `push_audio` (IPC thread) and `tick_rt` (RT thread),
+	//     adding `_prime_ms` of fixed latency in steady state.
+	//     This is the JITTER BUFFER, not noise; every sample lives
+	//     here. Default 80 ms; configurable per-stream via
+	//     `Command::SetIngressRingPrimeMs` (typically 20–30 ms on
+	//     LAN, 80–120 ms on a tunnel).
+	//   * One engine process cycle — between when `tick_rt` writes
+	//     into the port buffer and the next `Session::process`
+	//     reads it through the track input. With the dummy backend's
+	//     default 1024/48 kHz that's ~21 ms; on a 64-sample JACK
+	//     setup it's <2 ms. Read directly from the engine so the
+	//     same code adapts to whichever buffer size is running.
+	const auto sr = AudioEngine::instance ()->sample_rate ();
+	const auto cycle = AudioEngine::instance ()->samples_per_cycle ();
+	std::uint32_t prime_samples = 0;
+	if (sr > 0) {
+		prime_samples = static_cast<std::uint32_t> (
+		    (static_cast<std::uint64_t> (_prime_ms) * static_cast<std::uint64_t> (sr)) / 1000ull);
+	}
+	const std::uint32_t shim_samples =
+	    prime_samples + static_cast<std::uint32_t> (cycle);
+	const std::uint32_t total = samples + shim_samples;
+	_capture_latency_samples = total;
+	// `playback=false` selects the CAPTURE direction. Ardour's
+	// `Route::update_signal_latency()` reads
+	// `private_latency_range(false).max` and propagates it down to
+	// `DiskWriter::_capture_offset`, which shifts the recorded
+	// region earlier by exactly this many samples. min == max
+	// because there's no jitter to express here — the prime ring
+	// IS the jitter absorber; what's left at the port is
+	// deterministic.
+	LatencyRange r;
+	r.min = total;
+	r.max = total;
+	_port->set_private_latency_range (r, false);
 }
 
 void

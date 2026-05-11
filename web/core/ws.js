@@ -23,6 +23,13 @@ export class FoyerWs extends EventTarget {
     this._lastSeq = 0;
     this._backoff = 500;
     this._closed = false;
+    /**
+     * Most recent WS lifecycle status. Mirrors the value pushed
+     * through `dispatchEvent("status")` so diagnostics + sentinel
+     * drift logic can poll once instead of having to subscribe and
+     * track the last event themselves.
+     */
+    this.status = "idle";
     // Outbox: commands sent before the socket opens (common on first-
     // paint — components mount and fire `list_backends`/`browse_path`
     // in `connectedCallback` while the WS is still handshaking). Flushed
@@ -180,6 +187,7 @@ export class FoyerWs extends EventTarget {
 
     ws.addEventListener("open", () => {
       this._backoff = 500;
+      this.status = "open";
       this.dispatchEvent(new CustomEvent("status", { detail: "open" }));
       // Flush anything components queued while the WS was still
       // handshaking. Order is preserved (FIFO).
@@ -214,6 +222,7 @@ export class FoyerWs extends EventTarget {
     });
 
     ws.addEventListener("close", () => {
+      this.status = "closed";
       this.dispatchEvent(new CustomEvent("status", { detail: "closed" }));
       if (this._closed) return;
       const wait = Math.min(this._backoff, 8000);
@@ -222,6 +231,7 @@ export class FoyerWs extends EventTarget {
     });
 
     ws.addEventListener("error", () => {
+      this.status = "error";
       this.dispatchEvent(new CustomEvent("status", { detail: "error" }));
     });
   }

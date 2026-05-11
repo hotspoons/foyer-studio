@@ -52,6 +52,11 @@ public:
 	// jitter (decode bursts, GC pauses, WS backpressure). Balanced
 	// against recording latency — higher is more robust but the user
 	// hears their captured audio N ms later.
+	//
+	// This is the DEFAULT only; the constructor's `prime_ms` arg
+	// (set by `Dispatcher` from the most-recent `SetIngressRingPrimeMs`
+	// command) overrides it at construction. Users on loopback / LAN
+	// commonly drop to 20–30 ms; tunnel users may raise to 100+.
 	static constexpr std::uint32_t PRIME_THRESHOLD_MS = 80;
 
 	ShimInputPort (FoyerShim& shim,
@@ -59,7 +64,8 @@ public:
 	               const std::string& name,
 	               std::uint32_t channels,
 	               std::uint32_t sample_rate,
-	               std::uint32_t frame_size);
+	               std::uint32_t frame_size,
+	               std::uint32_t prime_ms = PRIME_THRESHOLD_MS);
 	~ShimInputPort ();
 
 	std::uint32_t stream_id () const { return _stream_id; }
@@ -80,6 +86,26 @@ public:
 
 	/// Unregister the port. Safe to call multiple times.
 	void stop ();
+
+	/// Declare the capture-side latency for this port. `samples` is
+	/// what the BROWSER measured — its own capture buffer + WS
+	/// one-way. The shim adds its own internal contribution
+	/// (`PRIME_THRESHOLD_MS` ring depth + one engine cycle, read
+	/// live from `AudioEngine`) before writing to the port's
+	/// private latency range. This means the same code shifts
+	/// records correctly on both the in-process dummy backend
+	/// (large cycle, no JACK) and JACK setups (any buffer size)
+	/// without any pref tuning per environment.
+	///
+	/// Caller is responsible for triggering
+	/// `AudioEngine::latency_callback(false)` so the new value
+	/// propagates to `DiskWriter::_capture_offset` immediately;
+	/// otherwise it lands on the next port-change recompute.
+	void set_capture_latency (std::uint32_t samples);
+
+	/// Last `total` (browser-reported + shim-internal) value passed
+	/// to `set_capture_latency`. Surfaced for diagnostics.
+	std::uint32_t capture_latency_samples () const { return _capture_latency_samples; }
 
 	// ─── RT-safe ingress registry ────────────────────────────────────
 	//
@@ -112,10 +138,12 @@ private:
 	std::uint32_t        _channels;
 	std::uint32_t        _sample_rate;
 	std::uint32_t        _frame_size;
+	std::uint32_t        _prime_ms;
 	std::uint32_t        _prime_threshold_samples;
 
 	std::shared_ptr<ARDOUR::AudioPort>      _port;
 	std::string                             _engine_port_name;
+	std::uint32_t                           _capture_latency_samples = 0;
 	std::unique_ptr<PBD::RingBuffer<float>> _ring;
 
 	/// Scratch buffer reused by tick_rt (pre-allocated; RT-safe).

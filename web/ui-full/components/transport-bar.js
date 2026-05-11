@@ -6,6 +6,7 @@ import { ControlController } from "foyer-core/store.js";
 import { icon } from "foyer-ui-core/icons.js";
 import { isAllowed, onRbacChange } from "foyer-core/rbac.js";
 import { AudioIngress } from "foyer-core/audio/audio-ingress.js";
+import { stopTransportWithIngressTailDelay, hasActiveIngressForTailDelay } from "foyer-core/audio/record-stop.js";
 
 // Shared across track-editor-modal + transport-bar: lightly-typed map
 // of trackId → { ingress, portName } for the live mic captures this
@@ -64,6 +65,21 @@ export class TransportBar extends LitElement {
     .btn.locate  { color: color-mix(in oklab, #6ab0ff 65%, var(--color-text-muted)); }
     .btn.scrub   { color: color-mix(in oklab, #8fb8ff 60%, var(--color-text-muted)); }
     .btn.stop    { color: color-mix(in oklab, #b8b8c6 75%, var(--color-text-muted)); }
+    /* "Stopping…" affordance — pulses the stop icon while we're
+     * waiting for the browser ingress buffer to drain into Ardour
+     * so the user knows their keypress registered + we're not
+     * ignoring it. Pointer-events off prevents a double-click from
+     * cancelling the in-flight wait. */
+    .btn.stop.stopping {
+      color: var(--color-warning, #d0a040);
+      animation: stop-pulse 0.9s ease-in-out infinite;
+      cursor: progress;
+      pointer-events: none;
+    }
+    @keyframes stop-pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.45; }
+    }
     .btn.play    { color: color-mix(in oklab, var(--color-accent) 80%, var(--color-text-muted)); }
     .btn.rec     { color: color-mix(in oklab, var(--color-danger, #d04040) 80%, var(--color-text-muted)); }
     .btn.loop    { color: color-mix(in oklab, #dece5c 70%, var(--color-text-muted)); }
@@ -188,7 +204,8 @@ export class TransportBar extends LitElement {
   `;
 
   static properties = {
-    _showMeta: { state: true },
+    _showMeta:  { state: true },
+    _stopping:  { state: true },
   };
 
   constructor() {
@@ -442,7 +459,9 @@ export class TransportBar extends LitElement {
         <div class="row transport">
           <div class="btn locate" title="Go to start (Home)" @click=${this._gotoStart}>${icon("backward-step", 16)}</div>
           <div class="btn scrub"  title="Rewind 5 s" @click=${this._rewind}>${icon("backward", 16)}</div>
-          <div class="btn stop"   title="Stop" @click=${this._stop}>${icon("stop", 16)}</div>
+          <div class="btn stop ${this._stopping ? "stopping" : ""}"
+               title=${this._stopping ? "Stopping — draining ingress buffer…" : "Stop"}
+               @click=${this._stop}>${icon("stop", 16)}</div>
           <div class="btn play ${play ? "on" : ""}"
                title="${play ? "Pause" : "Play"} (Space)"
                @click=${() => this._setPlay(!play)}>${icon(play ? "pause" : "play", 16)}</div>
@@ -533,7 +552,32 @@ export class TransportBar extends LitElement {
     cycleReturnMode();
     this.requestUpdate();
   };
-  _stop = () => this._set("transport.playing", false);
+  // Arrow class-property so `@click=${this._stop}` retains its
+  // instance `this` — every other transport handler on this
+  // component follows the same pattern. (Earlier agent changed
+  // this to a regular async method, which silently broke `this`
+  // because Lit's @event syntax does NOT auto-bind a plain method
+  // reference.)
+  _stop = async () => {
+    if (this._stopping) return;
+    const ws = window.__foyer?.ws;
+    const store = window.__foyer?.store;
+    // Fast-path when no recording-tail consideration is needed —
+    // skips even allocating the helper's listener so the cheap
+    // case stays cheap.
+    if (!hasActiveIngressForTailDelay()) {
+      this._set("transport.playing", false);
+      return;
+    }
+    this._stopping = true;
+    this.requestUpdate();
+    try {
+      await stopTransportWithIngressTailDelay({ ws, store, commandKind: "control" });
+    } finally {
+      this._stopping = false;
+      this.requestUpdate();
+    }
+  };
   // All of these are explicit user seeks — if the return-on-stop lock
   // is still running we release it so the new target isn't swallowed.
   _seek(samples) {
