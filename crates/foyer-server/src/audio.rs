@@ -72,7 +72,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use foyer_schema::{AudioCodec, AudioFormat, AudioSource};
+use foyer_schema::{AudioCodec, AudioFormat, AudioSource, Event};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 
@@ -120,6 +120,11 @@ pub struct StreamState {
     /// has no resampler attached (matched rates) — drift correction
     /// is unnecessary in that case.
     drift_tx: Option<mpsc::Sender<f64>>,
+    /// Timing-sentinel task that samples the audio broadcast and
+    /// fires `Event::AudioSentinel` onto the control channel every
+    /// few seconds. `None` when the stream was opened without a
+    /// sentinel channel (e.g. test tones, dev probes).
+    sentinel_task: Option<JoinHandle<()>>,
 }
 
 /// Sidecar-owned registry of live egress streams. One `AudioHub` per
@@ -166,6 +171,10 @@ impl AudioHub {
         // not "now"; both forms are documented at the top of this
         // module.
         backend: Option<std::sync::Weak<dyn foyer_backend::Backend>>,
+        // Optional channel for the encode loop to fire timing
+        // sentinels onto the event broadcast. Used to correlate
+        // audio-stream latency against the control-plane stream.
+        sentinel_tx: Option<mpsc::Sender<Event>>,
     ) -> Result<broadcast::Sender<EncodedPacket>, String> {
         let mut streams = self.streams.lock().await;
         if streams.contains_key(&stream_id) {
@@ -209,7 +218,7 @@ impl AudioHub {
             None
         };
 
-        let (tx, _) = broadcast::channel(self.broadcast_depth);
+        let (tx, _) = broadcast::channel::<EncodedPacket>(self.broadcast_depth);
         let tx_for_task = tx.clone();
         let codec = format.codec;
         // Drift-correction channel — populated only when there's a
@@ -220,6 +229,49 @@ impl AudioHub {
         let (drift_tx, mut drift_rx) = mpsc::channel::<f64>(8);
         let drift_handle = if egress_resampler.is_some() {
             Some(drift_tx)
+        } else {
+            None
+        };
+
+        let sentinel_task = if let Some(stx) = sentinel_tx {
+            let mut srx = tx_for_task.subscribe();
+            let sid = stream_id;
+            Some(tokio::spawn(async move {
+                use tokio::time::{sleep, Duration};
+                loop {
+                    sleep(Duration::from_secs(5)).await;
+                    // Drain the backlog — the subscriber has been idle
+                    // for 5 s and `recv()` would return the OLDEST
+                    // packet. We want the freshest one so the browser
+                    // still has it in its ~1.3 s frame ring.
+                    let mut latest = None;
+                    while let Ok(pkt) = srx.try_recv() {
+                        latest = Some(pkt);
+                    }
+                    if latest.is_none() {
+                        // Nothing produced yet or channel empty; fall
+                        // back to a blocking recv for at most one tick.
+                        match srx.recv().await {
+                            Ok(pkt) => latest = Some(pkt),
+                            Err(_) => break,
+                        }
+                    }
+                    if let Some(pkt) = latest {
+                        if stx
+                            .send(Event::AudioSentinel {
+                                stream_id: sid,
+                                server_mono_ns: pkt.server_mono_ns,
+                                transport_pos_samples: pkt.transport_pos_samples,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                tracing::debug!("audio hub: sentinel task for stream {sid} exited");
+            }))
         } else {
             None
         };
@@ -369,6 +421,7 @@ impl AudioHub {
                 packets: tx.clone(),
                 encode_task,
                 drift_tx: drift_handle,
+                sentinel_task,
             }),
         );
         Ok(tx)
@@ -582,7 +635,7 @@ mod tests {
         let fmt = AudioFormat::new(48_000, 2, 128);
         let (_tx, rx) = mpsc::channel(4);
         let bcast = hub
-            .open_stream(7, AudioSource::Master, fmt, 48_000, rx, None)
+            .open_stream(7, AudioSource::Master, fmt, 48_000, rx, None, None)
             .await
             .expect("open");
         assert!(bcast.receiver_count() == 0);

@@ -817,6 +817,28 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<(PcmTx, AudioIngressAck), BackendError>;
 
     async fn measure_latency(&self, stream_id: u32) -> Result<LatencyReport, BackendError>;
+
+    /// Tell the backend the client-perceived capture latency on
+    /// `stream_id`, in samples at the engine rate. Backends that
+    /// own a recording engine (Ardour shim) translate this into a
+    /// `Port::set_private_latency_range` call so the engine
+    /// compensates recordings by shifting them earlier. Backends
+    /// without a recording path (stub) ignore. Idempotent.
+    async fn set_ingress_capture_latency(
+        &self,
+        _stream_id: u32,
+        _samples: u32,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Tune the depth of the shim's per-stream jitter ring. Cached
+    /// session-wide on backends that have one (Ardour shim); applies
+    /// to every subsequent `open_ingress`. Backends without a ring
+    /// (stub) ignore. Idempotent.
+    async fn set_ingress_ring_prime_ms(&self, _ms: u32) -> Result<(), BackendError> {
+        Ok(())
+    }
 }
 
 /// Generate a deterministic placeholder waveform for a region. Used by the

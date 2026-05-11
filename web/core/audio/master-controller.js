@@ -23,7 +23,7 @@
 // standalone Foyer use is common enough that default-off caused more
 // confusion than help.)
 
-import { AudioListener } from "./audio-listener.js";
+import { AudioListener, readAudioPrefs } from "./audio-listener.js";
 
 const PREF_KEY = "foyer.listen.master";
 
@@ -36,6 +36,9 @@ class AudioController extends EventTarget {
     this._on = false;
     this._starting = false;
     this._envelopeHandler = (ev) => this._onEnvelope(ev?.detail);
+    /** @type {Array<{serverMonoNs: number, audioArrivedMs: number, sentinelArrivedMs: number, driftMs: number}>} */
+    this._sentinelHistory = [];
+    this._lastReconnectAt = 0;
   }
 
   /// Wire up the controller. Called from app.js once the WS + store
@@ -63,6 +66,8 @@ class AudioController extends EventTarget {
     if (!body) return;
     if (body.type === "client_greeting") {
       this._applyPref(!!body.is_local);
+    } else if (body.type === "audio_sentinel") {
+      this._handleAudioSentinel(body);
     } else if (
       body.type === "backend_swapped" ||
       body.type === "session_opened" ||
@@ -104,6 +109,55 @@ class AudioController extends EventTarget {
         // gesture-defer handler.
         this._applyPref(null);
       }
+    }
+  }
+
+  /**
+   * Correlates an `Event::AudioSentinel` with the matching audio
+   * frame in our ring and computes audio-vs-event path skew.
+   * If drift exceeds the threshold while transport is paused,
+   * we restart the audio stream (the sentinel is stale and
+   * audio packets are being dropped or buffered past safe limits).
+   */
+  _handleAudioSentinel(body) {
+    const { server_mono_ns: serverMonoNs } = body;
+    if (!this._listener?.audioClock || !serverMonoNs) return;
+    const audioArrivedMs = this._listener.audioClock.lookupAudioArrivalMs(
+      Number(serverMonoNs),
+    );
+    const sentinelArrivedMs = performance.now();
+    if (audioArrivedMs == null) return;
+    const driftMs = sentinelArrivedMs - audioArrivedMs;
+    const entry = {
+      serverMonoNs: Number(serverMonoNs),
+      audioArrivedMs,
+      sentinelArrivedMs,
+      driftMs,
+    };
+    this._sentinelHistory.push(entry);
+    if (this._sentinelHistory.length > 20) this._sentinelHistory.shift();
+    this.dispatchEvent(
+      new CustomEvent("sentinel", { detail: entry }),
+    );
+    // Restart audio stream if:
+    //   1. drift exceeds the user-configured threshold (Edit →
+    //      Preferences → Audio drift). Setting `0` disables.
+    //   2. transport is paused (we don't disrupt playback)
+    //   3. we haven't restarted recently (< 5 s throttle)
+    const threshold = Number(readAudioPrefs().sentinelDriftMs) || 0;
+    const playing = this._store?.state?.controls?.get("transport.playing");
+    const now = performance.now();
+    if (threshold > 0 && driftMs > threshold && !playing && now - this._lastReconnectAt > 5000) {
+      console.warn(
+        `[audio-controller] sentinel drift ${driftMs.toFixed(1)} ms > ${threshold} ms, ` +
+          `transport paused — restarting audio stream`,
+      );
+      this._lastReconnectAt = now;
+      this.stop({ silent: true })
+        .then(() => this.start({ silent: true }))
+        .catch((e) =>
+          console.warn("[audio-controller] sentinel-triggered restart failed:", e),
+        );
     }
   }
 

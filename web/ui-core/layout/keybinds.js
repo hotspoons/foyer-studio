@@ -19,6 +19,7 @@
 import { DIR } from "./tile-tree.js";
 import { isTypingTarget, hasActiveTextSelection } from "../typing-guard.js";
 import { isActionAllowed } from "foyer-core/rbac.js";
+import { stopTransportWithIngressTailDelay } from "foyer-core/audio/record-stop.js";
 
 const STORAGE_MOD = "foyer.keymap.mod";
 
@@ -194,7 +195,7 @@ export class Keybinds {
       if (selectedTracks && selectedTracks.size > 0) {
         e.preventDefault();
         const ids = Array.from(selectedTracks);
-        import("../components/confirm-modal.js").then(({ confirmAction }) => {
+        import("../widgets/confirm-modal.js").then(({ confirmAction }) => {
           confirmAction({
             title: ids.length === 1 ? "Delete track" : `Delete ${ids.length} tracks`,
             message: ids.length === 1 ? "Delete this track and all of its regions?" : `Delete ${ids.length} selected tracks and all of their regions?`,
@@ -248,13 +249,24 @@ export class Keybinds {
         ws.send({ type: "invoke_action", id: "transport.record" });
       } else {
         // Toggle playing: if currently playing, stop; else play.
-        const st = window.__foyer?.store?.state?.controls;
+        const store = window.__foyer?.store;
+        const st = store?.state?.controls;
         const playing = !!(st && st.get("transport.playing"));
         if (playing) {
-          // Return-on-stop behavior lives in transport-return.js — it
-          // watches the store transition and handles the locate. No
-          // special-casing here.
-          ws.send({ type: "invoke_action", id: "transport.stop" });
+          // Route the stop through the shared helper so a recording-
+          // tail delay is applied if a browser ingress is open. The
+          // helper handles the no-ingress case by sending the stop
+          // immediately — same behavior as before for everyone not
+          // actively recording. Return-on-stop semantics live in
+          // transport-return.js and react to the store transition,
+          // so this stays a single send.
+          stopTransportWithIngressTailDelay({ ws, store, commandKind: "action" })
+            .catch((err) => {
+              console.warn("[keybinds] stop-with-tail-delay failed:", err);
+              // Best-effort fallback so a bug in the helper doesn't
+              // strand a recording user with a live transport.
+              ws.send({ type: "invoke_action", id: "transport.stop" });
+            });
         } else {
           ws.send({ type: "invoke_action", id: "transport.play" });
         }

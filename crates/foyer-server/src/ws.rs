@@ -673,6 +673,9 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::ClockProbe { .. } => "clock_probe",
         Command::ProbeSessionRecovery { .. } => "probe_session_recovery",
         Command::AudioBufferReport { .. } => "audio_buffer_report",
+        Command::RequestIngressLatency { .. } => "request_ingress_latency",
+        Command::SetIngressCaptureLatency { .. } => "set_ingress_capture_latency",
+        Command::SetIngressRingPrimeMs { .. } => "set_ingress_ring_prime_ms",
         Command::UndoGroupBegin { .. } => "undo_group_begin",
         Command::UndoGroupEnd => "undo_group_end",
         Command::ControlSet { .. } => "control_set",
@@ -1021,6 +1024,37 @@ async fn dispatch_command(
                     .audio_hub
                     .nudge_stream_ratio(stream_id, nudge_ppm)
                     .await;
+            }
+        }
+        Command::RequestIngressLatency { stream_id } => {
+            // The ingress WS handler records per-stream latency
+            // samples in a median tracker. Broadcast the result so
+            // the requesting client (and diagnostics peers) can see it.
+            let median_ms = state.ingress_latency.median_ms(stream_id);
+            broadcast_event(
+                state,
+                Event::IngressLatencyReport {
+                    stream_id,
+                    median_ms,
+                },
+            )
+            .await;
+        }
+        Command::SetIngressCaptureLatency { stream_id, samples } => {
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_ingress_capture_latency(stream_id, samples)
+                .await
+            {
+                tracing::debug!(
+                    "set_ingress_capture_latency forwarding failed: {e}"
+                );
+            }
+        }
+        Command::SetIngressRingPrimeMs { ms } => {
+            if let Err(e) = state.backend().await.set_ingress_ring_prime_ms(ms).await {
+                tracing::debug!("set_ingress_ring_prime_ms forwarding failed: {e}");
             }
         }
         Command::Subscribe | Command::RequestSnapshot => {
@@ -2058,6 +2092,18 @@ async fn dispatch_command(
             // encoder never pins an old backend.
             let backend_weak = std::sync::Arc::downgrade(&backend_arc);
             drop(backend_arc);
+            // Sentinel channel: the encode loop fires
+            // `Event::AudioSentinel` through this sender every few
+            // seconds; a small forwarder task pumps them into the
+            // main event broadcast so every client sees them.
+            let (sentinel_tx, mut sentinel_rx) =
+                tokio::sync::mpsc::channel::<foyer_schema::Event>(4);
+            let sentinel_state = state.clone();
+            tokio::spawn(async move {
+                while let Some(ev) = sentinel_rx.recv().await {
+                    broadcast_event(&sentinel_state, ev).await;
+                }
+            });
             match state
                 .audio_hub
                 .open_stream(
@@ -2067,6 +2113,7 @@ async fn dispatch_command(
                     pcm_source_rate,
                     rx,
                     Some(backend_weak),
+                    Some(sentinel_tx),
                 )
                 .await
             {
