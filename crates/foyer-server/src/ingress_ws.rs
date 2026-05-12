@@ -153,7 +153,17 @@ async fn handle(mut socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
                         // updates whenever the median shifts past
                         // the apply threshold.
                         if let Some(median_ms) = latency_tracker.median_ms(stream_id) {
-                            let new_samples = ((median_ms as f64 / 1000.0)
+                            // Stack the user's manual offset on top of
+                            // the empirical median. Positive offset
+                            // lengthens `_capture_offset` (shifts the
+                            // recording earlier on the timeline) — the
+                            // intended way to dial in any residual the
+                            // echo-roundtrip math can't observe.
+                            let manual_offset_ms = state
+                                .ingress_manual_offset_ms
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            let effective_ms = (median_ms as f64) + manual_offset_ms as f64;
+                            let new_samples = ((effective_ms / 1000.0)
                                 * engine_sample_rate as f64)
                                 .max(0.0) as u32;
                             let push = match last_applied_samples {

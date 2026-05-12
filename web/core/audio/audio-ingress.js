@@ -245,6 +245,14 @@ export class AudioIngress {
         if (Number.isFinite(ms) && ms > 0) {
           this.ws.send({ type: "set_ingress_ring_prime_ms", ms: Math.round(ms) });
         }
+        // Re-seed the server's manual offset atomic from the persisted
+        // pref. Server defaults to 0 each boot; without this re-send
+        // the user's saved value would silently revert after a server
+        // restart.
+        const offsetMs = Number(prefs.ingressManualOffsetMs);
+        if (Number.isFinite(offsetMs)) {
+          this.ws.send({ type: "set_ingress_manual_offset_ms", ms: Math.round(offsetMs) });
+        }
       } catch {}
       const ackPromise = this._waitForIngressOpened(this.streamId);
       this.ws.send({

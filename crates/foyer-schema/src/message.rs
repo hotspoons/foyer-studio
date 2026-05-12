@@ -972,6 +972,18 @@ pub enum Command {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         egress_ms: Option<u32>,
     },
+    /// User-tuned manual offset added on top of the empirical
+    /// ingress capture-latency measurement, in milliseconds. Signed
+    /// — positive shifts recordings earlier on the timeline (i.e.
+    /// adds to `_capture_offset`), negative shifts later. Used to
+    /// dial in any residual the echo-roundtrip math can't see (the
+    /// mic-to-browser-stack hop, browser-specific output-latency
+    /// under-reporting, etc.). Persisted in browser audio prefs;
+    /// the server holds it in an atomic and adds it to the median
+    /// before pushing `SetIngressCaptureLatency` to the shim.
+    SetIngressManualOffsetMs {
+        ms: i32,
+    },
     /// Open a named undo group. Subsequent mutations (region delete,
     /// plugin move, etc.) land in the same `UndoTransaction` until a
     /// matching `UndoGroupEnd` is received. One undo step unwinds

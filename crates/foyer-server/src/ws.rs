@@ -678,6 +678,7 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::SetIngressRingPrimeMs { .. } => "set_ingress_ring_prime_ms",
         Command::SetMidiCaptureLatency { .. } => "set_midi_capture_latency",
         Command::SetFakeLatency { .. } => "set_fake_latency",
+        Command::SetIngressManualOffsetMs { .. } => "set_ingress_manual_offset_ms",
         Command::UndoGroupBegin { .. } => "undo_group_begin",
         Command::UndoGroupEnd => "undo_group_end",
         Command::ControlSet { .. } => "control_set",
@@ -1086,6 +1087,12 @@ async fn dispatch_command(
                     .store(v, Ordering::Relaxed);
                 tracing::info!("fake egress latency set to {v} ms");
             }
+        }
+        Command::SetIngressManualOffsetMs { ms } => {
+            state
+                .ingress_manual_offset_ms
+                .store(ms, Ordering::Relaxed);
+            tracing::info!("ingress manual offset set to {ms} ms");
         }
         Command::Subscribe | Command::RequestSnapshot => {
             // Easy case: produce a fresh snapshot synchronously and push into the

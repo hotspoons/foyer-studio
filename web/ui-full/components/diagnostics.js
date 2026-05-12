@@ -479,7 +479,7 @@ export class DiagnosticsView extends LitElement {
               <tr><td>Capture (mic + worklet)</td><td>${t.lastStopDelay.captureMs} ms</td></tr>
               <tr><td>Network (ingress one-way)</td><td>${t.lastStopDelay.networkMs} ms</td></tr>
               <tr><td>Backend (IPC + cycle + write)</td><td>${t.lastStopDelay.backendMs} ms</td></tr>
-              <tr><td>Jitter cushion</td><td>${t.lastStopDelay.safetyMs} ms</td></tr>
+              <tr><td>Ingress buffer (cushion)</td><td>${t.lastStopDelay.bufferMs ?? t.lastStopDelay.safetyMs ?? 0} ms</td></tr>
               <tr><td><strong>Total</strong></td><td><strong>${t.lastStopDelay.totalMs} ms</strong></td></tr>
             ` : null}
             ${t.empiricalIngress ? html`

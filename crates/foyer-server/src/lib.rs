@@ -328,6 +328,13 @@ pub(crate) struct AppState {
     /// Sibling for the egress (server → browser) audio path. Read
     /// by `audio_ws::handle` per packet. Same semantics.
     pub(crate) fake_egress_latency_ms: std::sync::atomic::AtomicU32,
+    /// User-tuned manual offset added on top of the empirical
+    /// ingress capture-latency measurement, in milliseconds.
+    /// Signed: positive lengthens `_capture_offset` (shifts the
+    /// recorded clip earlier on the timeline). Set via
+    /// `Command::SetIngressManualOffsetMs`; persisted in browser
+    /// audio prefs and resent on each session open.
+    pub(crate) ingress_manual_offset_ms: std::sync::atomic::AtomicI32,
     /// Per-track MIDI roundtrip-latency samples. Browser `MidiInput`
     /// commands carry an `echo_server_mono_ns` echo timestamp; the
     /// server records `recv - echo` per track here and the dispatch
@@ -729,6 +736,7 @@ impl Server {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0),
             ),
+            ingress_manual_offset_ms: std::sync::atomic::AtomicI32::new(0),
             midi_latency,
             midi_latency_last_applied,
             track_ingress,

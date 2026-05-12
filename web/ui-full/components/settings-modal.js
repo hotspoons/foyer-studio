@@ -94,6 +94,45 @@ export class SettingsModal extends LitElement {
       background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
       border-color: transparent;
     }
+    /* Slider replacement for chip-rows that have a continuous range. */
+    .slider-row { display: flex; align-items: center; gap: 10px; min-width: 220px; }
+    .slider-row input[type="range"] {
+      flex: 1 1 auto;
+      min-width: 120px;
+      height: 4px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+    }
+    .slider-row input[type="range"]::-webkit-slider-runnable-track {
+      height: 4px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
+    }
+    .slider-row input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 12px; height: 12px; margin-top: -4px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      border: 2px solid var(--color-surface-elevated);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+    }
+    .slider-row input[type="range"]::-moz-range-thumb {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      border: 2px solid var(--color-surface-elevated);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+    }
+    .slider-row .val {
+      font-size: 11px;
+      color: var(--color-text);
+      font-variant-numeric: tabular-nums;
+      min-width: 4.5em;
+      text-align: right;
+    }
     footer {
       padding: 10px 18px;
       border-top: 1px solid var(--color-border);
@@ -208,78 +247,96 @@ export class SettingsModal extends LitElement {
 
   _renderRecordStopSection(a) {
     const backendMs = Number(a.recordStopBackendMs) || 0;
-    const jitterMs  = Number(a.recordStopSafetyMs)  || 0;
     const ringMs    = Number(a.shimIngressRingPrimeMs) || 0;
-    const RING_TIP =
-      "Depth of the shim's per-stream audio jitter ring. Bigger absorbs more " +
-      "browser GC + WS reorder jitter at the cost of higher live-monitoring " +
-      "latency. Recordings are auto-shifted for this latency, so only the " +
-      "foreground mix you hear through the engine is delayed. 80 ms suits a " +
-      "tunnel; loopback / LAN setups commonly drop to 20–30 ms. Takes effect " +
-      "on the next Listen / record stream you open.";
+    const offsetMs  = Number(a.ingressManualOffsetMs) || 0;
+    const BUFFER_TIP =
+      "How much audio the shim's per-stream ingress buffer holds before draining " +
+      "into Ardour's record source. Bigger absorbs more browser GC + WS reorder " +
+      "jitter at the cost of higher live-monitoring latency. Recordings are auto-" +
+      "shifted for this depth, so only the foreground mix you hear through the " +
+      "engine is delayed. 80 ms suits a tunnel; loopback / LAN setups commonly " +
+      "drop to 20–30 ms. This value also doubles as the record-stop cushion — " +
+      "anything still in flight when you press stop has at most this much time " +
+      "to land before the engine halts. Takes effect on the next Listen / record " +
+      "stream you open.";
     const SECTION_TIP =
       "When you hit stop while recording browser audio, Foyer waits before the engine " +
       "actually halts so the last in-flight bytes reach Ardour's record source. " +
-      "Total delay = capture + network + backend + jitter cushion; the first two are " +
-      "measured live (browser baseLatency + ingress one-way median), these two are " +
-      "tunable here. Last computed breakdown shows in Diagnostics → Timing. " +
-      "Per-track record-shift compensation is a separate path that doesn't use these " +
-      "prefs — the shim self-reports its internal latency there.";
+      "Total delay = capture + network + backend + ingress buffer depth; the first " +
+      "two are measured live (browser baseLatency + ingress one-way median), the " +
+      "last two are tunable in this section and the next. Last computed breakdown " +
+      "shows in Diagnostics → Timing.";
     const BACKEND_TIP =
-      "IPC + shim ring-prime (80 ms; absorbs WS jitter) + one engine process cycle + " +
-      "record-write. The ring is the dominant term and is identical between the " +
-      "in-process dummy backend and JACK, so 100 ms is a good default for both. Drop " +
-      "to ~90 ms on a tight buffer (JACK 64 samples); raise to 150+ on a loaded tunnel.";
-    const JITTER_TIP =
-      "Cushion on top of the measured + estimated components. Raise if you still hear " +
-      "the tail clipped — median latency under-represents the 95th percentile that " +
-      "determines whether a packet missed the deadline.";
+      "IPC + one engine process cycle + record-write. The ingress buffer (next " +
+      "section) is added on top, so this number doesn't need to include it. " +
+      "Defaults to 100 ms which suits both the in-process dummy backend and a " +
+      "small-buffer JACK setup. Drop to ~90 ms on a tight buffer (JACK 64 samples); " +
+      "raise to 150+ on a loaded tunnel.";
+    const OFFSET_TIP =
+      "Signed millisecond offset added on top of the empirical browser↔server " +
+      "round-trip the server measures from your ingress packets. Use this to " +
+      "dial in any residual the echo math can't observe — typically the mic-to-" +
+      "browser-stack hop and any platform output-latency that's under-reported by " +
+      "the browser. Positive shifts recordings earlier (longer _capture_offset); " +
+      "negative shifts later. Sing along to an existing track, eyeball the offset " +
+      "in the timeline, and dial this until the new take lines up. Live — applies " +
+      "on the next packet without restarting the stream.";
+    const fmtSigned = (n) => (n > 0 ? `+${n} ms` : `${n} ms`);
     return html`
       <div class="section">
         <h3 title=${SECTION_TIP}>Record stop delay</h3>
         <div class="row">
           <label title=${BACKEND_TIP}>Backend (IPC + Ardour cycle)</label>
-          <div class="chip-row">
-            ${[90, 100, 120, 150, 200].map((ms) => html`
-              <button class="chip ${backendMs === ms ? "active" : ""}"
-                      title=${BACKEND_TIP}
-                      @click=${() => { writeAudioPrefs({ recordStopBackendMs: ms }); this._refresh(); }}>
-                ${ms} ms
-              </button>
-            `)}
-          </div>
-        </div>
-        <div class="row">
-          <label title=${JITTER_TIP}>Jitter cushion</label>
-          <div class="chip-row">
-            ${[20, 60, 120, 200].map((ms) => html`
-              <button class="chip ${jitterMs === ms ? "active" : ""}"
-                      title=${JITTER_TIP}
-                      @click=${() => { writeAudioPrefs({ recordStopSafetyMs: ms }); this._refresh(); }}>
-                ${ms} ms
-              </button>
-            `)}
+          <div class="slider-row" title=${BACKEND_TIP}>
+            <input type="range" min="60" max="300" step="10"
+                   .value=${String(backendMs)}
+                   @input=${(e) => {
+                     const ms = Math.round(Number(e.target.value));
+                     writeAudioPrefs({ recordStopBackendMs: ms });
+                     this._refresh();
+                   }}>
+            <span class="val">${backendMs} ms</span>
           </div>
         </div>
       </div>
       <div class="section">
-        <h3 title="Tuning that only applies to the Ardour shim (no-op for the stub backend).">
-          Ardour shim
+        <h3 title="Tuning for the browser→shim audio path. Drives both the ingress buffer depth (Ardour shim) and the empirical capture-offset stack.">
+          Recording alignment
         </h3>
         <div class="row">
-          <label title=${RING_TIP}>Ingress jitter ring</label>
-          <div class="chip-row">
-            ${[20, 30, 50, 80, 120].map((ms) => html`
-              <button class="chip ${ringMs === ms ? "active" : ""}"
-                      title=${RING_TIP}
-                      @click=${() => { writeAudioPrefs({ shimIngressRingPrimeMs: ms }); this._refresh(); }}>
-                ${ms} ms
-              </button>
-            `)}
+          <label title=${BUFFER_TIP}>Ingress jitter buffer</label>
+          <div class="slider-row" title=${BUFFER_TIP}>
+            <input type="range" min="20" max="200" step="10"
+                   .value=${String(ringMs)}
+                   @input=${(e) => {
+                     const ms = Math.round(Number(e.target.value));
+                     writeAudioPrefs({ shimIngressRingPrimeMs: ms });
+                     this._refresh();
+                   }}>
+            <span class="val">${ringMs} ms</span>
+          </div>
+        </div>
+        <div class="row">
+          <label title=${OFFSET_TIP}>Manual capture offset</label>
+          <div class="slider-row" title=${OFFSET_TIP}>
+            <input type="range" min="0" max="350" step="20"
+                   .value=${String(Math.max(0, Math.min(350, offsetMs)))}
+                   @input=${(e) => {
+                     const ms = Math.round(Number(e.target.value) / 20) * 20;
+                     this._setManualOffset(ms);
+                   }}>
+            <span class="val">${fmtSigned(offsetMs)}</span>
           </div>
         </div>
       </div>
     `;
+  }
+
+  _setManualOffset(ms) {
+    writeAudioPrefs({ ingressManualOffsetMs: ms });
+    const ws = globalThis.__foyer?.ws;
+    try { ws?.send({ type: "set_ingress_manual_offset_ms", ms }); } catch {}
+    this._refresh();
   }
 
   render() {

@@ -86,12 +86,15 @@ const DEFAULT_AUDIO_PREFS = Object.freeze({
    */
   shimIngressRingPrimeMs: 80,
   /**
-   * Pure-fudge safety margin appended on top of the measured /
-   * estimated stop-delay components. Default 60 ms; raise on
-   * jittery networks where the median latency under-represents the
-   * 95th percentile that determines a clipped tail.
+   * User-tuned manual offset (signed, milliseconds) added on top
+   * of the empirical capture-latency measurement before the server
+   * pushes `SetIngressCaptureLatency` to the shim. Positive shifts
+   * recordings earlier on the timeline. Sits in the prefs purely
+   * so the value persists across reloads; the live value lives in
+   * the server's AppState atomic, refreshed on each session open
+   * via `Command::SetIngressManualOffsetMs`.
    */
-  recordStopSafetyMs: 60,
+  ingressManualOffsetMs: 0,
 });
 
 export function readAudioPrefs() {

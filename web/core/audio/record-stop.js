@@ -16,11 +16,12 @@
 //   network (live)  ingress one-way median latency (server-tracked).
 //   backend (pref)  IPC + Ardour cycle + record-write — not directly
 //                   measurable from the browser, exposed in Preferences.
-//   jitter  (pref)  pure cushion for 95th-percentile network spikes.
-//
-// All four sum into the wall-clock pause between the user's
-// "stop" intent and the actual `transport.playing=false` command
-// going on the wire.
+//   buffer  (pref)  the shim's ingress buffer depth (formerly a
+//                   separate "jitter cushion" pref; the buffer
+//                   already represents how much packet jitter the
+//                   shim is willing to absorb, so we derive the
+//                   cushion from it directly instead of asking the
+//                   user to tune two correlated knobs).
 
 import { readAudioPrefs } from "./audio-listener.js";
 
@@ -98,13 +99,16 @@ export async function stopTransportWithIngressTailDelay({ ws, store, commandKind
   const captureMs = ingress.getCaptureLatencyMs?.() ?? 25;
   const networkMs = (await requestIngressLatency(ws, ingress.streamId)) ?? 50;
   const backendMs = Number(prefs.recordStopBackendMs) || 0;
-  const jitterMs  = Number(prefs.recordStopSafetyMs)  || 0;
-  const delayMs = Math.round(captureMs + networkMs + backendMs + jitterMs);
+  // Buffer cushion: the shim's ingress jitter buffer absorbs packets
+  // arriving up to that many ms late. Use it as the safety margin
+  // beyond the measured median; deeper buffer → more headroom.
+  const bufferMs  = Number(prefs.shimIngressRingPrimeMs) || 0;
+  const delayMs = Math.round(captureMs + networkMs + backendMs + bufferMs);
   const breakdown = {
     captureMs: Math.round(captureMs),
     networkMs: Math.round(networkMs),
     backendMs,
-    safetyMs: jitterMs,
+    bufferMs,
     totalMs: delayMs,
     commandKind,
   };
@@ -113,7 +117,7 @@ export async function stopTransportWithIngressTailDelay({ ws, store, commandKind
   console.info(
     `[record-stop] delay ${delayMs} ms ` +
       `(capture ${breakdown.captureMs} + network ${breakdown.networkMs} + ` +
-      `backend ${backendMs} + jitter ${jitterMs}) via ${commandKind}`,
+      `backend ${backendMs} + buffer ${bufferMs}) via ${commandKind}`,
   );
   await new Promise((r) => setTimeout(r, delayMs));
   sendStop();
