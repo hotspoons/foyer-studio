@@ -153,13 +153,16 @@ async fn handle(mut socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
                         // updates whenever the median shifts past
                         // the apply threshold.
                         if let Some(median_ms) = latency_tracker.median_ms(stream_id) {
-                            // Stack the user's manual offset on top of
-                            // the empirical median. Positive offset
-                            // lengthens `_capture_offset` (shifts the
-                            // recording earlier on the timeline) — the
-                            // intended way to dial in any residual the
-                            // echo-roundtrip math can't observe.
-                            let manual_offset_ms = state
+                            // Stack the owning peer's manual offset on
+                            // top of the empirical median. Positive
+                            // offset lengthens `_capture_offset` (shifts
+                            // the recording earlier on the timeline) —
+                            // the intended way to dial in any residual
+                            // the echo-roundtrip math can't observe.
+                            // Per-PEER, not global, so two clients can
+                            // hold different offsets without fighting.
+                            let manual_offset_ms = sink
+                                .peer_audio_prefs
                                 .ingress_manual_offset_ms
                                 .load(std::sync::atomic::Ordering::Relaxed);
                             let effective_ms = (median_ms as f64) + manual_offset_ms as f64;
@@ -230,6 +233,66 @@ async fn handle(mut socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
                 if chunk.is_empty() {
                     continue;
                 }
+
+                // Calibration detection: scan this chunk for the
+                // 4 kHz click pattern emitted by the egress side.
+                // Each detection pops the oldest emit timestamp and
+                // computes the loopback round-trip directly; we emit
+                // CalibrationProgress per detection and the final
+                // CalibrationResult when the target click count is
+                // reached.
+                let hits = state.calibration.scan_ingress_for_clicks(
+                    stream_id,
+                    &chunk,
+                    sink.channels as u32,
+                    sink.engine_sample_rate,
+                    recv_mono_ns,
+                );
+                for (measured_ms, n, total) in hits {
+                    crate::ws::broadcast_event(
+                        &state,
+                        foyer_schema::Event::CalibrationProgress {
+                            stream_id,
+                            n,
+                            total,
+                            measured_ms,
+                        },
+                    )
+                    .await;
+                    if n >= total {
+                        // Finalize: pop the run and emit the result.
+                        if let Some(egress_id) =
+                            state.calibration.egress_for_ingress(stream_id)
+                        {
+                            if let Some(result) = state.calibration.take_result(egress_id) {
+                                let suggested = crate::ws::suggested_offset(
+                                    &state,
+                                    result.median_ms,
+                                );
+                                tracing::info!(
+                                    "calibration complete on egress {}: kept {}/{} median {:.1} ms → suggested offset {} ms",
+                                    egress_id,
+                                    result.samples_kept,
+                                    result.samples_requested,
+                                    result.median_ms,
+                                    suggested,
+                                );
+                                crate::ws::broadcast_event(
+                                    &state,
+                                    foyer_schema::Event::CalibrationResult {
+                                        stream_id: egress_id,
+                                        median_ms: result.median_ms,
+                                        samples_kept: result.samples_kept,
+                                        samples_requested: result.samples_requested,
+                                        suggested_offset_ms: suggested,
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+
                 let frame = PcmFrame::untimed(stream_id, chunk);
                 let inject_ms = state
                     .fake_ingress_latency_ms

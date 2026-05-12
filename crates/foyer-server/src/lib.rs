@@ -24,6 +24,7 @@ mod cloudflared_dl;
 mod dev;
 mod files;
 mod import_audio;
+mod calibration;
 mod ingress_latency;
 mod ingress_ws;
 mod jail;
@@ -215,6 +216,54 @@ impl Default for Config {
     }
 }
 
+/// Per-client tunable audio prefs that other clients shouldn't
+/// share. Held in `AppState.peer_audio_prefs` keyed by peer id and
+/// captured by reference onto each `IngressSink` at open time so the
+/// per-packet ingress hot path reads only one atomic (no map lookup).
+/// Updates via `SetIngressManualOffsetMs` from a given peer flow only
+/// into THAT peer's struct, so two clients with different offsets
+/// don't fight each other.
+pub(crate) struct PeerAudioPrefs {
+    /// User-tuned manual offset added on top of the empirical
+    /// ingress capture-latency measurement, in milliseconds.
+    pub ingress_manual_offset_ms: std::sync::atomic::AtomicI32,
+}
+
+impl Default for PeerAudioPrefs {
+    fn default() -> Self {
+        Self {
+            ingress_manual_offset_ms: std::sync::atomic::AtomicI32::new(0),
+        }
+    }
+}
+
+impl AppState {
+    /// Get-or-create the audio-prefs struct for `peer_id`. Returns
+    /// a clone of the Arc so callers can hold a reference without
+    /// keeping the map locked.
+    pub(crate) async fn peer_prefs_for(
+        &self,
+        peer_id: &str,
+    ) -> Arc<PeerAudioPrefs> {
+        let mut g = self.peer_audio_prefs.lock().await;
+        g.entry(peer_id.to_string())
+            .or_insert_with(|| Arc::new(PeerAudioPrefs::default()))
+            .clone()
+    }
+}
+
+/// Metadata for a single live WS connection. Multiple `ConnectionMeta`
+/// rows can point at the same `peer_id` (multi-window — see
+/// `ConnectionRole`). Used to route role-gated commands and to
+/// enumerate sibling windows of a logical peer (pane handoff +
+/// "primary closed, promote a secondary" follow-ups).
+#[allow(dead_code)] // fields read by upcoming multi-window routing
+#[derive(Clone, Debug)]
+pub(crate) struct ConnectionMeta {
+    pub peer_id: String,
+    pub role: foyer_schema::ConnectionRole,
+}
+
 /// Browser → engine ingress registration: PCM sink plus rates for optional resampling.
 #[derive(Clone)]
 pub(crate) struct IngressSink {
@@ -229,6 +278,11 @@ pub(crate) struct IngressSink {
     /// flowing into. The recorded mapping drives auto-stamping
     /// of `Region.ingress_latency_ms` at take-commit time.
     pub port_name: Option<String>,
+    /// Per-client prefs (currently just the manual capture offset).
+    /// Shared `Arc` with `AppState.peer_audio_prefs` so a
+    /// `SetIngressManualOffsetMs` from the owning peer is observed
+    /// here on the next packet without any map lookup.
+    pub peer_audio_prefs: Arc<PeerAudioPrefs>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -328,13 +382,21 @@ pub(crate) struct AppState {
     /// Sibling for the egress (server → browser) audio path. Read
     /// by `audio_ws::handle` per packet. Same semantics.
     pub(crate) fake_egress_latency_ms: std::sync::atomic::AtomicU32,
-    /// User-tuned manual offset added on top of the empirical
-    /// ingress capture-latency measurement, in milliseconds.
-    /// Signed: positive lengthens `_capture_offset` (shifts the
-    /// recorded clip earlier on the timeline). Set via
-    /// `Command::SetIngressManualOffsetMs`; persisted in browser
-    /// audio prefs and resent on each session open.
-    pub(crate) ingress_manual_offset_ms: std::sync::atomic::AtomicI32,
+    /// Per-peer audio prefs (currently the manual capture offset).
+    /// Each connected peer gets a stable entry on first use; updates
+    /// from `SetIngressManualOffsetMs` write into THAT peer's atomic
+    /// only, and any ingress sink opened by that peer holds an Arc
+    /// to the same struct so per-packet reads stay lock-free.
+    /// Avoids the cross-client interference an `AppState`-global
+    /// atomic would create (last writer wins, every client's
+    /// ingress sees the offset).
+    pub(crate) peer_audio_prefs:
+        Mutex<HashMap<String, Arc<PeerAudioPrefs>>>,
+    /// Speaker→mic loopback calibration manager. Created idle;
+    /// `Command::StartIngressCalibration` arms it, the egress encode
+    /// + ingress decode hooks drive it, `Event::CalibrationProgress`
+    /// + `Event::CalibrationResult` surface progress to the UI.
+    pub(crate) calibration: Arc<calibration::CalibrationManager>,
     /// Per-track MIDI roundtrip-latency samples. Browser `MidiInput`
     /// commands carry an `echo_server_mono_ns` echo timestamp; the
     /// server records `recv - echo` per track here and the dispatch
@@ -435,13 +497,21 @@ pub(crate) struct AppState {
     /// in an RwLock so the CLI's `--reload-roles` path (future) can
     /// hot-swap without restarting the server.
     pub(crate) roles_policy: RwLock<foyer_config::RolesConfig>,
-    /// Live connection roster, keyed by the server-assigned
-    /// connection id. Populated by the WS `handle()` on connect and
-    /// pruned on disconnect; broadcast to every client via
-    /// `PeerJoined` / `PeerLeft` / `PeerList` events. Gives the status
-    /// bar a reliable "who's here" view that — unlike the old
-    /// origin-sniffing — includes tunnel guests and quiet observers.
+    /// Logical-peer roster, keyed by `peer_id`. One entry per logical
+    /// user (regardless of how many browser windows / WS connections
+    /// they hold). `PeerInfo.connection_count` reflects the active
+    /// window count; we broadcast `PeerJoined` only on the 0→1
+    /// transition and `PeerLeft` only on the N→0 transition, so
+    /// adding a second window for an existing peer is invisible to
+    /// other clients' rosters.
     pub(crate) peers: RwLock<HashMap<String, foyer_schema::PeerInfo>>,
+    /// Per-connection registry, keyed by the server-assigned
+    /// `connection_id`. Distinct from `peers`: this is one row per
+    /// open WS, so secondary windows of the same logical user each
+    /// get an entry pointing at the shared `peer_id`. Read on
+    /// command dispatch to determine `ConnectionRole` (audio I/O is
+    /// `Primary`-only). Pruned on disconnect.
+    pub(crate) connections: RwLock<HashMap<String, ConnectionMeta>>,
     /// Operator pin for the UI variant every browser should load —
     /// e.g. `Some("touch")` on a kiosk deployment, `Some("kids")` on
     /// a family workstation. `None` lets each browser pick via
@@ -694,6 +764,7 @@ impl Server {
         let ring = Arc::new(RwLock::new(DeltaRing::new(RING_CAP)));
         let next_seq = Arc::new(AtomicU64::new(1));
         let ingress_latency = Arc::new(ingress_latency::IngressLatencyTracker::new());
+        let calibration = Arc::new(calibration::CalibrationManager::new());
         let midi_latency = Arc::new(midi_latency::MidiLatencyTracker::new());
         let midi_latency_last_applied: Arc<Mutex<HashMap<EntityId, u32>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -721,7 +792,7 @@ impl Server {
             attached_socket: RwLock::new(None),
             listen_port: std::sync::atomic::AtomicU16::new(0),
             tls_enabled: std::sync::atomic::AtomicBool::new(false),
-            audio_hub: Arc::new(audio::AudioHub::new()),
+            audio_hub: Arc::new(audio::AudioHub::new(calibration.clone())),
             ingress_senders: Mutex::new(HashMap::new()),
             ingress_latency,
             fake_ingress_latency_ms: std::sync::atomic::AtomicU32::new(
@@ -736,7 +807,8 @@ impl Server {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0),
             ),
-            ingress_manual_offset_ms: std::sync::atomic::AtomicI32::new(0),
+            peer_audio_prefs: Mutex::new(HashMap::new()),
+            calibration,
             midi_latency,
             midi_latency_last_applied,
             track_ingress,
@@ -760,6 +832,7 @@ impl Server {
             // "LAN is trusted" baseline.
             roles_policy: RwLock::new(foyer_config::RolesConfig::bundled_default()),
             peers: RwLock::new(HashMap::new()),
+            connections: RwLock::new(HashMap::new()),
             default_ui_variant: None,
             xpra_available: probe_xpra_available(),
             login_gate: tokio::sync::Mutex::new(HashMap::new()),

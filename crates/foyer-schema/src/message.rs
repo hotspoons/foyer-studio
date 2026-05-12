@@ -182,6 +182,32 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         median_ms: Option<f32>,
     },
+    /// Per-click progress fired during an ingress calibration run.
+    /// `n` is 1-indexed (`1`, `2`, …) so the UI can render `5/8`
+    /// style progress. `measured_ms` is the raw round-trip for this
+    /// individual click (NOT yet medianed).
+    CalibrationProgress {
+        stream_id: u32,
+        n: u32,
+        total: u32,
+        measured_ms: f32,
+    },
+    /// Fired once at the end of a calibration run. `median_ms` is
+    /// the empirically-measured speaker→mic round-trip; `samples_kept`
+    /// is how many of the requested clicks were actually detected
+    /// (the rest were missed — typically because of ambient noise
+    /// or the user not playing the egress stream out their speakers).
+    /// `suggested_offset_ms` is `median_ms − empirical_median_ms` —
+    /// the value the Manual capture offset should be set to in
+    /// order to close the gap. May be negative if the empirical
+    /// stack happens to over-estimate.
+    CalibrationResult {
+        stream_id: u32,
+        median_ms: f32,
+        samples_kept: u32,
+        samples_requested: u32,
+        suggested_offset_ms: i32,
+    },
     /// Server → browser: empirical MIDI roundtrip-latency report,
     /// keyed by track id. Broadcast whenever the server pushes a
     /// new `SetMidiCaptureLatency` to the shim for the track (i.e.
@@ -370,11 +396,28 @@ pub enum Event {
         /// as "signed in as …" for tunnel guests.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient: Option<String>,
-        /// This connection's own id. Matches the `PeerInfo.id` that
+        /// This connection's own peer id. Matches the `PeerInfo.id` that
         /// goes out in `PeerJoined` / `PeerList`; the client filters
         /// its own entry out of the displayed roster using this.
+        ///
+        /// Shared across all WS connections belonging to the same logical
+        /// user (multi-window). The per-connection identity lives in
+        /// `connection_id`.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         peer_id: String,
+        /// Per-connection identity (hex UUID). Unique even when two
+        /// windows of the same logical user share a `peer_id`. Used
+        /// for self-echo filtering on the client (so window A sees
+        /// window B's control updates) and connection-scoped
+        /// addressing on the wire.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        connection_id: String,
+        /// Whether this WS connection is the spawning ("Primary") window
+        /// for the logical peer, or a secondary control-plane window.
+        /// Audio ingress / egress is only permitted on `Primary` —
+        /// secondaries get a typed error if they try to open one.
+        #[serde(default)]
+        connection_role: ConnectionRole,
         /// Backend-feature snapshot keyed by a stable feature id (e.g.
         /// `"sequencer"`, `"surround_pan"`, `"groups"`, `"sends"`,
         /// `"automation"`). `true` = supported, `false` = explicitly
@@ -807,6 +850,27 @@ fn is_zero_u64(n: &u64) -> bool {
     *n == 0
 }
 
+/// Role of a single WS connection relative to its logical peer.
+///
+/// One logical peer (one `peer_id`) can hold multiple WS connections —
+/// one per browser window — for multi-monitor / multi-window use. The
+/// first connection is `Primary`; subsequent connections opened with
+/// `?parent=<peer_id>` against an existing peer are `Secondary`.
+///
+/// Audio ingress / egress (the `/ws/audio/*` and `/ws/ingress/*`
+/// endpoints) is only valid on `Primary` connections. Secondaries are
+/// control-plane only — they read state, dispatch commands, render UI,
+/// but never own a microphone or speaker stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionRole {
+    /// Spawning window. Owns audio I/O for the logical peer.
+    #[default]
+    Primary,
+    /// Secondary window. Control-plane only; audio is rejected.
+    Secondary,
+}
+
 /// One connected client. Tracked server-side and broadcast via
 /// `PeerJoined` / `PeerLeft` / `PeerList` so every client sees a
 /// consistent roster. `label` is the display string — `"host"` for
@@ -830,9 +894,24 @@ pub struct PeerInfo {
     /// for LAN (trusted, no role).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_id: Option<String>,
-    /// Unix epoch ms when the connection came up.
+    /// Unix epoch ms when the FIRST connection of this logical peer
+    /// came up. Stays stable when additional windows attach.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub connected_at: u64,
+    /// Number of active WS connections (windows) this logical peer is
+    /// holding open. `1` for a single-window peer; `>=2` once the user
+    /// has popped out a second window. Defaults to `1` for older
+    /// clients / wire compat.
+    #[serde(default = "one_u32", skip_serializing_if = "is_one_u32")]
+    pub connection_count: u32,
+}
+
+fn one_u32() -> u32 {
+    1
+}
+
+fn is_one_u32(n: &u32) -> bool {
+    *n == 1
 }
 
 /// Metadata for a single backend entry in the sidecar's config — what
@@ -983,6 +1062,33 @@ pub enum Command {
     /// before pushing `SetIngressCaptureLatency` to the shim.
     SetIngressManualOffsetMs {
         ms: i32,
+    },
+    /// Start a speaker→mic loopback calibration run on `stream_id`
+    /// (must be an OPEN egress stream that the browser is also
+    /// piping to its speakers, AND there must be an active ingress
+    /// stream picking up the resulting audio). Server emits a short
+    /// click pattern every 500 ms for the duration of the run,
+    /// stamps each emit time, and watches the matching ingress
+    /// stream for the click reflection. Progress events fire per
+    /// detected click; when the run finishes the server emits a
+    /// `CalibrationResult` with the median round-trip and a
+    /// suggested manual offset (= measured − empirical-median).
+    StartIngressCalibration {
+        /// Egress stream that will carry the calibration clicks.
+        egress_stream_id: u32,
+        /// Ingress stream the mic is being piped through.
+        ingress_stream_id: u32,
+        /// Number of clicks to emit before finalising. 5 is a sane
+        /// default; raising trades a longer calibration for tighter
+        /// medians.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        clicks: Option<u32>,
+    },
+    /// Abort a calibration run early (user clicked Cancel, the
+    /// browser closed the stream, etc.). Idempotent; safe to send
+    /// when no calibration is active.
+    StopIngressCalibration {
+        egress_stream_id: u32,
     },
     /// Open a named undo group. Subsequent mutations (region delete,
     /// plugin move, etc.) land in the same `UndoTransaction` until a

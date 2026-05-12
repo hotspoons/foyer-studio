@@ -27,6 +27,9 @@ import { installTransportReturn } from "./transport-return.js";
 import { installBackTrap } from "./back-trap.js";
 import { attach as attachRecents } from "./recents.js";
 import { audioController } from "./audio/master-controller.js";
+import { multiWindow } from "./multi-window.js";
+import { windowRestore } from "./window-restore.js";
+import { attachWindowIdentify, identifyAllWindows, hideAllWindowIdentifiers } from "./multi-window-identify.js";
 import { ClockSync } from "./audio/clock-sync.js";
 import { AudioClock } from "./audio/audio-clock.js";
 import { getWebMidiService } from "./midi/web-midi.js";
@@ -63,6 +66,44 @@ export function bootFoyerCore(opts = {}) {
   store.attach(ws);
   chat.attach();
   attachRecents(store);
+  // Multi-window: BroadcastChannel between sibling tabs of the same
+  // logical peer + helpers for spawning secondary windows. Audio I/O
+  // is rejected by the server on secondaries — feature code should
+  // gate on `multiWindow.role === "primary"`.
+  multiWindow.attach(store);
+  // Wire the receiver for the "identify this window" overlay so
+  // siblings paint a transient label when any window in the family
+  // asks "which one are you?". Triggered from context menus that
+  // need the user to map menu items onto physical windows.
+  attachWindowIdentify();
+  // Ctrl+Alt+W — open a new sibling window. We intentionally do NOT
+  // accept the Cmd-key variant on macOS because Cmd+Option+W is "close
+  // all windows of the app" — binding ourselves there would surprise
+  // Mac users into killing their session. Mac users get the same
+  // shortcut with the Control key. KeyboardEvent.code reads the
+  // physical key so dvorak / azerty users hit the same chord.
+  // Installed at document capture so it fires even with focus inside
+  // a tile; the typing-target check skips text inputs.
+  if (typeof document !== "undefined") {
+    document.addEventListener("keydown", (e) => {
+      if (e.repeat) return;
+      if (e.code !== "KeyW") return;
+      if (!e.ctrlKey || !e.altKey) return;
+      if (e.shiftKey || e.metaKey) return;
+      const t = e.target;
+      const tag = t?.tagName?.toLowerCase?.();
+      if (tag === "input" || tag === "textarea" || t?.isContentEditable) return;
+      e.preventDefault();
+      e.stopPropagation();
+      multiWindow.openSecondary({ width: 1280, height: 820 }).catch((err) => {
+        console.warn("[foyer-core] open-window shortcut failed", err);
+      });
+    }, true);
+  }
+  // Window/monitor layout persistence — saves per-display-fingerprint
+  // window position + size + (eventually) tile tree so a power-cycle
+  // returns to the same arrangement.
+  windowRestore.attach({ store, multiWindow });
   installTransportReturn({ store, ws });
   // Web MIDI bridge — singleton; construction is cheap and does NOT
   // ask the browser for permission. The first call to
@@ -166,6 +207,10 @@ export function bootFoyerCore(opts = {}) {
     webMidi,
     mountVariant,
     unmountVariant,
+    multiWindow,
+    windowRestore,
+    identifyAllWindows,
+    hideAllWindowIdentifiers,
   });
 
   ws.connect();

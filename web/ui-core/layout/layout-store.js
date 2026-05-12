@@ -3,7 +3,7 @@
 
 import * as Tree from "./tile-tree.js";
 import { slotBounds } from "./slots.js";
-import { sessionScope } from "foyer-core/session-scope.js";
+import { sessionScope, windowSlot } from "foyer-core/session-scope.js";
 
 /**
  * Sane first-open slot defaults per view, borrowed from pro-DAW
@@ -37,15 +37,21 @@ const DEFAULT_STICKY_SLOT = {
 // session-scoped — opening a different .ardour project no longer
 // inherits the previous project's tile composition (which might
 // reference per-session entities like a track editor pinned to a
-// trackId that doesn't exist here). The bare key is used as the
-// default for the launcher (no session loaded yet) and as a one-time
-// fallback when a freshly-loaded session has nothing recorded — so
-// existing users don't lose their layout the first time they switch
-// projects after this change ships.
+// trackId that doesn't exist here). As of 2026-05-12 the key also
+// carries a window slot suffix when running as one of multiple
+// windows for the same logical user, so the mixer-pinned window and
+// the timeline-pinned window keep separate tile trees. Slot "0"
+// (the Primary / single-window default) keeps the historical key
+// shape so existing users don't lose their layout. The bare key is
+// used as the default for the launcher (no session loaded yet) and
+// as a one-time fallback when a freshly-loaded session has nothing
+// recorded.
 const CUR_KEY_BASE = "foyer.layout.current.v1";
 function curKey() {
   const scope = sessionScope();
-  return scope === "default" ? CUR_KEY_BASE : `${CUR_KEY_BASE}@${scope}`;
+  const slot = windowSlot();
+  const base = scope === "default" ? CUR_KEY_BASE : `${CUR_KEY_BASE}@${scope}`;
+  return slot === "0" ? base : `${base}#slot=${slot}`;
 }
 const NAMED_KEY = "foyer.layout.named.v1";
 const FOCUS_KEY = "foyer.layout.focus.v1";

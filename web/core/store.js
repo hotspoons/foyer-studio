@@ -84,6 +84,22 @@ export class Store extends EventTarget {
         roleAllow: [],
         recipient: null,
       },
+      // ── Connection identity (multi-window) ───────────────────────
+      // `peerId` is the logical-user id, shared across every window
+      // this browser holds open against the same Foyer. `connectionId`
+      // is unique per WS connection — sibling windows of the same
+      // peer have different `connectionId`s but the same `peerId`.
+      // `role` is `"primary"` (this window owns audio I/O) or
+      // `"secondary"` (control plane only — audio commands are
+      // rejected by the server). All three are filled from the
+      // `ClientGreeting` event and are stable for the connection's
+      // lifetime. Components that care about audio (mic toolbar,
+      // listener controls, calibration) gate on `role === "primary"`.
+      connection: {
+        peerId: null,
+        connectionId: null,
+        role: "primary",
+      },
     };
     // Transport-position reconciliation state.
     this._lastTransportSeq = 0;
@@ -414,12 +430,24 @@ export class Store extends EventTarget {
         // Our own connection id — used to filter our entry out of the
         // connected-peers list so the user doesn't see themselves.
         this.state.selfPeerId = body.peer_id || "";
+        // Connection identity for multi-window: `peerId` is the logical
+        // user id (shared with sibling windows), `connectionId` is
+        // unique per WS, `role` says whether this is the spawning
+        // ("primary") window or a secondary control-plane window.
+        // Defaults preserve single-window behavior for older servers
+        // that don't populate these fields.
+        this.state.connection = {
+          peerId: body.peer_id || null,
+          connectionId: body.connection_id || null,
+          role: body.connection_role === "secondary" ? "secondary" : "primary",
+        };
         // Full greeting retained so the bootstrap + feature registry
         // can pull backend capability flags and the server-pinned
         // default UI variant without re-parsing the envelope.
         this.state.greeting = body;
         this.dispatchEvent(new CustomEvent("rbac"));
         this.dispatchEvent(new CustomEvent("peers"));
+        this.dispatchEvent(new CustomEvent("connection"));
         this.dispatchEvent(new CustomEvent("greeting"));
         break;
       }

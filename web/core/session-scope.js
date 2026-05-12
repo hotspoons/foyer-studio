@@ -54,3 +54,39 @@ export function sessionScopedKey(key) {
   if (scope === "default") return key;
   return `${scope}:${key}`;
 }
+
+/** Window-slot id for the current browser window (see
+ *  `core/window-restore.js`). Primary returns `"0"`; secondaries
+ *  return their `?slot=` URL param. Used by view-local persistence
+ *  (tile tree, floats, …) that should differ between two windows of
+ *  the same logical peer. Returns `"0"` when the multi-window layer
+ *  hasn't booted yet, which is the right fallback for single-window
+ *  pages. */
+export function windowSlot() {
+  if (typeof window === "undefined") return "0";
+  const fromGlobal = window.__foyer?.windowSlotId;
+  if (typeof fromGlobal === "string" && fromGlobal.length > 0) return fromGlobal;
+  // Fallback before window-restore.attach runs: peek at the URL
+  // directly so the very first paint already keys correctly.
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get("slot");
+    if (fromUrl) return fromUrl;
+  } catch {}
+  return "0";
+}
+
+/** Compose a key scoped to BOTH the active session and the current
+ *  window slot. Differs from {@link sessionScopedKey} only when the
+ *  browser is running as one window of a multi-window peer — the
+ *  Primary keeps the historical key (slot `"0"` is bare for cache
+ *  compat), Secondaries get a `#slot=N` suffix. Use this for state
+ *  that should differ between windows of the same logical user
+ *  (tile tree, floating tile list, focus). Plain `sessionScopedKey`
+ *  remains correct for per-session global state (recents pin,
+ *  picker filter, etc.) that every window should see identically. */
+export function windowScopedKey(key) {
+  const slot = windowSlot();
+  const base = sessionScopedKey(key);
+  if (!slot || slot === "0") return base;
+  return `${base}#slot=${slot}`;
+}

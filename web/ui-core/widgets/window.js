@@ -32,6 +32,13 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { sessionScopedKey } from "foyer-core/session-scope.js";
+import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
+import { multiWindow } from "foyer-core/multi-window.js";
+import {
+  identifyAllWindows,
+  hideAllWindowIdentifiers,
+} from "foyer-core/multi-window-identify.js";
+import { sendFloatingTile } from "foyer-ui-core/layout/pane-handoff.js";
 
 const STORAGE_PREFIX = "foyer.window:";
 const MIN_W = 320;
@@ -448,6 +455,69 @@ export class FoyerWindow extends LitElement {
     this._emitClose();
   }
 
+  /**
+   * Right-click on the header. Mirrors `tile-leaf._onContextMenu` so a
+   * floating widget window gets the same per-window family options
+   * (Send to Window 2, …) plus tile-layer / close shortcuts. Without
+   * a registered `viewKind` the receiver wouldn't know what to mount,
+   * so the per-window items are gated on that.
+   */
+  _onHeaderContextMenu(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const items = [];
+    if (this.viewKind) {
+      const siblings = multiWindow.siblings || [];
+      if (siblings.length > 0) {
+        items.push({ heading: this.title || "Window" });
+        // Flash identifier overlays on every sibling so the user can
+        // map "Send to Window 3" → physical screen. Same affordance
+        // tile-leaf uses; same multi-window-identify module.
+        identifyAllWindows();
+        const sorted = siblings.slice().sort(
+          (a, b) => Number(a.slot ?? 0) - Number(b.slot ?? 0),
+        );
+        for (const sib of sorted) {
+          const n = multiWindow.siblingWindowNumber(sib.slot);
+          const label =
+            n == null ? "Send to other window" : `Send to Window ${n}`;
+          items.push({
+            label,
+            icon: "arrow-top-right-on-square",
+            action: () => {
+              hideAllWindowIdentifiers();
+              sendFloatingTile({
+                targetConnectionId: sib.connectionId,
+                view: this.viewKind,
+                props: this.viewProps || {},
+              });
+              this._emitClose();
+            },
+          });
+        }
+        items.push({ separator: true });
+      }
+      items.push({
+        label: "Send to tile layer",
+        icon: "arrow-down-left-on-square",
+        action: () => this._sendToTiles(),
+      });
+    }
+    items.push({
+      label: this.maximized ? "Restore size" : "Maximize",
+      icon: this.maximized ? "arrows-pointing-in" : "arrows-pointing-out",
+      action: () => this._toggleMax(),
+    });
+    items.push({ separator: true });
+    items.push({
+      label: "Close",
+      icon: "x-mark",
+      tone: "danger",
+      action: () => this._emitClose(),
+    });
+    showContextMenu(ev, items);
+  }
+
   _clampToViewport() {
     // Window-rescue (Rich's 2026-04-21 ask): the title bar must
     // always be reachable. Two failure modes we've actually seen:
@@ -568,7 +638,8 @@ export class FoyerWindow extends LitElement {
       <div class="backdrop" @pointerdown=${() => this._emitClose()}></div>
       <div class="win" style=${style}>
         <header @pointerdown=${(e) => this._startDrag(e)}
-                @dblclick=${() => this._toggleMax()}>
+                @dblclick=${() => this._toggleMax()}
+                @contextmenu=${(e) => this._onHeaderContextMenu(e)}>
           ${this.icon ? html`<span class="title-icon">${icon(this.icon, 14)}</span>` : null}
           <h2>${this.title || ""}</h2>
           <span class="spacer"></span>

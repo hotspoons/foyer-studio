@@ -8,6 +8,12 @@ import { icon } from "foyer-ui-core/icons.js";
 
 import { listViews, registerView } from "foyer-core/registry/views.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
+import { multiWindow } from "foyer-core/multi-window.js";
+import {
+  identifyAllWindows,
+  hideAllWindowIdentifiers,
+} from "foyer-core/multi-window-identify.js";
+import { sendTileLeaf } from "./pane-handoff.js";
 
 import "./text-preview.js";
 
@@ -422,6 +428,11 @@ export class TileLeaf extends LitElement {
           action: () => this._dockTarget(),
         },
       ] : []),
+      // Multi-window: one menu item per sibling window. Skipped
+      // entirely when there are no siblings to avoid menu clutter on
+      // single-window setups. Sender removes the leaf locally on
+      // success — the operation is a *move*, not a copy.
+      ...this._handoffMenuItems(),
       { separator: true },
       {
         label: "Close tile",
@@ -431,6 +442,48 @@ export class TileLeaf extends LitElement {
       },
     ];
     showContextMenu(ev, items);
+  }
+
+  /**
+   * Enumerate one menu item per sibling window. Empty array on a
+   * single-window setup so the menu doesn't grow a useless separator.
+   * Sibling list comes from BroadcastChannel hellos — see
+   * `foyer-core/multi-window.js`. Items are labelled with the sibling's
+   * GLOBAL window number (slot+1) so they line up with the transient
+   * identifier overlay each window flashes when this menu opens.
+   */
+  _handoffMenuItems() {
+    const siblings = multiWindow.siblings || [];
+    if (siblings.length === 0) return [];
+    // Painting the identifier overlay on every window in the family
+    // is the cue that makes "Send to window 3" useful — without it
+    // the user has to mentally map slot numbers to physical screens.
+    // Fires once on menu open; the action handlers below dismiss it
+    // when the user picks something, and the overlay also auto-clears
+    // after a few seconds for users who back out of the menu.
+    identifyAllWindows();
+    return [
+      { separator: true },
+      ...siblings
+        .slice()
+        .sort((a, b) => Number(a.slot ?? 0) - Number(b.slot ?? 0))
+        .map((sib) => {
+          const n = multiWindow.siblingWindowNumber(sib.slot);
+          const label =
+            n == null ? "Send to other window" : `Send to Window ${n}`;
+          return {
+            label,
+            icon: "arrow-top-right-on-square",
+            action: () => {
+              hideAllWindowIdentifiers();
+              sendTileLeaf({
+                targetConnectionId: sib.connectionId,
+                leaf: { id: this.leaf.id, view: this.leaf.view, props: this.leaf.props },
+              });
+            },
+          };
+        }),
+    ];
   }
 
   /**

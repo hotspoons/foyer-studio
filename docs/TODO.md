@@ -92,9 +92,11 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 ## UI shape
 
+- [ ] Mutli-window/multi-monitor support
 - [ ] Once over on floating widgets layer versus tile layer, adding auto-tile layouts
     for tile layer, make sure z-indexes for pop-outs make sense, remove nonsense or
     old controls
+- [ ] Drop original "share" dialog and share button from main menu
 
 
 ## Infra + ops
