@@ -135,6 +135,15 @@ export class FoyerWs extends EventTarget {
     if (arr.length === 0 || arr.length > 3) return false;
     const body = { type: "midi_input", data: arr };
     if (trackId) body.track_id = trackId;
+    // Mirror the audio ingress echo: stamp with the source-clock ns
+    // of what the user is HEARING from the speakers right now. Shim
+    // (via the sidecar) subtracts this from its own monotonic clock
+    // to measure round-trip and drive `_capture_offset` on the
+    // per-track MIDI ingress port.
+    const speakerNs = globalThis.__foyer?.audioClock?.currentSpeakerSentinelNs?.();
+    if (Number.isFinite(speakerNs) && speakerNs > 0) {
+      body.echo_server_mono_ns = speakerNs;
+    }
     const env = {
       schema: [0, 1],
       seq: 0,

@@ -625,6 +625,7 @@ pub trait Backend: Send + Sync + 'static {
         &self,
         _data: Vec<u8>,
         _track_id: Option<EntityId>,
+        _echo_server_mono_ns: Option<i64>,
     ) -> Result<(), BackendError> {
         Ok(())
     }
@@ -837,6 +838,19 @@ pub trait Backend: Send + Sync + 'static {
     /// to every subsequent `open_ingress`. Backends without a ring
     /// (stub) ignore. Idempotent.
     async fn set_ingress_ring_prime_ms(&self, _ms: u32) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Tell the backend the empirical browser↔server round-trip
+    /// latency for MIDI events targeting `track_id`, in samples at
+    /// the engine rate. Backends with per-track MIDI ports (Ardour
+    /// shim) apply via `Port::set_private_latency_range` on the
+    /// matching port; backends without (stub) ignore. Idempotent.
+    async fn set_midi_capture_latency(
+        &self,
+        _track_id: EntityId,
+        _samples: u32,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 }

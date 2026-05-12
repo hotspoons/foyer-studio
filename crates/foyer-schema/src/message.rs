@@ -169,13 +169,29 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         transport_pos_samples: Option<u64>,
     },
-    /// Server → browser: reply to `RequestIngressLatency`.  Carries
-    /// the median one-way latency observed on this stream's ingress
-    /// WS (in milliseconds).  `None` means no samples yet.
+    /// Server → browser: reply to `RequestIngressLatency` and also
+    /// broadcast whenever the server-side empirical roundtrip median
+    /// shifts past the apply threshold (i.e. whenever the server is
+    /// about to push `SetIngressCaptureLatency` to the shim). The
+    /// median is now FULL ROUND-TRIP browser↔server, since the
+    /// ingress header carries `echo_server_mono_ns` and the server
+    /// compares against its own monotonic clock. `None` means too
+    /// few samples to compute a stable median yet.
     IngressLatencyReport {
         stream_id: u32,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         median_ms: Option<f32>,
+    },
+    /// Server → browser: empirical MIDI roundtrip-latency report,
+    /// keyed by track id. Broadcast whenever the server pushes a
+    /// new `SetMidiCaptureLatency` to the shim for the track (i.e.
+    /// after the per-track median has shifted past the apply
+    /// threshold). Mirrors `IngressLatencyReport` for the MIDI
+    /// path; the UI surfaces both side-by-side in the Timing tab.
+    MidiLatencyReport {
+        track_id: EntityId,
+        median_ms: f32,
+        samples_to_shim: u32,
     },
     /// Latest latency calibration result.
     LatencyReport {
@@ -927,6 +943,35 @@ pub enum Command {
     SetIngressRingPrimeMs {
         ms: u32,
     },
+    /// Server → shim: declare the capture-side latency for a per-
+    /// track MIDI ingress port, in samples at the engine sample
+    /// rate. Mirrors `SetIngressCaptureLatency` but for the virtual
+    /// MIDI input port the shim creates lazily on first
+    /// `MidiInput { track_id }` for `track_id`. The shim adds its
+    /// own internal contribution (engine cycle) on top before
+    /// writing `Port::set_private_latency_range`; Ardour's
+    /// `MidiDiskWriter` honours the resulting `_capture_offset` via
+    /// `_accumulated_capture_offset` so recorded MIDI events land
+    /// at the engine frame the user was hearing when they played.
+    /// `samples = 0` clears any prior compensation for the track.
+    SetMidiCaptureLatency {
+        track_id: EntityId,
+        samples: u32,
+    },
+    /// Test-only: inject artificial latency on the audio ingress
+    /// and/or egress paths so the empirical capture-offset logic can
+    /// be exercised against known asymmetric latency without
+    /// physically routing through a tunnel. `0` clears that side's
+    /// injection. The server stores the values in atomics that the
+    /// per-stream tasks consult on every packet — toggling takes
+    /// effect on the next packet without reconnecting. Bench knob;
+    /// not surfaced in user-facing UI flows.
+    SetFakeLatency {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        ingress_ms: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        egress_ms: Option<u32>,
+    },
     /// Open a named undo group. Subsequent mutations (region delete,
     /// plugin move, etc.) land in the same `UndoTransaction` until a
     /// matching `UndoGroupEnd` is received. One undo step unwinds
@@ -1148,6 +1193,19 @@ pub enum Command {
         /// exist before launch).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         sample_rate: Option<u32>,
+        /// Disposition for `.pending` crash-recovery state when the
+        /// browser detected it via `Event::SessionRecoveryAvailable`:
+        ///   - `Some(true)`  → user picked Recover. Server leaves
+        ///     `.pending` on disk and sets `FOYER_CRASH_RECOVERY=recover`
+        ///     on the Ardour spawn so the shim auto-clicks the native
+        ///     dialog's "Recover" button (the dialog still flashes
+        ///     briefly inside Ardour but is dismissed before the user
+        ///     can see it).
+        ///   - `Some(false)` → user picked Discard. Server deletes
+        ///     `.pending` pre-launch so Ardour never opens the dialog.
+        ///   - `None` → no crash artifacts; nothing to do.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        recover_crash: Option<bool>,
     },
 
     // ───── multi-session control plane ──────────────────────────────────
@@ -1398,6 +1456,17 @@ pub enum Command {
         /// the audio ingress access rule.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         track_id: Option<EntityId>,
+        /// Source-clock timestamp (server `monotonic_nanos`) of the
+        /// audio coming out of the user's speakers when this MIDI
+        /// event was produced. Mirrors the audio ingress echo: the
+        /// browser stamps from `audio-clock.currentSpeakerSentinelNs`;
+        /// the server subtracts it from its own `monotonic_nanos` on
+        /// receipt to measure the full round-trip latency, then drives
+        /// the matching MIDI ingress port's `_capture_offset`. `None`
+        /// means "no playback sentinel seen yet" — pre-record-arm
+        /// virtual-keyboard taps fall into this case.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        echo_server_mono_ns: Option<i64>,
     },
 
     /// Route a track's audio input to a named port. `port_name = None`

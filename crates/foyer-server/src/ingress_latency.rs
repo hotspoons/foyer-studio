@@ -1,26 +1,28 @@
-//! Per-stream ingress latency tracker.
+//! Per-stream ingress roundtrip-latency tracker.
 //!
-//! Each browser → DAW audio packet now carries a `client_send_ms`
-//! header (f64, milliseconds on the client's `performance.now()`
-//! clock). When a packet arrives the sidecar reads its monotonic
-//! clock, looks up the client/server offset most-recently estimated
-//! via `Command::ClockProbe`, and computes one-way latency as
+//! Each browser → DAW audio packet carries an 8-byte header of
+//! `i64 LE echo_server_mono_ns` — the source-side `CLOCK_MONOTONIC`
+//! timestamp of the audio coming out of the speakers when the
+//! browser captured this sample (most recent egress sentinel, shifted
+//! back by `playbackDelayMs`). When the packet arrives the sidecar
+//! reads its own monotonic clock and computes the FULL round-trip:
 //!
 //! ```text
-//!   recv_mono_ns = monotonic_nanos()
-//!   send_mono_ns = client_send_ms * 1e6 - offset_ns
-//!   latency_ns   = recv_mono_ns - send_mono_ns
+//!   recv_mono_ns  = monotonic_nanos()
+//!   roundtrip_ns  = recv_mono_ns - echo_server_mono_ns
 //! ```
 //!
-//! `offset_ns` is `client_mono_ns - server_mono_ns` from the probe,
-//! so subtracting it converts the client-stamped send time into
-//! server-monotonic units that line up with `recv_mono_ns`.
+//! Because the echo and `recv_mono_ns` are sampled from the SAME
+//! clock (same host, `CLOCK_MONOTONIC`), no clock-offset reconciliation
+//! is needed — the math is direct. `-1` (or non-positive) in the
+//! header means the browser hadn't observed any egress sentinel yet
+//! (cold start, record-armed-without-playback); we skip recording.
 //!
-//! Samples are kept in a small ring per stream so the median is
-//! cheap to compute; the consumer (the recording-finalize path) asks
-//! for the median when it commits a take's region metadata so the
-//! browser-side recording can be auto-shifted by exactly the
-//! transport latency without the user calibrating manually.
+//! The shim consumes the same value independently from the IPC audio
+//! frame's `transport_pos` slot and applies it as `_capture_offset`
+//! on the matching ingress port so the recorded take lands at the
+//! engine frame the user was hearing. The tracker here keeps the
+//! number around for diagnostics + the `IngressLatencyReport` reply.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

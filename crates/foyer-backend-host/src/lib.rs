@@ -109,17 +109,33 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn set_midi_capture_latency(
+        &self,
+        track_id: EntityId,
+        samples: u32,
+    ) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::SetMidiCaptureLatency { track_id, samples })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn send_midi_input(
         &self,
         data: Vec<u8>,
         track_id: Option<EntityId>,
+        echo_server_mono_ns: Option<i64>,
     ) -> Result<(), BackendError> {
         // Fire-and-forget: live MIDI is a real-time stream, dropping
         // a packet under WS backpressure is preferable to queueing
         // (a stale note-on after the user already lifted the key
         // sounds worse than a silent gap).
         self.client
-            .send_command(Command::MidiInput { data, track_id })
+            .send_command(Command::MidiInput {
+                data,
+                track_id,
+                echo_server_mono_ns,
+            })
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }

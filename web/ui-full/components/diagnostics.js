@@ -175,9 +175,15 @@ export class DiagnosticsView extends LitElement {
 
   _attachTimingListeners() {
     const ctrl = globalThis.__foyer?.audio;
-    if (!ctrl) return;
-    this._sentinelListener = (ev) => this._onSentinel(ev.detail);
-    ctrl.addEventListener("sentinel", this._sentinelListener);
+    if (ctrl) {
+      this._sentinelListener = (ev) => this._onSentinel(ev.detail);
+      ctrl.addEventListener("sentinel", this._sentinelListener);
+    }
+    const ws = globalThis.__foyer?.ws;
+    if (ws) {
+      this._envelopeListener = (ev) => this._onEnvelope(ev?.detail);
+      ws.addEventListener("envelope", this._envelopeListener);
+    }
   }
 
   _detachTimingListeners() {
@@ -186,6 +192,51 @@ export class DiagnosticsView extends LitElement {
       ctrl.removeEventListener("sentinel", this._sentinelListener);
       this._sentinelListener = null;
     }
+    const ws = globalThis.__foyer?.ws;
+    if (ws && this._envelopeListener) {
+      ws.removeEventListener("envelope", this._envelopeListener);
+      this._envelopeListener = null;
+    }
+  }
+
+  _onEnvelope(env) {
+    const body = env?.body;
+    if (!body) return;
+    if (body.type === "ingress_latency_report") {
+      this._timing = {
+        ...(this._timing || {}),
+        empiricalIngress: {
+          streamId: body.stream_id,
+          medianMs: body.median_ms,
+          updatedAt: performance.now(),
+        },
+      };
+      this.requestUpdate();
+    } else if (body.type === "midi_latency_report") {
+      const map = new Map(this._timing?.empiricalMidi || []);
+      map.set(body.track_id, {
+        medianMs: body.median_ms,
+        samples: body.samples_to_shim,
+        updatedAt: performance.now(),
+      });
+      this._timing = {
+        ...(this._timing || {}),
+        empiricalMidi: Array.from(map.entries()),
+      };
+      this.requestUpdate();
+    }
+  }
+
+  _setFakeLatency(which, raw) {
+    const ms = Math.max(0, Math.min(2000, Number(raw) || 0));
+    if (which === "ingress") this._fakeIngressInput = ms;
+    else if (which === "egress") this._fakeEgressInput = ms;
+    const ws = globalThis.__foyer?.ws;
+    if (!ws) return;
+    const body = { type: "set_fake_latency" };
+    if (which === "ingress") body.ingress_ms = ms;
+    if (which === "egress") body.egress_ms = ms;
+    ws.send(body);
   }
 
   _onSentinel(detail) {
@@ -219,7 +270,6 @@ export class DiagnosticsView extends LitElement {
       playing: !!store?.state?.controls?.get("transport.playing"),
       recording: !!store?.state?.controls?.get("transport.recording"),
       lastStopDelay: globalThis.__foyer?.lastStopDelay || null,
-      lastIngressLatency: globalThis.__foyer?.lastIngressLatency || null,
     };
     this.requestUpdate();
   }
@@ -432,15 +482,55 @@ export class DiagnosticsView extends LitElement {
               <tr><td>Jitter cushion</td><td>${t.lastStopDelay.safetyMs} ms</td></tr>
               <tr><td><strong>Total</strong></td><td><strong>${t.lastStopDelay.totalMs} ms</strong></td></tr>
             ` : null}
-            ${t.lastIngressLatency ? html`
-              <tr><th colspan="2">Capture compensation (full round-trip)</th></tr>
-              <tr><td>Capture (mic + worklet)</td><td>${t.lastIngressLatency.captureMs} ms</td></tr>
-              <tr><td>Ingress network</td><td>${t.lastIngressLatency.ingressNetworkMs ?? t.lastIngressLatency.networkMs ?? 0} ms</td></tr>
-              <tr><td>Egress network (≈ ingress)</td><td>${t.lastIngressLatency.egressNetworkMs ?? 0} ms</td></tr>
-              <tr><td>Playback delay (worklet + output)</td><td>${t.lastIngressLatency.playbackDelayMs ?? 0} ms</td></tr>
-              <tr><td>Sent to shim</td><td><strong>${t.lastIngressLatency.samplesToShim} samples</strong> = ${t.lastIngressLatency.browserMs} ms @ ${t.lastIngressLatency.engineSampleRate} Hz</td></tr>
-              <tr><td colspan="2" style="font-size:10px;color:var(--color-text-muted)">Shim adds its own ring-prime + engine cycle on top before applying to the port.</td></tr>
+            ${t.empiricalIngress ? html`
+              <tr><th colspan="2">Audio capture compensation (empirical round-trip)</th></tr>
+              <tr><td>Stream id</td><td>${t.empiricalIngress.streamId}</td></tr>
+              <tr><td>Median (browser ↔ server)</td><td>
+                ${t.empiricalIngress.medianMs != null
+                  ? html`<strong>${t.empiricalIngress.medianMs.toFixed(1)} ms</strong>`
+                  : "converging…"}
+              </td></tr>
+              <tr><td>Capture-offset lock</td><td>${t.recording
+                ? html`<strong style="color:var(--color-warn)">engaged</strong> (frozen for the take)`
+                : "released"}</td></tr>
+              <tr><td colspan="2" style="font-size:10px;color:var(--color-text-muted)">
+                Browser stamps each ingress packet with the source-clock ns of what's coming out of the speakers; server subtracts from its own monotonic clock. Shim adds its own ring-prime + engine cycle on top before writing to the port.
+              </td></tr>
             ` : null}
+            ${(t.empiricalMidi?.length || 0) > 0 ? html`
+              <tr><th colspan="2">MIDI capture compensation (per track, empirical)</th></tr>
+              ${t.empiricalMidi.map(([trackId, info]) => html`
+                <tr>
+                  <td>${trackId}</td>
+                  <td><strong>${info.medianMs.toFixed(1)} ms</strong> → ${info.samples} samples</td>
+                </tr>
+              `)}
+              <tr><td colspan="2" style="font-size:10px;color:var(--color-text-muted)">
+                Each browser-armed MIDI track has its own virtual ingress port (foyer-midi-ingress-&lt;track_id&gt;) with capture latency driven from the same echo round-trip.
+              </td></tr>
+            ` : null}
+            <tr><th colspan="2">Bench: injected fake latency</th></tr>
+            <tr>
+              <td>Ingress (audio)</td>
+              <td>
+                <input type="number" min="0" max="2000" step="10"
+                       .value=${String(this._fakeIngressInput ?? 0)}
+                       @change=${(e) => this._setFakeLatency("ingress", e.target.value)}
+                       style="width:80px"> ms
+              </td>
+            </tr>
+            <tr>
+              <td>Egress (audio)</td>
+              <td>
+                <input type="number" min="0" max="2000" step="10"
+                       .value=${String(this._fakeEgressInput ?? 0)}
+                       @change=${(e) => this._setFakeLatency("egress", e.target.value)}
+                       style="width:80px"> ms
+              </td>
+            </tr>
+            <tr><td colspan="2" style="font-size:10px;color:var(--color-text-muted)">
+              Adds an artificial tokio sleep on the respective WS path before forwarding. Useful for bench-testing capture-offset behaviour against asymmetric latency. 0 disables.
+            </td></tr>
           </tbody>
         </table>
 

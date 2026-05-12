@@ -661,15 +661,25 @@ async fn serve(
             // SessionRegistry, so close-session escalation doesn't
             // apply. Subsequent `LaunchProject` commands go through
             // the swap path and DO register a terminator.
-            // Bootstrap path has no UI to prompt with — `preflight_session`
-            // sweeps any crash-recovery artifacts into the hidden
-            // `.foyer-crash-archive/<stamp>/` subfolder so headless
-            // deploys boot without Ardour's modal blocking. Power users
-            // can opt out with `FOYER_KEEP_CRASH_RECOVERY=1`. Runtime
-            // `LaunchProject` calls go through the browser-driven
-            // probe + prompt before reaching this path.
+            //
+            // No UI to prompt with at boot. If the session has a live
+            // `.pending` (uncommitted crash state) we default to
+            // Recover — the Ardour shim will auto-click the dialog
+            // when it opens, so the user's unsaved work is preserved
+            // without blocking the launch. The runtime `LaunchProject`
+            // path lets the browser ask the user explicitly.
+            let recover = project
+                .as_deref()
+                .map(|p| !foyer_server::session_recovery::probe(p).is_empty())
+                .unwrap_or(false)
+                .then_some(true);
+            if recover.is_some() {
+                tracing::info!(
+                    "bootstrap launch: live `.pending` crash state detected — defaulting to Recover"
+                );
+            }
             spawner
-                .launch(&backend.id, project.as_deref(), None)
+                .launch(&backend.id, project.as_deref(), None, recover)
                 .await
                 .with_context(|| format!("launch backend `{}`", backend.id))?
                 .backend
@@ -755,6 +765,7 @@ impl BackendSpawner for CliSpawner {
         backend_id: &str,
         project_path: Option<&Path>,
         sample_rate: Option<u32>,
+        recover_crash: Option<bool>,
     ) -> anyhow::Result<foyer_server::LaunchedBackend> {
         let cfg_backend = self
             .config
@@ -808,6 +819,7 @@ impl BackendSpawner for CliSpawner {
                     &cfg_backend.env,
                     &abs,
                     sr_hint,
+                    recover_crash,
                 )
                 .await?;
                 let host = HostBackend::connect(socket.clone())
@@ -875,6 +887,7 @@ async fn launch_and_wait_for_shim(
     env: &std::collections::BTreeMap<String, String>,
     project: &std::path::Path,
     sample_rate_hint: Option<u32>,
+    recover_crash: Option<bool>,
 ) -> Result<(PathBuf, tokio::process::Child)> {
     use std::time::Duration;
 
@@ -1034,23 +1047,13 @@ if [ -f "$SESSION_FILE" ] && ! grep -q 'name="Foyer Studio Shim" active="1"' "$S
     fi
 fi
 {patch_sr_shell}
-# Sweep Ardour's crash-recovery breadcrumbs out of the session
-# dir so the "Recover from crash / Ignore" modal doesn't block
-# session load — we render to an Xvfb the user can't see, so a
-# blocking GUI dialog is fatal. Files are renamed (not deleted)
-# to .bak.<unix-timestamp> so a power user who actually wants to
-# recover can mv them back. Mirrors archive_crash_recovery_artifacts
-# in the Rust path. Opt-out: FOYER_KEEP_CRASH_RECOVERY=1.
-if [ -z "${{FOYER_KEEP_CRASH_RECOVERY:-}}" ]; then
-    STAMP=$(date +%s)
-    for FILE in "$SESSION_DIR"/*.pending "$SESSION_DIR"/*.history; do
-        if [ -e "$FILE" ]; then
-            BAK="$FILE.bak.$STAMP"
-            echo "foyer: archiving crash-recovery artifact $FILE → $BAK" >&2
-            mv "$FILE" "$BAK" 2>/dev/null || true
-        fi
-    done
-fi
+# Crash-recovery is now handled in-band by the Foyer shim:
+# when `FOYER_CRASH_RECOVERY=recover` is set (exported below by
+# the Rust spawner), the shim's GTK toplevel watcher auto-clicks
+# Ardour's "Recover from crash" dialog. When the user picked
+# Discard, the `.pending` file is deleted server-side BEFORE
+# this spawn, so the dialog never opens. `.history` (regular
+# undo state) is preserved verbatim.
 
 # FOYER_DEBUG_ARDOUR=1 wraps the Ardour spawn in `gdb --batch` so
 # SIGSEGV/SIGABRT dump a backtrace into stderr (which lands in
@@ -1167,6 +1170,16 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
                 cmd.env("FOYER_SESSION_SAMPLE_RATE", sr.to_string());
             }
         }
+    }
+    // The shim picks this up at library-constructor time and installs
+    // a GTK toplevel watcher that auto-clicks Ardour's crash-recovery
+    // dialog. `discard` is set for symmetry / logging only — the
+    // server already deleted `.pending` before this spawn, so the
+    // dialog won't actually open in that branch.
+    if let Some(recover) = recover_crash {
+        let v = if recover { "recover" } else { "discard" };
+        cmd.env("FOYER_CRASH_RECOVERY", v);
+        tracing::info!("Ardour spawn: FOYER_CRASH_RECOVERY={v}");
     }
 
     // Redirect the child's stdout+stderr to a per-launch log file so
@@ -1745,29 +1758,12 @@ fn preflight_session(
             );
         }
     }
-    // Sweep Ardour's crash-recovery breadcrumbs into a hidden
-    // subfolder BEFORE Ardour opens the session. Without this
-    // Ardour blocks at session load with a "Recover from crash /
-    // Ignore crash data" modal — fatal in container deploys (Cloud
-    // Run, headless Xvfb) where there's no human to dismiss it.
-    // The runtime `LaunchProject` path also sweeps from the WS
-    // server side after asking the user; the call here covers the
-    // bootstrap auto-open path (CLI `--open <session>` at startup)
-    // where there's no UI to prompt yet. Power users who really
-    // want Ardour's modal can set `FOYER_KEEP_CRASH_RECOVERY=1`
-    // (rare; useful when poking at the dev container directly).
-    let keep_via_env = std::env::var_os("FOYER_KEEP_CRASH_RECOVERY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    if !keep_via_env {
-        let n = foyer_server::session_recovery::archive(&dir);
-        if n > 0 {
-            tracing::info!(
-                "preflight_session: archived {n} crash-recovery artifact(s) at {} (set FOYER_KEEP_CRASH_RECOVERY=1 to opt out)",
-                dir.display(),
-            );
-        }
-    }
+    // Crash-recovery is no longer handled here — the WS layer
+    // discards `.pending` before this call when the user picked
+    // Discard, and the Ardour shim auto-clicks the recovery dialog
+    // when `FOYER_CRASH_RECOVERY=recover` is set. The CLI bootstrap
+    // path injects that env via `BackendSpawner::launch` based on a
+    // pre-launch probe (see the `launch()` call in `start_command`).
     (dir, name)
 }
 

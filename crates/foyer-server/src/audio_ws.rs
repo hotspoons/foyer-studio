@@ -67,11 +67,21 @@ async fn handle(socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
         return;
     };
 
+    // Bench-only egress latency injection — atomic in AppState so
+    // `Command::SetFakeLatency` toggles it live without reconnect.
+
     let (mut sink, _reader) = socket.split();
     loop {
         match rx.recv().await {
             Ok(pkt) => {
                 let bytes = pack_wire(&pkt);
+                let egress_inject_ms = state
+                    .fake_egress_latency_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if egress_inject_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(egress_inject_ms as u64))
+                        .await;
+                }
                 if sink.send(Message::Binary(bytes)).await.is_err() {
                     break;
                 }

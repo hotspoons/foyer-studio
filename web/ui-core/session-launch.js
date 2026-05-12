@@ -12,19 +12,17 @@
 //      user hadn't saved.
 //
 //   2. Crash-recovery prompt: ask the sidecar via
-//      `Command::ProbeSessionRecovery` whether the project has
-//      `.history` / `.pending` files (or legacy `.bak.<stamp>`
-//      clutter) lying around. If yes, ask the user to either
-//      ABORT and download the project (so they can recover the
-//      data offline however they want) or OPEN and let foyer
-//      sweep everything into a hidden `.foyer-crash-archive/`
-//      subfolder. Ardour can't recover crash data without
-//      popping its native modal — which we can't dismiss from the
-//      web shell — so foyer's policy is to never let Ardour see
-//      those files in the first place.
+//      `Command::ProbeSessionRecovery` whether the project has a
+//      live `.pending` file (uncommitted dirty state from a
+//      crashed Ardour run). If yes, ask the user to either
+//      RECOVER (preserve the unsaved work — the Ardour shim
+//      auto-clicks the native recovery dialog when it opens) or
+//      DISCARD (server deletes `.pending` before launch so the
+//      dialog never appears). The choice rides on the wire as
+//      `LaunchProject.recover_crash`. `.history` files are
+//      normal undo state and are never reported / touched.
 
 import { confirmChoice } from "./widgets/confirm-modal.js";
-import { toast } from "./widgets/toast.js";
 
 function currentSessionInfo(store) {
   if (!store) return null;
@@ -143,137 +141,51 @@ function formatArtifactList(artifacts) {
   return sorted
     .map((a) => {
       const age = ageOf(a.mtime_unix_ms);
-      const tag = a.archived
-        ? " (already archived)"
-        : a.kind === "pending" ? " (uncommitted)" : "";
-      return age ? `  • ${a.name} — modified ${age}${tag}` : `  • ${a.name}${tag}`;
+      return age ? `  • ${a.name} — modified ${age}` : `  • ${a.name}`;
     })
     .join("\n");
 }
 
 /**
- * Hit `/sessions/export?path=…` and stream the resulting tarball
- * to disk via a transient blob URL. Uses `fetch` rather than the
- * cheaper `<a download>` trick because the server tars + gzips the
- * whole project into memory before sending — `fetch().then(r)`
- * resolves at the moment compression finishes, which is exactly
- * when the busy spinner should drop. With a bare anchor click,
- * the user sees nothing for the seconds-of-CPU spent compressing
- * and (rightly) thinks foyer is stuck.
+ * Prompt for a project that has uncommitted crash state (`.pending`).
+ * Returns one of:
+ *   - `true`   → Recover. Sets `recover_crash: true` on the launch
+ *                payload so the shim auto-clicks the native dialog.
+ *   - `false`  → Discard. Sets `recover_crash: false` so the server
+ *                deletes `.pending` before spawn (no dialog opens).
+ *   - `null`   → Cancel / user chose to download offline; abort the launch.
  *
- * Trade-off: the response body is buffered in browser memory
- * before save. For typical foyer sessions (single-digit MB
- * compressed) this is fine; very large sessions (>1 GB) would be
- * a problem. If we ever ship sessions that big, swap in a
- * streaming progress UI against the fetch reader instead.
- */
-async function downloadProjectArchive(projectPath) {
-  if (!projectPath) return false;
-  // Mirror the tunnel-guest token onto the request so the same RBAC
-  // gate that protects /ws protects /sessions/export. LAN clients
-  // never have a token and the query stays empty.
-  let url = `/sessions/export?path=${encodeURIComponent(projectPath)}`;
-  if (typeof window !== "undefined") {
-    const t = new URLSearchParams(window.location.search).get("token");
-    if (t) url += `&token=${encodeURIComponent(t)}`;
-  }
-  const filename = `${(projectPath.split("/").pop() || "project")}.tar.gz`;
-  // Effectively-no-auto-dismiss TTL — we manage the lifetime
-  // around fetch + blob save. If something goes catastrophically
-  // wrong (network drop with no error fired) the user can click
-  // to dismiss; the 60s ceiling stops a permanently-broken
-  // request from leaving a stuck banner.
-  const dismissBusy = toast(`Compressing ${filename}…`, { ttl: 60_000 });
-  try {
-    const resp = await fetch(url, { credentials: "same-origin" });
-    if (!resp.ok) {
-      throw new Error(`server returned ${resp.status}`);
-    }
-    const blob = await resp.blob();
-    dismissBusy();
-    const objectUrl = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = objectUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    // Defer the revoke so the browser has time to start the
-    // download. Some browsers race revoke against the file save
-    // dialog and end up with a "failed: network error" if we
-    // revoke synchronously.
-    setTimeout(() => URL.revokeObjectURL(objectUrl), 5_000);
-    toast(`Downloaded ${filename}`, { tone: "info" });
-    return true;
-  } catch (e) {
-    dismissBusy();
-    toast(`Download failed: ${e.message || e}`, { tone: "error" });
-    return false;
-  }
-}
-
-/**
- * Prompt for a project that has crash data on disk. Returns:
- *   - "open"    → archive the artifacts and proceed with launch
- *   - "abort"   → user is downloading the project + recovering offline; do not launch
- *   - null      → user cancelled; do not launch
- *
- * Side effect: when "abort" is returned, the function has already
- * triggered the project-archive download. The caller doesn't need
- * to do anything further with that path.
+ * Bonus power-user escape: a small inline "download project" link
+ * inside the message body triggers the offline-recovery flow without
+ * eating a button slot.
  */
 async function confirmCrashDataBeforeLaunch(artifacts, projectPath) {
   const projectName = projectPath.replace(/\.ardour\/?$/, "").split("/").pop()
     || projectPath;
-  const hasPending = artifacts.some((a) => a.kind === "pending" && !a.archived);
-  const allArchived = artifacts.length > 0 && artifacts.every((a) => a.archived);
   const summary = formatArtifactList(artifacts);
 
-  let title;
-  let body;
-  if (allArchived) {
-    title = "Crash data on disk";
-    body =
-      `"${projectName}" has crash-recovery data left over from earlier `
-      + `foyer runs:\n\n${summary}\n\n`
-      + "Foyer can't replay this for you — Ardour's recovery flow needs "
-      + "Ardour's own GUI dialog, which isn't reachable from the web shell. "
-      + "Either download the project so you can recover offline, or have "
-      + "foyer move the files into a hidden archive subfolder and open the "
-      + "session fresh.";
-  } else if (hasPending) {
-    title = "Unsaved work from a previous crash";
-    body =
-      `"${projectName}" has uncommitted changes from a previous crash:\n\n${summary}\n\n`
-      + "Foyer can't have Ardour replay these — its recovery flow requires "
-      + "Ardour's own GUI dialog, which isn't reachable from the web shell. "
-      + "If you want the data, download the project archive and recover "
-      + "offline (open it in a desktop Ardour, accept the recovery prompt, "
-      + "save). Otherwise foyer will move the recovery files into a hidden "
-      + "archive subfolder and open the session fresh.";
-  } else {
-    title = "Crash data on disk";
-    body =
-      `"${projectName}" has crash-recovery data on disk:\n\n${summary}\n\n`
-      + "Foyer can't have Ardour replay these — its recovery flow requires "
-      + "Ardour's own GUI dialog. Download the project to recover offline, "
-      + "or have foyer archive the files and open the session fresh.";
-  }
+  const title = "Unsaved work from a previous crash";
+  const body =
+    `"${projectName}" has uncommitted changes from a previous Ardour run:\n\n`
+    + `${summary}\n\n`
+    + "Recover replays them into the session (Ardour's own crash-recovery "
+    + "flow, dispatched programmatically by the Foyer shim). Discard "
+    + "throws them away and opens the project clean. The session's "
+    + "undo history is preserved either way. "
+    + "If you want to recover offline instead, cancel and download the "
+    + "project from the welcome screen.";
 
   const choice = await confirmChoice({
     title,
     message: body,
-    confirmLabel: "Open (archive crash data)",
-    altLabel: "Abort & download project",
-    altTone: "warning",
+    confirmLabel: "Recover",
+    altLabel: "Discard",
+    altTone: "danger",
     cancelLabel: "Cancel",
     tone: "warning",
   });
-  if (choice === "confirm") return "open";
-  if (choice === "alt") {
-    downloadProjectArchive(projectPath);
-    return "abort";
-  }
+  if (choice === "confirm") return true;
+  if (choice === "alt") return false;
   return null;
 }
 
@@ -288,10 +200,11 @@ export async function launchProjectGuarded({
   const ok = await confirmUnsavedBeforeLaunch(store, ws);
   if (!ok) return false;
 
+  let recoverCrash = null;
   const artifacts = await probeSessionRecovery(ws, project_path);
   if (artifacts.length > 0) {
-    const choice = await confirmCrashDataBeforeLaunch(artifacts, project_path);
-    if (choice !== "open") return false; // Cancel or abort+download.
+    recoverCrash = await confirmCrashDataBeforeLaunch(artifacts, project_path);
+    if (recoverCrash === null) return false; // cancelled
   }
 
   const payload = {
@@ -302,6 +215,10 @@ export async function launchProjectGuarded({
   if (sample_rate != null && Number.isFinite(Number(sample_rate))) {
     payload.sample_rate = Math.round(Number(sample_rate));
   }
+  if (recoverCrash !== null) {
+    payload.recover_crash = recoverCrash;
+  }
   ws.send(payload);
   return true;
 }
+

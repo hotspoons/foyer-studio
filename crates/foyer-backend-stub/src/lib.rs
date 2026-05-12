@@ -265,6 +265,7 @@ impl Backend for StubBackend {
         &self,
         data: Vec<u8>,
         track_id: Option<EntityId>,
+        _echo_server_mono_ns: Option<i64>,
     ) -> Result<(), BackendError> {
         // Stub has no engine to feed; record the call so tests can
         // assert that browser-side Web MIDI plumbing reaches the

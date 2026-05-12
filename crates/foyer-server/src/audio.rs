@@ -584,7 +584,11 @@ pub fn pack_wire(packet: &EncodedPacket) -> Vec<u8> {
 /// Sidecar monotonic clock in nanoseconds since process start. Used
 /// to stamp outbound audio frames; the browser converts to its own
 /// `performance.now()` clock via the offset measured by the periodic
-/// clock-probe exchange.
+/// clock-probe exchange. The same value also rides back on ingress
+/// packet headers (as `echo_server_mono_ns`) so the server can
+/// compute round-trip latency directly via `monotonic_nanos() -
+/// echo` — both endpoints use the same epoch by virtue of being the
+/// same process.
 pub fn monotonic_nanos() -> u64 {
     use std::sync::OnceLock;
     static EPOCH: OnceLock<Instant> = OnceLock::new();

@@ -152,6 +152,38 @@ export class AudioClock extends EventTarget {
   }
 
   /**
+   * Source-clock (server `CLOCK_MONOTONIC`) timestamp, in nanoseconds,
+   * corresponding to the audio currently coming out of the speakers.
+   *
+   * Used by the ingress packet header so the shim can compute round-
+   * trip latency as `now_mono_ns - echo_ns` without any additive
+   * estimate stack. The echo MUST represent what the user is HEARING
+   * right now (not what's queued in the worklet), because the user
+   * sings in response to what they hear; if we stamped with the most-
+   * recently-arrived sentinel we'd under-compensate by the playback-
+   * queue depth.
+   *
+   * Returns `null` if no sentinel has arrived yet (browser hasn't
+   * seen any egress audio). Caller should send the `-1` sentinel in
+   * that case.
+   */
+  currentSpeakerSentinelNs() {
+    if (this._sentinelFrames.length === 0) return null;
+    const latest = this._sentinelFrames[this._sentinelFrames.length - 1];
+    if (latest == null || latest.serverMonoNs == null) return null;
+    // Project the latest sentinel forward to "now" in source-clock
+    // units (assuming source and browser monotonic clocks advance at
+    // the same rate — they do for any reasonable observation window),
+    // then subtract the playback-queue depth to get the speaker time.
+    const now = performance.now();
+    const elapsedMsSinceArrival = now - latest.arrivedAtClientMs;
+    const sourceNowNs = Number(latest.serverMonoNs)
+      + elapsedMsSinceArrival * 1_000_000;
+    const speakerNs = sourceNowNs - this._playbackDelayMs * 1_000_000;
+    return Math.round(speakerNs);
+  }
+
+  /**
    * Look up the client arrival time (performance.now()) of an
    * audio frame by its `server_mono_ns` correlation id. Used by
    * the sentinel drift monitor to compute audio-vs-event path

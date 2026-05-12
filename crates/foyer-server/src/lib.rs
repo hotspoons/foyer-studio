@@ -27,6 +27,7 @@ mod import_audio;
 mod ingress_latency;
 mod ingress_ws;
 mod jail;
+mod midi_latency;
 pub mod orphans;
 mod plugin_gui_ws;
 mod recents;
@@ -78,16 +79,25 @@ pub trait BackendSpawner: Send + Sync + 'static {
     /// Build a new backend. `project_path` is jail-relative (or absolute
     /// — the spawner decides how to resolve it). `sample_rate` is an optional
     /// hint for stub launches / demos; Ardour ignores it today.
-    /// Crash-recovery artifacts in the project directory are
-    /// expected to have been archived by the WS layer (see
-    /// [`crate::session_recovery`]) before this is called — the
-    /// spawner can assume the directory is in a state Ardour will
-    /// open without popping its native recovery modal.
+    ///
+    /// `recover_crash` carries the user's decision from the browser's
+    /// crash-recovery prompt for sessions that had a live `.pending`
+    /// file at probe time:
+    ///   - `Some(true)`  → Recover. Spawner sets
+    ///     `FOYER_CRASH_RECOVERY=recover` in the Ardour env; the shim
+    ///     auto-clicks the native recovery dialog when it opens.
+    ///   - `Some(false)` → Discard. The WS layer already deleted the
+    ///     `.pending` file before this call, so the dialog won't open
+    ///     — the env var is still set as a belt-and-braces for the
+    ///     shim's logging.
+    ///   - `None`        → no artifacts; spawn normally.
+    /// Stub spawners ignore it.
     async fn launch(
         &self,
         backend_id: &str,
         project_path: Option<&Path>,
         sample_rate: Option<u32>,
+        recover_crash: Option<bool>,
     ) -> anyhow::Result<LaunchedBackend>;
 
     /// Connect to an existing host process by its IPC socket — the
@@ -309,6 +319,26 @@ pub(crate) struct AppState {
     /// the median to stamp the resulting region with
     /// `Region.ingress_latency_ms`. See `ingress_latency.rs`.
     pub(crate) ingress_latency: Arc<ingress_latency::IngressLatencyTracker>,
+    /// Bench-only fake latency injected on the ingress audio path,
+    /// in ms. Read by `ingress_ws::handle` on every packet (branched
+    /// out on 0). Initially seeded from
+    /// `FOYER_INGRESS_FAKE_LATENCY_MS`; runtime-tunable via
+    /// `Command::SetFakeLatency`. See diagnostics Timing tab.
+    pub(crate) fake_ingress_latency_ms: std::sync::atomic::AtomicU32,
+    /// Sibling for the egress (server → browser) audio path. Read
+    /// by `audio_ws::handle` per packet. Same semantics.
+    pub(crate) fake_egress_latency_ms: std::sync::atomic::AtomicU32,
+    /// Per-track MIDI roundtrip-latency samples. Browser `MidiInput`
+    /// commands carry an `echo_server_mono_ns` echo timestamp; the
+    /// server records `recv - echo` per track here and the dispatch
+    /// path checks the rolling median to decide whether to emit a
+    /// `SetMidiCaptureLatency` to the shim. See `midi_latency.rs`.
+    pub(crate) midi_latency: Arc<midi_latency::MidiLatencyTracker>,
+    /// Last MIDI capture-latency value pushed per track id, in
+    /// samples. Used to threshold subsequent `SetMidiCaptureLatency`
+    /// emissions so we don't kick the shim on every MIDI event.
+    pub(crate) midi_latency_last_applied:
+        Arc<Mutex<HashMap<EntityId, u32>>>,
     /// Track id → ingress stream id. Populated when a
     /// `SetTrackInput` succeeds against a known ingress sink port,
     /// dropped on `AudioIngressClose`. Read by the per-session
@@ -657,6 +687,9 @@ impl Server {
         let ring = Arc::new(RwLock::new(DeltaRing::new(RING_CAP)));
         let next_seq = Arc::new(AtomicU64::new(1));
         let ingress_latency = Arc::new(ingress_latency::IngressLatencyTracker::new());
+        let midi_latency = Arc::new(midi_latency::MidiLatencyTracker::new());
+        let midi_latency_last_applied: Arc<Mutex<HashMap<EntityId, u32>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let track_ingress = Arc::new(Mutex::new(HashMap::<EntityId, u32>::new()));
         let sessions = Arc::new(SessionRegistry::new(
             tx.clone(),
@@ -684,6 +717,20 @@ impl Server {
             audio_hub: Arc::new(audio::AudioHub::new()),
             ingress_senders: Mutex::new(HashMap::new()),
             ingress_latency,
+            fake_ingress_latency_ms: std::sync::atomic::AtomicU32::new(
+                std::env::var("FOYER_INGRESS_FAKE_LATENCY_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+            ),
+            fake_egress_latency_ms: std::sync::atomic::AtomicU32::new(
+                std::env::var("FOYER_EGRESS_FAKE_LATENCY_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+            ),
+            midi_latency,
+            midi_latency_last_applied,
             track_ingress,
             clock_offset_ns: std::sync::atomic::AtomicI64::new(0),
             drift_integral: Mutex::new(HashMap::new()),

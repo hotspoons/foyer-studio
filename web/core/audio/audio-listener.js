@@ -266,10 +266,21 @@ export class AudioListener {
         // Feed playback delay into the audio-derived clock so the
         // displayed playhead accounts for the worklet's jitter
         // buffer + driver-reported output latency.
+        //
+        // Floor outputLatency at baseLatency: Safari (and some
+        // Firefox builds) report `outputLatency = 0` even when the
+        // actual driver path is 25–50 ms. `baseLatency` is the spec's
+        // "audio latency budget the user agent has allocated" and is
+        // a reliable lower-bound on the output side too. Without this
+        // floor, the empirical capture-offset under-corrects on
+        // those browsers by exactly the missing outputLatency.
         if (this.audioClock) {
+          const reportedOutLat = Number(this.ctx?.outputLatency) || 0;
+          const baseLat = Number(this.ctx?.baseLatency) || 0;
+          const effectiveOutLat = Math.max(reportedOutLat, baseLat);
           this.audioClock.setPlaybackDelay(
             Number(m.buffered) || 0,
-            Number(this.ctx?.outputLatency) || 0,
+            effectiveOutLat,
           );
         }
         // Emit a buffer-fill report to the sidecar's drift

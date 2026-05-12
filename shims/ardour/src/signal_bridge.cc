@@ -42,6 +42,7 @@ static constexpr bool LOG_TRANSPORT_TICK = false;
 #include "ipc.h"
 #include "msgpack_out.h"
 #include "schema_map.h"
+#include "shim_input_port.h"
 #include "surface.h"
 
 using namespace ARDOUR;
@@ -739,9 +740,15 @@ SignalBridge::note_user_play_request ()
 void
 SignalBridge::on_record_state_changed ()
 {
+	const bool active = _shim.session ().actively_recording ();
 	PBD::warning << "foyer_shim: SIGNAL RecordStateChanged: "
 	             << "rec_enabled=" << _shim.session ().get_record_enabled ()
-	             << " actively_rec=" << _shim.session ().actively_recording () << endmsg;
+	             << " actively_rec=" << active << endmsg;
+	// Freeze ingress `_capture_offset` while a take is in flight.
+	// Lifting the lock when recording stops lets the next server-
+	// driven `SetIngressCaptureLatency` retake effect for the next
+	// pass. See `ShimInputPort::set_capture_latency` for the gate.
+	ShimInputPort::set_capture_latency_lock (active);
 	on_transport_state_changed ();
 }
 

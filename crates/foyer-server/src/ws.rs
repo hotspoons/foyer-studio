@@ -676,6 +676,8 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::RequestIngressLatency { .. } => "request_ingress_latency",
         Command::SetIngressCaptureLatency { .. } => "set_ingress_capture_latency",
         Command::SetIngressRingPrimeMs { .. } => "set_ingress_ring_prime_ms",
+        Command::SetMidiCaptureLatency { .. } => "set_midi_capture_latency",
+        Command::SetFakeLatency { .. } => "set_fake_latency",
         Command::UndoGroupBegin { .. } => "undo_group_begin",
         Command::UndoGroupEnd => "undo_group_end",
         Command::ControlSet { .. } => "control_set",
@@ -1055,6 +1057,34 @@ async fn dispatch_command(
         Command::SetIngressRingPrimeMs { ms } => {
             if let Err(e) = state.backend().await.set_ingress_ring_prime_ms(ms).await {
                 tracing::debug!("set_ingress_ring_prime_ms forwarding failed: {e}");
+            }
+        }
+        Command::SetMidiCaptureLatency { track_id, samples } => {
+            // Normally emitted server-internally from the MidiInput
+            // handler when the per-track median moves; exposing the
+            // dispatch arm lets tooling poke at the value directly
+            // (parity with SetIngressCaptureLatency above).
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_midi_capture_latency(track_id, samples)
+                .await
+            {
+                tracing::debug!("set_midi_capture_latency forwarding failed: {e}");
+            }
+        }
+        Command::SetFakeLatency { ingress_ms, egress_ms } => {
+            if let Some(v) = ingress_ms {
+                state
+                    .fake_ingress_latency_ms
+                    .store(v, Ordering::Relaxed);
+                tracing::info!("fake ingress latency set to {v} ms");
+            }
+            if let Some(v) = egress_ms {
+                state
+                    .fake_egress_latency_ms
+                    .store(v, Ordering::Relaxed);
+                tracing::info!("fake egress latency set to {v} ms");
             }
         }
         Command::Subscribe | Command::RequestSnapshot => {
@@ -1526,6 +1556,7 @@ async fn dispatch_command(
             backend_id,
             project_path,
             sample_rate,
+            recover_crash,
         } => {
             let Some(spawner) = state.spawner.clone() else {
                 broadcast_event(
@@ -1631,38 +1662,43 @@ async fn dispatch_command(
                     }
                 }
             }
-            // Sweep any crash-recovery artifacts (live `.history` /
-            // `.pending` AND legacy `.bak.<stamp>` clutter) into a
-            // hidden timestamped subfolder before Ardour can see
-            // them. The browser already prompted the user via
-            // `ProbeSessionRecovery`; if they wanted the data they
-            // hit "abort + download" and we never reached this
-            // dispatch. Anything still here at launch time is by
-            // definition consenting to be archived.
-            if let Some(p) = path {
-                let abs = match state.jail.as_ref() {
-                    Some(jail) => jail
-                        .root()
-                        .join(p.to_string_lossy().trim_start_matches('/')),
-                    None => p.to_path_buf(),
-                };
-                // Dispatch via the per-backend profile so a
-                // non-Ardour launch doesn't sweep files the wrong
-                // DAW would have wanted to keep.
-                let profiles = state.profiles().await;
-                let n = profiles
-                    .get_or_default(&backend_id)
-                    .map(|prof| prof.archive_recovery(&abs))
-                    .unwrap_or(0);
-                if n > 0 {
-                    tracing::info!(
-                        "launch_project: archived {n} crash-recovery artifact(s) at {} ({})",
-                        abs.display(),
-                        backend_id,
-                    );
+            // Dispatch the user's crash-recovery choice (set on the
+            // browser by `confirmCrashDataBeforeLaunch`). Two paths:
+            //   - `Some(false)` (Discard): delete the live `.pending`
+            //     file so Ardour's `AskAboutPendingState` signal
+            //     doesn't fire, no dialog opens.
+            //   - `Some(true)` (Recover): leave `.pending` in place;
+            //     the Ardour shim auto-clicks the recovery dialog via
+            //     `FOYER_CRASH_RECOVERY=recover` (set in the spawner).
+            //   - `None`: no artifacts; nothing to do.
+            // `.history` is never touched — it's regular undo state,
+            // not crash data.
+            if recover_crash == Some(false) {
+                if let Some(p) = path {
+                    let abs = match state.jail.as_ref() {
+                        Some(jail) => jail
+                            .root()
+                            .join(p.to_string_lossy().trim_start_matches('/')),
+                        None => p.to_path_buf(),
+                    };
+                    let profiles = state.profiles().await;
+                    let n = profiles
+                        .get_or_default(&backend_id)
+                        .map(|prof| prof.discard_recovery(&abs))
+                        .unwrap_or(0);
+                    if n > 0 {
+                        tracing::info!(
+                            "launch_project: discarded {n} pending crash-recovery file(s) at {} ({})",
+                            abs.display(),
+                            backend_id,
+                        );
+                    }
                 }
             }
-            match spawner.launch(&backend_id, path, sample_rate).await {
+            match spawner
+                .launch(&backend_id, path, sample_rate, recover_crash)
+                .await
+            {
                 Ok(launched) => {
                     // swap_backend synthesizes a session UUID when
                     // the caller doesn't supply one. Once the
@@ -2647,7 +2683,11 @@ async fn dispatch_command(
             }
         }
 
-        Command::MidiInput { data, track_id } => {
+        Command::MidiInput {
+            data,
+            track_id,
+            echo_server_mono_ns,
+        } => {
             // SysEx and other long messages aren't supported through
             // the browser bridge yet — keep the wire-side enforcement
             // tight so a malicious client can't fan out a 64 KB sysex
@@ -2684,10 +2724,66 @@ async fn dispatch_command(
                 }
                 None => None,
             };
+            // Empirical MIDI capture-latency: when both an echo
+            // timestamp AND a resolved track exist, measure the full
+            // browser↔server round-trip and threshold-push a
+            // `SetMidiCaptureLatency` for that track when the
+            // rolling median has moved past ~5 ms (240 samples at
+            // 48 kHz) since the last applied value. Same gate as
+            // the audio ingress path; shim's own lock keeps it
+            // frozen mid-take.
+            if let (Some(echo_ns), Some(tid)) = (echo_server_mono_ns, resolved_track.clone()) {
+                if echo_ns > 0 {
+                    let recv_mono_ns = crate::audio::monotonic_nanos();
+                    let roundtrip_ns = recv_mono_ns as i64 - echo_ns;
+                    if roundtrip_ns >= 0 {
+                        state.midi_latency.record(&tid, roundtrip_ns);
+                        if let Some(median_ms) = state.midi_latency.median_ms(&tid) {
+                            let new_samples =
+                                ((median_ms as f64 / 1000.0) * 48_000.0).max(0.0) as u32;
+                            const APPLY_THRESHOLD_SAMPLES: i32 = 240;
+                            let mut applied = state.midi_latency_last_applied.lock().await;
+                            let push = match applied.get(&tid) {
+                                None => true,
+                                Some(prev) => (new_samples as i32 - *prev as i32).abs()
+                                    >= APPLY_THRESHOLD_SAMPLES,
+                            };
+                            if push {
+                                applied.insert(tid.clone(), new_samples);
+                                drop(applied);
+                                let backend = state.backend().await;
+                                if let Err(e) = backend
+                                    .set_midi_capture_latency(tid.clone(), new_samples)
+                                    .await
+                                {
+                                    tracing::debug!(
+                                        "midi capture-latency push failed for {}: {e}",
+                                        tid.as_str()
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        "midi capture latency for {} → {new_samples} samples (median {median_ms:.1} ms)",
+                                        tid.as_str()
+                                    );
+                                    broadcast_event(
+                                        state,
+                                        Event::MidiLatencyReport {
+                                            track_id: tid.clone(),
+                                            median_ms,
+                                            samples_to_shim: new_samples,
+                                        },
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if let Err(e) = state
                 .backend()
                 .await
-                .send_midi_input(data, resolved_track)
+                .send_midi_input(data, resolved_track, echo_server_mono_ns)
                 .await
             {
                 tracing::debug!("midi_input dropped: {e}");
@@ -3510,7 +3606,7 @@ async fn dispatch_command(
 
 /// Wrap an event in an envelope (with fresh seq), cache to the ring, and
 /// broadcast to all subscribers.
-async fn broadcast_event(state: &AppState, event: Event) {
+pub(crate) async fn broadcast_event(state: &AppState, event: Event) {
     let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
     let is_snapshot = matches!(event, Event::SessionSnapshot { .. });
     let env = Envelope {
