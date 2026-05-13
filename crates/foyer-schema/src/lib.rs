@@ -29,9 +29,9 @@ pub use fs::{FsEntry, FsEntryKind, PathListing};
 pub use id::EntityId;
 pub use io::{EnginePort, IoDirection, IoPort};
 pub use message::{
-    BackendInfo, ChatMessageRecord, Command, ControlUpdate, Envelope, Event, OrphanInfo, Patch,
-    PeerInfo, PttSpeaker, RecentEntry, Seq, SessionInfo, SessionRecoveryArtifact,
-    TrackBrowserSourceEntry,
+    BackendInfo, ChatMessageRecord, Command, ConnectionRole, ControlUpdate, Envelope, Event,
+    OrphanInfo, Patch, PeerInfo, PttSpeaker, RecentEntry, Seq, SessionInfo,
+    SessionRecoveryArtifact, TrackBrowserSourceEntry,
 };
 pub use midi::{
     default_gm_drum_rows, expand_sequencer_layout, sequencer_layout_length_ticks, ArrangementSlot,

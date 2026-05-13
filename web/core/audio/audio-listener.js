@@ -86,12 +86,15 @@ const DEFAULT_AUDIO_PREFS = Object.freeze({
    */
   shimIngressRingPrimeMs: 80,
   /**
-   * Pure-fudge safety margin appended on top of the measured /
-   * estimated stop-delay components. Default 60 ms; raise on
-   * jittery networks where the median latency under-represents the
-   * 95th percentile that determines a clipped tail.
+   * User-tuned manual offset (signed, milliseconds) added on top
+   * of the empirical capture-latency measurement before the server
+   * pushes `SetIngressCaptureLatency` to the shim. Positive shifts
+   * recordings earlier on the timeline. Sits in the prefs purely
+   * so the value persists across reloads; the live value lives in
+   * the server's AppState atomic, refreshed on each session open
+   * via `Command::SetIngressManualOffsetMs`.
    */
-  recordStopSafetyMs: 60,
+  ingressManualOffsetMs: 0,
 });
 
 export function readAudioPrefs() {
@@ -266,10 +269,21 @@ export class AudioListener {
         // Feed playback delay into the audio-derived clock so the
         // displayed playhead accounts for the worklet's jitter
         // buffer + driver-reported output latency.
+        //
+        // Floor outputLatency at baseLatency: Safari (and some
+        // Firefox builds) report `outputLatency = 0` even when the
+        // actual driver path is 25–50 ms. `baseLatency` is the spec's
+        // "audio latency budget the user agent has allocated" and is
+        // a reliable lower-bound on the output side too. Without this
+        // floor, the empirical capture-offset under-corrects on
+        // those browsers by exactly the missing outputLatency.
         if (this.audioClock) {
+          const reportedOutLat = Number(this.ctx?.outputLatency) || 0;
+          const baseLat = Number(this.ctx?.baseLatency) || 0;
+          const effectiveOutLat = Math.max(reportedOutLat, baseLat);
           this.audioClock.setPlaybackDelay(
             Number(m.buffered) || 0,
-            Number(this.ctx?.outputLatency) || 0,
+            effectiveOutLat,
           );
         }
         // Emit a buffer-fill report to the sidecar's drift

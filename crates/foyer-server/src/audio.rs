@@ -137,13 +137,17 @@ pub struct AudioHub {
     /// of back-pressure tolerance before the laggiest subscriber
     /// starts seeing `Lagged` errors and has to resynchronize.
     broadcast_depth: usize,
+    /// Shared calibration state. The encode loop reads this on every
+    /// chunk to decide whether to overlay a click on outgoing PCM.
+    calibration: Arc<crate::calibration::CalibrationManager>,
 }
 
 impl AudioHub {
-    pub fn new() -> Self {
+    pub fn new(calibration: Arc<crate::calibration::CalibrationManager>) -> Self {
         Self {
             streams: Mutex::new(HashMap::new()),
             broadcast_depth: 256,
+            calibration,
         }
     }
 
@@ -221,6 +225,8 @@ impl AudioHub {
         let (tx, _) = broadcast::channel::<EncodedPacket>(self.broadcast_depth);
         let tx_for_task = tx.clone();
         let codec = format.codec;
+        let calibration_for_task = self.calibration.clone();
+        let format_for_task = format.clone();
         // Drift-correction channel — populated only when there's a
         // resampler to nudge. Bounded queue so a slow encoder
         // can't get spammed by a fast feedback loop. Bursts > 8
@@ -347,7 +353,19 @@ impl AudioHub {
                 }
                 pending.extend_from_slice(&chunk);
                 while pending.len() >= samples_per_frame {
-                    let chunk: Vec<f32> = pending.drain(..samples_per_frame).collect();
+                    let mut chunk: Vec<f32> = pending.drain(..samples_per_frame).collect();
+                    // Overlay calibration click if a run is in flight
+                    // for THIS egress stream. Uses the click's emit
+                    // timestamp as `server_mono_ns` for the packet so
+                    // ingress detection can subtract it directly.
+                    let calibration_emit_ns = calibration_for_task
+                        .maybe_overlay_egress_click(
+                            stream_id,
+                            &mut chunk,
+                            format_for_task.channels as u32,
+                            format_for_task.sample_rate,
+                            monotonic_nanos(),
+                        );
                     // Source-side diagnostic: peak + zero-crossings on
                     // channel 0 of the pre-encode buffer. Tells us
                     // what the SHIM is actually handing the server.
@@ -404,7 +422,13 @@ impl AudioHub {
                         stream_id,
                         timestamp_us: epoch_micros(),
                         transport_pos_samples: transport_anchor,
-                        server_mono_ns: monotonic_nanos(),
+                        // Calibration override: when the click-overlay
+                        // function stamped a click onto this chunk we
+                        // use that emit timestamp directly so the
+                        // ingress-side roundtrip math sees the click's
+                        // actual emit moment, not the post-encode
+                        // moment ~1ms later.
+                        server_mono_ns: calibration_emit_ns.unwrap_or_else(monotonic_nanos),
                         opus: payload,
                     };
                     let _ = tx_for_task.send(pkt);
@@ -550,7 +574,7 @@ impl AudioHub {
 
 impl Default for AudioHub {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(crate::calibration::CalibrationManager::new()))
     }
 }
 
@@ -584,7 +608,11 @@ pub fn pack_wire(packet: &EncodedPacket) -> Vec<u8> {
 /// Sidecar monotonic clock in nanoseconds since process start. Used
 /// to stamp outbound audio frames; the browser converts to its own
 /// `performance.now()` clock via the offset measured by the periodic
-/// clock-probe exchange.
+/// clock-probe exchange. The same value also rides back on ingress
+/// packet headers (as `echo_server_mono_ns`) so the server can
+/// compute round-trip latency directly via `monotonic_nanos() -
+/// echo` — both endpoints use the same epoch by virtue of being the
+/// same process.
 pub fn monotonic_nanos() -> u64 {
     use std::sync::OnceLock;
     static EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -631,7 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn hub_open_and_close() {
-        let hub = AudioHub::new();
+        let hub = AudioHub::default();
         let fmt = AudioFormat::new(48_000, 2, 128);
         let (_tx, rx) = mpsc::channel(4);
         let bcast = hub

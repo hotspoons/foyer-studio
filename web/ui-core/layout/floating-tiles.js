@@ -500,29 +500,26 @@ export class FloatingTiles extends LitElement {
             ${icon("minus", 12)}
           </button>
           ${(() => {
-            // Widget-class views with a `floatSpawn` should pop out
-            // as a foyer-window — the user wants the dialog-class
-            // window chrome (drag, resize, send-to-tile button)
-            // rather than another tile-tree leaf they'd have to
-            // float again. Native tile views (mixer / timeline)
-            // keep the dock-back-to-tree behavior.
+            // Widget-class views with a `floatSpawn` pop out as a
+            // foyer-window — the dialog-class shell (drag, resize,
+            // send-to-tile button) the user wants for plugins / track
+            // editor / piano roll / etc. Native tile-class views
+            // (mixer, timeline) shouldn't reach this chrome at all —
+            // they're tile-tree-only as of 2026-05-13, the header
+            // tear-out is disabled in tile-leaf, and LayoutStore
+            // prunes any stale floating-tile entries for them at
+            // boot — so we just skip the slot here rather than render
+            // a "Dock back into tile tree" button that was the
+            // nonsense-button Rich flagged.
             const meta = listViews().find((v) => v.id === e.view);
             const canFloatAsWindow = !!meta?.floatSpawn;
-            if (canFloatAsWindow) {
-              return html`<button
-                title="Pop out as floating window"
-                @pointerdown=${(ev) => ev.stopPropagation()}
-                @click=${() => this._popOutAsWindow(e, meta)}
-              >
-                ${icon("arrow-top-right-on-square", 12)}
-              </button>`;
-            }
+            if (!canFloatAsWindow) return null;
             return html`<button
-              title="Dock back into tile tree"
+              title="Pop out as floating window"
               @pointerdown=${(ev) => ev.stopPropagation()}
-              @click=${() => this.store.dockFloat(e.id)}
+              @click=${() => this._popOutAsWindow(e, meta)}
             >
-              ${icon("arrow-down-left-on-square", 12)}
+              ${icon("arrow-top-right-on-square", 12)}
             </button>`;
           })()}
           <button

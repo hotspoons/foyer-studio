@@ -177,6 +177,15 @@ class AudioController extends EventTarget {
   /// be un-suspended. No-op if no auto-on pref applies.
   _applyPref(isLocal) {
     if (this._on || this._starting || this._gestureHandler) return;
+    // Secondary windows of a multi-window peer can't open audio
+    // (the server gates `audio_stream_open` etc. on connection
+    // role). The "Listen on by default" pref belongs to the
+    // Primary — the spawning window — only. Bail before we hit
+    // the server with a command we KNOW will be rejected; the
+    // user would otherwise see a "secondary_window_audio" startup
+    // banner on every secondary tab they open.
+    const role = this._store?.state?.connection?.role;
+    if (role === "secondary") return;
     const rbac = this._store?.state?.rbac;
     const isTunnel = !!rbac?.isTunnel;
     let wantOn;
@@ -241,6 +250,17 @@ class AudioController extends EventTarget {
   async start({ silent = false } = {}) {
     if (this._on || this._starting) return;
     if (!this._ws) return;
+    // Same guard as `_applyPref` — block explicit clicks too, so the
+    // Listen button (when something later un-hides it on a secondary)
+    // can't fire a doomed `audio_stream_open` either. The UI should
+    // hide the affordance entirely; this is belt-and-braces.
+    const role = this._store?.state?.connection?.role;
+    if (role === "secondary") {
+      if (!silent) {
+        console.info("[audio-controller] Listen ignored on secondary window");
+      }
+      return;
+    }
     this._starting = true;
     try {
       const baseUrl = location.origin.replace(/^http/, "ws");

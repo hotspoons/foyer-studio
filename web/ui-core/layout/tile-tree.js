@@ -39,12 +39,17 @@ export function split(direction, children) {
 
 // ── lookup ───────────────────────────────────────────────────────────────
 
-/** Collect every leaf in tree-iteration order. */
+/** Collect every leaf in tree-iteration order. Returns `[]` for a
+ *  null/undefined tree — happens on a freshly-spawned Secondary
+ *  window of a multi-window peer (it boots with an empty workspace
+ *  rather than inheriting the Primary's layout). */
 export function leaves(tree) {
   const out = [];
+  if (!tree) return out;
   (function walk(n) {
+    if (!n) return;
     if (n.kind === "leaf") out.push(n);
-    else n.children.forEach(walk);
+    else if (n.children) n.children.forEach(walk);
   })(tree);
   return out;
 }
@@ -225,6 +230,92 @@ function sanitize(node) {
   return null;
 }
 
+// ── slot-based insertion ────────────────────────────────────────────────
+
+/**
+ * Insert `newLeaf` into `tree` at the position implied by `slot` (one
+ * of the slot ids from `slots.js`). Returns the new tree.
+ *
+ * The heuristic for quadrant slots (`tl`/`tr`/`bl`/`br`): find the
+ * leftmost or rightmost LEAF (depending on slot's horizontal side),
+ * column-split it, place the new leaf in the top or bottom half. For
+ * half-slots, wrap the whole tree in a single row/column split with
+ * the new leaf on the appropriate side. `center` and `full` replace
+ * the focused leaf (or the tree's first leaf when no focus); they
+ * never grow the tree.
+ *
+ * Used by tile-leaf tear-out: when the user releases on a slot
+ * landing zone, the tear-out re-enters the tile tree at that
+ * approximate position rather than becoming a free-floating tile.
+ * Without it, dragging Track Editor into the bottom-right zone
+ * produced a floating overlay instead of shrinking Timeline to
+ * accommodate it — see Rich's 2026-05-13 report.
+ */
+export function insertIntoTreeAtSlot(tree, newLeaf, slot, focusId = null) {
+  if (!tree) return newLeaf;
+
+  const wrapWithLeaf = (childOrder /* "before" | "after" */, direction) => {
+    const children = childOrder === "before" ? [newLeaf, tree] : [tree, newLeaf];
+    return split(direction, children);
+  };
+
+  // Find the leaf to split for a quadrant slot. "left" picks the
+  // first leaf in tree order; "right" picks the last. Both prefer a
+  // top-level child of the root split when the root is a row split,
+  // so the quadrant maps to the column the user clicked.
+  const _findEdgeLeaf = (side) => {
+    const ls = leaves(tree);
+    if (ls.length === 0) return null;
+    return side === "left" ? ls[0] : ls[ls.length - 1];
+  };
+
+  const _splitTargetLeafColumnwise = (target, side /* "top" | "bottom" */) => {
+    if (!target) return tree;
+    return mapNode(tree, target.id, (n) => {
+      const childOrder = side === "top" ? [newLeaf, n] : [n, newLeaf];
+      return split(DIR.COLUMN, childOrder);
+    });
+  };
+
+  switch (slot) {
+    case "left-half":
+      return wrapWithLeaf("before", DIR.ROW);
+    case "right-half":
+      return wrapWithLeaf("after", DIR.ROW);
+    case "top-half":
+      return wrapWithLeaf("before", DIR.COLUMN);
+    case "bottom-half":
+      return wrapWithLeaf("after", DIR.COLUMN);
+    case "tl":
+      return _splitTargetLeafColumnwise(_findEdgeLeaf("left"), "top");
+    case "bl":
+      return _splitTargetLeafColumnwise(_findEdgeLeaf("left"), "bottom");
+    case "tr":
+      return _splitTargetLeafColumnwise(_findEdgeLeaf("right"), "top");
+    case "br":
+      return _splitTargetLeafColumnwise(_findEdgeLeaf("right"), "bottom");
+    case "center":
+    case "full": {
+      const targetId = focusId || leaves(tree)[0]?.id;
+      if (!targetId) return newLeaf;
+      if (slot === "full") return newLeaf;
+      // Center: replace the focused leaf with the new one.
+      return mapNode(tree, targetId, () => newLeaf);
+    }
+    // Left/right-third are MVP-deferred — fall back to the
+    // corresponding half-slot so the user still gets a sensible
+    // landing (drag to a slot we don't know about lands in the
+    // half-slot equivalent).
+    case "left-third":
+      return wrapWithLeaf("before", DIR.ROW);
+    case "right-third":
+      return wrapWithLeaf("after", DIR.ROW);
+    default:
+      // Unknown slot: append as a row sibling of the root.
+      return wrapWithLeaf("after", DIR.ROW);
+  }
+}
+
 // ── default trees ────────────────────────────────────────────────────────
 
 export function defaultTree() {
@@ -236,56 +327,21 @@ export function defaultTree() {
   return split(DIR.ROW, [leaf("mixer"), leaf("timeline")]);
 }
 
+// Layout presets only compose TILE-CLASS views — currently `mixer` and
+// `timeline`. Widget-class views (plugins, console, diagnostics, MIDI
+// editor, beat sequencer, project picker, etc.) live in the widgets
+// dock + foyer-window layer, NOT in the tile tree. Earlier versions
+// of this map carried multi-pane presets that splatted `plugins` /
+// `session` / `console` into tile leaves; those rendered as
+// "missing entity" placeholders after the dock migration. Removed.
 export const PRESETS = {
   // Singletons
   mixer:    () => leaf("mixer"),
   timeline: () => leaf("timeline"),
-  plugins:  () => leaf("plugins"),
-  session:  () => leaf("session"),
-  console:  () => leaf("console"),
-  diagnostics: () => leaf("diagnostics"),
 
-  // Two-pane arrangements — any combination of main surfaces can live together.
-  "timeline-over-mixer":         () => split(DIR.COLUMN, [leaf("timeline"), leaf("mixer")]),
-  "mixer-over-timeline":         () => split(DIR.COLUMN, [leaf("mixer"), leaf("timeline")]),
-  "timeline-left-mixer-right":   () => split(DIR.ROW,    [leaf("timeline"), leaf("mixer")]),
-  "mixer-left-timeline-right":   () => split(DIR.ROW,    [leaf("mixer"), leaf("timeline")]),
-  "plugins-left-mixer-right":    () => split(DIR.ROW,    [leaf("plugins"), leaf("mixer")]),
-  "mixer-left-plugins-right":    () => split(DIR.ROW,    [leaf("mixer"), leaf("plugins")]),
-  "session-left-timeline-right": () => split(DIR.ROW,    [leaf("session"), leaf("timeline")]),
-
-  // Three-column layout: session is a narrow left rail (1/6), timeline and
-  // mixer each take 5/12 of the width. All three are full-height so nothing
-  // is ever vertically cropped — the mental model is "file browser + two
-  // equal work surfaces" which is the common DAW shape.
-  "session+timeline+mixer": () => ({
-    ...split(DIR.ROW, [leaf("session"), leaf("timeline"), leaf("mixer")]),
-    ratios: [1/6, 5/12, 5/12],
-  }),
-  // Older stacked shape kept under a second id for anyone who prefers the
-  // session-rail + timeline-over-mixer arrangement.
-  "session+timeline-over-mixer": () => split(DIR.ROW, [
-    leaf("session"),
-    split(DIR.COLUMN, [leaf("timeline"), leaf("mixer")]),
-  ]),
-
-  // Everything at once.
-  everything: () => split(DIR.COLUMN, [
-    split(DIR.ROW, [leaf("session"), leaf("plugins")]),
-    split(DIR.ROW, [leaf("timeline"), leaf("mixer")]),
-  ]),
-
-  // PLAN 139 — a tall left pane and two stacked right panes at half
-  // height each. The default placement puts timeline on the left
-  // (the "long view" of the session) with mixer and plugins stacked
-  // on the right (the work surfaces). It's a one-hand-on-keyboard /
-  // one-hand-on-mouse layout: keep the playhead moving on the left
-  // while you tweak channels + plugins on the right.
-  "timeline-left-mixer-over-plugins": () => ({
-    ...split(DIR.ROW, [
-      leaf("timeline"),
-      split(DIR.COLUMN, [leaf("mixer"), leaf("plugins")]),
-    ]),
-    ratios: [0.5, 0.5],
-  }),
+  // Two-pane arrangements.
+  "timeline-over-mixer":       () => split(DIR.COLUMN, [leaf("timeline"), leaf("mixer")]),
+  "mixer-over-timeline":       () => split(DIR.COLUMN, [leaf("mixer"), leaf("timeline")]),
+  "timeline-left-mixer-right": () => split(DIR.ROW,    [leaf("timeline"), leaf("mixer")]),
+  "mixer-left-timeline-right": () => split(DIR.ROW,    [leaf("mixer"), leaf("timeline")]),
 };

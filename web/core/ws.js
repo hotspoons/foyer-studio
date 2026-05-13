@@ -135,6 +135,15 @@ export class FoyerWs extends EventTarget {
     if (arr.length === 0 || arr.length > 3) return false;
     const body = { type: "midi_input", data: arr };
     if (trackId) body.track_id = trackId;
+    // Mirror the audio ingress echo: stamp with the source-clock ns
+    // of what the user is HEARING from the speakers right now. Shim
+    // (via the sidecar) subtracts this from its own monotonic clock
+    // to measure round-trip and drive `_capture_offset` on the
+    // per-track MIDI ingress port.
+    const speakerNs = globalThis.__foyer?.audioClock?.currentSpeakerSentinelNs?.();
+    if (Number.isFinite(speakerNs) && speakerNs > 0) {
+      body.echo_server_mono_ns = speakerNs;
+    }
     const env = {
       schema: [0, 1],
       seq: 0,
@@ -167,9 +176,20 @@ export class FoyerWs extends EventTarget {
     // so tunnel guests authenticate automatically after clicking a
     // share link. LAN users never have a token in their URL, so this
     // is a harmless no-op for them.
-    const pageToken = typeof window !== "undefined"
-      ? new URLSearchParams(window.location.search).get("token")
-      : null;
+    //
+    // `?parent=<peer_id>` rides the same channel: when this page was
+    // opened as a secondary window by an existing Foyer tab
+    // (`window.open("/?parent=<my-peer-id>", ...)` via
+    // `multi-window.js`), the server treats this WS connection as a
+    // child of the named peer and shares its `peer_id` /
+    // `PeerAudioPrefs` / track-source assignments. Falls through to a
+    // fresh `Primary` if the parent is gone (the user closed it or
+    // the server restarted).
+    const pageQuery = typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search)
+      : new URLSearchParams();
+    const pageToken = pageQuery.get("token");
+    const pageParent = pageQuery.get("parent");
     const url =
       this.url +
       sep +
@@ -177,6 +197,7 @@ export class FoyerWs extends EventTarget {
         origin: this.origin,
         ...(this._lastSeq > 0 ? { since: String(this._lastSeq) } : {}),
         ...(pageToken ? { token: pageToken } : {}),
+        ...(pageParent ? { parent: pageParent } : {}),
       }).toString();
 
     const ws = new WebSocket(url);

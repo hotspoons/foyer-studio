@@ -303,6 +303,14 @@ export class FoyerApp extends LitElement {
       windowIndex: this.windowIndex,
     });
 
+    // Wire the receiver side of pane handoff between sibling windows.
+    // Has to happen AFTER `window.__foyer.layout` is set above —
+    // pane-handoff resolves layout lazily through that global so
+    // ui-core never has to import from ui-full.
+    import("foyer-ui-core/layout/pane-handoff.js")
+      .then((m) => m.attachPaneHandoff())
+      .catch((err) => console.warn("[app] pane-handoff attach failed", err));
+
     // The master-bus audio listener is now attached by foyer-core's
     // bootstrap so the phone variant gets it too. Re-calling
     // `audioController.attach` here would just rebind handlers that

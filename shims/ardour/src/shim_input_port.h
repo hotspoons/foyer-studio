@@ -88,14 +88,20 @@ public:
 	void stop ();
 
 	/// Declare the capture-side latency for this port. `samples` is
-	/// what the BROWSER measured — its own capture buffer + WS
-	/// one-way. The shim adds its own internal contribution
-	/// (`PRIME_THRESHOLD_MS` ring depth + one engine cycle, read
-	/// live from `AudioEngine`) before writing to the port's
-	/// private latency range. This means the same code shifts
-	/// records correctly on both the in-process dummy backend
-	/// (large cycle, no JACK) and JACK setups (any buffer size)
-	/// without any pref tuning per environment.
+	/// the EMPIRICAL browser↔server round-trip measured by the
+	/// sidecar from the ingress packet's echo header. The shim adds
+	/// its own internal contribution (`PRIME_THRESHOLD_MS` ring
+	/// depth + one engine cycle, read live from `AudioEngine`)
+	/// before writing to the port's private latency range. Same
+	/// code adapts to in-process dummy backend (large cycle, no
+	/// JACK) and JACK setups (any buffer size) without per-env
+	/// tuning.
+	///
+	/// While the global capture-latency lock is engaged (set by
+	/// `SignalBridge::on_record_state_changed` for the duration of
+	/// an active recording), calls are silently dropped — the port
+	/// keeps whatever value was last applied so `_capture_offset`
+	/// doesn't shift mid-take.
 	///
 	/// Caller is responsible for triggering
 	/// `AudioEngine::latency_callback(false)` so the new value
@@ -103,9 +109,18 @@ public:
 	/// otherwise it lands on the next port-change recompute.
 	void set_capture_latency (std::uint32_t samples);
 
-	/// Last `total` (browser-reported + shim-internal) value passed
+	/// Last `total` (server-empirical + shim-internal) value passed
 	/// to `set_capture_latency`. Surfaced for diagnostics.
 	std::uint32_t capture_latency_samples () const { return _capture_latency_samples; }
+
+	/// Engage/release the global capture-latency lock. While
+	/// engaged, every `ShimInputPort::set_capture_latency` call is
+	/// a no-op. Called from `SignalBridge::on_record_state_changed`
+	/// with `actively_recording()`. The lock is global rather than
+	/// per-port because the trigger (transport recording state) is
+	/// a session-level fact — every record-armed track shares it.
+	static void set_capture_latency_lock (bool locked);
+	static bool capture_latency_locked ();
 
 	// ─── RT-safe ingress registry ────────────────────────────────────
 	//

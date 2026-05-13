@@ -3,7 +3,8 @@
 
 import * as Tree from "./tile-tree.js";
 import { slotBounds } from "./slots.js";
-import { sessionScope } from "foyer-core/session-scope.js";
+import { sessionScope, windowSlot } from "foyer-core/session-scope.js";
+import { listViews } from "foyer-core/registry/views.js";
 
 /**
  * Sane first-open slot defaults per view, borrowed from pro-DAW
@@ -37,19 +38,33 @@ const DEFAULT_STICKY_SLOT = {
 // session-scoped — opening a different .ardour project no longer
 // inherits the previous project's tile composition (which might
 // reference per-session entities like a track editor pinned to a
-// trackId that doesn't exist here). The bare key is used as the
-// default for the launcher (no session loaded yet) and as a one-time
-// fallback when a freshly-loaded session has nothing recorded — so
-// existing users don't lose their layout the first time they switch
-// projects after this change ships.
+// trackId that doesn't exist here). As of 2026-05-12 the key also
+// carries a window slot suffix when running as one of multiple
+// windows for the same logical user, so the mixer-pinned window and
+// the timeline-pinned window keep separate tile trees. Slot "0"
+// (the Primary / single-window default) keeps the historical key
+// shape so existing users don't lose their layout. The bare key is
+// used as the default for the launcher (no session loaded yet) and
+// as a one-time fallback when a freshly-loaded session has nothing
+// recorded.
 const CUR_KEY_BASE = "foyer.layout.current.v1";
 function curKey() {
   const scope = sessionScope();
-  return scope === "default" ? CUR_KEY_BASE : `${CUR_KEY_BASE}@${scope}`;
+  const slot = windowSlot();
+  const base = scope === "default" ? CUR_KEY_BASE : `${CUR_KEY_BASE}@${scope}`;
+  return slot === "0" ? base : `${base}#slot=${slot}`;
 }
 const NAMED_KEY = "foyer.layout.named.v1";
 const FOCUS_KEY = "foyer.layout.focus.v1";
-const FLOAT_KEY = "foyer.layout.floating.v1";
+const FLOAT_KEY_BASE = "foyer.layout.floating.v1";
+// Float list, plugin-float list, and focus are slot-scoped same as
+// the tile tree so two windows of one logical user have independent
+// open-widget rosters. Slot "0" keeps the bare key for cache compat
+// with single-window installs.
+function floatKey() {
+  const slot = windowSlot();
+  return slot === "0" ? FLOAT_KEY_BASE : `${FLOAT_KEY_BASE}#slot=${slot}`;
+}
 const FAB_DOCK_KEY = "foyer.layout.dockedFabs.v1";
 // Set of FAB ids whose dock state has been explicitly decided —
 // either by a `defaultDocked` register (first-ever) or by a user
@@ -94,14 +109,27 @@ function _identityKey(view, props) {
 export class LayoutStore extends EventTarget {
   constructor() {
     super();
-    // Read the session-scoped tile tree, falling back to the
-    // pre-scoping global key on miss (one-time migration for users
-    // upgrading from before 2026-05-07; subsequent edits write to the
-    // scoped key so each project keeps its own composition).
-    this.tree =
-      Tree.deserialize(this._read(curKey())) ||
-      Tree.deserialize(this._read(CUR_KEY_BASE)) ||
-      Tree.defaultTree();
+    // Read the session-scoped tile tree. The "fall back to the pre-
+    // scoping global key" migration only applies to the Primary
+    // (slot 0) — a freshly-spawned Secondary window should boot
+    // empty, not inherit the Primary's composition, otherwise
+    // popping out a second window means looking at two copies of
+    // mixer + timeline until the user manually rearranges.
+    // `Tree.defaultTree()` (the mixer+timeline split) only kicks in
+    // for the Primary on a brand-new install, also.
+    const slot = windowSlot();
+    const isPrimary = slot === "0";
+    if (isPrimary) {
+      this.tree =
+        Tree.deserialize(this._read(curKey())) ||
+        Tree.deserialize(this._read(CUR_KEY_BASE)) ||
+        Tree.defaultTree();
+    } else {
+      // Secondary: only the slot-specific saved layout. Empty on
+      // first boot (placeholder UI takes over until the user adds
+      // something).
+      this.tree = Tree.deserialize(this._read(curKey()));
+    }
     this.focusId = this._read(FOCUS_KEY) || Tree.leaves(this.tree)[0]?.id || null;
     // Re-hydrate when the active session changes (project switch /
     // first snapshot landing). Without this the user-facing tree
@@ -122,7 +150,7 @@ export class LayoutStore extends EventTarget {
       catch { return {}; }
     })();
     this._floating = (() => {
-      try { return JSON.parse(localStorage.getItem(FLOAT_KEY) || "[]") || []; }
+      try { return JSON.parse(localStorage.getItem(floatKey()) || "[]") || []; }
       catch { return []; }
     })();
     // Migration: floats persisted before the kind discriminator existed
@@ -143,7 +171,19 @@ export class LayoutStore extends EventTarget {
     // render with the OLD tile-class chrome (slot tag, dock-back,
     // duplicate title) alongside the new foyer-window when the user
     // re-opens.
+    //
+    // Native tile views (mixer, timeline — no `floatSpawn` registered)
+    // also get pruned out of `_floating`: as of 2026-05-13 they're
+    // tile-tree-only and cannot be torn out. Anyone with stale
+    // entries from an earlier build would otherwise see a duplicate
+    // floating mixer/timeline carrying the "Dock back into tile tree"
+    // button — exactly the nonsense-button issue Rich flagged. The
+    // canonical tree-side leaf survives untouched.
     const STALE_VIEWS = new Set(["console", "diagnostics"]);
+    const _views = listViews();
+    for (const v of _views) {
+      if (!v.floatSpawn) STALE_VIEWS.add(v.id);
+    }
     this._floating = this._floating.filter((f) => !STALE_VIEWS.has(f.view));
     // Plugin floats also migrated to <foyer-window> (frosted shell,
     // shared dock-list, persistence via `foyer.windows.open.v1`). The
@@ -272,7 +312,7 @@ export class LayoutStore extends EventTarget {
       localStorage.setItem(curKey(), Tree.serialize(this.tree));
       if (this.focusId) localStorage.setItem(FOCUS_KEY, this.focusId);
       localStorage.setItem(NAMED_KEY, JSON.stringify(this.named));
-      localStorage.setItem(FLOAT_KEY, JSON.stringify(this._floating));
+      localStorage.setItem(floatKey(), JSON.stringify(this._floating));
       localStorage.setItem(FAB_DOCK_KEY, JSON.stringify(this._dockedFabs));
       localStorage.setItem(FAB_SEEN_KEY, JSON.stringify([...this._dockSeen]));
       localStorage.setItem(PLUGIN_FLOAT_KEY, JSON.stringify(this._pluginFloats));

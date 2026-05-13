@@ -60,16 +60,18 @@ pub trait BackendProfile: Send + Sync + 'static {
     /// Probe `project_path` for crash-recovery artifacts the user
     /// would lose if the project opened without intervention. Default
     /// returns empty (no recovery model). Ardour overrides to look
-    /// for `.history` / `.pending` / legacy `.bak.<stamp>` siblings.
+    /// for live `.pending` files (uncommitted dirty state from a
+    /// crashed run).
     fn probe_recovery(&self, _project_path: &Path) -> Vec<SessionRecoveryArtifact> {
         Vec::new()
     }
 
-    /// Sweep recovery artifacts out of the way before launch.
-    /// Returns the number of files moved. Default: 0. Backends with
-    /// a recovery model implement this to avoid the DAW's native
-    /// recovery modal — see Ardour's `.foyer-crash-archive/` sweep.
-    fn archive_recovery(&self, _project_path: &Path) -> usize {
+    /// Delete the recovery artifacts the user chose to discard.
+    /// Returns the count removed. Default: 0. Ardour deletes
+    /// `.pending` so the native recovery dialog never opens; the
+    /// Recover branch is handled in-shim by `FOYER_CRASH_RECOVERY=recover`
+    /// rather than here.
+    fn discard_recovery(&self, _project_path: &Path) -> usize {
         0
     }
 
@@ -205,8 +207,8 @@ impl BackendProfile for ArdourProfile {
         session_recovery::probe(project_path)
     }
 
-    fn archive_recovery(&self, project_path: &Path) -> usize {
-        session_recovery::archive(project_path)
+    fn discard_recovery(&self, project_path: &Path) -> usize {
+        session_recovery::discard_pending(project_path)
     }
 
     fn scrub_project(&self, project_root: &Path) -> Result<ScrubReport, ScrubError> {
@@ -287,16 +289,29 @@ mod tests {
         let p = StubProfile;
         assert!(p.session_file_extensions().is_empty());
         assert!(p.probe_recovery(Path::new("/nonexistent")).is_empty());
-        assert_eq!(p.archive_recovery(Path::new("/nonexistent")), 0);
+        assert_eq!(p.discard_recovery(Path::new("/nonexistent")), 0);
     }
 
     #[test]
-    fn ardour_profile_finds_recovery_artifacts() {
+    fn ardour_profile_finds_pending_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("X.ardour"), b"<a/>").unwrap();
-        std::fs::write(dir.path().join("X.history"), b"hh").unwrap();
+        std::fs::write(dir.path().join("X.pending"), b"pp").unwrap();
         let p = ArdourProfile;
         let found = p.probe_recovery(&dir.path().join("X.ardour"));
         assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, "pending");
+    }
+
+    #[test]
+    fn ardour_profile_discards_pending_preserves_history() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("X.ardour"), b"<a/>").unwrap();
+        std::fs::write(dir.path().join("X.history"), b"hh").unwrap();
+        std::fs::write(dir.path().join("X.pending"), b"pp").unwrap();
+        let p = ArdourProfile;
+        assert_eq!(p.discard_recovery(&dir.path().join("X.ardour")), 1);
+        assert!(!dir.path().join("X.pending").exists());
+        assert!(dir.path().join("X.history").exists());
     }
 }

@@ -41,7 +41,29 @@ using namespace ARDOUR;
 // down before the last port's destructor runs.
 namespace {
 std::array<std::atomic<ShimInputPort*>, ShimInputPort::MAX_SLOTS> g_ingress_slots {};
+
+// Global lock — engaged while transport is actively recording so
+// `_capture_offset` doesn't shift mid-take. Set by SignalBridge from
+// `RecordStateChanged`. Loaded inside `set_capture_latency` as the
+// first thing before any per-port work; a relaxed atomic is enough
+// because the worst-case race (lock flips false→true between our
+// load and our write) just means one stale value sneaks in at the
+// instant recording engages, which is below the threshold the
+// server's apply gate already filters.
+std::atomic<bool> g_capture_latency_locked { false };
 } // namespace
+
+void
+ShimInputPort::set_capture_latency_lock (bool locked)
+{
+	g_capture_latency_locked.store (locked, std::memory_order_relaxed);
+}
+
+bool
+ShimInputPort::capture_latency_locked ()
+{
+	return g_capture_latency_locked.load (std::memory_order_relaxed);
+}
 
 int
 ShimInputPort::register_in_registry ()
@@ -160,12 +182,15 @@ void
 ShimInputPort::set_capture_latency (std::uint32_t samples)
 {
 	if (!_port) return;
-	// Layer the shim-internal contribution on top of what the
-	// browser reported. The browser only knows about its own
-	// pipeline (capture buffer + WS one-way); it can't measure
-	// the engine-side hops, and the static `recordStopBackendMs`
-	// pref was a coarse fudge that drifted on every engine config
-	// change. The shim is the only thing that actually knows:
+	if (g_capture_latency_locked.load (std::memory_order_relaxed)) {
+		// Recording in progress; refuse to shift `_capture_offset`
+		// until the take wraps. The server will keep feeding fresh
+		// medians; we just don't act on them until unlocked.
+		return;
+	}
+	// Layer the shim-internal contribution on top of the empirical
+	// browser↔server round-trip the sidecar measured for us. The
+	// sidecar can't know:
 	//
 	//   * `_prime_ms` worth of ring depth — sits between
 	//     `push_audio` (IPC thread) and `tick_rt` (RT thread),

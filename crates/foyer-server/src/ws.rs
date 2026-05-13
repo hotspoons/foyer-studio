@@ -14,8 +14,16 @@
 //! - `origin=<string>` — free-form identifier attached to messages originated by this
 //!   client; shows up in `control.update` echoes so clients can detect self-echoes.
 //!   Honored only on LAN connections. On tunnel connections the server overrides
-//!   it with the per-connection `peer_id` so a guest can't spoof another peer's
-//!   origin label.
+//!   it with the per-connection `connection_id` so a guest can't spoof another
+//!   peer's origin label, and so multi-window peers can self-echo-filter at
+//!   connection granularity (sibling windows see each other's control updates).
+//! - `parent=<peer_id>` — multi-window opt-in. When set AND the named peer
+//!   exists AND auth matches (same `role_id`/`recipient` or both LAN), this
+//!   connection joins the existing logical peer as a `Secondary` window — it
+//!   shares the parent's `peer_id`, `PeerAudioPrefs`, source-user
+//!   assignments, MIDI ownership, etc. Audio ingress/egress is rejected on
+//!   secondaries. Invalid parent (gone, auth mismatch) → falls back to a
+//!   fresh `Primary` connection with a freshly-minted `peer_id`.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -72,6 +80,7 @@ pub(crate) async fn upgrade(
     let since: Option<u64> = params.get("since").and_then(|s| s.parse().ok());
     let origin = params.get("origin").cloned();
     let token = params.get("token").cloned();
+    let parent_peer_id = params.get("parent").cloned().filter(|s| !s.is_empty());
     let is_tunnel = tunnel_origin.is_some();
 
     // Resolve the per-connection role before the upgrade completes.
@@ -86,7 +95,7 @@ pub(crate) async fn upgrade(
         ConnectionAuth::Lan
     };
 
-    ws.on_upgrade(move |sock| handle(sock, state, since, origin, peer, auth))
+    ws.on_upgrade(move |sock| handle(sock, state, since, origin, peer, auth, parent_peer_id))
 }
 
 /// Per-connection authentication state. Drives the RBAC gate in
@@ -215,6 +224,7 @@ async fn handle(
     origin: Option<String>,
     peer: SocketAddr,
     auth: ConnectionAuth,
+    parent_peer_id: Option<String>,
 ) {
     let (mut tx_ws, mut rx_ws) = sock.split();
     let mut rx_broadcast = state.tx.subscribe();
@@ -226,14 +236,57 @@ async fn handle(
     // phone or another machine on the LAN.
     let is_local = is_local_addr(&peer);
 
-    // Mint a stable per-connection id — used in the greeting so the
-    // client can filter itself out of the peer list, and in every
-    // PeerJoined / PeerLeft broadcast.
-    let peer_id = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = uuid::Uuid::new_v4().simple().to_string();
     let connection_role_id = match &auth {
         ConnectionAuth::Authenticated { role_id, .. } => Some(role_id.clone()),
         _ => None,
     };
+    let connection_recipient = match &auth {
+        ConnectionAuth::Authenticated { recipient, .. } => Some(recipient.clone()),
+        _ => None,
+    };
+
+    // Multi-window join: if `?parent=<peer_id>` was supplied AND the
+    // parent peer exists AND its auth matches ours (same tunnel
+    // role+recipient, or both LAN), reuse the parent's peer_id and
+    // attach as a Secondary. Otherwise mint a fresh peer_id and run
+    // as Primary. Auth mismatch silently falls back rather than
+    // rejecting the connection — that way an outdated localStorage
+    // hint can't strand the user.
+    let (peer_id, connection_role) = {
+        let mut peer_id = None;
+        if let Some(ref pid) = parent_peer_id {
+            let peers = state.peers.read().await;
+            if let Some(parent) = peers.get(pid) {
+                let parent_matches = parent.is_local == is_local
+                    && parent.is_tunnel == auth.is_tunnel()
+                    && parent.role_id == connection_role_id;
+                // For tunnel guests we also require the recipient
+                // (invite email) to match — otherwise a guest with
+                // the same role could hijack another guest's window
+                // family by guessing their peer_id.
+                let recipient_ok = if auth.is_tunnel() {
+                    match (&parent.label, &connection_recipient) {
+                        (label, Some(r)) => label == r,
+                        _ => false,
+                    }
+                } else {
+                    true
+                };
+                if parent_matches && recipient_ok {
+                    peer_id = Some(pid.clone());
+                }
+            }
+        }
+        match peer_id {
+            Some(pid) => (pid, foyer_schema::ConnectionRole::Secondary),
+            None => (
+                uuid::Uuid::new_v4().simple().to_string(),
+                foyer_schema::ConnectionRole::Primary,
+            ),
+        }
+    };
+
     let peer_label = match &auth {
         ConnectionAuth::Authenticated { recipient, .. } => recipient.clone(),
         _ => {
@@ -244,24 +297,17 @@ async fn handle(
             }
         }
     };
-    let peer_info = foyer_schema::PeerInfo {
-        id: peer_id.clone(),
-        label: peer_label,
-        remote_addr: peer.to_string(),
-        is_local,
-        is_tunnel: auth.is_tunnel(),
-        role_id: connection_role_id.clone(),
-        connected_at: now_ms(),
-    };
 
     // Origin label propagated into every ControlUpdate this connection
     // emits. On LAN we trust the user-supplied `?origin=` query param;
     // on tunnel connections we replace it with the server-minted
-    // `peer_id` so a guest can't pretend to be the host (or another
-    // guest) in the audit trail. Self-echo detection still works
-    // because every client knows its own peer_id from the greeting.
+    // `connection_id` (not `peer_id`!) so a guest can't pretend to be
+    // another peer in the audit trail AND so sibling windows of the
+    // same logical user can self-echo-filter at connection granularity
+    // (otherwise window A's controlSet would look like a self-echo to
+    // window B because they share peer_id).
     let origin = if auth.is_tunnel() {
-        Some(format!("peer:{peer_id}"))
+        Some(format!("conn:{connection_id}"))
     } else {
         origin
     };
@@ -306,6 +352,8 @@ async fn handle(
                 role_allow,
                 recipient,
                 peer_id: peer_id.clone(),
+                connection_id: connection_id.clone(),
+                connection_role,
                 // Capability snapshot — whatever the active backend
                 // implementation says it supports. Mirrored on the
                 // client into foyer-core's feature registry so the
@@ -366,16 +414,48 @@ async fn handle(
         let _ = send_env(&mut tx_ws, &env).await;
     }
 
-    // Register + broadcast PeerJoined. Every client (including the one
-    // that just connected) receives the join through the broadcast
-    // channel; the new client filters its own entry via `peer_id` from
-    // the greeting.
-    state
-        .peers
-        .write()
-        .await
-        .insert(peer_id.clone(), peer_info.clone());
-    {
+    // Register the connection-level row first so command dispatch
+    // can resolve `connection_id → ConnectionRole` (audio gate) the
+    // moment we yield to the reader task.
+    state.connections.write().await.insert(
+        connection_id.clone(),
+        crate::ConnectionMeta {
+            peer_id: peer_id.clone(),
+            role: connection_role,
+        },
+    );
+
+    // Register the logical-peer row. For a Secondary connection
+    // (existing peer_id), we bump `connection_count` and skip the
+    // PeerJoined broadcast — other clients shouldn't see a "new peer"
+    // for every window the host opens. Only the 0→1 transition fires
+    // PeerJoined; subsequent windows are invisible to other peers'
+    // rosters (modulo `connection_count`, which is just metadata).
+    let (peer_info, is_first_connection) = {
+        let mut peers = state.peers.write().await;
+        match peers.get_mut(&peer_id) {
+            Some(existing) => {
+                existing.connection_count = existing.connection_count.saturating_add(1);
+                (existing.clone(), false)
+            }
+            None => {
+                let info = foyer_schema::PeerInfo {
+                    id: peer_id.clone(),
+                    label: peer_label,
+                    remote_addr: peer.to_string(),
+                    is_local,
+                    is_tunnel: auth.is_tunnel(),
+                    role_id: connection_role_id.clone(),
+                    connected_at: now_ms(),
+                    connection_count: 1,
+                };
+                peers.insert(peer_id.clone(), info.clone());
+                (info, true)
+            }
+        }
+    };
+
+    if is_first_connection {
         let env = Envelope {
             schema: SCHEMA_VERSION,
             api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
@@ -463,6 +543,7 @@ async fn handle(
     let reader_auth = auth.clone();
     let reader_peer_id = peer_id.clone();
     let reader_peer_label = peer_info.label.clone();
+    let reader_connection_role = connection_role;
     let reader = tokio::spawn(async move {
         while let Some(frame) = rx_ws.next().await {
             let Ok(msg) = frame else { break };
@@ -474,6 +555,7 @@ async fn handle(
                         &reader_auth,
                         &reader_peer_id,
                         &reader_peer_label,
+                        reader_connection_role,
                         &t,
                     )
                     .await
@@ -561,28 +643,51 @@ async fn handle(
 
     reader.abort();
 
-    // Remove from the peer roster + broadcast PeerLeft so everyone
-    // else's status bar prunes us.
-    state.peers.write().await.remove(&peer_id);
-    let env = Envelope {
-        schema: SCHEMA_VERSION,
-        api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
-        seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
-        origin: Some("server".into()),
-        session_id: None,
-        body: Event::PeerLeft {
-            peer_id: peer_id.clone(),
-        },
+    // Drop the connection-level row first. If this was the last
+    // window for the logical peer, fall through to PeerLeft +
+    // routing cleanup; otherwise the peer is still around (one of
+    // their other windows is open) and we leave shared state alone.
+    state.connections.write().await.remove(&connection_id);
+
+    let last_connection = {
+        let mut peers = state.peers.write().await;
+        match peers.get_mut(&peer_id) {
+            Some(info) => {
+                info.connection_count = info.connection_count.saturating_sub(1);
+                if info.connection_count == 0 {
+                    peers.remove(&peer_id);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => true,
+        }
     };
-    let _ = state.tx.send(env);
-    // A host-selected "browser source = this peer" assignment stops
-    // making sense the moment the peer leaves — drop those entries
-    // and notify everyone so the track editor's selector flips back
-    // to "off" for the relevant tracks.
-    clear_track_sources_for_peer(&state, &peer_id).await;
-    // Also release any PTT hold held by this peer (leaving mid-speech
-    // should free the slot).
-    crate::chat::handle_ptt_stop(&state, &peer_id).await;
+
+    if last_connection {
+        let env = Envelope {
+            schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            session_id: None,
+            body: Event::PeerLeft {
+                peer_id: peer_id.clone(),
+            },
+        };
+        let _ = state.tx.send(env);
+        // A host-selected "browser source = this peer" assignment stops
+        // making sense the moment the peer leaves — drop those entries
+        // and notify everyone so the track editor's selector flips back
+        // to "off" for the relevant tracks. Skipped when only one
+        // window of a multi-window peer closed: the logical user is
+        // still here, just with one less monitor.
+        clear_track_sources_for_peer(&state, &peer_id).await;
+        // Also release any PTT hold held by this peer (leaving mid-speech
+        // should free the slot).
+        crate::chat::handle_ptt_stop(&state, &peer_id).await;
+    }
 }
 
 fn now_ms() -> u64 {
@@ -676,6 +781,11 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::RequestIngressLatency { .. } => "request_ingress_latency",
         Command::SetIngressCaptureLatency { .. } => "set_ingress_capture_latency",
         Command::SetIngressRingPrimeMs { .. } => "set_ingress_ring_prime_ms",
+        Command::SetMidiCaptureLatency { .. } => "set_midi_capture_latency",
+        Command::SetFakeLatency { .. } => "set_fake_latency",
+        Command::SetIngressManualOffsetMs { .. } => "set_ingress_manual_offset_ms",
+        Command::StartIngressCalibration { .. } => "start_ingress_calibration",
+        Command::StopIngressCalibration { .. } => "stop_ingress_calibration",
         Command::UndoGroupBegin { .. } => "undo_group_begin",
         Command::UndoGroupEnd => "undo_group_end",
         Command::ControlSet { .. } => "control_set",
@@ -824,9 +934,46 @@ async fn dispatch_command(
     auth: &ConnectionAuth,
     peer_id: &str,
     peer_label: &str,
+    connection_role: foyer_schema::ConnectionRole,
     text: &str,
 ) -> Result<(), DispatchError> {
     let env: Envelope<Command> = serde_json::from_str(text).map_err(DispatchError::Parse)?;
+
+    // ─── Audio-role gate ─────────────────────────────────────────────
+    // Audio ingress/egress and the related WebRTC handshake belong to
+    // the spawning (`Primary`) window. Secondary windows of a multi-
+    // window peer are control-plane only — the browser security model
+    // forbids moving AudioContext / MediaStream between windows, and
+    // even if it didn't, every window opening its own mic would
+    // duplicate the audio path. Reject loudly so the secondary's UI
+    // can degrade gracefully rather than silently produce dead air.
+    if matches!(connection_role, foyer_schema::ConnectionRole::Secondary) {
+        let blocked = matches!(
+            env.body,
+            Command::AudioIngressOpen { .. }
+                | Command::AudioIngressClose { .. }
+                | Command::AudioEgressStart { .. }
+                | Command::AudioEgressStop { .. }
+                | Command::AudioStreamOpen { .. }
+                | Command::AudioStreamClose { .. }
+                | Command::AudioSdpAnswer { .. }
+                | Command::AudioIceCandidate { .. }
+        );
+        if blocked {
+            let tag = command_tag(&env.body);
+            broadcast_event(
+                state,
+                Event::Error {
+                    code: "secondary_window_audio".into(),
+                    message: format!(
+                        "audio command '{tag}' rejected: this is a secondary window — open it on the spawning window instead"
+                    ),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+    }
 
     // ─── RBAC gate ───────────────────────────────────────────────────
     // LAN connections pass through. Tunnel connections without a valid
@@ -1055,6 +1202,82 @@ async fn dispatch_command(
         Command::SetIngressRingPrimeMs { ms } => {
             if let Err(e) = state.backend().await.set_ingress_ring_prime_ms(ms).await {
                 tracing::debug!("set_ingress_ring_prime_ms forwarding failed: {e}");
+            }
+        }
+        Command::SetMidiCaptureLatency { track_id, samples } => {
+            // Normally emitted server-internally from the MidiInput
+            // handler when the per-track median moves; exposing the
+            // dispatch arm lets tooling poke at the value directly
+            // (parity with SetIngressCaptureLatency above).
+            if let Err(e) = state
+                .backend()
+                .await
+                .set_midi_capture_latency(track_id, samples)
+                .await
+            {
+                tracing::debug!("set_midi_capture_latency forwarding failed: {e}");
+            }
+        }
+        Command::SetFakeLatency { ingress_ms, egress_ms } => {
+            if let Some(v) = ingress_ms {
+                state
+                    .fake_ingress_latency_ms
+                    .store(v, Ordering::Relaxed);
+                tracing::info!("fake ingress latency set to {v} ms");
+            }
+            if let Some(v) = egress_ms {
+                state
+                    .fake_egress_latency_ms
+                    .store(v, Ordering::Relaxed);
+                tracing::info!("fake egress latency set to {v} ms");
+            }
+        }
+        Command::SetIngressManualOffsetMs { ms } => {
+            // Per-peer: a different client setting their offset
+            // doesn't affect anyone else. The Arc is shared with
+            // any IngressSink already opened by this peer so the
+            // change is observed on the next ingress packet.
+            let prefs = state.peer_prefs_for(peer_id).await;
+            prefs
+                .ingress_manual_offset_ms
+                .store(ms, Ordering::Relaxed);
+            tracing::info!("ingress manual offset for peer {peer_id} set to {ms} ms");
+        }
+        Command::StartIngressCalibration {
+            egress_stream_id,
+            ingress_stream_id,
+            clicks,
+        } => {
+            let sr = state.backend().await.sample_rate();
+            let target = state.calibration.start_run(
+                egress_stream_id,
+                ingress_stream_id,
+                sr,
+                clicks,
+            );
+            tracing::info!(
+                "calibration start: egress={egress_stream_id} ingress={ingress_stream_id} clicks={target}"
+            );
+        }
+        Command::StopIngressCalibration { egress_stream_id } => {
+            if let Some(result) = state.calibration.stop_run(egress_stream_id) {
+                tracing::info!(
+                    "calibration stop: kept {}/{} median {:.1} ms",
+                    result.samples_kept,
+                    result.samples_requested,
+                    result.median_ms
+                );
+                broadcast_event(
+                    state,
+                    Event::CalibrationResult {
+                        stream_id: result.stream_id,
+                        median_ms: result.median_ms,
+                        samples_kept: result.samples_kept,
+                        samples_requested: result.samples_requested,
+                        suggested_offset_ms: suggested_offset(state, result.median_ms),
+                    },
+                )
+                .await;
             }
         }
         Command::Subscribe | Command::RequestSnapshot => {
@@ -1456,6 +1679,7 @@ async fn dispatch_command(
                 .await
             {
                 Ok((tx, ack)) => {
+                    let peer_prefs = state.peer_prefs_for(peer_id).await;
                     state.ingress_senders.lock().await.insert(
                         stream_id,
                         crate::IngressSink {
@@ -1464,6 +1688,7 @@ async fn dispatch_command(
                             engine_sample_rate: engine_sr,
                             channels: ch,
                             port_name: ack.port_name.clone(),
+                            peer_audio_prefs: peer_prefs,
                         },
                     );
                     broadcast_event(
@@ -1526,6 +1751,7 @@ async fn dispatch_command(
             backend_id,
             project_path,
             sample_rate,
+            recover_crash,
         } => {
             let Some(spawner) = state.spawner.clone() else {
                 broadcast_event(
@@ -1631,38 +1857,43 @@ async fn dispatch_command(
                     }
                 }
             }
-            // Sweep any crash-recovery artifacts (live `.history` /
-            // `.pending` AND legacy `.bak.<stamp>` clutter) into a
-            // hidden timestamped subfolder before Ardour can see
-            // them. The browser already prompted the user via
-            // `ProbeSessionRecovery`; if they wanted the data they
-            // hit "abort + download" and we never reached this
-            // dispatch. Anything still here at launch time is by
-            // definition consenting to be archived.
-            if let Some(p) = path {
-                let abs = match state.jail.as_ref() {
-                    Some(jail) => jail
-                        .root()
-                        .join(p.to_string_lossy().trim_start_matches('/')),
-                    None => p.to_path_buf(),
-                };
-                // Dispatch via the per-backend profile so a
-                // non-Ardour launch doesn't sweep files the wrong
-                // DAW would have wanted to keep.
-                let profiles = state.profiles().await;
-                let n = profiles
-                    .get_or_default(&backend_id)
-                    .map(|prof| prof.archive_recovery(&abs))
-                    .unwrap_or(0);
-                if n > 0 {
-                    tracing::info!(
-                        "launch_project: archived {n} crash-recovery artifact(s) at {} ({})",
-                        abs.display(),
-                        backend_id,
-                    );
+            // Dispatch the user's crash-recovery choice (set on the
+            // browser by `confirmCrashDataBeforeLaunch`). Two paths:
+            //   - `Some(false)` (Discard): delete the live `.pending`
+            //     file so Ardour's `AskAboutPendingState` signal
+            //     doesn't fire, no dialog opens.
+            //   - `Some(true)` (Recover): leave `.pending` in place;
+            //     the Ardour shim auto-clicks the recovery dialog via
+            //     `FOYER_CRASH_RECOVERY=recover` (set in the spawner).
+            //   - `None`: no artifacts; nothing to do.
+            // `.history` is never touched — it's regular undo state,
+            // not crash data.
+            if recover_crash == Some(false) {
+                if let Some(p) = path {
+                    let abs = match state.jail.as_ref() {
+                        Some(jail) => jail
+                            .root()
+                            .join(p.to_string_lossy().trim_start_matches('/')),
+                        None => p.to_path_buf(),
+                    };
+                    let profiles = state.profiles().await;
+                    let n = profiles
+                        .get_or_default(&backend_id)
+                        .map(|prof| prof.discard_recovery(&abs))
+                        .unwrap_or(0);
+                    if n > 0 {
+                        tracing::info!(
+                            "launch_project: discarded {n} pending crash-recovery file(s) at {} ({})",
+                            abs.display(),
+                            backend_id,
+                        );
+                    }
                 }
             }
-            match spawner.launch(&backend_id, path, sample_rate).await {
+            match spawner
+                .launch(&backend_id, path, sample_rate, recover_crash)
+                .await
+            {
                 Ok(launched) => {
                     // swap_backend synthesizes a session UUID when
                     // the caller doesn't supply one. Once the
@@ -2647,7 +2878,11 @@ async fn dispatch_command(
             }
         }
 
-        Command::MidiInput { data, track_id } => {
+        Command::MidiInput {
+            data,
+            track_id,
+            echo_server_mono_ns,
+        } => {
             // SysEx and other long messages aren't supported through
             // the browser bridge yet — keep the wire-side enforcement
             // tight so a malicious client can't fan out a 64 KB sysex
@@ -2684,10 +2919,66 @@ async fn dispatch_command(
                 }
                 None => None,
             };
+            // Empirical MIDI capture-latency: when both an echo
+            // timestamp AND a resolved track exist, measure the full
+            // browser↔server round-trip and threshold-push a
+            // `SetMidiCaptureLatency` for that track when the
+            // rolling median has moved past ~5 ms (240 samples at
+            // 48 kHz) since the last applied value. Same gate as
+            // the audio ingress path; shim's own lock keeps it
+            // frozen mid-take.
+            if let (Some(echo_ns), Some(tid)) = (echo_server_mono_ns, resolved_track.clone()) {
+                if echo_ns > 0 {
+                    let recv_mono_ns = crate::audio::monotonic_nanos();
+                    let roundtrip_ns = recv_mono_ns as i64 - echo_ns;
+                    if roundtrip_ns >= 0 {
+                        state.midi_latency.record(&tid, roundtrip_ns);
+                        if let Some(median_ms) = state.midi_latency.median_ms(&tid) {
+                            let new_samples =
+                                ((median_ms as f64 / 1000.0) * 48_000.0).max(0.0) as u32;
+                            const APPLY_THRESHOLD_SAMPLES: i32 = 240;
+                            let mut applied = state.midi_latency_last_applied.lock().await;
+                            let push = match applied.get(&tid) {
+                                None => true,
+                                Some(prev) => (new_samples as i32 - *prev as i32).abs()
+                                    >= APPLY_THRESHOLD_SAMPLES,
+                            };
+                            if push {
+                                applied.insert(tid.clone(), new_samples);
+                                drop(applied);
+                                let backend = state.backend().await;
+                                if let Err(e) = backend
+                                    .set_midi_capture_latency(tid.clone(), new_samples)
+                                    .await
+                                {
+                                    tracing::debug!(
+                                        "midi capture-latency push failed for {}: {e}",
+                                        tid.as_str()
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        "midi capture latency for {} → {new_samples} samples (median {median_ms:.1} ms)",
+                                        tid.as_str()
+                                    );
+                                    broadcast_event(
+                                        state,
+                                        Event::MidiLatencyReport {
+                                            track_id: tid.clone(),
+                                            median_ms,
+                                            samples_to_shim: new_samples,
+                                        },
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if let Err(e) = state
                 .backend()
                 .await
-                .send_midi_input(data, resolved_track)
+                .send_midi_input(data, resolved_track, echo_server_mono_ns)
                 .await
             {
                 tracing::debug!("midi_input dropped: {e}");
@@ -3508,9 +3799,39 @@ async fn dispatch_command(
     Ok(())
 }
 
+/// Compute the suggested manual offset given a measured loopback
+/// `median_ms`. The empirical capture-offset path is already setting
+/// `_capture_offset` to the median of the browser↔server round-trip
+/// from echo timestamps; the LOOPBACK measurement gives the TRUE
+/// engine-emit to engine-record round-trip. The delta is exactly the
+/// residual the user has to dial in by hand. Pulls the empirical
+/// median across all active ingress streams (typically one).
+pub(crate) fn suggested_offset(state: &AppState, loopback_median_ms: f32) -> i32 {
+    // Find any active ingress stream's median (we typically have one).
+    let empirical_ms: f32 = {
+        // We don't have a direct "active stream" enumerator, so just
+        // take whichever stream id has samples in the tracker. If
+        // none, treat as 0.
+        let g = state.ingress_senders.try_lock();
+        if let Ok(g) = g {
+            let mut found = 0.0_f32;
+            for sid in g.keys() {
+                if let Some(m) = state.ingress_latency.median_ms(*sid) {
+                    found = m;
+                    break;
+                }
+            }
+            found
+        } else {
+            0.0
+        }
+    };
+    (loopback_median_ms - empirical_ms).round() as i32
+}
+
 /// Wrap an event in an envelope (with fresh seq), cache to the ring, and
 /// broadcast to all subscribers.
-async fn broadcast_event(state: &AppState, event: Event) {
+pub(crate) async fn broadcast_event(state: &AppState, event: Event) {
     let seq = state.next_seq.fetch_add(1, Ordering::Relaxed);
     let is_snapshot = matches!(event, Event::SessionSnapshot { .. });
     let env = Envelope {

@@ -84,6 +84,7 @@
 #include "msgpack_out.h"
 #include "schema_map.h"
 #include "shim_input_port.h"
+#include "shim_midi_input_port.h"
 #include "surface.h"
 
 using namespace ARDOUR;
@@ -446,6 +447,7 @@ struct DecodedCmd
 		AudioIngressClose,
 		SetIngressCaptureLatency,
 		SetIngressRingPrimeMs,
+		SetMidiCaptureLatency,
 		DuplicateRegion,
 		DuplicateRegionRange,
 		StretchRegion,
@@ -1647,6 +1649,7 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "audio_ingress_open")  out.kind = DecodedCmd::Kind::AudioIngressOpen;
 			else if (cmd_type == "set_ingress_capture_latency") out.kind = DecodedCmd::Kind::SetIngressCaptureLatency;
 			else if (cmd_type == "set_ingress_ring_prime_ms")   out.kind = DecodedCmd::Kind::SetIngressRingPrimeMs;
+			else if (cmd_type == "set_midi_capture_latency")    out.kind = DecodedCmd::Kind::SetMidiCaptureLatency;
 			else if (cmd_type == "audio_ingress_close") out.kind = DecodedCmd::Kind::AudioIngressClose;
 			else if (cmd_type == "duplicate_region")    out.kind = DecodedCmd::Kind::DuplicateRegion;
 			else if (cmd_type == "duplicate_region_range") out.kind = DecodedCmd::Kind::DuplicateRegionRange;
@@ -3161,6 +3164,48 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			    cmd.set_latency_samples, std::memory_order_relaxed);
 			break;
 		}
+		case DecodedCmd::Kind::SetMidiCaptureLatency: {
+			// MIDI sibling of SetIngressCaptureLatency. Looks up (or
+			// lazy-creates) the per-track soft MIDI port and sets
+			// its capture-side latency. Triggers
+			// `AudioEngine::latency_callback` so the
+			// `_capture_offset` change propagates to the connected
+			// track's MidiDiskWriter immediately (otherwise it
+			// lands on the next port-change recompute).
+			if (cmd.track_id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap, this] () {
+				ShimMidiInputPort* port = nullptr;
+				{
+					std::lock_guard<std::mutex> lk (this->_midi_ports_mx);
+					auto it = this->_midi_ingress_ports.find (snap.track_id);
+					if (it == this->_midi_ingress_ports.end ()) {
+						// Eager create: the value matters at record-
+						// engage time but we don't know which track
+						// the user will hit first, so make the port
+						// now and connect lazily on the next write
+						// that actually has a route to lock onto.
+						auto p = std::make_unique<ShimMidiInputPort> (
+						    *shim, snap.track_id);
+						port = p.get ();
+						this->_midi_ingress_ports.emplace (
+						    snap.track_id, std::move (p));
+					} else {
+						port = it->second.get ();
+					}
+				}
+				if (!port) return;
+				port->set_capture_latency (snap.set_latency_samples);
+				try {
+					AudioEngine::instance ()->latency_callback (false);
+				} catch (...) {
+					PBD::warning << "foyer_shim: latency_callback threw (midi)"
+					             << endmsg;
+				}
+			});
+			break;
+		}
 		case DecodedCmd::Kind::SetIngressCaptureLatency: {
 			// Sets the capture-side latency on the matching soft
 			// ingress port so Ardour's `Route::update_signal_latency()`
@@ -3353,28 +3398,27 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 		case DecodedCmd::Kind::MidiInput: {
 			// Live MIDI from a browser device. Two routing modes:
 			//
-			// 1. `track_id` set → inject the bytes directly into that
-			//    MIDI track's processing chain via
-			//    `MidiTrack::write_user_immediate_event`. This is the
-			//    MIDI analogue of the audio ingress per-track path:
-			//    bytes land at the track's instrument without the
-			//    user having to wire JACK up by hand. Hops to the
-			//    event loop because route lookup walks the session
-			//    RouteList which expects to be touched on the shim's
-			//    own thread.
+			// 1. `track_id` set → write to a per-track virtual MIDI
+			//    ingress port (`foyer-midi-ingress-<track_id>`) that
+			//    we lazy-create and auto-connect to the track's MIDI
+			//    in. Going through a real port (vs the older
+			//    `write_user_immediate_event` path) is what lets
+			//    Ardour apply the empirical `_capture_offset` we set
+			//    via `Port::set_private_latency_range` — recorded
+			//    events get backdated to the engine frame the user
+			//    was actually hearing.
 			//
 			// 2. `track_id` empty → write to the shared `Foyer Web
 			//    MIDI` virtual source port. Users can then connect
 			//    track inputs from it the way they'd cable a hardware
-			//    controller. Stays on the IPC reader thread because
-			//    `AsyncMIDIPort::write` locks its own FIFO mutex and
-			//    we want the lowest latency we can manage on
-			//    keypresses.
+			//    controller. No latency comp (no specific recipient
+			//    to backdate); suitable for the always-on virtual
+			//    keyboard / no-track-armed case.
 			if (cmd.midi_byte_count == 0) break;
 			if (!cmd.track_id.empty ()) {
 				DecodedCmd snap = cmd;
 				FoyerShim* shim = &_shim;
-				_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				_shim.call_slot (MISSING_INVALIDATOR, [shim, snap, this] () {
 					if (snap.track_id.rfind ("track.", 0) != 0) return;
 					const std::string sid = snap.track_id.substr (6);
 					std::shared_ptr<RouteList const> routes =
@@ -3389,10 +3433,26 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						break;
 					}
 					if (!mt) return;
-					mt->write_user_immediate_event (
-					    Evoral::MIDI_EVENT,
-					    snap.midi_byte_count,
-					    snap.midi_bytes);
+					ShimMidiInputPort* port = nullptr;
+					{
+						std::lock_guard<std::mutex> lk (this->_midi_ports_mx);
+						auto it = this->_midi_ingress_ports.find (snap.track_id);
+						if (it == this->_midi_ingress_ports.end ()) {
+							auto p = std::make_unique<ShimMidiInputPort> (
+							    *shim, snap.track_id);
+							port = p.get ();
+							this->_midi_ingress_ports.emplace (
+							    snap.track_id, std::move (p));
+						} else {
+							port = it->second.get ();
+						}
+					}
+					if (!port) return;
+					// Idempotent connect — first call wires the port
+					// into the track's MIDI in; subsequent calls
+					// no-op via PortEngine de-dup.
+					port->connect_to_track (*mt);
+					port->write_event (snap.midi_bytes, snap.midi_byte_count);
 				});
 				break;
 			}

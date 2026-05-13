@@ -71,6 +71,114 @@ pub struct Config {
     pub tunnel: TunnelConfig,
     #[serde(default)]
     pub backends: Vec<BackendConfig>,
+    /// Container-launch settings used by `foyer docker`. None means
+    /// `foyer docker` falls back to its built-in defaults (latest
+    /// image, integrated mode, podman if available else docker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker: Option<DockerConfig>,
+    /// `foyer-desktop` runtime preferences. Persisted by the first-
+    /// run mode picker so subsequent launches skip the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<DesktopConfig>,
+}
+
+/// Behaviour of the `foyer-desktop` native shell.
+///
+/// First launch shows an in-window picker (no terminal needed) for
+/// `mode` and saves the user's choice. Subsequent launches read
+/// `mode` and skip the prompt; pass `--reset-mode` (or delete the
+/// `desktop` block from config.yaml) to re-prompt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DesktopConfig {
+    /// `"host"` runs `foyer-server` in-process inside the desktop
+    /// shell. `"docker"` spawns `foyer docker` (modes inherited
+    /// from `docker:` config) and points the WebView at the
+    /// container's published port. Unset = first-launch picker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<DesktopMode>,
+    /// Open the WebView fullscreen by default. Off by default — the
+    /// native shell starts at 1440×900 so the user can keep working
+    /// in other apps; flip to `true` on a kiosk / studio rig.
+    #[serde(default, skip_serializing_if = "is_default_false")]
+    pub fullscreen: bool,
+}
+
+/// Run mode for `foyer-desktop`. The picker dialog writes this back
+/// into config.yaml after the user clicks one of the two buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopMode {
+    /// Embed `foyer-server` in-process; the sidecar lives in the same
+    /// binary as the WebView. No container runtime needed.
+    Host,
+    /// Spawn `foyer docker` (using `docker:` config defaults) and
+    /// open the WebView on the container's exposed port.
+    Docker,
+}
+
+/// Defaults for the `foyer docker` orchestration command.
+///
+/// `mode` picks audio-engine integration:
+///   · `integrated` (default) — runs Foyer's dummy/stub backend with
+///     SYS_NICE + IPC_LOCK so the in-container audio graph still has
+///     real-time priority. No external JACK needed; usable on hosts
+///     without a sound server at all (Cloud Run, headless CI).
+///   · `jack` — bind-mounts the host's JACK socket dir into the
+///     container so the in-container Ardour talks to the host's
+///     JACK daemon. Linux only; Docker-on-Mac's VM breaks this.
+///   · `netjack` — connects to a NetJACK server over TCP. Works
+///     cross-platform but adds network jitter.
+///
+/// `image` defaults to `ghcr.io/hotspoons/foyer-studio:latest`. Set
+/// to a per-commit tag (`snapshot-abc1234`) to pin.
+///
+/// `runtime` lets the user force a specific container runtime when
+/// multiple are installed (`podman`, `docker`, `nerdctl`); auto-
+/// picks based on PATH otherwise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DockerConfig {
+    /// Which container runtime to use. Auto-picked from PATH when
+    /// unset (preference: podman → docker → nerdctl). Set explicitly
+    /// for hosts with multiple runtimes installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Container image reference. Default
+    /// `ghcr.io/hotspoons/foyer-studio:latest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Default audio mode for `foyer docker` invocations without an
+    /// explicit `--integrated`/`--jack`/`--netjack` flag. Defaults
+    /// to `integrated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<DockerMode>,
+    /// Host port to publish the container's 3838 on. Defaults to
+    /// 3838 (same as the host-mode sidecar) — flip this when the
+    /// host already has a foyer sidecar running and you want to
+    /// run the container alongside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_port: Option<u16>,
+    /// Extra command-line arguments appended to the runtime's `run`
+    /// invocation, before the image name. Use for host-specific
+    /// flags `foyer docker` doesn't know about (e.g.,
+    /// `["--gpus", "all"]` on a CUDA box). Order: foyer-managed
+    /// flags first, then these, then `image` last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+/// Audio-engine integration mode for `foyer docker`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerMode {
+    /// No external audio system — container runs Foyer's dummy
+    /// backend with elevated caps so low-latency processing still
+    /// works. Smallest setup; default.
+    #[default]
+    Integrated,
+    /// Bind-mount the host's JACK socket dir. Linux only.
+    Jack,
+    /// Connect to a NetJACK server over TCP. Cross-platform.
+    Netjack,
 }
 
 /// Network config for the sidecar's HTTP/WS surface. Both fields
@@ -334,6 +442,8 @@ pub fn seed_default() -> Config {
         server: ServerConfig::default(),
         tunnel: TunnelConfig::default(),
         backends,
+        docker: None,
+        desktop: None,
     }
 }
 

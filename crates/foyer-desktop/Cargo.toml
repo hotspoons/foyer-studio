@@ -14,7 +14,8 @@ path = "src/main.rs"
 foyer-server.workspace = true
 foyer-backend-stub.workspace = true
 foyer-backend-host.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+foyer-config.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 tracing.workspace = true
@@ -24,5 +25,19 @@ tracing-subscriber.workspace = true
 # the system WebView wrapper (webkit2gtk on Linux, WebView2 on Windows, WKWebView
 # on macOS). Tauri is built on these same two crates — we skip the Tauri layer
 # to keep the frontend free of its asset pipeline, per our no-bundler stance.
-tao = "0.30"
-wry = "0.45"
+tao = "0.35"
+wry = "0.55"
+
+# SIGTERM-to-child on window close so the container we spawned in
+# docker mode shuts down cleanly. Already a workspace dep used by
+# foyer-cli for the same reason.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Linux-only: we drop into the raw webkit2gtk + gtk APIs to disable
+# hardware acceleration on the underlying WebKitWebView. Env-var
+# overrides get increasingly ignored on webkit2gtk 2.50+; the
+# in-code policy is the only knob that consistently applies.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+gtk = "0.18"

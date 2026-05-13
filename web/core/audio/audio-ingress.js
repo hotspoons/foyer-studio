@@ -44,14 +44,6 @@ export class AudioIngress {
      * engine rate, not on time.
      */
     this._engineSampleRate = 0;
-    /** Last latency-sample value we sent — avoids spamming the shim. */
-    this._lastLatencySamples = -1;
-    /** Interval handle for periodic latency refresh. */
-    this._latencyTimer = null;
-    /** Last network latency (ms) reported by the server for this stream. */
-    this._lastNetworkMs = null;
-    /** Bound envelope handler so we can remove it cleanly on stop(). */
-    this._envHandler = (ev) => this._onEnvelope(ev?.detail);
   }
 
   get enginePortName() {
@@ -105,13 +97,12 @@ export class AudioIngress {
 
       this._setupBinaryWsAndPump();
       await this._ctx.resume();
-      // Begin pushing capture-latency compensation to the shim so
-      // recorded regions land at the right position on the timeline.
-      // Without this, the take is offset to the right by the full
-      // browser→shim transport latency. Fires immediately with a
-      // capture-only estimate, then refines on each
-      // `ingress_latency_report` reply.
-      this._startLatencyCompensation();
+      // Capture-latency compensation runs entirely server-side now:
+      // the ingress packet header carries an echoed source-clock
+      // timestamp (see audio-clock.currentSpeakerSentinelNs); the
+      // server measures the full browser↔server round-trip empirically
+      // and feeds the shim via `SetIngressCaptureLatency`. The browser
+      // doesn't drive that command any more.
     } catch (e) {
       await this._cleanupAfterFailure();
       throw e;
@@ -121,7 +112,6 @@ export class AudioIngress {
   async stop() {
     if (!this._running) return;
     this._running = false;
-    this._stopLatencyCompensation();
 
     if (this._workletNode) {
       this._workletNode.port.onmessage = null;
@@ -255,6 +245,14 @@ export class AudioIngress {
         if (Number.isFinite(ms) && ms > 0) {
           this.ws.send({ type: "set_ingress_ring_prime_ms", ms: Math.round(ms) });
         }
+        // Re-seed the server's manual offset atomic from the persisted
+        // pref. Server defaults to 0 each boot; without this re-send
+        // the user's saved value would silently revert after a server
+        // restart.
+        const offsetMs = Number(prefs.ingressManualOffsetMs);
+        if (Number.isFinite(offsetMs)) {
+          this.ws.send({ type: "set_ingress_manual_offset_ms", ms: Math.round(offsetMs) });
+        }
       } catch {}
       const ackPromise = this._waitForIngressOpened(this.streamId);
       this.ws.send({
@@ -301,18 +299,42 @@ export class AudioIngress {
     this._workletNode.port.onmessage = (ev) => {
       if (!this._audioWs || this._audioWs.readyState !== WebSocket.OPEN) return;
       const buf = ev.data;
-      // Prepend the 8-byte `client_send_ms` (f64 LE) header expected
-      // by /ws/ingress/:stream_id. We stamp on the main thread at
-      // receipt of the worklet message; the queueing delay between
-      // worklet post and main-thread receipt is small (~quantum-
-      // bounded, single-digit ms) and constant across packets, so
-      // it cancels out of the median latency the server tracks.
-      // Doing it on the main thread keeps the worklet's hot-path
-      // budget free of cross-thread clock alignment math.
-      const header = new Float64Array(1);
-      header[0] = performance.now();
+      // 8-byte header: i64 LE `echo_server_mono_ns` — the source-clock
+      // timestamp of the audio the user was HEARING out the speakers
+      // at the moment the bytes in this packet were captured by the
+      // mic. The server subtracts this from its own monotonic clock
+      // at packet receipt to get the full round-trip, which becomes
+      // `_capture_offset` (plus the shim's ring + cycle).
+      //
+      // Two corrections from the naive "what's playing right now":
+      //
+      //   1. `currentSpeakerSentinelNs()` returns the speaker time at
+      //      THIS moment (when the worklet posts the chunk to the
+      //      main thread). But the samples in `buf` were actually
+      //      captured at the mic ~`getCaptureLatencyMs()` ago —
+      //      `baseLatency` + half a worklet frame in the OS/browser
+      //      capture buffer. We subtract that so the stamp reflects
+      //      the speaker content at MIC-CAPTURE time, not stamp time.
+      //      Without this the echo is too RECENT, the computed
+      //      roundtrip is too small, and recordings land late by
+      //      roughly `captureLatencyMs` (~30 ms on a typical Mac).
+      //
+      //   2. `-1` if no egress sentinel has been observed yet (cold
+      //      start, record-armed-without-playback); shim falls back
+      //      to the additive estimate from `SetIngressCaptureLatency`.
+      const view = new DataView(new ArrayBuffer(8));
+      const ac = globalThis.__foyer?.audioClock;
+      const speakerNs = ac?.currentSpeakerSentinelNs?.();
+      const captureMs = this.getCaptureLatencyMs() ?? 0;
+      const adjustedNs = (Number.isFinite(speakerNs) && speakerNs > 0)
+        ? speakerNs - Math.round(captureMs * 1_000_000)
+        : null;
+      const echo = (adjustedNs != null && adjustedNs > 0)
+        ? BigInt(adjustedNs)
+        : -1n;
+      view.setBigInt64(0, echo, true);
       const out = new Uint8Array(8 + buf.byteLength);
-      out.set(new Uint8Array(header.buffer), 0);
+      out.set(new Uint8Array(view.buffer), 0);
       out.set(new Uint8Array(buf.buffer), 8);
       this._audioWs.send(out.buffer);
     };
@@ -390,155 +412,4 @@ export class AudioIngress {
     });
   }
 
-  // ─── Capture-latency compensation ─────────────────────────────
-  //
-  // Pushes a periodic `SetIngressCaptureLatency` to the server so
-  // the shim sets the matching port's private capture-latency
-  // range. Ardour's `Route::update_signal_latency()` then shifts
-  // every recording on that track earlier by the FULL round-trip
-  // latency — the take lines up acoustically with the playback
-  // the user heard.
-  //
-  // Why round-trip and not just ingress: the user sings in
-  // response to audio they HEAR. What they hear is delayed by the
-  // egress path (engine → server encoder → WS → worklet jitter
-  // buffer → AudioContext output → speakers). When they sing at
-  // wall-clock W, the engine had emitted the audio at engine time
-  // T = W - egress_latency. Their sung audio then travels back
-  // through ingress and lands at engine time W + ingress. To
-  // align the recording with T (where the user thought they
-  // sang), we shift by egress + ingress, not just ingress.
-  //
-  // Components we measure browser-side:
-  //   * capture        — browser baseLatency + half-frame
-  //   * ingress net    — ingress one-way median from server tracker
-  //   * playback delay — worklet jitter buffer + AudioContext
-  //                      output latency (from `audioClock`)
-  //   * egress net     — approximated as ≈ ingress one-way
-  //                      (symmetric path assumption)
-  //
-  // The shim's `ShimInputPort::set_capture_latency` adds its OWN
-  // contribution on top (PRIME_THRESHOLD_MS ring depth + one
-  // engine cycle, read live from `AudioEngine`). That keeps the
-  // browser ignorant of engine-side state (JACK vs in-process
-  // dummy, buffer size) — same code adapts automatically.
-  //
-  // Fires immediately on stream open with capture-only (no other
-  // measurements yet), then every 5 s once the server has > 8
-  // ingress samples and the worklet has reported a buffer-fill
-  // stat.
-
-  _startLatencyCompensation() {
-    if (!this.ws || !this._engineSampleRate) return;
-    this.ws.addEventListener("envelope", this._envHandler);
-    // Fire once right away so the shim has SOMETHING by the time
-    // the user hits record. The capture-only estimate is the
-    // single biggest component (~25–40 ms) so it's worth applying
-    // before the first network sample arrives.
-    this._pushCaptureLatency();
-    this._latencyTimer = setInterval(() => {
-      if (!this._running) return;
-      // Re-request the server's latest median; the envelope
-      // handler will re-push when the reply arrives.
-      this.ws.send({ type: "request_ingress_latency", stream_id: this.streamId });
-    }, 5000);
-    // Also fire one initial latency request so we get the network
-    // median as soon as the server has enough samples.
-    setTimeout(() => {
-      if (!this._running) return;
-      this.ws.send({ type: "request_ingress_latency", stream_id: this.streamId });
-    }, 1500);
-  }
-
-  _stopLatencyCompensation() {
-    if (this._latencyTimer) {
-      clearInterval(this._latencyTimer);
-      this._latencyTimer = null;
-    }
-    try { this.ws?.removeEventListener("envelope", this._envHandler); } catch {}
-    // Clear the shim's compensation for this stream — any future
-    // reuse of the same stream_id starts from zero (shouldn't
-    // happen since we mint a fresh id per ingress, but defensive).
-    if (this._lastLatencySamples > 0) {
-      try {
-        this.ws?.send({
-          type: "set_ingress_capture_latency",
-          stream_id: this.streamId,
-          samples: 0,
-        });
-      } catch {}
-    }
-    this._lastLatencySamples = -1;
-    this._lastNetworkMs = null;
-  }
-
-  _onEnvelope(env) {
-    const body = env?.body;
-    if (body?.type !== "ingress_latency_report") return;
-    if (body.stream_id !== this.streamId) return;
-    if (body.median_ms != null && Number.isFinite(body.median_ms)) {
-      this._lastNetworkMs = body.median_ms;
-      this._pushCaptureLatency();
-    }
-  }
-
-  _pushCaptureLatency() {
-    if (!this._running || !this.ws || !this._engineSampleRate) return;
-    const captureMs = this.getCaptureLatencyMs() ?? 0;
-    const ingressNetworkMs = this._lastNetworkMs ?? 0;
-    // Egress (playback) leg — what the user HEARS lags the engine
-    // by this much. We read it from the live audio-clock if the
-    // listener is running. Falls back to 0 (user isn't listening,
-    // so they couldn't have sung in response to anything anyway).
-    let playbackDelayMs = 0;
-    try {
-      const ac = globalThis.__foyer?.audioClock;
-      const snap = ac?.snapshot?.();
-      if (snap && Number.isFinite(snap.playbackDelayMs)) {
-        playbackDelayMs = snap.playbackDelayMs;
-      }
-    } catch {}
-    // Assume the egress network leg ≈ ingress network leg. On
-    // loopback / LAN this is true within a ms or two; on a tunnel
-    // the asymmetry is bounded by routing and gets absorbed into
-    // whatever jitter is already in the worklet buffer.
-    const egressNetworkMs = ingressNetworkMs;
-    // Browser-side ms → samples at the engine rate. The shim adds
-    // its internal ring-prime + cycle contribution on top before
-    // calling `Port::set_private_latency_range`, so we report only
-    // the part we can measure here.
-    const browserMs = captureMs + ingressNetworkMs + egressNetworkMs + playbackDelayMs;
-    const samples = Math.max(0, Math.round((browserMs / 1000) * this._engineSampleRate));
-    // Skip the send if the value hasn't meaningfully changed —
-    // anything within 32 samples is below a single typical JACK
-    // period and would only churn the latency-compensation pass.
-    if (Math.abs(samples - this._lastLatencySamples) < 32 && this._lastLatencySamples >= 0) {
-      return;
-    }
-    this._lastLatencySamples = samples;
-    this.ws.send({
-      type: "set_ingress_capture_latency",
-      stream_id: this.streamId,
-      samples,
-    });
-    // Stash for diagnostics.
-    globalThis.__foyer = globalThis.__foyer || {};
-    globalThis.__foyer.lastIngressLatency = {
-      streamId: this.streamId,
-      captureMs: Math.round(captureMs),
-      ingressNetworkMs: Math.round(ingressNetworkMs),
-      egressNetworkMs: Math.round(egressNetworkMs),
-      playbackDelayMs: Math.round(playbackDelayMs),
-      browserMs: Math.round(browserMs),
-      samplesToShim: samples,
-      engineSampleRate: this._engineSampleRate,
-    };
-    console.info(
-      `[ingress] capture latency → ${samples} samples ` +
-        `(capture ${Math.round(captureMs)} + ingress-net ${Math.round(ingressNetworkMs)} + ` +
-        `egress-net ${Math.round(egressNetworkMs)} + playback ${Math.round(playbackDelayMs)} = ` +
-        `${Math.round(browserMs)} ms browser-side) @ ${this._engineSampleRate} Hz; ` +
-        `shim adds ring + cycle on top`,
-    );
-  }
 }

@@ -79,6 +79,75 @@ fn main() {
     if want_real_bundle {
         println!("cargo:rerun-if-changed={resolved}");
     }
+
+    // ── Ardour shim embed ───────────────────────────────────────────
+    // Same shape as the web bundle: env override → repo path →
+    // empty stub. The shim is a `.so` (or `.dylib` on macOS) built
+    // out-of-band by `shims/ardour`'s CMake/waf scripts; this build
+    // script only reads the resulting blob. Hash stamp lets the
+    // runtime detect a stale extracted copy.
+    let shim_env_override = std::env::var("FOYER_BUNDLED_SHIM")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let shim_default = format!("{manifest_dir}/../../shims/ardour/build/libfoyer_shim.so");
+    let resolved_shim_input = shim_env_override.clone().unwrap_or(shim_default);
+    let shim_input_path = PathBuf::from(&resolved_shim_input);
+
+    let shim_blob_path: PathBuf;
+    let shim_present: bool;
+    let shim_stamp: u64;
+    if shim_input_path.is_file() {
+        // Real shim — copy into OUT_DIR so include_bytes! has a
+        // stable path even if the source moves between rebuilds.
+        let dst = PathBuf::from(&out_dir).join("libfoyer_shim.blob");
+        let bytes = std::fs::read(&shim_input_path).expect("read shim");
+        std::fs::write(&dst, &bytes).expect("write shim blob");
+        shim_stamp = hash_bytes(&bytes);
+        shim_blob_path = dst;
+        shim_present = true;
+        println!("cargo:rerun-if-changed={}", shim_input_path.display());
+    } else {
+        // Stub: zero-byte file so include_bytes! still compiles, and
+        // the runtime treats `shim_present == false` as "no embedded
+        // shim, refuse to start with backend=ardour and tell user
+        // where to put one." Common in CI matrices that build the
+        // sidecar without the C++ shim.
+        let stub = PathBuf::from(&out_dir).join("libfoyer_shim.empty");
+        if !stub.exists() {
+            std::fs::write(&stub, b"").expect("write empty shim stub");
+        }
+        shim_blob_path = stub;
+        shim_present = false;
+        shim_stamp = 0;
+    }
+    println!(
+        "cargo:rustc-env=FOYER_BUNDLED_SHIM_PATH={}",
+        shim_blob_path.display()
+    );
+    println!(
+        "cargo:rustc-env=FOYER_BUNDLED_SHIM_PRESENT={}",
+        if shim_present { "1" } else { "0" },
+    );
+    println!("cargo:rustc-env=FOYER_BUNDLED_SHIM_STAMP={shim_stamp:016x}");
+    println!("cargo:rerun-if-env-changed=FOYER_BUNDLED_SHIM");
+
+    // Hard-coded Ardour version that the embedded shim was built
+    // against. Override via `FOYER_ARDOUR_VERSION=9.3` at build time
+    // when the shim is rebuilt for a new Ardour. The runtime checks
+    // this against the installed Ardour's reported version and
+    // warns on mismatch (the surfaces ABI is version-sensitive).
+    let ardour_version = std::env::var("FOYER_ARDOUR_VERSION").unwrap_or_else(|_| "9.2".into());
+    println!("cargo:rustc-env=FOYER_ARDOUR_VERSION={ardour_version}");
+    println!("cargo:rerun-if-env-changed=FOYER_ARDOUR_VERSION");
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 /// FNV-1a 64-bit over the bundle's contents. Walks the tree in sorted

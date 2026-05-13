@@ -169,13 +169,55 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         transport_pos_samples: Option<u64>,
     },
-    /// Server → browser: reply to `RequestIngressLatency`.  Carries
-    /// the median one-way latency observed on this stream's ingress
-    /// WS (in milliseconds).  `None` means no samples yet.
+    /// Server → browser: reply to `RequestIngressLatency` and also
+    /// broadcast whenever the server-side empirical roundtrip median
+    /// shifts past the apply threshold (i.e. whenever the server is
+    /// about to push `SetIngressCaptureLatency` to the shim). The
+    /// median is now FULL ROUND-TRIP browser↔server, since the
+    /// ingress header carries `echo_server_mono_ns` and the server
+    /// compares against its own monotonic clock. `None` means too
+    /// few samples to compute a stable median yet.
     IngressLatencyReport {
         stream_id: u32,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         median_ms: Option<f32>,
+    },
+    /// Per-click progress fired during an ingress calibration run.
+    /// `n` is 1-indexed (`1`, `2`, …) so the UI can render `5/8`
+    /// style progress. `measured_ms` is the raw round-trip for this
+    /// individual click (NOT yet medianed).
+    CalibrationProgress {
+        stream_id: u32,
+        n: u32,
+        total: u32,
+        measured_ms: f32,
+    },
+    /// Fired once at the end of a calibration run. `median_ms` is
+    /// the empirically-measured speaker→mic round-trip; `samples_kept`
+    /// is how many of the requested clicks were actually detected
+    /// (the rest were missed — typically because of ambient noise
+    /// or the user not playing the egress stream out their speakers).
+    /// `suggested_offset_ms` is `median_ms − empirical_median_ms` —
+    /// the value the Manual capture offset should be set to in
+    /// order to close the gap. May be negative if the empirical
+    /// stack happens to over-estimate.
+    CalibrationResult {
+        stream_id: u32,
+        median_ms: f32,
+        samples_kept: u32,
+        samples_requested: u32,
+        suggested_offset_ms: i32,
+    },
+    /// Server → browser: empirical MIDI roundtrip-latency report,
+    /// keyed by track id. Broadcast whenever the server pushes a
+    /// new `SetMidiCaptureLatency` to the shim for the track (i.e.
+    /// after the per-track median has shifted past the apply
+    /// threshold). Mirrors `IngressLatencyReport` for the MIDI
+    /// path; the UI surfaces both side-by-side in the Timing tab.
+    MidiLatencyReport {
+        track_id: EntityId,
+        median_ms: f32,
+        samples_to_shim: u32,
     },
     /// Latest latency calibration result.
     LatencyReport {
@@ -354,11 +396,28 @@ pub enum Event {
         /// as "signed in as …" for tunnel guests.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient: Option<String>,
-        /// This connection's own id. Matches the `PeerInfo.id` that
+        /// This connection's own peer id. Matches the `PeerInfo.id` that
         /// goes out in `PeerJoined` / `PeerList`; the client filters
         /// its own entry out of the displayed roster using this.
+        ///
+        /// Shared across all WS connections belonging to the same logical
+        /// user (multi-window). The per-connection identity lives in
+        /// `connection_id`.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         peer_id: String,
+        /// Per-connection identity (hex UUID). Unique even when two
+        /// windows of the same logical user share a `peer_id`. Used
+        /// for self-echo filtering on the client (so window A sees
+        /// window B's control updates) and connection-scoped
+        /// addressing on the wire.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        connection_id: String,
+        /// Whether this WS connection is the spawning ("Primary") window
+        /// for the logical peer, or a secondary control-plane window.
+        /// Audio ingress / egress is only permitted on `Primary` —
+        /// secondaries get a typed error if they try to open one.
+        #[serde(default)]
+        connection_role: ConnectionRole,
         /// Backend-feature snapshot keyed by a stable feature id (e.g.
         /// `"sequencer"`, `"surround_pan"`, `"groups"`, `"sends"`,
         /// `"automation"`). `true` = supported, `false` = explicitly
@@ -791,6 +850,27 @@ fn is_zero_u64(n: &u64) -> bool {
     *n == 0
 }
 
+/// Role of a single WS connection relative to its logical peer.
+///
+/// One logical peer (one `peer_id`) can hold multiple WS connections —
+/// one per browser window — for multi-monitor / multi-window use. The
+/// first connection is `Primary`; subsequent connections opened with
+/// `?parent=<peer_id>` against an existing peer are `Secondary`.
+///
+/// Audio ingress / egress (the `/ws/audio/*` and `/ws/ingress/*`
+/// endpoints) is only valid on `Primary` connections. Secondaries are
+/// control-plane only — they read state, dispatch commands, render UI,
+/// but never own a microphone or speaker stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionRole {
+    /// Spawning window. Owns audio I/O for the logical peer.
+    #[default]
+    Primary,
+    /// Secondary window. Control-plane only; audio is rejected.
+    Secondary,
+}
+
 /// One connected client. Tracked server-side and broadcast via
 /// `PeerJoined` / `PeerLeft` / `PeerList` so every client sees a
 /// consistent roster. `label` is the display string — `"host"` for
@@ -814,9 +894,24 @@ pub struct PeerInfo {
     /// for LAN (trusted, no role).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_id: Option<String>,
-    /// Unix epoch ms when the connection came up.
+    /// Unix epoch ms when the FIRST connection of this logical peer
+    /// came up. Stays stable when additional windows attach.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub connected_at: u64,
+    /// Number of active WS connections (windows) this logical peer is
+    /// holding open. `1` for a single-window peer; `>=2` once the user
+    /// has popped out a second window. Defaults to `1` for older
+    /// clients / wire compat.
+    #[serde(default = "one_u32", skip_serializing_if = "is_one_u32")]
+    pub connection_count: u32,
+}
+
+fn one_u32() -> u32 {
+    1
+}
+
+fn is_one_u32(n: &u32) -> bool {
+    *n == 1
 }
 
 /// Metadata for a single backend entry in the sidecar's config — what
@@ -926,6 +1021,74 @@ pub enum Command {
     /// ring (stub) ignore.
     SetIngressRingPrimeMs {
         ms: u32,
+    },
+    /// Server → shim: declare the capture-side latency for a per-
+    /// track MIDI ingress port, in samples at the engine sample
+    /// rate. Mirrors `SetIngressCaptureLatency` but for the virtual
+    /// MIDI input port the shim creates lazily on first
+    /// `MidiInput { track_id }` for `track_id`. The shim adds its
+    /// own internal contribution (engine cycle) on top before
+    /// writing `Port::set_private_latency_range`; Ardour's
+    /// `MidiDiskWriter` honours the resulting `_capture_offset` via
+    /// `_accumulated_capture_offset` so recorded MIDI events land
+    /// at the engine frame the user was hearing when they played.
+    /// `samples = 0` clears any prior compensation for the track.
+    SetMidiCaptureLatency {
+        track_id: EntityId,
+        samples: u32,
+    },
+    /// Test-only: inject artificial latency on the audio ingress
+    /// and/or egress paths so the empirical capture-offset logic can
+    /// be exercised against known asymmetric latency without
+    /// physically routing through a tunnel. `0` clears that side's
+    /// injection. The server stores the values in atomics that the
+    /// per-stream tasks consult on every packet — toggling takes
+    /// effect on the next packet without reconnecting. Bench knob;
+    /// not surfaced in user-facing UI flows.
+    SetFakeLatency {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        ingress_ms: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        egress_ms: Option<u32>,
+    },
+    /// User-tuned manual offset added on top of the empirical
+    /// ingress capture-latency measurement, in milliseconds. Signed
+    /// — positive shifts recordings earlier on the timeline (i.e.
+    /// adds to `_capture_offset`), negative shifts later. Used to
+    /// dial in any residual the echo-roundtrip math can't see (the
+    /// mic-to-browser-stack hop, browser-specific output-latency
+    /// under-reporting, etc.). Persisted in browser audio prefs;
+    /// the server holds it in an atomic and adds it to the median
+    /// before pushing `SetIngressCaptureLatency` to the shim.
+    SetIngressManualOffsetMs {
+        ms: i32,
+    },
+    /// Start a speaker→mic loopback calibration run on `stream_id`
+    /// (must be an OPEN egress stream that the browser is also
+    /// piping to its speakers, AND there must be an active ingress
+    /// stream picking up the resulting audio). Server emits a short
+    /// click pattern every 500 ms for the duration of the run,
+    /// stamps each emit time, and watches the matching ingress
+    /// stream for the click reflection. Progress events fire per
+    /// detected click; when the run finishes the server emits a
+    /// `CalibrationResult` with the median round-trip and a
+    /// suggested manual offset (= measured − empirical-median).
+    StartIngressCalibration {
+        /// Egress stream that will carry the calibration clicks.
+        egress_stream_id: u32,
+        /// Ingress stream the mic is being piped through.
+        ingress_stream_id: u32,
+        /// Number of clicks to emit before finalising. 5 is a sane
+        /// default; raising trades a longer calibration for tighter
+        /// medians.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        clicks: Option<u32>,
+    },
+    /// Abort a calibration run early (user clicked Cancel, the
+    /// browser closed the stream, etc.). Idempotent; safe to send
+    /// when no calibration is active.
+    StopIngressCalibration {
+        egress_stream_id: u32,
     },
     /// Open a named undo group. Subsequent mutations (region delete,
     /// plugin move, etc.) land in the same `UndoTransaction` until a
@@ -1148,6 +1311,19 @@ pub enum Command {
         /// exist before launch).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         sample_rate: Option<u32>,
+        /// Disposition for `.pending` crash-recovery state when the
+        /// browser detected it via `Event::SessionRecoveryAvailable`:
+        ///   - `Some(true)`  → user picked Recover. Server leaves
+        ///     `.pending` on disk and sets `FOYER_CRASH_RECOVERY=recover`
+        ///     on the Ardour spawn so the shim auto-clicks the native
+        ///     dialog's "Recover" button (the dialog still flashes
+        ///     briefly inside Ardour but is dismissed before the user
+        ///     can see it).
+        ///   - `Some(false)` → user picked Discard. Server deletes
+        ///     `.pending` pre-launch so Ardour never opens the dialog.
+        ///   - `None` → no crash artifacts; nothing to do.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        recover_crash: Option<bool>,
     },
 
     // ───── multi-session control plane ──────────────────────────────────
@@ -1398,6 +1574,17 @@ pub enum Command {
         /// the audio ingress access rule.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         track_id: Option<EntityId>,
+        /// Source-clock timestamp (server `monotonic_nanos`) of the
+        /// audio coming out of the user's speakers when this MIDI
+        /// event was produced. Mirrors the audio ingress echo: the
+        /// browser stamps from `audio-clock.currentSpeakerSentinelNs`;
+        /// the server subtracts it from its own `monotonic_nanos` on
+        /// receipt to measure the full round-trip latency, then drives
+        /// the matching MIDI ingress port's `_capture_offset`. `None`
+        /// means "no playback sentinel seen yet" — pre-record-arm
+        /// virtual-keyboard taps fall into this case.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        echo_server_mono_ns: Option<i64>,
     },
 
     /// Route a track's audio input to a named port. `port_name = None`

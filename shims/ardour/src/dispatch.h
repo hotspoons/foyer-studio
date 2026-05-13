@@ -21,6 +21,7 @@ namespace ArdourSurface {
 class FoyerShim;
 class MasterTap;
 class ShimInputPort;
+class ShimMidiInputPort;
 
 class Dispatcher
 {
@@ -51,6 +52,17 @@ private:
 	// because IPC reader and event-loop threads both touch it.
 	std::mutex _ingress_mx;
 	std::map<std::uint32_t, std::unique_ptr<ShimInputPort>> _ingress_ports;
+
+	// Per-track virtual MIDI input ports keyed by track id. Lazy-
+	// created on the first `Command::MidiInput { track_id }` for a
+	// given track; auto-connected into the track's MIDI in on
+	// creation. Stay alive for the lifetime of the shim — cleaning
+	// up on every armed/disarm transition would churn engine port
+	// registrations, and an idle port costs nothing. The IPC reader
+	// and the event-loop thread both touch the map (write_event vs.
+	// connect / set_capture_latency), guarded by `_midi_ports_mx`.
+	std::mutex _midi_ports_mx;
+	std::map<std::string, std::unique_ptr<ShimMidiInputPort>> _midi_ingress_ports;
 
 	// Nesting depth for `undo_group_begin` / `undo_group_end`. Only
 	// touched from the event-loop thread (the call_slot lambdas).
