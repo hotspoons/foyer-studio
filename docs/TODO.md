@@ -85,14 +85,41 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     loop range. Want: if no selection, either no-op or hint. Timeline "Loop selection"
     button works correctly because it explicitly sends `set_loop_range` with bounds.
 - [/] Flakiness on Monitoring/listening setting with multiple clients connected
-  - Likely helped by the tile-leaf element-reuse fix (mixer no longer remounts on every
-    store tick, which was re-running `_applyListenPref` and stacking concurrent
-    `AudioListener` starts). Per-client persistence + multi-client stability still need
-    verification on a live Ardour session with 2+ browsers.
+  - Tile-leaf element-reuse fix (no more remount-on-tick) + per-peer
+    `PeerAudioPrefs` (each peer's manual capture offset is isolated)
+    + Primary-only audio gate (Secondary windows can't open a competing
+    listener stream) all address known stacking failure modes. The auto-start
+    on a fresh client now bails on Secondary connections so the "open a
+    second tab and the listener thrashes" failure mode is closed.
+    Per-client persistence + multi-client stability still need verification on
+    a live Ardour session with 2+ browsers — can't bench-test from this side.
 
 ## UI shape
 
-- [ ] Mutli-window/multi-monitor support
+- [x] Multi-window/multi-monitor support
+  - Shipped 2026-05-12 on `feature/drift-take-2`:
+    · `ConnectionRole` (Primary/Secondary) + per-connection `connection_id` + reusable
+      `peer_id` via `?parent=` (`crates/foyer-schema/src/message.rs`,
+      `crates/foyer-server/src/ws.rs`). Server gates `audio_*` commands on
+      Primary; Secondaries are control-plane only.
+    · `multiWindow` singleton + `BroadcastChannel("foyer:<peer_id>")` for sibling
+      sync + pane-handoff transport (`web/core/multi-window.js`).
+    · "Identify" overlay flashes "Window N" on every sibling — analogous to
+      macOS Identify Displays (`web/core/multi-window-identify.js`).
+    · Send-to-window items on tile-leaf AND foyer-window context menus
+      (`web/ui-core/layout/tile-leaf.js`, `web/ui-core/widgets/window.js`).
+    · `windowRestore` persists per-display-fingerprint slot positions; auto-reopens
+      children on Primary boot; live-only slot allocation, forget-on-close,
+      boot-time prune, "Forget saved windows" reset in Preferences
+      (`web/core/window-restore.js`).
+    · Spawner moved out of the status bar into Preferences → Windows + global
+      `Ctrl+Alt+W` (Mac users hit the same chord — `Cmd+Alt+W` left alone to
+      avoid the "close all windows" conflict).
+  - Follow-ups deferred: per-slot persistence for floating-widget windows
+    (`foyer.window:<key>` still keys on storageKey + sessionScope only — two
+    primaries on different monitors share their plugin float positions), and
+    a "promote secondary to primary" path when the spawning window closes
+    with audio mid-flight (today: audio just drops).
 - [ ] Once over on floating widgets layer versus tile layer, adding auto-tile layouts
     for tile layer, make sure z-indexes for pop-outs make sense, remove nonsense or
     old controls

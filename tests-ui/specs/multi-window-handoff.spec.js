@@ -36,6 +36,21 @@ async function openFamily(ctx) {
     null,
     { timeout: 3000 },
   );
+  // Wait for the UI variant's `<foyer-app>` to mount on BOTH windows
+  // — `__foyer.layout` is published in its `connectedCallback`,
+  // which lands a few hundred ms after the greeting. Without this
+  // wait, evaluate-time reads of `__foyer.layout` can race the
+  // variant boot and see `undefined`.
+  await primary.waitForFunction(
+    () => typeof window.__foyer?.layout?.openFloating === "function",
+    null,
+    { timeout: 10_000 },
+  );
+  await secondary.waitForFunction(
+    () => typeof window.__foyer?.layout?.openFloating === "function",
+    null,
+    { timeout: 10_000 },
+  );
   return { primary, secondary };
 }
 
@@ -85,7 +100,7 @@ test("identifyAllWindows flashes the Window N overlay on every sibling", async (
   );
 });
 
-test("floating-tile handoff lands a new leaf on the receiving window", async ({ browser }) => {
+test("floating-tile handoff lands on the receiving window's float list", async ({ browser }) => {
   const ctx = await browser.newContext();
   const { primary, secondary } = await openFamily(ctx);
 
@@ -95,20 +110,12 @@ test("floating-tile handoff lands a new leaf on the receiving window", async ({ 
   const secondaryConnId = await secondary.evaluate(
     () => window.__foyer.multiWindow.connectionId,
   );
-  // Snapshot the receiver's leaf count beforehand so we can assert
-  // additivity rather than an exact post-state (stub session has
-  // pre-existing tiles).
-  const before = await secondary.evaluate(() => {
-    const leaves = (function walk(node, acc) {
-      if (!node) return acc;
-      if (node.kind === "leaf") acc.push(node);
-      else if (node.kind === "split") {
-        for (const c of node.children || []) walk(c, acc);
-      }
-      return acc;
-    })(window.__foyer.layout?.tree, []);
-    return leaves.length;
-  });
+  // Snapshot the receiver's float count beforehand so we can assert
+  // additivity. `floating-tile` payloads land via `layout.openFloating`
+  // which appends to the float list — not the tile tree.
+  const before = await secondary.evaluate(
+    () => (window.__foyer.layout?.floating?.() || []).length,
+  );
 
   const ok = await primary.evaluate(async (target) => {
     const m = await import("/ui-core/layout/pane-handoff.js");
@@ -120,24 +127,16 @@ test("floating-tile handoff lands a new leaf on the receiving window", async ({ 
   }, secondaryConnId);
   expect(ok).toBe(true);
 
-  // Receiver should mount a new leaf (sendToTiles is the
-  // `floating-tile` fallback when the variant lacks `openFloating` —
-  // for this assertion we don't care which path took; we care that
-  // the tree changed).
+  // Receiver should mount a new floating entry. We wait on the float
+  // list rather than tree leaves because `openFloating` does NOT add
+  // to the tile tree.
   await secondary.waitForFunction(
     (prev) => {
-      const tree = window.__foyer.layout?.tree;
-      const leaves = (function walk(node, acc) {
-        if (!node) return acc;
-        if (node.kind === "leaf") acc.push(node);
-        else if (node.kind === "split") {
-          for (const c of node.children || []) walk(c, acc);
-        }
-        return acc;
-      })(tree, []);
-      return leaves.length > prev;
+      const floats = window.__foyer.layout?.floating?.() || [];
+      return floats.length > prev && floats.some((f) => f.view === "console");
     },
     before,
     { timeout: 3000 },
   );
 });
+

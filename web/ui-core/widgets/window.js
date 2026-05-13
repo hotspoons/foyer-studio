@@ -31,7 +31,7 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
-import { sessionScopedKey } from "foyer-core/session-scope.js";
+import { sessionScopedKey, windowScopedKey } from "foyer-core/session-scope.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { multiWindow } from "foyer-core/multi-window.js";
 import {
@@ -706,12 +706,16 @@ const FACTORIES = new Map();
 // The persisted open-list embeds per-session ids (track / region /
 // plugin), so we scope it by the active session — different .ardour
 // projects don't try to rehydrate each other's windows on reload.
-// `sessionScopedKey` returns the bare key when no session is open
-// (the launcher), so the previous "default" history still rehydrates
-// while the user is at the picker. Once a session loads, that
-// session's slot takes over.
+// As of 2026-05-13 the key is also scoped by the window slot so a
+// freshly-spawned Secondary window starts with no open widget
+// windows rather than inheriting the Primary's roster (otherwise
+// every plugin float / track editor the user had open on the
+// Primary would also pop on the new Secondary). `windowScopedKey`
+// returns the bare key when running as slot 0 (Primary or single-
+// window install) so the existing session history still rehydrates
+// for everyone else.
 function _persistedListKey() {
-  return sessionScopedKey(PERSIST_KEY);
+  return windowScopedKey(PERSIST_KEY);
 }
 function _loadPersisted() {
   try { return JSON.parse(localStorage.getItem(_persistedListKey()) || "[]") || []; }

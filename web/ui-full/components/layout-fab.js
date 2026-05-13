@@ -32,7 +32,11 @@ const PRESET_ORDER = [
   { id: "timeline-left-mixer-right",    label: "Timeline + Mixer",        tag: "T · M" },
   { id: "timeline-over-mixer",          label: "Timeline over Mixer",     tag: "stack" },
   { id: "mixer-over-timeline",          label: "Mixer over Timeline",     tag: "stack" },
-  { id: "everything",                   label: "Everything",              tag: "full" },
+  // "Everything" + the plugins/session multi-pane presets are gone:
+  // every non-tile-class view (plugins, session/Projects, console,
+  // diagnostics) is a widget now — putting them in the tile tree
+  // rendered as "missing entity" placeholders. Widgets live in the
+  // right-dock + foyer-window layer instead.
   { id: "mixer",                        label: "Mixer only",              tag: "single" },
   { id: "timeline",                     label: "Timeline only",           tag: "single" },
 ];

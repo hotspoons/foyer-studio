@@ -518,6 +518,11 @@ export class TileLeaf extends LitElement {
     // own thing.
     if (ev.button !== 0) return;
     if (ev.target && ev.target.closest("button")) return;
+    // Every tile (native or widget) can be dragged to a new slot in
+    // the tile tree. The drop ALWAYS lands inside the tree — there's
+    // no bypass to free-float here, because the tile layer is meant
+    // to be 100% tiles. Releasing off-slot cancels the drag and the
+    // original tree shape is restored.
     const startX = ev.clientX;
     const startY = ev.clientY;
     const THRESHOLD = 8;
@@ -554,62 +559,61 @@ export class TileLeaf extends LitElement {
       w,
       h,
     };
-    // Tear-out path: remove the leaf and ALLOW the tree to be empty. The
-    // default backfill-with-mixer used to kick in here, which looked like
-    // "the window I dragged duplicated itself in place."
-    //
-    // Widget-class views (track editor, MIDI editor, beat sequencer,
-    // …) keep using drop-zones / `openFloating` here so the user
-    // gets the slot-snap landing they expect from a header drag.
-    // The view registry's `elementTag` fallback in
-    // `<foyer-floating-tiles>::_renderView` makes the body render
-    // correctly even though those views weren't in the original
-    // hardcoded switch, so the slotted entry behaves the same as
-    // a native mixer/timeline tear-out — and `_renderWindow`'s
-    // dock-back button checks `meta.floatSpawn` to decide whether
-    // "popping out" converts the slot entry into a foyer-window
-    // (widget views) or re-docks into the tile tree (native).
+    // Snapshot the original tree shape + focus so we can cancel
+    // cleanly when the user releases off-slot. The tile layer is
+    // 100% tiles — there's no "leave it floating in the air" exit
+    // path. Without this, a hesitated drag would orphan the leaf.
+    const Tree = await import("./tile-tree.js");
+    const originalTree = Tree.deserialize(Tree.serialize(this.store?.tree));
+    const originalFocus = this.store?.focusId || null;
+
+    // Stage a floating preview while the drag is in flight — gives
+    // the user a visible cursor handle to drag onto a slot. The
+    // preview is removed on release regardless of outcome (slot
+    // drop → reshape tree, off-slot release → restore tree).
     this.store?.removeLeaf(this.leaf.id, { allowEmpty: true });
     const id = this.store?.openFloating(view, props, placement);
     if (!id) return;
 
     // Dynamically import to avoid a circular dependency with layout-store.
-    const [{ dropZones }, { slotBounds }] = await Promise.all([
-      import("./drop-zones.js"),
-      import("./slots.js"),
-    ]);
+    const { dropZones } = await import("./drop-zones.js");
     const zones = dropZones();
     zones.show();
     zones.update(x, y);
 
-    // Alt/Ctrl/Shift during the tear drag hides the slot grid and drops the
-    // torn-out window at raw pixel coordinates — same bypass chord as the
-    // floating-tile drag path.
-    const isBypass = (e) => !!(e && (e.altKey || e.ctrlKey || e.shiftKey));
     const move = (e) => {
       const nx = Math.max(0, e.clientX - w / 2);
       const ny = Math.max(0, e.clientY - 12);
       this.store.floatSet(id, { x: nx, y: ny, slot: null });
-      if (isBypass(e)) {
-        zones.setBypassed(true);
-      } else {
-        zones.setBypassed(false);
-        zones.update(e.clientX, e.clientY);
-      }
+      zones.update(e.clientX, e.clientY);
     };
-    const up = (e) => {
+    const up = async () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       const snap = zones.currentSlot();
       zones.hide();
-      if (snap && !isBypass(e)) {
-        const rect = slotBounds(snap);
-        if (rect) {
-          this.store.floatSet(id, { ...rect, slot: snap });
-          try {
-            localStorage.setItem(`foyer.layout.sticky.${view}`, snap);
-          } catch {}
-        }
+      this.store.removeFloat(id);
+      if (snap) {
+        // Reshape the tile tree so the dropped leaf lands at the
+        // slot position. New leaf id so the focus jumps correctly.
+        const newLeaf = Tree.leaf(view, props);
+        const nextTree = Tree.insertIntoTreeAtSlot(
+          this.store.tree,
+          newLeaf,
+          snap,
+          this.store.focusId,
+        );
+        this.store.setTree(nextTree);
+        this.store.focus(newLeaf.id);
+        try {
+          localStorage.setItem(`foyer.layout.sticky.${view}`, snap);
+        } catch {}
+      } else {
+        // Off-slot release — cancel by restoring the pre-drag tree
+        // shape. The 100%-tiles rule means we never leave the user
+        // looking at a free-floating tile that has no home.
+        this.store.setTree(originalTree);
+        if (originalFocus) this.store.focus(originalFocus);
       }
     };
     window.addEventListener("pointermove", move);
@@ -732,41 +736,46 @@ export class TileLeaf extends LitElement {
       y: Math.max(0, y - 14),
       w, h,
     };
+    // Same model as `_tearOut`: stage a floating preview during the
+    // drag, drop the preview on release, and either reshape the tile
+    // tree (slot drop) or do nothing (off-slot release — no new
+    // tile spawned). 100% tiles in the tile layer; the bypass-to-
+    // free-float chord is gone.
     const id = this.store?.openFloating(view, {}, placement);
     if (!id) return;
 
-    const [{ dropZones }, { slotBounds }] = await Promise.all([
-      import("./drop-zones.js"),
-      import("./slots.js"),
-    ]);
+    const Tree = await import("./tile-tree.js");
+    const { dropZones } = await import("./drop-zones.js");
     const zones = dropZones();
     zones.show();
     zones.update(x, y);
 
-    const isBypass = (e) => !!(e && (e.altKey || e.ctrlKey || e.shiftKey));
     const move = (e) => {
       const nx = Math.max(0, e.clientX - w / 2);
       const ny = Math.max(0, e.clientY - 14);
       this.store.floatSet(id, { x: nx, y: ny, slot: null });
-      if (isBypass(e)) {
-        zones.setBypassed(true);
-      } else {
-        zones.setBypassed(false);
-        zones.update(e.clientX, e.clientY);
-      }
+      zones.update(e.clientX, e.clientY);
     };
-    const up = (e) => {
+    const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       const snap = zones.currentSlot();
       zones.hide();
-      if (snap && !isBypass(e)) {
-        const rect = slotBounds(snap);
-        if (rect) {
-          this.store.floatSet(id, { ...rect, slot: snap });
-          try { localStorage.setItem(`foyer.layout.sticky.${view}`, snap); } catch {}
-        }
+      this.store.removeFloat(id);
+      if (snap) {
+        const newLeaf = Tree.leaf(view, {});
+        const nextTree = Tree.insertIntoTreeAtSlot(
+          this.store.tree,
+          newLeaf,
+          snap,
+          this.store.focusId,
+        );
+        this.store.setTree(nextTree);
+        this.store.focus(newLeaf.id);
+        try { localStorage.setItem(`foyer.layout.sticky.${view}`, snap); } catch {}
       }
+      // Off-slot release: the new view was never committed, so we
+      // simply removed the preview above — nothing else to undo.
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
