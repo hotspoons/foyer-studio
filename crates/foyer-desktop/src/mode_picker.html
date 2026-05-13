@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Foyer Studio — first launch</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 24px;
+        height: 100%;
+        background: #0e1116;
+        color: #e5e8ee;
+        font-family: system-ui, sans-serif;
+        font-size: 14px;
+      }
+      h1 { margin: 0 0 12px 0; font-size: 18px; }
+      p  { margin: 0 0 18px 0; color: #8a93a3; font-size: 12px; }
+      .row { display: flex; gap: 12px; }
+      button {
+        flex: 1;
+        background: #161b22;
+        color: #e5e8ee;
+        border: 1px solid #1f2630;
+        border-radius: 8px;
+        padding: 14px 16px;
+        text-align: left;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover { border-color: #6c8cff; background: #1f262f; }
+      button h2  { margin: 0 0 6px 0; font-size: 13px; }
+      button div { font-size: 11px; color: #8a93a3; }
+    </style>
+  </head>
+  <body>
+    <h1>How should Foyer run?</h1>
+    <p>
+      Pick once — saved to <code>config.yaml</code>. Re-run with
+      <code>--reset-mode</code> to change later.
+    </p>
+    <div class="row">
+      <button data-pick="host">
+        <h2>Run on this machine (Host)</h2>
+        <div>Embeds the Foyer sidecar in this window. No containers.</div>
+      </button>
+      <button data-pick="docker">
+        <h2>Run in a container (Docker)</h2>
+        <div>Spawns <code>foyer docker</code> with the configured mode.</div>
+      </button>
+    </div>
+    <script>
+      function pick(v) {
+        if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(v);
+      }
+      for (const b of document.querySelectorAll("[data-pick]")) {
+        b.addEventListener("click", () => pick(b.dataset.pick));
+      }
+      document.addEventListener("keydown", (ev) => {
+        if (ev.key === "h" || ev.key === "H") pick("host");
+        if (ev.key === "d" || ev.key === "D") pick("docker");
+      });
+    </script>
+  </body>
+</html>

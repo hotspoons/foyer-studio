@@ -19,6 +19,9 @@ use foyer_config::{self as cfg, BackendKind, Config};
 use foyer_schema::BackendInfo;
 use foyer_server::{BackendSpawner, Config as ServerConfig, Server};
 
+mod docker_cmd;
+mod shim_install;
+
 #[derive(Parser)]
 #[command(name = "foyer", version, about = "Foyer Studio runtime")]
 struct Cli {
@@ -119,6 +122,52 @@ enum Command {
         /// with JACK.
         #[arg(long, value_name = "HZ")]
         sample_rate: Option<u32>,
+
+        /// Override the Ardour executable path. Wins over `executable`
+        /// in the backend config and the PATH probe. Useful when you
+        /// have multiple Ardour versions installed and want a specific
+        /// one (e.g., `--ardour-path /opt/Ardour-9.2/bin/ardour9`).
+        /// Ignored when `--backend stub`.
+        #[arg(long, value_name = "BIN")]
+        ardour_path: Option<PathBuf>,
+    },
+    /// Run Foyer Studio in a container. Wraps docker / podman /
+    /// nerdctl behind a single command with audio-mode presets.
+    /// Defaults from `config.yaml`'s `docker` section.
+    Docker {
+        /// Dummy-backend mode — container needs no host audio system.
+        /// Default when no mode flag is set. Mutually exclusive with
+        /// `--jack` / `--netjack`.
+        #[arg(long, conflicts_with_all = ["jack", "netjack"])]
+        integrated: bool,
+        /// Bind-mount the host's JACK socket dir into the container.
+        /// Linux only. Mutually exclusive with `--integrated` / `--netjack`.
+        #[arg(long, conflicts_with_all = ["integrated", "netjack"])]
+        jack: bool,
+        /// Connect to a NetJACK server over TCP. Set
+        /// `FOYER_NETJACK_HOST` + `FOYER_NETJACK_PORT` env vars to
+        /// point at it. Mutually exclusive with `--integrated` / `--jack`.
+        #[arg(long, conflicts_with_all = ["integrated", "jack"])]
+        netjack: bool,
+        /// Container image. Default `ghcr.io/hotspoons/foyer-studio:latest`.
+        /// Pin to a specific snapshot tag (e.g.
+        /// `ghcr.io/hotspoons/foyer-studio:snapshot-abc1234`) for
+        /// reproducible runs.
+        #[arg(long, value_name = "IMG")]
+        image: Option<String>,
+        /// Container runtime: `podman`, `docker`, or `nerdctl`. Auto-
+        /// picked from PATH when unset.
+        #[arg(long, value_name = "BIN")]
+        runtime: Option<String>,
+        /// Host port to publish the container's 3838 on. Default 3838.
+        #[arg(long, value_name = "PORT")]
+        host_port: Option<u16>,
+        /// Detach instead of streaming logs.
+        #[arg(short, long, default_value_t = false)]
+        detach: bool,
+        /// Print the assembled command without running it.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
     /// Print the resolved config and exit.
     Backends,
@@ -210,6 +259,37 @@ async fn main() -> Result<()> {
     let config = load_config(cli.config.as_deref())?;
 
     match cli.command {
+        Command::Docker {
+            integrated,
+            jack,
+            netjack,
+            image,
+            runtime,
+            host_port,
+            detach,
+            dry_run,
+        } => {
+            let mode_override = if integrated {
+                Some(cfg::DockerMode::Integrated)
+            } else if jack {
+                Some(cfg::DockerMode::Jack)
+            } else if netjack {
+                Some(cfg::DockerMode::Netjack)
+            } else {
+                None
+            };
+            docker_cmd::run(
+                &config,
+                docker_cmd::DockerCmdArgs {
+                    mode_override,
+                    image_override: image,
+                    runtime_override: runtime,
+                    host_port_override: host_port,
+                    detach,
+                    dry_run,
+                },
+            )
+        }
         Command::Backends => {
             println!("config: {}", config_path(cli.config.as_deref())?.display());
             println!("default_backend: {}", config.default_backend);
@@ -275,6 +355,7 @@ async fn main() -> Result<()> {
             tls_key,
             stub_test_tone,
             sample_rate,
+            ardour_path,
         } => {
             if list_shims {
                 return list_available_shims();
@@ -319,6 +400,7 @@ async fn main() -> Result<()> {
                 tls,
                 stub_test_tone,
                 sample_rate,
+                ardour_path,
             )
             .await
         }
@@ -485,6 +567,7 @@ async fn serve(
     tls: Option<foyer_server::TlsConfig>,
     stub_test_tone: bool,
     sample_rate_override: Option<u32>,
+    ardour_path_override: Option<PathBuf>,
 ) -> Result<()> {
     // Resolve backend: CLI override wins, then config default.
     let backend = match backend_override.as_deref() {
@@ -502,6 +585,31 @@ async fn serve(
         ));
     }
     tracing::info!("using backend id={} kind={:?}", backend.id, backend.kind);
+
+    // Ardour preflight: when the resolved backend is Ardour, refuse to
+    // boot until we've located the executable AND materialized the
+    // embedded shim into the user's surfaces directory. Skipped when
+    // an explicit `--socket` was passed (attach-to-running mode — the
+    // shim is already loaded; Ardour binary is moot). Skipped for
+    // `--backend stub`, of course. Override precedence:
+    //   1. `--ardour-path`
+    //   2. backend config `executable` field
+    //   3. PATH probe / well-known paths
+    if matches!(backend.kind, BackendKind::Ardour) && socket.is_none() {
+        let override_path = ardour_path_override
+            .as_deref()
+            .or_else(|| backend.executable.as_deref());
+        match shim_install::ensure_ardour_ready(override_path) {
+            Ok(ready) => {
+                tracing::info!("Ardour binary: {}", ready.binary.display());
+                tracing::info!("shim installed: {}", ready.shim_installed_at.display());
+            }
+            Err(e) => {
+                eprintln!("\n{e:#}\n");
+                return Err(anyhow!("Ardour preflight failed — refusing to start"));
+            }
+        }
+    }
 
     // Resolve jail: --jail wins; empty-string opts out; fall back to config.
     let jail = match jail_override {

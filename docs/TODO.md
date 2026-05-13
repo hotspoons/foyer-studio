@@ -120,10 +120,10 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     primaries on different monitors share their plugin float positions), and
     a "promote secondary to primary" path when the spawning window closes
     with audio mid-flight (today: audio just drops).
-- [ ] Once over on floating widgets layer versus tile layer, adding auto-tile layouts
+- [x] Once over on floating widgets layer versus tile layer, adding auto-tile layouts
     for tile layer, make sure z-indexes for pop-outs make sense, remove nonsense or
     old controls
-- [ ] Drop original "share" dialog and share button from main menu
+- [x] Drop original "share" dialog and share button from main menu
 
 
 ## Infra + ops
