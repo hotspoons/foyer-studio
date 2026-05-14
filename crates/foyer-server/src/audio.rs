@@ -358,14 +358,13 @@ impl AudioHub {
                     // for THIS egress stream. Uses the click's emit
                     // timestamp as `server_mono_ns` for the packet so
                     // ingress detection can subtract it directly.
-                    let calibration_emit_ns = calibration_for_task
-                        .maybe_overlay_egress_click(
-                            stream_id,
-                            &mut chunk,
-                            format_for_task.channels as u32,
-                            format_for_task.sample_rate,
-                            monotonic_nanos(),
-                        );
+                    let calibration_emit_ns = calibration_for_task.maybe_overlay_egress_click(
+                        stream_id,
+                        &mut chunk,
+                        format_for_task.channels as u32,
+                        format_for_task.sample_rate,
+                        monotonic_nanos(),
+                    );
                     // Source-side diagnostic: peak + zero-crossings on
                     // channel 0 of the pre-encode buffer. Tells us
                     // what the SHIM is actually handing the server.

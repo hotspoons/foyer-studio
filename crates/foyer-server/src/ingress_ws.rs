@@ -166,13 +166,14 @@ async fn handle(mut socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
                                 .ingress_manual_offset_ms
                                 .load(std::sync::atomic::Ordering::Relaxed);
                             let effective_ms = (median_ms as f64) + manual_offset_ms as f64;
-                            let new_samples = ((effective_ms / 1000.0)
-                                * engine_sample_rate as f64)
+                            let new_samples = ((effective_ms / 1000.0) * engine_sample_rate as f64)
                                 .max(0.0) as u32;
                             let push = match last_applied_samples {
                                 None => true,
-                                Some(prev) => (new_samples as i32 - prev as i32).abs()
-                                    >= APPLY_THRESHOLD_SAMPLES,
+                                Some(prev) => {
+                                    (new_samples as i32 - prev as i32).abs()
+                                        >= APPLY_THRESHOLD_SAMPLES
+                                }
                             };
                             if push {
                                 last_applied_samples = Some(new_samples);
@@ -261,14 +262,10 @@ async fn handle(mut socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
                     .await;
                     if n >= total {
                         // Finalize: pop the run and emit the result.
-                        if let Some(egress_id) =
-                            state.calibration.egress_for_ingress(stream_id)
-                        {
+                        if let Some(egress_id) = state.calibration.egress_for_ingress(stream_id) {
                             if let Some(result) = state.calibration.take_result(egress_id) {
-                                let suggested = crate::ws::suggested_offset(
-                                    &state,
-                                    result.median_ms,
-                                );
+                                let suggested =
+                                    crate::ws::suggested_offset(&state, result.median_ms);
                                 tracing::info!(
                                     "calibration complete on egress {}: kept {}/{} median {:.1} ms → suggested offset {} ms",
                                     egress_id,

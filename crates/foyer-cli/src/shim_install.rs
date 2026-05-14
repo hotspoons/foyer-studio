@@ -79,8 +79,8 @@ pub fn ensure_ardour_ready(ardour_binary_override: Option<&Path>) -> Result<Aard
     let binary = resolve_ardour_binary(ardour_binary_override)
         .context("Ardour executable not found on this system")?;
     check_version_compat(&binary);
-    let shim_installed_at = install_shim_if_stale()
-        .context("failed to install embedded Ardour shim")?;
+    let shim_installed_at =
+        install_shim_if_stale().context("failed to install embedded Ardour shim")?;
     Ok(AardourReady {
         binary,
         shim_installed_at,
@@ -227,7 +227,9 @@ fn ardour_surfaces_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("could not determine $HOME"))?;
     let major = ARDOUR_VERSION.split('.').next().unwrap_or("9");
     let dir = if cfg!(target_os = "macos") {
-        home.join("Library/Preferences").join(format!("Ardour{major}")).join("surfaces")
+        home.join("Library/Preferences")
+            .join(format!("Ardour{major}"))
+            .join("surfaces")
     } else {
         let xdg = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)

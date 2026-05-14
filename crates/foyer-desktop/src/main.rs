@@ -171,7 +171,9 @@ fn run_from_config(reset: bool) -> Result<()> {
         .map(|d| d.fullscreen)
         .unwrap_or(false);
     match mode {
-        Some(DesktopMode::Host) => run_host(Backend::Stub, None, "127.0.0.1:0".parse()?, fullscreen),
+        Some(DesktopMode::Host) => {
+            run_host(Backend::Stub, None, "127.0.0.1:0".parse()?, fullscreen)
+        }
         Some(DesktopMode::Docker) => run_docker_mode(fullscreen),
         None => show_mode_picker(),
     }
@@ -362,7 +364,8 @@ fn show_mode_picker() -> Result<()> {
     // shape that `http::Uri` accepts, AND let us serve arbitrary
     // bytes from memory without writing temp files.
     let html_bytes = html.as_bytes().to_vec();
-    let event_loop: EventLoop<PickResult> = EventLoopBuilder::<PickResult>::with_user_event().build();
+    let event_loop: EventLoop<PickResult> =
+        EventLoopBuilder::<PickResult>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
         .with_title("Foyer Studio — first launch")
@@ -433,7 +436,9 @@ enum PickResult {
 /// foyer-desktop process so the new mode is read by `run_from_config`.
 fn persist_and_relaunch(pick: PickResult) -> Result<()> {
     let mut config = cfg::load_or_seed().context("load config.yaml")?;
-    let desktop = config.desktop.get_or_insert_with(cfg::DesktopConfig::default);
+    let desktop = config
+        .desktop
+        .get_or_insert_with(cfg::DesktopConfig::default);
     desktop.mode = Some(match pick {
         PickResult::Host => DesktopMode::Host,
         PickResult::Docker => DesktopMode::Docker,
@@ -487,9 +492,7 @@ fn apply_linux_render_workarounds(webview: &wry::WebView) {
             // the behaviour.
             #[allow(deprecated)]
             settings.set_enable_accelerated_2d_canvas(false);
-            tracing::info!(
-                "applied linux render workarounds: hw_accel=Never, accel_2d_canvas=off",
-            );
+            tracing::info!("applied linux render workarounds: hw_accel=Never, accel_2d_canvas=off",);
         }
     }
 }
