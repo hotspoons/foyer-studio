@@ -111,6 +111,26 @@ jobs:
         with:
           components: rustfmt, clippy
           targets: ${{ matrix.target }}
+      # Defensive toolchain wire-up. On macos-14, `just fmt-check` has
+      # been observed to resolve `cargo` to rustup-init (the bootstrap
+      # installer, NOT the rustup proxy) and fail with:
+      #     error: unexpected argument 'fmt' found
+      #     Usage: rustup-init[EXE] [OPTIONS]
+      # That happens when no default toolchain is wired up at the
+      # shell `just` spawns from — argv[0]=cargo hits a proxy with
+      # no active toolchain and falls back to installer behavior.
+      # `rustup default stable` after the install action guarantees a
+      # default is set; printing `which cargo` / `cargo --version`
+      # surfaces toolchain-resolution issues in the workflow log
+      # instead of as a cryptic clap usage dump later.
+      - name: Verify rust toolchain
+        shell: bash
+        run: |
+          rustup default stable
+          echo "PATH=$PATH"
+          which -a cargo
+          cargo --version
+          rustup show
       - uses: Swatinem/rust-cache@v2
         with:
           # Per-cell cache; suffix changes when the build target does

@@ -267,11 +267,6 @@ anything beyond a public demo, mount a GCS bucket at `/projects`
 via [GCS Fuse](https://cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts)
 — Foyer's upload/export flows just work against it.
 
-**Continuous deployment.** [`.github/workflows/cloudrun-deploy.yml`](../.github/workflows/cloudrun-deploy.yml)
-auto-deploys `:latest` after every main build, gated on the
-`GCP_PROJECT` repo variable. The workflow header has the one-time
-WIF / service-account setup recipe.
-
 ## Path 2 — host install against your own Ardour 9.2
 
 The installer drops a single `foyer` binary on your `$PATH` and

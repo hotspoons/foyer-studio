@@ -147,6 +147,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Defensive toolchain wire-up — same rationale as ci.yml.
+      # On macos-14 we've seen `cargo` resolve to rustup-init's
+      # installer mode (clap "Usage: rustup-init[EXE]" dump) when no
+      # default is set, so force one and surface the resolution.
+      - name: Verify rust toolchain
+        shell: bash
+        run: |
+          rustup default stable
+          echo "PATH=$PATH"
+          which -a cargo
+          cargo --version
+          rustup show
+
       # `target/` cache, separate per matrix cell + target so musl
       # artifacts don't collide with leftover glibc ones.
       - uses: Swatinem/rust-cache@v2
