@@ -508,6 +508,153 @@ export class TimelineView extends LitElement {
     }
     .region .edge.left  { left: 0; }
     .region .edge.right { right: 0; }
+
+    /* Fade SVG overlay — covers the lozenge so the curve sits over the
+     * waveform. The path itself is what shows the shape; the fill below
+     * dims the still-attenuated portion so the user reads the fade
+     * envelope at a glance even without the waveform helping. */
+    .region .fade-svg {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 2;
+      overflow: visible;
+    }
+    .region .fade-svg .fade-fill {
+      fill: rgba(0, 0, 0, 0.42);
+      stroke: none;
+    }
+    .region .fade-svg .fade-line {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.9);
+      stroke-width: 1.25;
+      vector-effect: non-scaling-stroke;
+    }
+    /* Crossfade curves render at the lane level (between regions on the
+     * same track) using their own SVG layer. Two paths — one per region's
+     * contribution — drawn over the overlap span. */
+    .crossfade-svg {
+      position: absolute;
+      pointer-events: none;
+      z-index: 5;
+      overflow: visible;
+    }
+    .crossfade-svg .xfade-line-out {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.85);
+      stroke-width: 1.25;
+      vector-effect: non-scaling-stroke;
+    }
+    .crossfade-svg .xfade-line-in {
+      fill: none;
+      stroke: rgba(120, 220, 255, 0.85);
+      stroke-width: 1.25;
+      vector-effect: non-scaling-stroke;
+    }
+    .crossfade-svg .xfade-tint {
+      fill: rgba(255, 255, 255, 0.06);
+      stroke: rgba(255, 255, 255, 0.25);
+      stroke-width: 1;
+      stroke-dasharray: 3 3;
+    }
+
+    /* Fade-length grab handle — a small triangle anchored to the
+     * inside endpoint of the fade. When no fade exists the handle
+     * sits at the lozenge corner; drag inward to extend. Hold Alt
+     * to rotate the curve shape; Shift+click clears the fade. */
+    .region .fade-handle {
+      position: absolute;
+      top: 0;
+      width: 10px;
+      height: 14px;
+      cursor: ew-resize;
+      z-index: 5;
+      opacity: 0.65;
+      transition: opacity 0.1s ease;
+    }
+    .region:hover .fade-handle,
+    .region .fade-handle.dragging,
+    .region .fade-handle.active { opacity: 1; }
+    .region .fade-handle::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      width: 0;
+      height: 0;
+      border-style: solid;
+    }
+    .region .fade-handle.in::before {
+      left: 0;
+      border-width: 14px 10px 0 0;
+      border-color: rgba(255, 255, 255, 0.9) transparent transparent transparent;
+    }
+    .region .fade-handle.out::before {
+      right: 0;
+      border-width: 14px 0 0 10px;
+      border-color: transparent transparent transparent rgba(255, 255, 255, 0.9);
+    }
+    .region .fade-handle.in  { transform: translateX(-2px); }
+    .region .fade-handle.out { transform: translateX(2px); }
+
+    /* Per-region gain strip — a thin bar across the lozenge top
+     * that drags vertically to set gain. Shows the linear-gain dB
+     * label while dragging. Audio-only; MIDI regions don't render
+     * this strip (Ardour's set_scale_amplitude isn't meaningful
+     * for MIDI). */
+    .region .gain-strip {
+      position: absolute;
+      top: 0; left: 12px; right: 12px;
+      height: 6px;
+      cursor: ns-resize;
+      z-index: 4;
+      background: linear-gradient(180deg,
+        color-mix(in oklab, var(--color-accent-3, #f59e0b) 75%, transparent),
+        color-mix(in oklab, var(--color-accent-3, #f59e0b) 25%, transparent));
+      border-radius: 0 0 3px 3px;
+      opacity: 0;
+      transition: opacity 0.1s ease;
+    }
+    .region:hover .gain-strip,
+    .region .gain-strip.dragging,
+    .region .gain-strip.nonunity { opacity: 0.85; }
+    .region .gain-readout {
+      position: absolute;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: var(--font-sans);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: rgba(0, 0, 0, 0.65);
+      color: #fff;
+      pointer-events: none;
+      z-index: 5;
+      white-space: nowrap;
+    }
+    /* Floating label that follows the fade-handle drag, showing the
+     * current fade length and shape so the user has feedback while
+     * they tune the curve. Lives inside the region (not body-level)
+     * so positioning is simple. */
+    .region .fade-readout {
+      position: absolute;
+      top: 18px;
+      font-family: var(--font-sans);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: rgba(0, 0, 0, 0.65);
+      color: #fff;
+      pointer-events: none;
+      z-index: 6;
+      white-space: nowrap;
+    }
     .region.stretch-active {
       outline: 1px dashed color-mix(in oklab, var(--color-accent) 70%, transparent);
       z-index: 1;
@@ -2166,25 +2313,6 @@ export class TimelineView extends LitElement {
     return t?.kind || "audio";
   }
 
-  _regionPairForCrossfadeGlue() {
-    const regs = this._selectedRegionObjects();
-    if (regs.length !== 2) return null;
-    const [a0, b0] = regs;
-    if (a0.track_id !== b0.track_id) return null;
-    if (this._trackKind(a0.track_id) !== "audio") return null;
-    const ordered = [...regs].sort(
-      (a, b) => Number(a.start_samples) - Number(b.start_samples),
-    );
-    const L = ordered[0];
-    const R = ordered[1];
-    const sL = Math.round(Number(L.start_samples) || 0);
-    const eL = sL + Math.max(0, Math.round(Number(L.length_samples) || 0));
-    const sR = Math.round(Number(R.start_samples) || 0);
-    const eR = sR + Math.max(0, Math.round(Number(R.length_samples) || 0));
-    const inter = Math.min(eL, eR) - Math.max(sL, sR);
-    return { L, R, sL, eL, sR, eR, inter, track_id: L.track_id };
-  }
-
   _quantizeSelectedRegionsToGrid() {
     const step = this._gridStepSamples();
     if (!step) {
@@ -2206,92 +2334,365 @@ export class TimelineView extends LitElement {
     }
   }
 
-  _fadeStepSamples() {
-    const step = this._gridStepSamples();
-    return Math.max(480, step || Math.round(this._sampleRate() * 0.05));
-  }
-
-  _applyFadeInStep() {
-    const ws = window.__foyer?.ws;
-    if (!ws) return;
-    const n = this._fadeStepSamples();
-    for (const id of this._selectedRegionIds) {
-      const r = this._regionForId(id);
-      if (!r || this._trackKind(r.track_id) !== "audio") continue;
-      const maxFade = Math.max(480, Math.round(Number(r.length_samples) || 0) - 480);
-      const fade = Math.min(n, maxFade);
-      ws.send({
+  /**
+   * Begin a fade-handle drag. `side` is `"in"` or `"out"`, `anchor` is the
+   * region the handle belongs to. Moves the fade endpoint horizontally
+   * — fade length grows as the user drags inward, shrinks back to zero
+   * if they overshoot the corner. Shape stays put unless the user
+   * holds Alt (cycles through Ardour's five shapes).
+   *
+   * Local-only preview during drag (no `update_region` until pointer-up)
+   * matches the single-undo-entry contract the move/resize handlers
+   * already use. Crossfades render automatically from the resulting
+   * fade fields whenever two same-track audio regions overlap.
+   */
+  _startFadeDrag(ev, region, side) {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (this._trackKind(region.track_id) !== "audio") return;
+    const sr = this._sampleRate();
+    const pxPerSec = this._zoom;
+    const startX = ev.clientX;
+    const origInSamples = Math.max(0, Number(region.fade_in_samples) || 0);
+    const origOutSamples = Math.max(0, Number(region.fade_out_samples) || 0);
+    const origShape = side === "in"
+      ? (region.fade_in_shape || "linear")
+      : (region.fade_out_shape || "linear");
+    // Local copy of shape, mutable by Alt+drag; commits on pointer-up.
+    this._fadeDragShape = origShape;
+    const regionEl = this.renderRoot.querySelector(`.region[data-id="${region.id}"]`);
+    const handleEl = ev.currentTarget;
+    handleEl?.classList?.add("dragging");
+    regionEl?.classList?.add("fade-dragging");
+    try { handleEl?.setPointerCapture?.(ev.pointerId); } catch {}
+    const lenSamples = Math.max(1, Number(region.length_samples) || 1);
+    const minFade = 0;
+    // Cap each fade so it can't swallow more than (length - 480 samples)
+    // — same hard floor as the previous menu-driven step paths.
+    const maxFade = Math.max(0, lenSamples - 480);
+    let lastFade = side === "in" ? origInSamples : origOutSamples;
+    const move = (e) => {
+      const dxPx = e.clientX - startX;
+      const dxSamples = Math.round((dxPx / pxPerSec) * sr);
+      // Drag direction: fade-in grows as the pointer moves to the
+      // right; fade-out grows as the pointer moves to the left. So
+      // the fade length delta is +dx for "in" and -dx for "out".
+      const delta = side === "in" ? dxSamples : -dxSamples;
+      const orig = side === "in" ? origInSamples : origOutSamples;
+      let fade = Math.max(minFade, Math.min(maxFade, orig + delta));
+      // When dragging both fades on the same region they may NOT
+      // overlap — otherwise Ardour's fade engine produces a click. If
+      // we're sizing the "in" handle and there's a fixed fade-out, cap
+      // accordingly; same for the inverse.
+      const other = side === "in" ? origOutSamples : origInSamples;
+      const room = Math.max(0, lenSamples - other - 1);
+      fade = Math.min(fade, room);
+      if (e.altKey && !this._fadeDragAltConsumed) {
+        // Alt cycles the shape on the way DOWN of a single press
+        // (not on each pointermove sample). The flag is reset on
+        // Alt-release below.
+        this._fadeDragShape = this._cycleFadeShape(this._fadeDragShape);
+        this._fadeDragAltConsumed = true;
+      } else if (!e.altKey && this._fadeDragAltConsumed) {
+        this._fadeDragAltConsumed = false;
+      }
+      lastFade = fade;
+      const preview = { ...region };
+      if (side === "in") {
+        preview.fade_in_samples = fade > 0 ? fade : null;
+        preview.fade_in_shape = fade > 0 ? this._fadeDragShape : null;
+      } else {
+        preview.fade_out_samples = fade > 0 ? fade : null;
+        preview.fade_out_shape = fade > 0 ? this._fadeDragShape : null;
+      }
+      this._patchRegionLocally(preview);
+    };
+    const up = () => {
+      handleEl?.classList?.remove("dragging");
+      regionEl?.classList?.remove("fade-dragging");
+      try { handleEl?.releasePointerCapture?.(ev.pointerId); } catch {}
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      this._fadeDragAltConsumed = false;
+      // Commit once at the end.
+      const r = this._regionForId(region.id);
+      if (!r) return;
+      const patch = side === "in"
+        ? {
+            fade_in_samples: lastFade,
+            ...(lastFade > 0 ? { fade_in_shape: this._fadeDragShape } : {}),
+          }
+        : {
+            fade_out_samples: lastFade,
+            ...(lastFade > 0 ? { fade_out_shape: this._fadeDragShape } : {}),
+          };
+      // Skip the round-trip if nothing actually changed.
+      const wasSamples = side === "in" ? origInSamples : origOutSamples;
+      if (wasSamples === lastFade && this._fadeDragShape === origShape) return;
+      window.__foyer?.ws?.send({
         type: "update_region",
         id: r.id,
-        patch: { fade_in_samples: fade, fade_in_shape: "linear" },
+        patch,
       });
-    }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   }
 
-  _applyFadeOutStep() {
+  /** Cycle through Ardour's fade-shape enum on Alt+fade-drag. */
+  _cycleFadeShape(s) {
+    const order = ["linear", "fast", "slow", "constant_power", "symmetric"];
+    const i = order.indexOf(s);
+    return order[(i < 0 ? 0 : (i + 1) % order.length)];
+  }
+
+  /**
+   * Shift-click on a fade handle clears that fade. Cheap shortcut
+   * since the drag-to-zero path requires careful aim.
+   */
+  _clearFade(region, side) {
     const ws = window.__foyer?.ws;
-    if (!ws) return;
-    const n = this._fadeStepSamples();
-    for (const id of this._selectedRegionIds) {
-      const r = this._regionForId(id);
-      if (!r || this._trackKind(r.track_id) !== "audio") continue;
-      const maxFade = Math.max(480, Math.round(Number(r.length_samples) || 0) - 480);
-      const fade = Math.min(n, maxFade);
-      ws.send({
-        type: "update_region",
-        id: r.id,
-        patch: { fade_out_samples: fade, fade_out_shape: "linear" },
-      });
-    }
+    if (!ws || !region) return;
+    if (this._trackKind(region.track_id) !== "audio") return;
+    const patch = side === "in"
+      ? { fade_in_samples: 0 }
+      : { fade_out_samples: 0 };
+    ws.send({ type: "update_region", id: region.id, patch });
   }
 
-  _clearFadeIn() {
-    const ws = window.__foyer?.ws;
-    if (!ws) return;
-    for (const id of this._selectedRegionIds) {
-      const r = this._regionForId(id);
-      if (!r || this._trackKind(r.track_id) !== "audio") continue;
-      ws.send({ type: "update_region", id: r.id, patch: { fade_in_samples: 0 } });
+  /**
+   * Pair of overlapping audio regions on the same track, in timeline
+   * order, for crossfade rendering. Returns null when nothing overlaps.
+   * Includes the overlap span (in samples) so the renderer can shape
+   * the X curve.
+   */
+  _overlappingPairsForTrack(trackId) {
+    if (this._trackKind(trackId) !== "audio") return [];
+    const list = (this._regionsByTrack[trackId] || [])
+      .slice()
+      .sort((a, b) => Number(a.start_samples) - Number(b.start_samples));
+    const pairs = [];
+    for (let i = 0; i + 1 < list.length; i++) {
+      const L = list[i];
+      const R = list[i + 1];
+      const sL = Math.round(Number(L.start_samples) || 0);
+      const eL = sL + Math.max(0, Math.round(Number(L.length_samples) || 0));
+      const sR = Math.round(Number(R.start_samples) || 0);
+      const eR = sR + Math.max(0, Math.round(Number(R.length_samples) || 0));
+      const inter = Math.min(eL, eR) - Math.max(sL, sR);
+      if (inter > 0) pairs.push({ L, R, sL, eL, sR, eR, inter });
     }
+    return pairs;
   }
 
-  _clearFadeOut() {
-    const ws = window.__foyer?.ws;
-    if (!ws) return;
-    for (const id of this._selectedRegionIds) {
-      const r = this._regionForId(id);
-      if (!r || this._trackKind(r.track_id) !== "audio") continue;
-      ws.send({ type: "update_region", id: r.id, patch: { fade_out_samples: 0 } });
-    }
-  }
-
+  /** Auto-snap the fades on a pair of overlapping audio regions to
+   *  match the overlap. Useful from the contextual menu when the user
+   *  drops one region onto another and wants Ardour to actually mix
+   *  them, not pick one. */
   _applyCrossfadeToSelection() {
-    const pair = this._regionPairForCrossfadeGlue();
     const ws = window.__foyer?.ws;
-    if (!pair) return;
     if (!ws) {
-      toast("Not connected — cannot apply crossfade.", { tone: "warn" });
+      toast("Not connected.", { tone: "warn" });
       return;
     }
-    if (pair.inter <= 0) {
+    // Walk every track that has overlapping audio regions among the
+    // current selection. Without this the menu only worked on
+    // exactly two regions (the legacy crossfade behavior).
+    let applied = 0;
+    const trackIds = new Set();
+    for (const id of this._selectedRegionIds) {
+      const r = this._regionForId(id);
+      if (r) trackIds.add(r.track_id);
+    }
+    ws.send({ type: "undo_group_begin", name: "Foyer crossfade" });
+    for (const tid of trackIds) {
+      const pairs = this._overlappingPairsForTrack(tid);
+      for (const p of pairs) {
+        const inSel = this._selectedRegionIds.has(p.L.id) && this._selectedRegionIds.has(p.R.id);
+        if (!inSel) continue;
+        const ov = Math.floor(p.inter);
+        ws.send({
+          type: "update_region",
+          id: p.L.id,
+          patch: { fade_out_samples: ov, fade_out_shape: "symmetric" },
+        });
+        ws.send({
+          type: "update_region",
+          id: p.R.id,
+          patch: { fade_in_samples: ov, fade_in_shape: "symmetric" },
+        });
+        applied++;
+      }
+    }
+    ws.send({ type: "undo_group_end" });
+    if (!applied) {
       toast(
-        "Crossfade needs two overlapping audio regions on the same track (drag one over the other).",
+        "Select two or more overlapping audio regions on the same track.",
         { tone: "warn" },
       );
+    } else {
+      toast(applied === 1 ? "Crossfade applied." : `${applied} crossfades applied.`, { tone: "info" });
+    }
+  }
+
+  /**
+   * Per-region gain drag. Source amplitude in Ardour is a linear
+   * coefficient — drag the strip up/down for a logarithmic dB
+   * response (1 dB per 10 px) so the gesture feels musical.
+   */
+  _startGainDrag(ev, region) {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (this._trackKind(region.track_id) !== "audio") return;
+    const startY = ev.clientY;
+    const startLinear = Math.max(0, Number(region.gain_linear ?? 1));
+    const startDb = startLinear > 0 ? 20 * Math.log10(startLinear) : -60;
+    const strip = ev.currentTarget;
+    strip?.classList?.add("dragging");
+    try { strip?.setPointerCapture?.(ev.pointerId); } catch {}
+    let lastLinear = startLinear;
+    const move = (e) => {
+      // Up = louder. 10 px per dB; Shift = fine (50 px per dB).
+      const pxPerDb = e.shiftKey ? 50 : 10;
+      const dDb = (startY - e.clientY) / pxPerDb;
+      // Clamp to roughly the Ardour fader range to keep things sane:
+      // −60 dB silence floor, +6 dB unity-plus headroom.
+      const newDb = Math.max(-60, Math.min(6, startDb + dDb));
+      const linear = newDb <= -60 ? 0 : Math.pow(10, newDb / 20);
+      lastLinear = linear;
+      this._patchRegionLocally({ ...region, gain_linear: linear });
+    };
+    const up = () => {
+      strip?.classList?.remove("dragging");
+      try { strip?.releasePointerCapture?.(ev.pointerId); } catch {}
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (Math.abs(lastLinear - startLinear) < 1e-4) return;
+      window.__foyer?.ws?.send({
+        type: "update_region",
+        id: region.id,
+        patch: { gain_linear: lastLinear },
+      });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  /** Double-click a gain strip resets the region to unity gain. */
+  _resetGain(region) {
+    if (!region) return;
+    const cur = Number(region.gain_linear);
+    if (!Number.isFinite(cur) || Math.abs(cur - 1) < 1e-4) return;
+    window.__foyer?.ws?.send({
+      type: "update_region",
+      id: region.id,
+      patch: { gain_linear: 1 },
+    });
+  }
+
+  /** Crop every selected region to the carved time selection. Mirror of
+   *  the Cut menu entry but destructive — the slice REPLACES each
+   *  selected region instead of leaving the head + tail. Operates
+   *  per-region: if the selection misses a region entirely it stays put.
+   */
+  cropSelectedRegionsToSelection() {
+    if (!this._selection) {
+      toast("Drag a range on the ruler first.", { tone: "warn" });
       return;
     }
-    const ov = Math.floor(pair.inter);
-    ws.send({
-      type: "update_region",
-      id: pair.L.id,
-      patch: { fade_out_samples: ov, fade_out_shape: "symmetric" },
-    });
-    ws.send({
-      type: "update_region",
-      id: pair.R.id,
-      patch: { fade_in_samples: ov, fade_in_shape: "symmetric" },
-    });
-    toast("Crossfade applied over overlap.", { tone: "info" });
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    const lo = Math.min(this._selection.startSamples, this._selection.endSamples);
+    const hi = Math.max(this._selection.startSamples, this._selection.endSamples);
+    if (hi - lo < 1) {
+      toast("Selection is empty.", { tone: "warn" });
+      return;
+    }
+    const ids = [...this._selectedRegionIds];
+    if (!ids.length) {
+      toast("Select at least one region.", { tone: "warn" });
+      return;
+    }
+    let cropped = 0;
+    ws.send({ type: "undo_group_begin", name: "Foyer crop region(s)" });
+    for (const id of ids) {
+      const r = this._regionForId(id);
+      if (!r) continue;
+      const start = Math.round(Number(r.start_samples) || 0);
+      const len = Math.max(0, Math.round(Number(r.length_samples) || 0));
+      const end = start + len;
+      const overlapStart = Math.max(start, lo);
+      const overlapEnd = Math.min(end, hi);
+      if (overlapEnd - overlapStart < 480) continue; // need at least 10 ms
+      const sourceOffset = Math.max(0, Number(r.source_offset_samples) || 0);
+      const newStart = overlapStart;
+      const newLen = overlapEnd - overlapStart;
+      const newSourceOffset = sourceOffset + (overlapStart - start);
+      ws.send({
+        type: "update_region",
+        id: r.id,
+        patch: {
+          start_samples: newStart,
+          length_samples: newLen,
+          source_offset_samples: newSourceOffset,
+        },
+      });
+      cropped++;
+    }
+    ws.send({ type: "undo_group_end" });
+    if (!cropped) {
+      toast("Selection doesn't overlap the selected regions.", { tone: "warn" });
+    } else {
+      this._selection = null;
+      toast(cropped === 1 ? "Region cropped." : `${cropped} regions cropped.`, { tone: "info" });
+    }
+  }
+
+  /** Arrow-key nudge for selected regions. Distance modifiers:
+   *   - bare: 1 grid step (or 50 ms when no grid)
+   *   - Shift: 1 beat
+   *   - Ctrl/Cmd: 1 sample
+   * Returns true if anything actually moved (so callers can preventDefault). */
+  nudgeSelectedRegions(dir, modifiers) {
+    if (!this._selectedRegionIds.size) return false;
+    const ws = window.__foyer?.ws;
+    if (!ws) return false;
+    const sr = this._sampleRate();
+    let step;
+    if (modifiers?.fine) {
+      step = 1; // one sample
+    } else if (modifiers?.beat) {
+      const ctls = window.__foyer?.store?.state?.controls;
+      const tempo = Number(ctls?.get?.("transport.tempo")) || 120;
+      const tsDen = Math.max(1, Math.round(Number(ctls?.get?.("transport.ts.den")) || 4));
+      const beatSec = (60 / Math.max(1, tempo)) * (4 / tsDen);
+      step = Math.max(1, Math.round(beatSec * sr));
+    } else {
+      step = this._gridStepSamples() || Math.round(sr * 0.05);
+    }
+    const delta = dir === "right" ? step : -step;
+    ws.send({ type: "undo_group_begin", name: "Foyer nudge region(s)" });
+    for (const id of this._selectedRegionIds) {
+      const r = this._regionForId(id);
+      if (!r) continue;
+      const next = Math.round(Number(r.start_samples) || 0) + delta;
+      ws.send({
+        type: "update_region",
+        id: r.id,
+        patch: { start_samples: next },
+      });
+    }
+    ws.send({ type: "undo_group_end" });
+    return true;
   }
 
   /** Timeline order (left to right) for currently selected regions. */
@@ -2411,12 +2812,37 @@ export class TimelineView extends LitElement {
 
   _regionEditMenuActions() {
     const nSel = this._selectedRegionIds.size;
-    const pair = nSel === 2 ? this._regionPairForCrossfadeGlue() : null;
     const combineSel = this._combineRegionSelection();
     const anyAudio = [...this._selectedRegionIds].some((id) => {
       const r = this._regionForId(id);
       return r && this._trackKind(r.track_id) === "audio";
     });
+    // Crossfade is available whenever at least one selected audio region
+    // overlaps another selected audio region on the same track. The new
+    // drag-handle fades produce a crossfade automatically — the menu
+    // entry is a one-click "snap fades to the overlap" affordance.
+    let canCrossfade = false;
+    {
+      const seenTracks = new Set();
+      for (const id of this._selectedRegionIds) {
+        const r = this._regionForId(id);
+        if (r) seenTracks.add(r.track_id);
+      }
+      for (const tid of seenTracks) {
+        const pairs = this._overlappingPairsForTrack(tid);
+        if (pairs.some((p) =>
+          this._selectedRegionIds.has(p.L.id)
+          && this._selectedRegionIds.has(p.R.id)
+        )) {
+          canCrossfade = true;
+          break;
+        }
+      }
+    }
+    const hasTimeSelection = !!this._selection
+      && Math.abs(
+        (this._selection.startSamples || 0) - (this._selection.endSamples || 0),
+      ) > 0;
 
     const items = [];
     items.push({
@@ -2426,44 +2852,71 @@ export class TimelineView extends LitElement {
       action: () => this._quantizeSelectedRegionsToGrid(),
     });
     items.push({
-      label: "Fade in (1 grid step)",
-      icon: "speaker-wave",
-      disabled: !anyAudio,
-      action: () => this._applyFadeInStep(),
+      label: "Crop to time selection",
+      icon: "scissors",
+      disabled: !hasTimeSelection || nSel === 0,
+      title: !hasTimeSelection
+        ? "Drag a range on the ruler to enable."
+        : "Replace each selected region with the slice inside the time selection.",
+      action: () => this.cropSelectedRegionsToSelection(),
     });
     items.push({
-      label: "Fade out (1 grid step)",
-      icon: "speaker-wave",
-      disabled: !anyAudio,
-      action: () => this._applyFadeOutStep(),
+      label: "Snap fades to overlap (crossfade)",
+      icon: "arrows-pointing-in",
+      disabled: !canCrossfade,
+      title: canCrossfade
+        ? "Set symmetric fades across every overlap among the selected audio regions."
+        : "Drag two audio regions on the same track so they share time.",
+      action: () => this._applyCrossfadeToSelection(),
     });
     items.push({
-      label: "Clear fade in",
+      label: "Clear fades",
       icon: "x-mark",
       disabled: !anyAudio,
-      action: () => this._clearFadeIn(),
+      title: anyAudio
+        ? "Remove fade-in and fade-out from every selected audio region."
+        : "Select at least one audio region.",
+      action: () => {
+        const ws = window.__foyer?.ws;
+        if (!ws) return;
+        ws.send({ type: "undo_group_begin", name: "Foyer clear fades" });
+        for (const id of this._selectedRegionIds) {
+          const r = this._regionForId(id);
+          if (!r || this._trackKind(r.track_id) !== "audio") continue;
+          ws.send({
+            type: "update_region",
+            id: r.id,
+            patch: { fade_in_samples: 0, fade_out_samples: 0 },
+          });
+        }
+        ws.send({ type: "undo_group_end" });
+      },
     });
     items.push({
-      label: "Clear fade out",
-      icon: "x-mark",
+      label: "Reset region gain to 0 dB",
+      icon: "speaker-wave",
       disabled: !anyAudio,
-      action: () => this._clearFadeOut(),
+      title: anyAudio
+        ? "Restore unity gain (scale_amplitude = 1.0) on selected audio regions."
+        : "Select at least one audio region.",
+      action: () => {
+        const ws = window.__foyer?.ws;
+        if (!ws) return;
+        ws.send({ type: "undo_group_begin", name: "Foyer reset region gain" });
+        for (const id of this._selectedRegionIds) {
+          const r = this._regionForId(id);
+          if (!r || this._trackKind(r.track_id) !== "audio") continue;
+          ws.send({
+            type: "update_region",
+            id: r.id,
+            patch: { gain_linear: 1 },
+          });
+        }
+        ws.send({ type: "undo_group_end" });
+      },
     });
-    if (pair) {
-      items.push({ separator: true });
-      items.push({
-        label: "Crossfade overlap",
-        icon: "arrows-pointing-in",
-        disabled: pair.inter <= 0,
-        title:
-          pair.inter <= 0
-            ? "Needs overlap: put two audio regions on the same track so they share time."
-            : "Sets symmetric fades across the overlapping span.",
-        action: () => this._applyCrossfadeToSelection(),
-      });
-    }
     if (combineSel) {
-      if (!pair) items.push({ separator: true });
+      items.push({ separator: true });
       items.push({
         label: "Glue regions",
         icon: "circle-stack",
@@ -2582,12 +3035,15 @@ export class TimelineView extends LitElement {
     const has = this._selectedRegionIds.size > 0;
     if (!has) return null;
     const nSel = this._selectedRegionIds.size;
-    const pair = nSel === 2 ? this._regionPairForCrossfadeGlue() : null;
     const combineSel = this._combineRegionSelection();
     const anyAudio = [...this._selectedRegionIds].some((id) => {
       const r = this._regionForId(id);
       return r && this._trackKind(r.track_id) === "audio";
     });
+    const hasTimeSelection = !!this._selection
+      && Math.abs(
+        (this._selection.startSamples || 0) - (this._selection.endSamples || 0),
+      ) > 0;
 
     return html`
       <details class="tb-menu" @click=${(e) => e.stopPropagation()}>
@@ -2597,32 +3053,33 @@ export class TimelineView extends LitElement {
             @click=${() => this._quantizeSelectedRegionsToGrid()}>
             Quantize start to grid
           </button>
-          <button class="mi" ?disabled=${!anyAudio} @click=${() => this._applyFadeInStep()}>
-            Fade in (1 grid step)
+          <button class="mi" ?disabled=${!hasTimeSelection || nSel === 0}
+            title=${!hasTimeSelection
+              ? "Drag a range on the ruler to enable."
+              : "Replace each selected region with the slice inside the range."}
+            @click=${() => this.cropSelectedRegionsToSelection()}>
+            Crop to time selection
           </button>
-          <button class="mi" ?disabled=${!anyAudio} @click=${() => this._applyFadeOutStep()}>
-            Fade out (1 grid step)
+          <button class="mi" ?disabled=${!anyAudio}
+            title="Set symmetric fades across any overlap among the selected audio regions."
+            @click=${() => this._applyCrossfadeToSelection()}>
+            Snap fades to overlap
           </button>
-          <button class="mi" ?disabled=${!anyAudio} @click=${() => this._clearFadeIn()}>
-            Clear fade in
+          <button class="mi" ?disabled=${!anyAudio}
+            title="Drag the triangle handles on the lozenge corners to shape fades. Hold Alt while dragging to cycle shape."
+            @click=${() => {
+              const ws = window.__foyer?.ws;
+              if (!ws) return;
+              ws.send({ type: "undo_group_begin", name: "Foyer clear fades" });
+              for (const id of this._selectedRegionIds) {
+                const r = this._regionForId(id);
+                if (!r || this._trackKind(r.track_id) !== "audio") continue;
+                ws.send({ type: "update_region", id: r.id, patch: { fade_in_samples: 0, fade_out_samples: 0 } });
+              }
+              ws.send({ type: "undo_group_end" });
+            }}>
+            Clear fades
           </button>
-          <button class="mi" ?disabled=${!anyAudio} @click=${() => this._clearFadeOut()}>
-            Clear fade out
-          </button>
-          ${pair
-            ? html`
-              <button
-                class="mi"
-                ?disabled=${pair.inter <= 0}
-                title=${pair.inter <= 0
-                  ? "Needs overlap: two audio regions on this track must share time."
-                  : "Symmetric fade-out on the left region and fade-in on the right across the overlap."}
-                @click=${() => this._applyCrossfadeToSelection()}
-              >
-                Crossfade overlap
-              </button>
-            `
-            : null}
           ${combineSel
             ? html`
               <button
@@ -2665,8 +3122,8 @@ export class TimelineView extends LitElement {
             Pitch shift…
           </button>
           <div class="tb-hint">
-            <strong>Regions:</strong> quantize, fades, crossfade (two overlapping audio),
-            glue (same track), reverse, strip silence, pitch shift (prompt).
+            Drag the triangle handles to set fades. <kbd>Alt</kbd>+drag rotates
+            shape. <kbd>Shift</kbd>+click clears. Top strip = region gain.
           </div>
         </div>
       </details>
@@ -2886,6 +3343,18 @@ export class TimelineView extends LitElement {
                    style="left:${leftPct}%;right:${rightPct}%"></div>
             `;
           }
+          // Audio-only affordances: fades + per-region gain. Skip on
+          // MIDI lozenges — Ardour's set_scale_amplitude/set_fade_*
+          // aren't meaningful for MIDI regions.
+          const fadeOverlay = !isMidi
+            ? this._renderRegionFadeOverlay(r, widthPx)
+            : null;
+          const fadeHandles = !isMidi
+            ? this._renderRegionFadeHandles(r, widthPx)
+            : null;
+          const gainStrip = !isMidi
+            ? this._renderRegionGainStrip(r)
+            : null;
           return html`
             <div class="region ${regionSelected ? "selected" : ""}" data-id=${r.id}
                  tabindex="0"
@@ -2904,8 +3373,11 @@ export class TimelineView extends LitElement {
               ${isMidi
                 ? html`<foyer-midi-strip class="viz" .notes=${r.notes || []} .region=${r} .color=${track.color || ""}></foyer-midi-strip>`
                 : html`<foyer-waveform-gl class="viz" data-id=${r.id}></foyer-waveform-gl>`}
+              ${fadeOverlay}
               ${cutOverlay}
               <div class="name">${r.name}</div>
+              ${gainStrip}
+              ${fadeHandles}
               <div class="edge left"  @pointerdown=${(e) => {
                  if (e.button !== 0) return;
                  this._startDrag(e, r, "resize-left");
@@ -2917,6 +3389,7 @@ export class TimelineView extends LitElement {
             </div>
           `;
         })}
+        ${this._renderCrossfadeOverlaysForTrack(track, sr)}
         ${(() => {
           const recording = !!(controls && controls.get("transport.recording"));
           const span = this._recordingSpanPixels(controls);
@@ -2930,6 +3403,278 @@ export class TimelineView extends LitElement {
              @pointerdown=${(e) => this._startLaneResize(e, track.id)}></div>
       </div>
     `;
+  }
+
+  /**
+   * Fade-curve overlay drawn inside the region lozenge. Uses a single
+   * SVG so the same coordinate system handles both ends (and so a wide
+   * fade-in + wide fade-out can meet in the middle without overdraw).
+   *
+   * The path covers the still-attenuated portion of the region in a
+   * semi-transparent fill; the curve outline runs along the gain
+   * envelope. We let the SVG scale to the region's width — the actual
+   * shape function is sampled at fixed N points which is fine since
+   * regions rarely show <30 px of fade body before a user widens them.
+   */
+  _renderRegionFadeOverlay(region, widthPx) {
+    const inSamples = Math.max(0, Number(region.fade_in_samples) || 0);
+    const outSamples = Math.max(0, Number(region.fade_out_samples) || 0);
+    if (!inSamples && !outSamples) return null;
+    const sr = this._sampleRate();
+    const lenSamples = Math.max(1, Number(region.length_samples) || 1);
+    const wPx = Math.max(1, widthPx);
+    // Render into a fixed-height coordinate so we don't have to know
+    // the real region pixel height (CSS scales the SVG). 100 is just
+    // a tidy unit count.
+    const H = 100;
+    const inFracX = Math.min(1, inSamples / lenSamples);
+    const outFracX = Math.min(1, outSamples / lenSamples);
+    const inPx = wPx * inFracX;
+    const outPxStart = wPx * (1 - outFracX);
+    // Clamp the two if they collide so the visual matches the playback
+    // engine's "no overlap on fade endpoints" contract.
+    const clampedInPx = Math.min(inPx, outPxStart);
+    const clampedOutStart = Math.max(outPxStart, clampedInPx);
+    const samples = 24; // points per curve
+    const inShape = region.fade_in_shape || "linear";
+    const outShape = region.fade_out_shape || "linear";
+    const curve = (shape, t) => {
+      // t in [0,1] → gain in [0,1]
+      switch (shape) {
+        case "fast":           return t * t;
+        case "slow":           return Math.sqrt(t);
+        case "constant_power": return Math.sin((t * Math.PI) / 2);
+        case "symmetric":      return 0.5 - 0.5 * Math.cos(t * Math.PI);
+        case "linear":
+        default:               return t;
+      }
+    };
+    const sr2 = sr; void sr2; // (kept for future shape-vs-samples tweaks)
+    // Build fill polygon over the attenuated regions + outline path.
+    let fillPath = "";
+    let linePath = "";
+    if (inSamples) {
+      // Fill: polygon from top-left across the curve down to bottom-left.
+      // Line: top-left → curve → (inPx, 0). Coord system: y=0 is top
+      // (full gain), y=H is silence.
+      const pts = [];
+      for (let i = 0; i <= samples; i++) {
+        const t = i / samples;
+        const gain = curve(inShape, t);
+        const x = t * clampedInPx;
+        const y = H - gain * H;
+        pts.push([x, y]);
+      }
+      // Fill below the curve (the "silent" wedge that's being faded in)
+      // shaded so the user can see the fade extent. The wedge sits
+      // between the curve and the LEFT edge of the region.
+      fillPath += `M 0 ${H} L 0 0 `;
+      for (const [x, y] of pts) fillPath += `L ${x.toFixed(2)} ${y.toFixed(2)} `;
+      fillPath += `L 0 ${H} Z `;
+      linePath += `M 0 ${H} `;
+      for (const [x, y] of pts) linePath += `L ${x.toFixed(2)} ${y.toFixed(2)} `;
+    }
+    if (outSamples) {
+      const pts = [];
+      const span = wPx - clampedOutStart;
+      for (let i = 0; i <= samples; i++) {
+        const t = i / samples;
+        // gain decreases from 1 → 0 across the span.
+        const gain = curve(outShape, 1 - t);
+        const x = clampedOutStart + t * span;
+        const y = H - gain * H;
+        pts.push([x, y]);
+      }
+      fillPath += `M ${wPx.toFixed(2)} ${H} `;
+      for (let i = pts.length - 1; i >= 0; i--) {
+        const [x, y] = pts[i];
+        fillPath += `L ${x.toFixed(2)} ${y.toFixed(2)} `;
+      }
+      fillPath += `L ${wPx.toFixed(2)} 0 L ${wPx.toFixed(2)} ${H} Z `;
+      const start = pts[0];
+      linePath += `M ${start[0].toFixed(2)} ${start[1].toFixed(2)} `;
+      for (let i = 1; i < pts.length; i++) {
+        const [x, y] = pts[i];
+        linePath += `L ${x.toFixed(2)} ${y.toFixed(2)} `;
+      }
+    }
+    return html`
+      <svg class="fade-svg" viewBox="0 0 ${wPx} ${H}" preserveAspectRatio="none">
+        <path class="fade-fill" d=${fillPath}></path>
+        <path class="fade-line" d=${linePath}></path>
+      </svg>
+    `;
+  }
+
+  /**
+   * Two triangular grab handles, one at each inside-fade endpoint. When
+   * no fade exists, the handle sits flush against the corner so the
+   * user can drag it inward to create the fade in the first place.
+   * Shift-click clears; Alt-drag rotates curve shape mid-drag.
+   */
+  _renderRegionFadeHandles(region, widthPx) {
+    const sr = this._sampleRate();
+    const lenSamples = Math.max(1, Number(region.length_samples) || 1);
+    const inSamples = Math.max(0, Number(region.fade_in_samples) || 0);
+    const outSamples = Math.max(0, Number(region.fade_out_samples) || 0);
+    const inPx = Math.max(0, Math.min(widthPx, widthPx * (inSamples / lenSamples)));
+    const outPx = Math.max(0, Math.min(widthPx, widthPx * (outSamples / lenSamples)));
+    const inActive = inSamples > 0;
+    const outActive = outSamples > 0;
+    const inLabel = inSamples > 0
+      ? `${Math.round((inSamples / sr) * 1000)} ms · ${region.fade_in_shape || "linear"}`
+      : "drag inward to fade in";
+    const outLabel = outSamples > 0
+      ? `${Math.round((outSamples / sr) * 1000)} ms · ${region.fade_out_shape || "linear"}`
+      : "drag inward to fade out";
+    return html`
+      <div class="fade-handle in ${inActive ? "active" : ""}"
+           style="left:${inPx}px"
+           title=${`Fade in: ${inLabel} — Alt+drag = shape, Shift+click = clear`}
+           @pointerdown=${(e) => this._startFadeDrag(e, region, "in")}
+           @click=${(e) => {
+             if (!e.shiftKey) return;
+             e.preventDefault(); e.stopPropagation();
+             this._clearFade(region, "in");
+           }}></div>
+      <div class="fade-handle out ${outActive ? "active" : ""}"
+           style="right:${outPx}px"
+           title=${`Fade out: ${outLabel} — Alt+drag = shape, Shift+click = clear`}
+           @pointerdown=${(e) => this._startFadeDrag(e, region, "out")}
+           @click=${(e) => {
+             if (!e.shiftKey) return;
+             e.preventDefault(); e.stopPropagation();
+             this._clearFade(region, "out");
+           }}></div>
+    `;
+  }
+
+  /**
+   * Top-edge strip with the region's gain in dB. Hidden until the user
+   * hovers the region or the value diverges from unity — keeps the
+   * lozenge clean for the common 1.0 case while making non-unity
+   * regions visually distinct.
+   */
+  _renderRegionGainStrip(region) {
+    const cur = Number(region.gain_linear);
+    const hasGain = Number.isFinite(cur) && cur >= 0;
+    const linear = hasGain ? cur : 1;
+    const nonUnity = Math.abs(linear - 1) > 1e-3;
+    const db = linear <= 0 ? -Infinity : 20 * Math.log10(linear);
+    const dbLabel = !Number.isFinite(db)
+      ? "−∞ dB"
+      : `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`;
+    return html`
+      <div class="gain-strip ${nonUnity ? "nonunity" : ""}"
+           title=${`Region gain: ${dbLabel}. Drag up/down to adjust (Shift = fine). Double-click resets to 0 dB.`}
+           @pointerdown=${(e) => this._startGainDrag(e, region)}
+           @dblclick=${(e) => { e.stopPropagation(); this._resetGain(region); }}></div>
+      ${nonUnity
+        ? html`<div class="gain-readout">${dbLabel}</div>`
+        : null}
+    `;
+  }
+
+  /**
+   * Crossfade overlays — for every neighboring overlapping pair of
+   * audio regions on a track, draw an X curve in the overlap band so
+   * the user can see how the mix is going to behave. The curves are
+   * derived from the actual `fade_out_samples` / `fade_in_samples` on
+   * each region; if the fades don't cover the whole overlap we show
+   * a faint guide rect over the orphan band as a hint to snap fades.
+   */
+  _renderCrossfadeOverlaysForTrack(track, sr) {
+    const pairs = this._overlappingPairsForTrack(track.id);
+    if (!pairs.length) return null;
+    const out = [];
+    const H = 100;
+    for (const p of pairs) {
+      const overlapStart = Math.max(p.sL, p.sR);
+      const overlapEnd = Math.min(p.eL, p.eR);
+      const overlapSamples = overlapEnd - overlapStart;
+      if (overlapSamples <= 0) continue;
+      const leftPx = HEAD_WIDTH + (overlapStart / sr) * this._zoom;
+      const widthPx = Math.max(1, (overlapSamples / sr) * this._zoom);
+      // Fade lengths inside the overlap. Cap by the overlap so a fade
+      // that runs past the overlap doesn't draw outside its bounds.
+      const lFadeOut = Math.min(
+        overlapSamples,
+        Math.max(0, Number(p.L.fade_out_samples) || 0),
+      );
+      const rFadeIn = Math.min(
+        overlapSamples,
+        Math.max(0, Number(p.R.fade_in_samples) || 0),
+      );
+      const lShape = p.L.fade_out_shape || "linear";
+      const rShape = p.R.fade_in_shape || "linear";
+      const curve = (shape, t) => {
+        switch (shape) {
+          case "fast":           return t * t;
+          case "slow":           return Math.sqrt(t);
+          case "constant_power": return Math.sin((t * Math.PI) / 2);
+          case "symmetric":      return 0.5 - 0.5 * Math.cos(t * Math.PI);
+          case "linear":
+          default:               return t;
+        }
+      };
+      const samples = 24;
+      // Left region's fade-out: gain goes 1→0 across lFadeOut samples,
+      // anchored at the overlap start (where L's fade-out begins
+      // depends on the offset from the L-end → overlap start, but for
+      // a clean visual we anchor it from `overlapEnd − lFadeOut` since
+      // Ardour's playlist places the fade-out at the tail). Drop to
+      // overlap-start when the fade is wider than the overlap.
+      let lOutPath = "";
+      if (lFadeOut > 0) {
+        const fadeStartSample = Math.max(0, overlapSamples - lFadeOut);
+        const fadeSpan = overlapSamples - fadeStartSample;
+        const pts = [];
+        for (let i = 0; i <= samples; i++) {
+          const t = i / samples;
+          const sampleOffset = fadeStartSample + t * fadeSpan;
+          const gain = curve(lShape, 1 - t);
+          const x = (sampleOffset / overlapSamples) * widthPx;
+          const y = H - gain * H;
+          pts.push([x, y]);
+        }
+        lOutPath += `M 0 0 L ${pts[0][0].toFixed(2)} 0 `;
+        for (const [x, y] of pts) lOutPath += `L ${x.toFixed(2)} ${y.toFixed(2)} `;
+      }
+      let rInPath = "";
+      if (rFadeIn > 0) {
+        const fadeSpan = rFadeIn;
+        const pts = [];
+        for (let i = 0; i <= samples; i++) {
+          const t = i / samples;
+          const sampleOffset = t * fadeSpan;
+          const gain = curve(rShape, t);
+          const x = (sampleOffset / overlapSamples) * widthPx;
+          const y = H - gain * H;
+          pts.push([x, y]);
+        }
+        rInPath += "";
+        for (let i = 0; i < pts.length; i++) {
+          const [x, y] = pts[i];
+          rInPath += i === 0 ? `M ${x.toFixed(2)} ${y.toFixed(2)} ` : `L ${x.toFixed(2)} ${y.toFixed(2)} `;
+        }
+      }
+      // Hint rect when fades don't cover the whole overlap (user can
+      // "Snap fades to overlap" from the menu to fix in one click).
+      const showHint = (lFadeOut < overlapSamples) || (rFadeIn < overlapSamples);
+      out.push(html`
+        <svg class="crossfade-svg"
+             style="left:${leftPx}px;top:4px;height:calc(100% - 8px);width:${widthPx}px"
+             viewBox="0 0 ${widthPx} ${H}"
+             preserveAspectRatio="none">
+          ${showHint
+            ? html`<rect class="xfade-tint" x="0" y="0" width=${widthPx} height=${H}></rect>`
+            : null}
+          ${lOutPath ? html`<path class="xfade-line-out" d=${lOutPath}></path>` : null}
+          ${rInPath ? html`<path class="xfade-line-in" d=${rInPath}></path>` : null}
+        </svg>
+      `);
+    }
+    return out;
   }
 
   /**

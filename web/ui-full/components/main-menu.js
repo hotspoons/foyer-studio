@@ -395,6 +395,7 @@ export class MainMenu extends LitElement {
             `;
           })}
           ${cat === "edit" ? this._renderEditPreferencesItem(items.length > 0) : null}
+          ${cat === "edit" ? this._renderEditRegionSection() : null}
           ${cat === "session" ? this._renderRecentSubmenu() : null}
           ${cat === "session" && isAllowed("list_audio_pool") ? html`
             <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
@@ -455,6 +456,59 @@ export class MainMenu extends LitElement {
         <span class="shortcut">⌘ ,</span>
       </div>
     `;
+  }
+
+  /**
+   * Contextual "Region" section under the Edit menu. Appears only when
+   * the timeline has at least one selected region — keeps the menu
+   * lean otherwise. Each item dispatches against the same timeline
+   * methods the toolbar/context menu use, so behavior is one source of
+   * truth. (TODO #62 — surface region options outside the timeline
+   * context menu so they're discoverable from the menu bar too.)
+   */
+  _renderEditRegionSection() {
+    const tl = this._findTimeline();
+    const ids = tl?.getSelectedRegionIds?.() || [];
+    if (!ids.length) return null;
+    const nSel = ids.length;
+    const actions = tl?._regionEditMenuActions?.();
+    if (!Array.isArray(actions) || !actions.length) return null;
+    const close = () => { this._openMenu = ""; };
+    return html`
+      <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
+      <div class="item disabled" style="opacity:0.55;pointer-events:none;font-size:10px;letter-spacing:0.05em;text-transform:uppercase">
+        <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto"></span>
+        <span class="label">${nSel === 1 ? "Region" : `${nSel} regions`}</span>
+      </div>
+      ${actions.map((a) => a.separator
+        ? html`<div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>`
+        : html`
+          <div class="item ${a.disabled ? "disabled" : ""}"
+               title=${a.title || ""}
+               @click=${() => { if (a.disabled) return; close(); a.action?.(); }}>
+            <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">
+              ${a.icon ? icon(a.icon, 11) : null}
+            </span>
+            <span class="label">${a.label}</span>
+          </div>
+        `)}
+    `;
+  }
+
+  /** Walk shadow roots once to find the active timeline-view. */
+  _findTimeline() {
+    const walk = (root) => {
+      const hit = root.querySelector("foyer-timeline-view");
+      if (hit) return hit;
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) {
+          const nested = walk(el.shadowRoot);
+          if (nested) return nested;
+        }
+      }
+      return null;
+    };
+    return walk(document);
   }
 
   /** Client-side "Open Recent" cascade appended to the Session menu.

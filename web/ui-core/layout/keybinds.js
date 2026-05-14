@@ -168,6 +168,24 @@ export class Keybinds {
         tl.splitSelectedRegionsAtPlayhead();
         return;
       }
+      // Arrow-key region nudge:
+      //   bare ←/→        nudge by 1 grid step
+      //   Shift+←/→       nudge by 1 beat
+      //   Ctrl/Cmd+←/→    nudge by 1 sample (fine)
+      // Alt is the existing tile-focus chord — leave it alone so the
+      // layout shortcuts still resolve.
+      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !e.altKey) {
+        const tl = queryTimelineFromKeyEvent(e);
+        const hasSel = !!tl?.getSelectedRegionIds?.()?.length;
+        if (!hasSel) return;
+        const fine = !!(e.ctrlKey || e.metaKey);
+        const beat = !!e.shiftKey && !fine;
+        const dir = e.key === "ArrowLeft" ? "left" : "right";
+        if (tl?.nudgeSelectedRegions?.(dir, { fine, beat })) {
+          e.preventDefault();
+          return;
+        }
+      }
     }
 
     // Delete key (no modifiers) → delete regions in the current

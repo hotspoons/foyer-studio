@@ -12,29 +12,27 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 ---
 
 ## Timeline edits outstanding:
-- [ ] Crossfades on overlapping regions
-  - When two regions on the same track overlap, render a crossfade
-    in the overlap region (linear by default, exposed shape later).
-    Ardour models this as `AudioRegion::set_fade_in_length` /
-    `set_fade_out_length` plus the playlist-level overlap detection.
-    Schema needs `RegionPatch.fade_{in,out}_samples` + a fade-shape
-    enum, and the timeline view needs to draw the X curve in the
-    overlap. Hover handles on the overlap edges adjust the curve.
-  - **Shim (2026-05):** `RegionPatch` carries `fade_{in,out}_samples`,
-    `fade_{in,out}_shape` (`FadeShape`), and `gain_linear`; Ardour
-    `update_region` maps them to `AudioRegion::set_fade_in` /
-    `set_fade_out`, `set_fade_in/out_shape`, and `set_scale_amplitude`.
-    **Still not 1:1 here:** pairing overlaps, mutual autofades, and
-    drawing the crossfade curve are UI/playlist concerns — not done.
-- [ ] Fade-in / fade-out per region (independent of crossfade)
-  - Same `fade_{in,out}_samples` patch fields, applied to a
-    non-overlapping region. UI: a small triangular handle in the top-
-    inside corner of the lozenge that you drag inward to set the fade
-    length. Holding the modifier rotates through fade shapes (linear,
-    log, exp, S-curve).
-  - **Shim (2026-05):** backend + schema above; Ardour exposes linear,
-    fast, slow, constant_power, symmetric — not separate log/exp/S
-    names. **UI handles** still needed.
+- [x] Crossfades on overlapping regions
+  - Drawn as paired X-curve overlays at the lane level whenever two
+    audio regions on the same track share time. The L region's
+    fade-out and R region's fade-in are read directly from
+    `fade_out_samples` / `fade_in_samples`; when the fades don't
+    cover the whole overlap, a faint dashed tint rect hints at the
+    "Snap fades to overlap" menu entry that snaps both fades to the
+    full overlap in one click. Curve shape comes from each region's
+    own `fade_*_shape`. (timeline-view.js
+    `_renderCrossfadeOverlaysForTrack`, `_applyCrossfadeToSelection`.)
+- [x] Fade-in / fade-out per region (independent of crossfade)
+  - Triangular grab handles anchored at each fade endpoint inside
+    the region lozenge — at the corner when no fade exists, else
+    flush with the fade's inside edge. Drag inward to grow, outward
+    past the corner to clear. **Alt+drag** rotates through Ardour's
+    five shapes (linear → fast → slow → constant_power → symmetric).
+    **Shift+click** clears that fade. The curve renders as an SVG
+    path inside the region with a semi-transparent fill over the
+    attenuated portion. One `update_region` per drag, on pointer-up,
+    same as move/resize. (`_startFadeDrag`,
+    `_renderRegionFadeOverlay`, `_renderRegionFadeHandles`.)
 - [ ] Region groups (linked-edit)
   - Mark several regions as a group; subsequent move / trim / fade /
     delete on any one applies to all. Ardour has a native
@@ -43,33 +41,50 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     in the `Region` payload, then the timeline view applies edits to
     every group sibling.
     (or MIDI note transform) — skip.
-- [ ] Region gain handle (per-region volume)
-  - A draggable strip across the region top renders gain in dB. Edge
-    cases: live preview during the drag without sending N
-    `update_region`s (use a `RegionGainPreview` envelope or just one
-    write on pointer-up, like the move/resize commit pattern).
-  - **Shim (2026-05):** `RegionPatch.gain_linear` →
-    `AudioRegion::set_scale_amplitude` (linear gain). **UI** (dB strip,
-    drag preview) still TODO — wire is ready.
-- [ ] Nudge region left/right by grid step (arrow keys)
-  - Plain Left/Right when a region is selected nudges by the active
-    grid sub-step (16th by default); Shift+arrow nudges by a beat;
-    Ctrl/Cmd+arrow nudges by 1 sample. Already partially wired for
-    automation points; extend the same handler to regions.
-  - **Already expressible** as `update_region { start_samples }` with
-    client-computed deltas — no new backend mapping.
-- [ ] Crop / trim around time selection
-  - With a region + ruler time selection, "Crop to selection" trims
-    the region to the carved range (mirror of Cut, but destructive
-    on the original — the slice REPLACES the region). One menu
-    entry; reuses the existing slice-capture math.
-  - **Compose-only:** combine `update_region` (start, length,
-    `source_offset_samples`) — UI orchestration; skip shim.
+- [x] Region gain handle (per-region volume)
+  - Thin strip across the lozenge top — hidden at unity, visible on
+    hover or whenever the gain diverges from 0 dB. Drag up/down for a
+    logarithmic dB response (10 px/dB, **Shift** = fine at 50 px/dB).
+    Range clamped to −60..+6 dB. Double-click resets to unity. One
+    `update_region { gain_linear }` on pointer-up; local-only
+    optimistic preview during the drag matches the move/fade pattern.
+    (`_startGainDrag`, `_renderRegionGainStrip`.)
+- [x] Nudge region left/right by grid step (arrow keys)
+  - `←` / `→` nudge selected regions by the active grid sub-step
+    (or 50 ms when no grid). **Shift+arrow** nudges by a beat;
+    **Ctrl/Cmd+arrow** nudges by 1 sample. Wired through
+    `Keybinds._onKey` in [web/ui-core/layout/keybinds.js] →
+    `TimelineView.nudgeSelectedRegions`. One undo group per arrow
+    press so multi-selection moves replay atomically.
+- [x] Crop / trim around time selection
+  - "Crop to time selection" in the region edit menu (and the global
+    Edit menu's contextual Region section). Replaces each selected
+    region with the slice carved by the ruler selection — adjusts
+    `start_samples`, `length_samples`, AND `source_offset_samples`
+    in a single patch so the audio content lines up with the new
+    timeline span. Single undo entry per region.
 - [ ] Move/cut/copy/paste regions between audio and midi tracks
-- [ ] Add region options (mute/quantize start/fade in/out/reverse
-    /strip/pitch shift/duplicate) to edit menu under a contextual
+  - **Today:** the wire protocol pins `DuplicateRegion` /
+    `DuplicateRegionRange` to the source's own track, so paste always
+    stays on the source track regardless of where the user clicks.
+    Cross-track paste needs an optional `target_track_id` on those
+    commands + a type-compatibility check in the shim (audio→midi
+    needs MIDI rendering of audio, which is a wholly different op;
+    likely just reject incompatible pairs with a friendly toast).
+- [x] Add region options to the edit menu under a contextual
     section that appears only when one or more regions are selected
+  - The Edit dropdown grows a "Region" / "N regions" header + the
+    same action list the right-click menu surfaces (Quantize, Crop
+    to selection, Snap fades to overlap, Clear fades, Reset gain,
+    Glue, Reverse audio, Strip silence, Pitch shift). Driven by
+    `_renderEditRegionSection` in [main-menu.js] which delegates to
+    the timeline's `_regionEditMenuActions()` so behavior stays one
+    source of truth.
 - [ ] Z-index controls for regions (layering in ardour)
+  - Needs `Region.layer` (or analogous) on the schema + shim wiring
+    to Ardour's `set_layer` / `raise` / `lower`. Pure UI ordering
+    would violate the backend-source-of-truth rule (CLAUDE.md) since
+    other clients need to see the layering. Pending schema work.
 - [ ] Automation needs to support *all* automation including plugin
     controls. Suggest making a dedicated UI that opens in a modal
     for editing automation with an automation channel picker (allow
