@@ -229,10 +229,15 @@ RUN KXSTUDIO_PKGS=""; \
 
 # x42 General MIDI Synth (x42-gmsynth) prebuilt LV2 bundle.
 # Upstream publishes per-arch tarballs with gmsynth.lv2 included.
-RUN case "${TARGETARCH}" in \
+#
+# TARGETARCH is only auto-populated by BuildKit/buildx; on hosts using
+# the legacy builder (no docker-buildx-plugin) it arrives empty. Fall
+# back to `uname -m` — same pattern as the kubectl/fastfetch blocks below.
+RUN ARCH="${TARGETARCH:-$(uname -m)}" \
+ && case "${ARCH}" in \
       amd64|x86_64) GMSYNTH_ARCH="x86_64" ;; \
       arm64|aarch64) GMSYNTH_ARCH="arm64" ;; \
-      *) echo "Unsupported TARGETARCH for x42-gmsynth: ${TARGETARCH}" >&2; exit 1 ;; \
+      *) echo "Unsupported arch for x42-gmsynth: ${ARCH}" >&2; exit 1 ;; \
     esac \
  && tmpdir="$(mktemp -d)" \
  && curl -fsSL --retry 5 --retry-delay 10 --retry-connrefused --retry-all-errors --max-time 60 \
