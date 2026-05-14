@@ -1194,9 +1194,7 @@ async fn dispatch_command(
                 .set_ingress_capture_latency(stream_id, samples)
                 .await
             {
-                tracing::debug!(
-                    "set_ingress_capture_latency forwarding failed: {e}"
-                );
+                tracing::debug!("set_ingress_capture_latency forwarding failed: {e}");
             }
         }
         Command::SetIngressRingPrimeMs { ms } => {
@@ -1218,17 +1216,16 @@ async fn dispatch_command(
                 tracing::debug!("set_midi_capture_latency forwarding failed: {e}");
             }
         }
-        Command::SetFakeLatency { ingress_ms, egress_ms } => {
+        Command::SetFakeLatency {
+            ingress_ms,
+            egress_ms,
+        } => {
             if let Some(v) = ingress_ms {
-                state
-                    .fake_ingress_latency_ms
-                    .store(v, Ordering::Relaxed);
+                state.fake_ingress_latency_ms.store(v, Ordering::Relaxed);
                 tracing::info!("fake ingress latency set to {v} ms");
             }
             if let Some(v) = egress_ms {
-                state
-                    .fake_egress_latency_ms
-                    .store(v, Ordering::Relaxed);
+                state.fake_egress_latency_ms.store(v, Ordering::Relaxed);
                 tracing::info!("fake egress latency set to {v} ms");
             }
         }
@@ -1238,9 +1235,7 @@ async fn dispatch_command(
             // any IngressSink already opened by this peer so the
             // change is observed on the next ingress packet.
             let prefs = state.peer_prefs_for(peer_id).await;
-            prefs
-                .ingress_manual_offset_ms
-                .store(ms, Ordering::Relaxed);
+            prefs.ingress_manual_offset_ms.store(ms, Ordering::Relaxed);
             tracing::info!("ingress manual offset for peer {peer_id} set to {ms} ms");
         }
         Command::StartIngressCalibration {
@@ -1249,12 +1244,10 @@ async fn dispatch_command(
             clicks,
         } => {
             let sr = state.backend().await.sample_rate();
-            let target = state.calibration.start_run(
-                egress_stream_id,
-                ingress_stream_id,
-                sr,
-                clicks,
-            );
+            let target =
+                state
+                    .calibration
+                    .start_run(egress_stream_id, ingress_stream_id, sr, clicks);
             tracing::info!(
                 "calibration start: egress={egress_stream_id} ingress={ingress_stream_id} clicks={target}"
             );
@@ -2940,8 +2933,10 @@ async fn dispatch_command(
                             let mut applied = state.midi_latency_last_applied.lock().await;
                             let push = match applied.get(&tid) {
                                 None => true,
-                                Some(prev) => (new_samples as i32 - *prev as i32).abs()
-                                    >= APPLY_THRESHOLD_SAMPLES,
+                                Some(prev) => {
+                                    (new_samples as i32 - *prev as i32).abs()
+                                        >= APPLY_THRESHOLD_SAMPLES
+                                }
                             };
                             if push {
                                 applied.insert(tid.clone(), new_samples);

@@ -60,7 +60,10 @@ pub fn run(config: &Config, args: DockerCmdArgs) -> Result<()> {
         .clone()
         .or(dcfg.image.clone())
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
-    let mode = args.mode_override.or(dcfg.mode).unwrap_or(DockerMode::Integrated);
+    let mode = args
+        .mode_override
+        .or(dcfg.mode)
+        .unwrap_or(DockerMode::Integrated);
     let host_port = args
         .host_port_override
         .or(dcfg.host_port)
@@ -108,8 +111,8 @@ pub fn run(config: &Config, args: DockerCmdArgs) -> Result<()> {
                 ));
             }
             let uid = unsafe { libc::geteuid() };
-            let xdg_runtime = std::env::var("XDG_RUNTIME_DIR")
-                .unwrap_or_else(|_| format!("/run/user/{uid}"));
+            let xdg_runtime =
+                std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{uid}"));
             let jack_dir = PathBuf::from(&xdg_runtime);
             if !jack_dir.is_dir() {
                 tracing::warn!(

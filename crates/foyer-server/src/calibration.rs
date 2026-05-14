@@ -239,17 +239,13 @@ impl CalibrationManager {
         let ch = channels.max(1) as usize;
         let click_frames = click_samples.min(total_frames);
         for frame_idx in 0..click_frames {
-            let phase = (frame_idx as f32 / sample_rate as f32)
-                * CLICK_FREQ_HZ
-                * std::f32::consts::TAU;
+            let phase =
+                (frame_idx as f32 / sample_rate as f32) * CLICK_FREQ_HZ * std::f32::consts::TAU;
             // Hann window so the click has no DC step at start
             // or end — avoids the speaker driver making a "thump"
             // outside the 4 kHz band the detector is keying on.
             let win = 0.5
-                * (1.0
-                    - ((frame_idx as f32 / click_samples as f32)
-                        * std::f32::consts::TAU)
-                        .cos());
+                * (1.0 - ((frame_idx as f32 / click_samples as f32) * std::f32::consts::TAU).cos());
             let s = phase.sin() * win * CLICK_AMPLITUDE;
             for c in 0..ch {
                 pcm[frame_idx * ch + c] = s;
@@ -321,11 +317,9 @@ impl CalibrationManager {
                     // the chunk's end, minus the SUSTAIN we waited
                     // before triggering.
                     let samples_from_chunk_end =
-                        total_frames.saturating_sub(frame_idx + 1)
-                            + DETECTION_SUSTAIN_SAMPLES;
+                        total_frames.saturating_sub(frame_idx + 1) + DETECTION_SUSTAIN_SAMPLES;
                     let ns_from_chunk_end =
-                        (samples_from_chunk_end as u64 * 1_000_000_000)
-                            / sample_rate.max(1) as u64;
+                        (samples_from_chunk_end as u64 * 1_000_000_000) / sample_rate.max(1) as u64;
                     let detect_ns = recv_mono_ns.saturating_sub(ns_from_chunk_end);
 
                     // Time-windowed match: find the MOST RECENT emit
@@ -440,8 +434,14 @@ mod tests {
         // First call at t=100ms — still inside the settling window,
         // chunk should be silenced but no click emitted.
         let emit0 = mgr.maybe_overlay_egress_click(1, &mut pcm, 1, 48000, 100 * NS_PER_MS);
-        assert!(emit0.is_none(), "first call inside settling window should NOT emit");
-        assert!(pcm.iter().all(|&s| s == 0.0), "chunk must be silenced even when no click emitted");
+        assert!(
+            emit0.is_none(),
+            "first call inside settling window should NOT emit"
+        );
+        assert!(
+            pcm.iter().all(|&s| s == 0.0),
+            "chunk must be silenced even when no click emitted"
+        );
         // Second call AFTER the settling deadline emits.
         let mut pcm2 = vec![0.5_f32; 480];
         let t1 = (100 + SETTLING_MS + 1) * NS_PER_MS;
@@ -476,31 +476,26 @@ mod tests {
         // 200ms). Earlier two clicks were "missed" — the matcher
         // should attribute the detection to the third emit (200 ms
         // gap), not the first (1800 ms gap, > ACCEPT_MAX).
-        let third_emit_t =
-            base + SETTLING_MS * NS_PER_MS + 2 * CLICK_INTERVAL_MS * NS_PER_MS;
+        let third_emit_t = base + SETTLING_MS * NS_PER_MS + 2 * CLICK_INTERVAL_MS * NS_PER_MS;
         let detect_t = third_emit_t + 200 * NS_PER_MS;
         // Fabricate an ingress chunk containing a sustained spike at
         // the start; `recv_mono_ns` is set so the back-calc puts the
         // detection at `detect_t`.
         let mut rx = vec![0.0_f32; 4800];
-        for i in 100..400 {
-            rx[i] = 0.5;
+        for sample in &mut rx[100..400] {
+            *sample = 0.5;
         }
         // Detection back-calc: detect_ns = recv_mono_ns -
         // ns_from_chunk_end; we want detect_ns == detect_t, so
         // recv_mono_ns = detect_t + ns_from_chunk_end.
         let samples_from_chunk_end = 4800 - (100 + DETECTION_SUSTAIN_SAMPLES);
-        let ns_from_chunk_end =
-            (samples_from_chunk_end as u64 * 1_000_000_000) / 48_000u64;
+        let ns_from_chunk_end = (samples_from_chunk_end as u64 * 1_000_000_000) / 48_000u64;
         let recv = detect_t + ns_from_chunk_end;
         let hits = mgr.scan_ingress_for_clicks(2, &rx, 1, 48000, recv);
         assert_eq!(hits.len(), 1, "expected exactly one match");
         let (ms, _n, _) = hits[0];
         // Should be ~200ms, NOT ~1800ms (which is what greedy-oldest
         // would have produced).
-        assert!(
-            (ms - 200.0).abs() < 5.0,
-            "expected ~200ms, got {ms}"
-        );
+        assert!((ms - 200.0).abs() < 5.0, "expected ~200ms, got {ms}");
     }
 }

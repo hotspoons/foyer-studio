@@ -16,6 +16,7 @@ mod audio;
 mod audio_opus;
 mod audio_ws;
 pub mod backend_profile;
+mod calibration;
 mod capabilities;
 pub(crate) mod chat;
 mod cloudflare_api;
@@ -24,7 +25,6 @@ mod cloudflared_dl;
 mod dev;
 mod files;
 mod import_audio;
-mod calibration;
 mod ingress_latency;
 mod ingress_ws;
 mod jail;
@@ -241,10 +241,7 @@ impl AppState {
     /// Get-or-create the audio-prefs struct for `peer_id`. Returns
     /// a clone of the Arc so callers can hold a reference without
     /// keeping the map locked.
-    pub(crate) async fn peer_prefs_for(
-        &self,
-        peer_id: &str,
-    ) -> Arc<PeerAudioPrefs> {
+    pub(crate) async fn peer_prefs_for(&self, peer_id: &str) -> Arc<PeerAudioPrefs> {
         let mut g = self.peer_audio_prefs.lock().await;
         g.entry(peer_id.to_string())
             .or_insert_with(|| Arc::new(PeerAudioPrefs::default()))
@@ -390,8 +387,7 @@ pub(crate) struct AppState {
     /// Avoids the cross-client interference an `AppState`-global
     /// atomic would create (last writer wins, every client's
     /// ingress sees the offset).
-    pub(crate) peer_audio_prefs:
-        Mutex<HashMap<String, Arc<PeerAudioPrefs>>>,
+    pub(crate) peer_audio_prefs: Mutex<HashMap<String, Arc<PeerAudioPrefs>>>,
     /// Speaker→mic loopback calibration manager. Created idle;
     /// `Command::StartIngressCalibration` arms it, the egress encode
     /// + ingress decode hooks drive it, `Event::CalibrationProgress`
@@ -406,8 +402,7 @@ pub(crate) struct AppState {
     /// Last MIDI capture-latency value pushed per track id, in
     /// samples. Used to threshold subsequent `SetMidiCaptureLatency`
     /// emissions so we don't kick the shim on every MIDI event.
-    pub(crate) midi_latency_last_applied:
-        Arc<Mutex<HashMap<EntityId, u32>>>,
+    pub(crate) midi_latency_last_applied: Arc<Mutex<HashMap<EntityId, u32>>>,
     /// Track id → ingress stream id. Populated when a
     /// `SetTrackInput` succeeds against a known ingress sink port,
     /// dropped on `AudioIngressClose`. Read by the per-session

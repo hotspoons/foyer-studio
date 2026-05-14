@@ -80,38 +80,86 @@ fn main() {
         println!("cargo:rerun-if-changed={resolved}");
     }
 
+    // Hard-coded Ardour version that the embedded shim was built
+    // against. Override via `FOYER_ARDOUR_VERSION=9.3` at build time
+    // when the shim is rebuilt for a new Ardour. The runtime checks
+    // this against the installed Ardour's reported version and
+    // warns on mismatch (the surfaces ABI is version-sensitive).
+    // Resolved before the shim block so the default install path
+    // can derive the major-version folder name (`ardour9/`, etc.).
+    let ardour_version = std::env::var("FOYER_ARDOUR_VERSION").unwrap_or_else(|_| "9.2".into());
+    let ardour_major = ardour_version
+        .split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("9")
+        .to_string();
+    println!("cargo:rustc-env=FOYER_ARDOUR_VERSION={ardour_version}");
+    println!("cargo:rerun-if-env-changed=FOYER_ARDOUR_VERSION");
+
     // ── Ardour shim embed ───────────────────────────────────────────
-    // Same shape as the web bundle: env override → repo path →
-    // empty stub. The shim is a `.so` (or `.dylib` on macOS) built
-    // out-of-band by `shims/ardour`'s CMake/waf scripts; this build
-    // script only reads the resulting blob. Hash stamp lets the
-    // runtime detect a stale extracted copy.
+    // The shim is a `.so` (or `.dylib` on macOS) built out-of-band by
+    // `shims/ardour`'s CMake; this build script only reads the
+    // resulting blob and bakes it into the binary so a single-file
+    // release can self-install into Ardour's surfaces dir.
+    //
+    // Source resolution:
+    //   1. `FOYER_BUNDLED_SHIM` env var — release pipelines / CI /
+    //      custom builds point at an artifact wherever it lives.
+    //   2. The user's Ardour surfaces dir — same path Ardour itself
+    //      reads from at runtime, and where `scripts/dev/shim.sh
+    //      install` puts the file. The dev loop is "build shim →
+    //      install into surfaces → cargo embeds the just-installed
+    //      copy → runtime re-installs from the embed (no-op when
+    //      the stamps match)." One canonical location, no
+    //      dev-tree-layout assumptions.
+    //   3. Otherwise → empty stub. The runtime preflight refuses
+    //      `--backend ardour` and tells the user how to fix it.
+    //      CI matrices that build the sidecar without the C++ shim
+    //      hit this path, as does anyone running `--backend stub`.
+    //
+    // The explicit-env-var path warns on a missing file (the user
+    // asked for a specific blob and we couldn't honor it). The
+    // default path is quiet — "no installed shim, building a stub"
+    // is the normal state for sidecar-only contributors.
     let shim_env_override = std::env::var("FOYER_BUNDLED_SHIM")
         .ok()
-        .filter(|s| !s.is_empty());
-    let shim_default = format!("{manifest_dir}/../../shims/ardour/build/libfoyer_shim.so");
-    let resolved_shim_input = shim_env_override.clone().unwrap_or(shim_default);
-    let shim_input_path = PathBuf::from(&resolved_shim_input);
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let shim_default = default_shim_install_path(&ardour_major);
+    let (shim_input_path, shim_input_explicit) = match &shim_env_override {
+        Some(p) => (Some(p.clone()), true),
+        None => (shim_default, false),
+    };
 
     let shim_blob_path: PathBuf;
     let shim_present: bool;
     let shim_stamp: u64;
-    if shim_input_path.is_file() {
+    if let Some(shim_input_path) = shim_input_path.as_ref().filter(|p| p.is_file()) {
         // Real shim — copy into OUT_DIR so include_bytes! has a
         // stable path even if the source moves between rebuilds.
         let dst = PathBuf::from(&out_dir).join("libfoyer_shim.blob");
-        let bytes = std::fs::read(&shim_input_path).expect("read shim");
+        let bytes = std::fs::read(shim_input_path).expect("read shim");
         std::fs::write(&dst, &bytes).expect("write shim blob");
         shim_stamp = hash_bytes(&bytes);
         shim_blob_path = dst;
         shim_present = true;
         println!("cargo:rerun-if-changed={}", shim_input_path.display());
     } else {
+        if let (true, Some(missing)) = (shim_input_explicit, shim_input_path.as_ref()) {
+            // User explicitly pointed at a file that doesn't exist —
+            // surface it instead of silently building a stub. The
+            // default-path miss is normal (sidecar dev without a
+            // built shim) so stays quiet.
+            println!(
+                "cargo:warning=FOYER_BUNDLED_SHIM points at {}, which is not a file — building a stub (preflight will refuse --backend ardour)",
+                missing.display()
+            );
+        }
         // Stub: zero-byte file so include_bytes! still compiles, and
         // the runtime treats `shim_present == false` as "no embedded
         // shim, refuse to start with backend=ardour and tell user
-        // where to put one." Common in CI matrices that build the
-        // sidecar without the C++ shim.
+        // where to put one."
         let stub = PathBuf::from(&out_dir).join("libfoyer_shim.empty");
         if !stub.exists() {
             std::fs::write(&stub, b"").expect("write empty shim stub");
@@ -130,15 +178,36 @@ fn main() {
     );
     println!("cargo:rustc-env=FOYER_BUNDLED_SHIM_STAMP={shim_stamp:016x}");
     println!("cargo:rerun-if-env-changed=FOYER_BUNDLED_SHIM");
+    // The default install location depends on $HOME / $XDG_CONFIG_HOME;
+    // ask cargo to rebuild when those change so the embedded blob
+    // refreshes if the user moves their Ardour config dir.
+    println!("cargo:rerun-if-env-changed=HOME");
+    println!("cargo:rerun-if-env-changed=XDG_CONFIG_HOME");
+}
 
-    // Hard-coded Ardour version that the embedded shim was built
-    // against. Override via `FOYER_ARDOUR_VERSION=9.3` at build time
-    // when the shim is rebuilt for a new Ardour. The runtime checks
-    // this against the installed Ardour's reported version and
-    // warns on mismatch (the surfaces ABI is version-sensitive).
-    let ardour_version = std::env::var("FOYER_ARDOUR_VERSION").unwrap_or_else(|_| "9.2".into());
-    println!("cargo:rustc-env=FOYER_ARDOUR_VERSION={ardour_version}");
-    println!("cargo:rerun-if-env-changed=FOYER_ARDOUR_VERSION");
+/// Mirrors `shim_install::ardour_surfaces_dir`'s logic at build time
+/// so the build script reads the same `.so` the runtime would
+/// reinstall. Returns `None` if `$HOME` is unset (cross-compilation
+/// sandboxes, hermetic CI, etc.) — caller falls through to the empty
+/// stub.
+fn default_shim_install_path(ardour_major: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let surfaces_dir = if cfg!(target_os = "macos") {
+        home.join("Library/Preferences")
+            .join(format!("Ardour{ardour_major}"))
+            .join("surfaces")
+    } else {
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        xdg.join(format!("ardour{ardour_major}")).join("surfaces")
+    };
+    let ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
+    Some(surfaces_dir.join(format!("libfoyer_shim.{ext}")))
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {

@@ -57,9 +57,6 @@ docs/                       PLAN, STATUS, DECISIONS, DEVELOPMENT, KEYBOARD, TODO
                              pushes; main-<sha>/latest on main merges)
 .github/workflows/ghcr-cleanup.yml  Daily cron pruning old snapshot tags
                              from GHCR (>14 days). Untagged orphans go at >7 days.
-.github/workflows/cloudrun-deploy.yml CD into Cloud Run on main-pipeline
-                             success (gated on `vars.GCP_PROJECT` — off by
-                             default in fresh forks).
 ```
 
 ## Web tree (three-tier split)
