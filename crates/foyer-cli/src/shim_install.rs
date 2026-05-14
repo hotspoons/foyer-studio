@@ -1,7 +1,10 @@
 // Ardour shim preflight + install.
 //
-// The Foyer release binary embeds `shims/ardour/build/libfoyer_shim.so`
-// as a `&'static [u8]` blob via `build.rs`. At `foyer serve` time when
+// The Foyer release binary embeds the file pointed at by the
+// `FOYER_BUNDLED_SHIM` env var at build time (Justfile dev recipes
+// point this at `~/.config/ardour9/surfaces/libfoyer_shim.so` — the
+// same install location Ardour reads from at runtime) as a
+// `&'static [u8]` blob via `build.rs`. At `foyer serve` time when
 // the active backend is Ardour, we:
 //
 //   1. Look up the Ardour executable (config override → PATH probe →
@@ -183,7 +186,7 @@ fn check_version_compat(binary: &Path) {
 }
 
 fn major_minor(v: &str) -> (u32, u32) {
-    let mut parts = v.split(|c: char| c == '.' || c == '-');
+    let mut parts = v.split(['.', '-']);
     let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     (major, minor)

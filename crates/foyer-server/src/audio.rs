@@ -158,6 +158,7 @@ impl AudioHub {
     ///
     /// Subsequent calls with the same `stream_id` close the prior
     /// stream first (stream IDs are client-assigned and we want idempotency).
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_stream(
         &self,
         stream_id: u32,
@@ -226,7 +227,7 @@ impl AudioHub {
         let tx_for_task = tx.clone();
         let codec = format.codec;
         let calibration_for_task = self.calibration.clone();
-        let format_for_task = format.clone();
+        let format_for_task = format;
         // Drift-correction channel — populated only when there's a
         // resampler to nudge. Bounded queue so a slow encoder
         // can't get spammed by a fast feedback loop. Bursts > 8

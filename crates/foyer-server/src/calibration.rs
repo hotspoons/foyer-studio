@@ -482,8 +482,8 @@ mod tests {
         // the start; `recv_mono_ns` is set so the back-calc puts the
         // detection at `detect_t`.
         let mut rx = vec![0.0_f32; 4800];
-        for i in 100..400 {
-            rx[i] = 0.5;
+        for sample in &mut rx[100..400] {
+            *sample = 0.5;
         }
         // Detection back-calc: detect_ns = recv_mono_ns -
         // ns_from_chunk_end; we want detect_ns == detect_t, so

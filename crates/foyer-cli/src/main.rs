@@ -598,7 +598,7 @@ async fn serve(
     if matches!(backend.kind, BackendKind::Ardour) && socket.is_none() {
         let override_path = ardour_path_override
             .as_deref()
-            .or_else(|| backend.executable.as_deref());
+            .or(backend.executable.as_deref());
         match shim_install::ensure_ardour_ready(override_path) {
             Ok(ready) => {
                 tracing::info!("Ardour binary: {}", ready.binary.display());
