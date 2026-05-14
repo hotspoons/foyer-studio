@@ -421,6 +421,15 @@ export class TimelineView extends LitElement {
       overflow: hidden;
       cursor: grab;
       transition: filter 0.1s ease;
+      /* Force a new stacking context per region. Without this, the
+       * z-indexed handles + gain strip live in the LANE's stacking
+       * context and pop through the body of a later-DOM neighboring
+       * region in the overlap zone — producing the visual flicker
+       * Rich saw with overlapping clips. Isolated, each region's
+       * handles are confined to that region's z-space, so the
+       * front region's body cleanly covers the back region's
+       * controls in the overlap. */
+      isolation: isolate;
     }
     .region.dragging { cursor: grabbing; filter: brightness(1.15); }
     .region:hover { filter: brightness(1.08); }
@@ -563,7 +572,14 @@ export class TimelineView extends LitElement {
     /* Fade-length grab handle — a small triangle anchored to the
      * inside endpoint of the fade. When no fade exists the handle
      * sits at the lozenge corner; drag inward to extend. Hold Alt
-     * to rotate the curve shape; Shift+click clears the fade. */
+     * to rotate the curve shape; Shift+click clears the fade.
+     *
+     * Visibility is INTENTIONALLY stable (no hover transition):
+     * overlapping regions used to flip a :hover rule on/off as the
+     * cursor crossed the boundary, popping each region's handles in
+     * and out and producing a strobe. A constant baseline opacity
+     * makes the handles always discoverable without requiring the
+     * cursor to first claim hover ownership of the right region. */
     .region .fade-handle {
       position: absolute;
       top: 0;
@@ -571,10 +587,8 @@ export class TimelineView extends LitElement {
       height: 14px;
       cursor: ew-resize;
       z-index: 5;
-      opacity: 0.65;
-      transition: opacity 0.1s ease;
+      opacity: 0.85;
     }
-    .region:hover .fade-handle,
     .region .fade-handle.dragging,
     .region .fade-handle.active { opacity: 1; }
     .region .fade-handle::before {
@@ -602,7 +616,13 @@ export class TimelineView extends LitElement {
      * that drags vertically to set gain. Shows the linear-gain dB
      * label while dragging. Audio-only; MIDI regions don't render
      * this strip (Ardour's set_scale_amplitude isn't meaningful
-     * for MIDI). */
+     * for MIDI).
+     *
+     * Always-on baseline (same rationale as .fade-handle above):
+     * hiding the strip behind :hover flickers when two regions
+     * overlap and the cursor oscillates over the boundary. A subtle
+     * resting opacity is enough to advertise it without competing
+     * visually with the waveform underneath. */
     .region .gain-strip {
       position: absolute;
       top: 0; left: 12px; right: 12px;
@@ -613,10 +633,8 @@ export class TimelineView extends LitElement {
         color-mix(in oklab, var(--color-accent-3, #f59e0b) 75%, transparent),
         color-mix(in oklab, var(--color-accent-3, #f59e0b) 25%, transparent));
       border-radius: 0 0 3px 3px;
-      opacity: 0;
-      transition: opacity 0.1s ease;
+      opacity: 0.25;
     }
-    .region:hover .gain-strip,
     .region .gain-strip.dragging,
     .region .gain-strip.nonunity { opacity: 0.85; }
     .region .gain-readout {
