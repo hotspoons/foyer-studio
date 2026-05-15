@@ -332,6 +332,10 @@ struct RegionDesc {
 	double        gain_linear         = 1.0;
 	std::uint64_t fade_in_samples     = 0;
 	std::uint64_t fade_out_samples    = 0;
+	/// Render layer within the owning playlist. Pulled from
+	/// `Region::layer()`. We always emit so the FE's `(layer,
+	/// source-order)` sort lines up with what Ardour paints.
+	std::int64_t  layer               = 0;
 };
 
 /// Enumerate regions on the playlist of the track identified by `track_id`
@@ -365,6 +369,14 @@ struct RegionHit {
 	std::string                     track_id;   ///< "track.<stripable-id>"
 };
 RegionHit find_region (ARDOUR::Session&, const std::string& region_id);
+
+/// Resolve a Foyer `track.<pbd-id>` to the owning playlist. Returns
+/// `nullptr` when the id doesn't map to a track that hosts regions
+/// (busses / master), or when no matching route exists. Used by the
+/// dispatcher's cross-track move / paste handlers to find the
+/// destination playlist before relocating regions.
+std::shared_ptr<ARDOUR::Playlist> playlist_for_track_id (
+	ARDOUR::Session&, const std::string& track_id);
 
 /// Given a Foyer control id like `track.<pbd>.gain`, find the owning
 /// AutomationControl so automation-lane edits can call `alist()`.

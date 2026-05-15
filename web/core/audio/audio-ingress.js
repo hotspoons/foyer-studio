@@ -84,7 +84,37 @@ export class AudioIngress {
     try {
       let micStream;
       try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        // Pro-audio mode: disable every browser-side DSP in the
+        // capture path. Foyer is a DAW — the user owns the signal
+        // chain via Ardour's plugins (incl. autovocoder, x42, LSP
+        // dynamics, denoise, etc.). Browser DSPs in the way are
+        // strictly harmful:
+        //   · echoCancellation — kills sustained tones, pumps
+        //     transients, generally smears anything resembling
+        //     music. AEC is designed for speech; everything else
+        //     it touches sounds worse for it.
+        //   · noiseSuppression — Chrome's RNNoise-based NS chews
+        //     reverb tails and quiet program material. Recording
+        //     a quiet vocal take through it sounds like a phone
+        //     call.
+        //   · autoGainControl — silently rides the input level so
+        //     the user can't actually set their gain stage. The
+        //     UR22's hardware preamp + the engine fader are the
+        //     only gain controls foyer wants in the path.
+        // Disabling them also unlocks higher sample rates on
+        // capture-side interfaces — Chrome's voice-processing
+        // pipeline forces 48 kHz internally regardless of the
+        // device's native rate. With the constraints off, Chrome
+        // delivers the raw rate from getUserMedia, which the
+        // ingress handshake then aligns to the engine.
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+          video: false,
+        });
       } catch (e) {
         console.error("[ingress] getUserMedia failed:", e);
         this._running = false;
@@ -204,20 +234,25 @@ export class AudioIngress {
     }
     this._ctx = null;
 
+    // `latencyHint: "interactive"` asks for the tightest capture
+    // buffer the UA will give us — matches the listener-side hint
+    // so the speaker→mic round-trip isn't dominated by the OS-level
+    // input buffer on Linux (Chrome's default is "balanced" ≈ 100 ms
+    // capture, interactive ≈ 20 ms).
     const want = preferredSr != null ? Math.round(Number(preferredSr)) : 0;
     let ctx;
     if (want > 0) {
       try {
-        ctx = new AudioContext({ sampleRate: want });
+        ctx = new AudioContext({ sampleRate: want, latencyHint: "interactive" });
       } catch {
-        ctx = new AudioContext();
+        ctx = new AudioContext({ latencyHint: "interactive" });
       }
       if (Math.abs(ctx.sampleRate - want) > 1) {
         try { await ctx.close(); } catch {}
-        ctx = new AudioContext();
+        ctx = new AudioContext({ latencyHint: "interactive" });
       }
     } else {
-      ctx = new AudioContext();
+      ctx = new AudioContext({ latencyHint: "interactive" });
     }
 
     this._ctx = ctx;

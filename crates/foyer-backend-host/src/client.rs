@@ -1210,7 +1210,7 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                         }
                     }
                 }
-                Event::Error { code, message } => {
+                Event::Error { code, message, .. } => {
                     tracing::warn!("shim error: {code}: {message}");
                 }
                 _ => {}

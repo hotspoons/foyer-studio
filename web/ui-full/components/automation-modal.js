@@ -75,6 +75,52 @@ function laneSuffix(controlId) {
   return String(controlId || "").split(".").pop() || "param";
 }
 
+const NO_BANK_SENTINELS = new Set([-1, 0xffff, 0xffffff, 0x7fff]);
+function normalizePatchBank(bank) {
+  if (bank == null) return -1;
+  const n = Number(bank);
+  if (!Number.isFinite(n) || NO_BANK_SENTINELS.has(n) || n < 0) return -1;
+  return Math.max(0, Math.min(16383, n)) & 0x3fff;
+}
+
+/** Flatten MIDNAM `_patchNames.banks` into a search-friendly list:
+ *  `{ bank, bankName, program, name }` rows, including a synthetic
+ *  `bank: -1` row per bank-less program (1–128) so the search can
+ *  always return something even on a track without a MIDNAM map. */
+function flattenPatchNames(patchNames) {
+  const out = [];
+  const banks = patchNames?.banks || [];
+  if (banks.length) {
+    for (const b of banks) {
+      const bk = normalizePatchBank(b.bank);
+      if (bk < 0) continue;
+      const bankName = b.name || `Bank ${bk}`;
+      const programs = (b.programs || []).filter((p) =>
+        Number.isFinite(Number(p.program)));
+      for (const p of programs) {
+        const prog = Math.max(0, Math.min(127, Number(p.program) || 0));
+        out.push({
+          bank: bk,
+          bankName,
+          program: prog,
+          name: p.name || `Program ${prog + 1}`,
+        });
+      }
+    }
+    if (out.length) return out;
+  }
+  // Fallback when MIDNAM is silent: GM 1..128 with bank = -1.
+  for (let i = 0; i < 128; i += 1) {
+    out.push({
+      bank: -1,
+      bankName: "General MIDI",
+      program: i,
+      name: `Program ${i + 1}`,
+    });
+  }
+  return out;
+}
+
 /** Walk shadow roots to find the active timeline-view, if any. The
  *  modal mirrors its pxPerSec + scrollLeft so the user always edits
  *  automation at the same scale they're seeing on the timeline. */
@@ -106,6 +152,10 @@ export class AutomationModal extends LitElement {
     _filterText: { state: true, type: String },
     _pxPerSec: { state: true, type: Number },
     _scrollLeft: { state: true, type: Number },
+    _patchNames: { state: true, type: Object },
+    _patchNamesFor: { state: true, type: String },
+    _patchNamesLoading: { state: true, type: Boolean },
+    _patchPicker: { state: true, type: Object },
   };
 
   static styles = css`
@@ -154,6 +204,23 @@ export class AutomationModal extends LitElement {
       border-radius: var(--radius-sm);
       color: var(--color-text);
       width: 200px;
+    }
+    .top button.clear-all {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font: inherit;
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--color-border);
+      background: var(--color-surface);
+      color: var(--color-text-muted);
+      cursor: pointer;
+    }
+    .top button.clear-all:hover {
+      color: var(--color-danger, #f87171);
+      border-color: var(--color-danger, #f87171);
     }
     .top .zoom-row {
       display: inline-flex;
@@ -498,6 +565,169 @@ export class AutomationModal extends LitElement {
     input[type=checkbox].master {
       transform: translateY(1px);
     }
+    /* Patch picker overlay. Single-form, MIDNAM-driven, search +
+     * scrolling program list. Centered as a floating panel; the
+     * scrim closes on click-outside. */
+    .pp-scrim {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .pp-panel {
+      background: var(--color-surface-elevated);
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
+      width: 480px;
+      max-width: 92vw;
+      max-height: 76vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .pp-head {
+      padding: 12px 16px 10px;
+      border-bottom: 1px solid var(--color-border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .pp-head .title {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--color-text);
+      flex: 1;
+    }
+    .pp-head .x {
+      cursor: pointer;
+      background: transparent;
+      color: var(--color-text-muted);
+      border: 0;
+      font-size: 14px;
+      padding: 2px 6px;
+    }
+    .pp-head .x:hover { color: var(--color-text); }
+    .pp-controls {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      column-gap: 10px;
+      row-gap: 8px;
+      align-items: center;
+      padding: 10px 16px;
+      border-bottom: 1px solid color-mix(in oklab, var(--color-border) 50%, transparent);
+    }
+    .pp-controls label {
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+    }
+    .pp-controls select,
+    .pp-controls input[type=search] {
+      font: inherit;
+      font-size: 12px;
+      padding: 6px 8px;
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: 4px;
+      color: var(--color-text);
+      width: 100%;
+    }
+    .pp-controls input[type=search]:focus,
+    .pp-controls select:focus {
+      outline: 1px solid var(--color-accent-2, #22d3ee);
+      outline-offset: -1px;
+    }
+    .pp-hint {
+      grid-column: 1 / -1;
+      font-size: 10px;
+      color: var(--color-text-muted);
+      margin-top: -2px;
+    }
+    .pp-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 6px 0;
+    }
+    .pp-row {
+      padding: 6px 16px;
+      display: grid;
+      grid-template-columns: 38px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--color-text);
+      border-left: 2px solid transparent;
+    }
+    .pp-row:hover {
+      background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+    }
+    .pp-row.active {
+      background: color-mix(in oklab, var(--color-accent-2, #22d3ee) 18%, transparent);
+      border-left-color: var(--color-accent-2, #22d3ee);
+    }
+    .pp-row .prog {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--color-text-muted);
+    }
+    .pp-row.active .prog { color: var(--color-text); }
+    .pp-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pp-row .bk {
+      font-size: 9px;
+      color: var(--color-text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .pp-empty {
+      padding: 24px;
+      text-align: center;
+      color: var(--color-text-muted);
+      font-size: 11px;
+    }
+    .pp-foot {
+      padding: 10px 16px;
+      border-top: 1px solid var(--color-border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .pp-foot .summary {
+      flex: 1;
+      font-size: 11px;
+      color: var(--color-text-muted);
+    }
+    .pp-foot .summary strong {
+      color: var(--color-text);
+      font-weight: 600;
+    }
+    .pp-foot button {
+      font: inherit;
+      font-size: 12px;
+      padding: 6px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--color-border);
+      background: var(--color-surface);
+      color: var(--color-text);
+      cursor: pointer;
+    }
+    .pp-foot button:hover { background: color-mix(in oklab, var(--color-accent) 10%, var(--color-surface)); }
+    .pp-foot button.primary {
+      background: var(--color-accent-2, #22d3ee);
+      border-color: var(--color-accent-2, #22d3ee);
+      color: #001a20;
+      font-weight: 600;
+    }
+    .pp-foot button.primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
   `;
 
   constructor() {
@@ -511,14 +741,30 @@ export class AutomationModal extends LitElement {
     this._pxPerSec = 60;
     this._scrollLeft = 0;
     this._syncRaf = 0;
+    this._patchNames = null;
+    this._patchNamesFor = "";
+    this._patchNamesLoading = false;
+    // Picker stage. `null` = closed. When open, holds the
+    // in-progress edit/add session: target region + (optional)
+    // existing patch_change id + working channel/bank/program +
+    // free-text search filter. A single Save commit dispatches
+    // add_patch_change / update_patch_change.
+    this._patchPicker = null;
+    // Last committed selection across all chips (per-modal-instance
+    // memory). New add-flows seed from this so the typical workflow
+    // (drop several copies of the same patch around a track) doesn't
+    // force the user back through channel/bank every time.
+    this._lastPatchPick = null;
     this._onStoreChange = () => this.requestUpdate();
     this._onScroll = (ev) => this._onScrollChanged(ev);
+    this._onEnvelope = (ev) => this._onWsEnvelope(ev.detail);
   }
 
   connectedCallback() {
     super.connectedCallback();
     const store = window.__foyer?.store;
     store?.addEventListener?.("change", this._onStoreChange);
+    window.__foyer?.ws?.addEventListener?.("envelope", this._onEnvelope);
     this._loadPersistedState();
     this._startTimelineSync();
   }
@@ -527,7 +773,32 @@ export class AutomationModal extends LitElement {
     super.disconnectedCallback();
     const store = window.__foyer?.store;
     store?.removeEventListener?.("change", this._onStoreChange);
+    window.__foyer?.ws?.removeEventListener?.("envelope", this._onEnvelope);
     this._stopTimelineSync();
+  }
+
+  _onWsEnvelope(env) {
+    const body = env?.body;
+    if (!body) return;
+    if (body.type === "midi_patch_names_listed"
+        && body.track_id === this.trackId) {
+      this._patchNames = body.names || null;
+      this._patchNamesFor = `${this.trackId}:${body.names?.channel ?? 0}`;
+      this._patchNamesLoading = false;
+    }
+  }
+
+  _requestPatchNamesForChannel(ch) {
+    if (!this.trackId) return;
+    const channel = Math.max(0, Math.min(15, Number(ch) || 0));
+    const key = `${this.trackId}:${channel}`;
+    if (this._patchNamesFor === key && this._patchNames) return;
+    this._patchNamesLoading = true;
+    window.__foyer?.ws?.send({
+      type: "list_midi_patch_names",
+      track_id: this.trackId,
+      channel,
+    });
   }
 
   /**
@@ -799,39 +1070,242 @@ export class AutomationModal extends LitElement {
     return null;
   }
 
-  /** Prompt the user for bank/program/channel via a tiny inline
-   *  modal. Resolves with { bank, program, channel } or null on
-   *  cancel. Used by add / edit patch-change flows. */
-  async _promptPatchChange(initial = {}) {
-    const { promptText } = await import("foyer-ui-core/widgets/prompt-modal.js");
-    // We chain three prompts — minimal UI but functional. A purpose-
-    // built picker can replace this once we know what users need.
-    const channel = await promptText({
-      title: "Patch change · channel",
-      message: "MIDI channel (0–15)",
-      defaultValue: String(initial.channel ?? 0),
-      confirmLabel: "Next",
-    });
-    if (channel == null) return null;
-    const bank = await promptText({
-      title: "Patch change · bank",
-      message: "Bank (0–16383, or -1 for none)",
-      defaultValue: String(initial.bank ?? 0),
-      confirmLabel: "Next",
-    });
-    if (bank == null) return null;
-    const program = await promptText({
-      title: "Patch change · program",
-      message: "Program (0–127)",
-      defaultValue: String(initial.program ?? 0),
-      confirmLabel: "OK",
-    });
-    if (program == null) return null;
-    return {
-      channel: Math.max(0, Math.min(15, Number.parseInt(channel, 10) || 0)),
-      bank: Math.max(-1, Math.min(16383, Number.parseInt(bank, 10) || -1)),
-      program: Math.max(0, Math.min(127, Number.parseInt(program, 10) || 0)),
+  /** Open the patch picker for an add or edit flow.
+   *
+   *  Replaces the prior three-prompt chain. The picker is a single
+   *  floating panel rendered inside the modal that exposes MIDNAM
+   *  bank/program data with a search box, dropdowns, and a Save
+   *  button. New-add seeds from the last committed selection so a
+   *  user dropping multiple copies of the same patch doesn't have
+   *  to retrace the same channel + bank every time. */
+  _openPatchPicker({ mode, region, patch, sample }) {
+    const init = mode === "edit"
+      ? {
+        channel: patch.patch_change.channel,
+        bank: patch.patch_change.bank,
+        program: patch.patch_change.program,
+      }
+      : (this._lastPatchPick || { channel: 0, bank: -1, program: 0 });
+    this._patchPicker = {
+      mode,
+      regionId: region.id,
+      patchId: mode === "edit" ? patch.patch_change.id : "",
+      sample: sample ?? 0,
+      channel: Math.max(0, Math.min(15, Number(init.channel) || 0)),
+      bank: normalizePatchBank(init.bank),
+      program: Math.max(0, Math.min(127, Number(init.program) || 0)),
+      search: "",
     };
+    this._requestPatchNamesForChannel(this._patchPicker.channel);
+  }
+
+  _closePatchPicker() {
+    this._patchPicker = null;
+  }
+
+  _updatePicker(patch) {
+    if (!this._patchPicker) return;
+    this._patchPicker = { ...this._patchPicker, ...patch };
+  }
+
+  _commitPatchPicker() {
+    const p = this._patchPicker;
+    if (!p) return;
+    const channel = Math.max(0, Math.min(15, Number(p.channel) || 0));
+    const bank = normalizePatchBank(p.bank);
+    const program = Math.max(0, Math.min(127, Number(p.program) || 0));
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      this._closePatchPicker();
+      return;
+    }
+    if (p.mode === "edit") {
+      ws.send({
+        type: "update_patch_change",
+        region_id: p.regionId,
+        patch_change_id: p.patchId,
+        patch: { channel, bank, program },
+      });
+    } else {
+      const region = this._regionsForTrack(this.trackId)
+        .find((r) => r.id === p.regionId);
+      if (!region) { this._closePatchPicker(); return; }
+      const offsetSamples = (p.sample || 0) - (Number(region.start_samples) || 0);
+      const start_ticks = this._samplesToTicks(offsetSamples);
+      ws.send({
+        type: "add_patch_change",
+        region_id: p.regionId,
+        patch_change: {
+          id: `patchchange.opt.${Date.now().toString(36)}`,
+          channel,
+          program,
+          bank,
+          start_ticks,
+        },
+      });
+    }
+    this._lastPatchPick = { channel, bank, program };
+    this._closePatchPicker();
+  }
+
+  /** Clear automation points on every lane of `track`. Confirms with
+   *  the user (destructive across many lanes at once), wraps the
+   *  whole sweep in a single undo group so Ctrl+Z reverses it as
+   *  one step, and dispatches a `replace_automation_lane` with an
+   *  empty points list per lane that currently has data. Empty
+   *  lanes are skipped so the wire is quiet. */
+  async _clearAllAutomation(track) {
+    const lanes = (track.automation_lanes || [])
+      .filter((l) => Array.isArray(l.points) && l.points.length > 0);
+    if (lanes.length === 0) {
+      const { toast } = await import("foyer-ui-core/widgets/toast.js");
+      toast(`No automation to clear on ${track.name}.`, { tone: "info" });
+      return;
+    }
+    const totalPoints = lanes.reduce((n, l) => n + l.points.length, 0);
+    const { confirmAction } = await import("foyer-ui-core/widgets/confirm-modal.js");
+    const ok = await confirmAction({
+      title: "Clear all automation?",
+      message:
+        `Clear all ${totalPoints} automation point${totalPoints === 1 ? "" : "s"} `
+        + `across ${lanes.length} lane${lanes.length === 1 ? "" : "s"} on `
+        + `${track.name}? Undo restores everything in one step.`,
+      confirmLabel: "Clear all",
+      cancelLabel: "Cancel",
+      tone: "warning",
+    });
+    if (!ok) return;
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    ws.send({ type: "undo_group_begin", name: `Foyer clear automation · ${track.name}` });
+    for (const lane of lanes) {
+      ws.send({
+        type: "replace_automation_lane",
+        lane_id: lane.control_id,
+        points: [],
+      });
+    }
+    ws.send({ type: "undo_group_end" });
+  }
+
+  /** Render the patch picker overlay (or nothing if closed). One
+   *  form: channel + bank dropdowns up top, a search box that
+   *  filters across every program in every bank, and a scrolling
+   *  list of program rows. Selecting a row sets channel/bank/program
+   *  in one shot; Save commits, Cancel/click-outside closes. */
+  _renderPatchPicker() {
+    const p = this._patchPicker;
+    if (!p) return null;
+    // Make sure MIDNAM is loaded for the picker's current channel.
+    // Called from render is unusual but cheap (the request is
+    // deduped against `_patchNamesFor`). Loading state surfaces in
+    // the picker hint below.
+    this._requestPatchNamesForChannel(p.channel);
+    const all = flattenPatchNames(this._patchNames);
+    const banks = (this._patchNames?.banks || [])
+      .map((b) => ({ bank: normalizePatchBank(b.bank), name: b.name || "" }))
+      .filter((b) => b.bank >= 0);
+    const q = (p.search || "").trim().toLowerCase();
+    const rows = all.filter((r) => {
+      if (p.bank >= 0 && r.bank !== p.bank) return false;
+      if (!q) return true;
+      return r.name.toLowerCase().includes(q)
+          || r.bankName.toLowerCase().includes(q)
+          || String(r.program + 1).includes(q);
+    });
+    const activeRow = rows.find((r) => r.program === p.program
+        && (p.bank < 0 || r.bank === p.bank));
+    const model = this._patchNames?.model || "";
+    const mode = this._patchNames?.mode || "";
+    const onScrim = (e) => {
+      if (e.target.classList.contains("pp-scrim")) this._closePatchPicker();
+    };
+    return html`
+      <div class="pp-scrim" @click=${onScrim}>
+        <div class="pp-panel" role="dialog" aria-label="Patch change">
+          <div class="pp-head">
+            <div class="title">${p.mode === "edit" ? "Edit patch change" : "Add patch change"}</div>
+            <button class="x" title="Close" @click=${() => this._closePatchPicker()}>×</button>
+          </div>
+          <div class="pp-controls">
+            <label>Channel</label>
+            <select
+              .value=${String(p.channel + 1)}
+              @change=${(e) => {
+                const ch = Math.max(0, Math.min(15, Number(e.currentTarget.value) - 1));
+                this._updatePicker({ channel: ch });
+                this._requestPatchNamesForChannel(ch);
+              }}
+            >
+              ${Array.from({ length: 16 }).map((_, i) => html`
+                <option value=${String(i + 1)}>${i + 1}</option>
+              `)}
+            </select>
+
+            <label>Bank</label>
+            <select
+              .value=${String(p.bank)}
+              @change=${(e) => this._updatePicker({
+                bank: normalizePatchBank(Number(e.currentTarget.value)),
+              })}
+            >
+              <option value="-1">Any · program only</option>
+              ${banks.map((b) => html`
+                <option value=${String(b.bank)}>
+                  ${b.name || `Bank ${b.bank}`}
+                </option>
+              `)}
+            </select>
+
+            <label>Search</label>
+            <input type="search"
+                   placeholder="Filter by patch name, bank, or program number…"
+                   .value=${p.search}
+                   @input=${(e) => this._updatePicker({ search: e.currentTarget.value })}>
+
+            ${(model || mode || this._patchNamesLoading) ? html`
+              <div class="pp-hint">
+                ${this._patchNamesLoading
+                  ? "Loading patch names from Ardour…"
+                  : `${model || "No MIDNAM"}${model && mode ? " · " : ""}${mode || ""}`}
+              </div>
+            ` : null}
+          </div>
+          <div class="pp-list">
+            ${rows.length === 0 ? html`
+              <div class="pp-empty">No patches match.</div>
+            ` : rows.map((r) => html`
+              <div class="pp-row ${activeRow === r ? "active" : ""}"
+                   @click=${() => this._updatePicker({
+                     bank: r.bank,
+                     program: r.program,
+                   })}
+                   @dblclick=${() => {
+                     this._updatePicker({ bank: r.bank, program: r.program });
+                     this._commitPatchPicker();
+                   }}
+                   title="Click to select · double-click to save">
+                <span class="prog">${r.program + 1}</span>
+                <span class="name">${r.name}</span>
+                <span class="bk">${r.bank < 0 ? "" : r.bankName}</span>
+              </div>
+            `)}
+          </div>
+          <div class="pp-foot">
+            <div class="summary">
+              Ch <strong>${p.channel + 1}</strong>
+              · Bank <strong>${p.bank < 0 ? "—" : p.bank}</strong>
+              · Program <strong>${p.program + 1}</strong>
+              ${activeRow ? html` · <strong>${activeRow.name}</strong>` : ""}
+            </div>
+            <button @click=${() => this._closePatchPicker()}>Cancel</button>
+            <button class="primary" @click=${() => this._commitPatchPicker()}>
+              ${p.mode === "edit" ? "Save" : "Add"}
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   /** Background waveform layer behind an automation editor card.
@@ -1004,6 +1478,12 @@ export class AutomationModal extends LitElement {
         </div>
         <span class="sync-chip" title="Pan and zoom in this editor mirror the main timeline.">SYNC</span>
         <div class="spacer"></div>
+        <button class="clear-all"
+                title="Clear automation points on every lane for this track. Wrapped in one undo group so Ctrl+Z reverses the whole clear."
+                @click=${() => this._clearAllAutomation(track)}>
+          ${icon("trash", 11)}
+          <span>Clear all</span>
+        </button>
         <input class="filter"
                placeholder="Filter controls…"
                .value=${this._filterText}
@@ -1013,6 +1493,7 @@ export class AutomationModal extends LitElement {
         ${this._renderLegend(track)}
         ${this._renderEditorPane(track)}
       </div>
+      ${this._renderPatchPicker(track)}
     `;
   }
 
@@ -1235,9 +1716,9 @@ export class AutomationModal extends LitElement {
     `;
   }
 
-  /** Click on empty patches-body → prompt for channel/bank/program
-   *  and dispatch `add_patch_change` against the region containing
-   *  the clicked sample. */
+  /** Click on empty patches-body → open the picker (add flow).
+   *  Picker defaults to the last committed selection so dropping
+   *  multiple copies of the same patch doesn't force re-entry. */
   async _onPatchBodyPointerDown(ev, track) {
     if (ev.button !== 0) return;
     // Only react to clicks on the body itself, not on existing chips
@@ -1254,25 +1735,11 @@ export class AutomationModal extends LitElement {
       toast("Click within a region's timeline span to add a patch change.", { tone: "warn" });
       return;
     }
-    const picked = await this._promptPatchChange();
-    if (!picked) return;
-    const offsetSamples = sample - (Number(region.start_samples) || 0);
-    const start_ticks = this._samplesToTicks(offsetSamples);
-    window.__foyer?.ws?.send({
-      type: "add_patch_change",
-      region_id: region.id,
-      patch_change: {
-        id: `patchchange.opt.${Date.now().toString(36)}`,
-        channel: picked.channel,
-        program: picked.program,
-        bank: picked.bank,
-        start_ticks,
-      },
-    });
+    this._openPatchPicker({ mode: "add", region, sample });
   }
 
   /** Click an existing chip → edit or delete. Alt+click deletes
-   *  immediately; plain click opens the prompt prefilled. Stops
+   *  immediately; plain click opens the picker prefilled. Stops
    *  propagation so the body-level "add new" handler doesn't also
    *  fire on the same gesture. */
   async _onPatchChipPointerDown(ev, track, patch) {
@@ -1288,22 +1755,10 @@ export class AutomationModal extends LitElement {
       });
       return;
     }
-    const picked = await this._promptPatchChange({
-      channel: pc.channel,
-      bank: pc.bank,
-      program: pc.program,
-    });
-    if (!picked) return;
-    window.__foyer?.ws?.send({
-      type: "update_patch_change",
-      region_id: patch.region_id,
-      patch_change_id: pc.id,
-      patch: {
-        channel: picked.channel,
-        bank: picked.bank,
-        program: picked.program,
-      },
-    });
+    const region = this._regionsForTrack(this.trackId)
+      .find((r) => r.id === patch.region_id);
+    if (!region) return;
+    this._openPatchPicker({ mode: "edit", region, patch });
   }
 
   _renderEditorPane(track) {

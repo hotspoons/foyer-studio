@@ -601,7 +601,7 @@ async fn handle(
                     // initiated them. Unauthenticated tunnel guests see
                     // nothing but the greeting + error stream until they
                     // log in.
-                    if !should_forward_event(&env.body, &auth, &state).await {
+                    if !should_forward_event(&env.body, &auth, &self_peer_id, &state).await {
                         continue;
                     }
                     if send_env(&mut tx_ws, &env).await.is_err() {
@@ -707,11 +707,42 @@ fn now_ms() -> u64 {
 ///     events (for UI shell). Everything else is suppressed so a
 ///     stranger hitting the tunnel URL without a token doesn't leak
 ///     session content before logging in.
+///   · Targeted errors (`Event::Error.target_peer_id == Some(..)`)
+///     are visible only to the named peer plus LAN / tunnel-admin
+///     connections. Used for RBAC denials so a viewer doesn't see
+///     another viewer's banner flash by.
 ///
 /// Events minted unicast via `send_env` (greeting, initial session
 /// list, PeerList snapshot) bypass this check — they only reach the
 /// connection they're intended for.
-async fn should_forward_event(event: &Event, auth: &ConnectionAuth, state: &AppState) -> bool {
+async fn should_forward_event(
+    event: &Event,
+    auth: &ConnectionAuth,
+    self_peer_id: &str,
+    state: &AppState,
+) -> bool {
+    // Scope: targeted errors stop at the offender + admins.
+    if let Event::Error {
+        target_peer_id: Some(target),
+        ..
+    } = event
+    {
+        if target == self_peer_id {
+            return true;
+        }
+        // Admin proxy: LAN is always trusted; tunnel roles must be
+        // permitted to mint invite tokens (same gate as
+        // `is_tunnel_admin_event`).
+        return match auth {
+            ConnectionAuth::Lan => true,
+            ConnectionAuth::Authenticated { role_id, .. } => state
+                .roles_policy
+                .read()
+                .await
+                .allows(role_id, "tunnel_create_token"),
+            ConnectionAuth::Unauthenticated => false,
+        };
+    }
     match auth {
         ConnectionAuth::Unauthenticated => {
             matches!(
@@ -968,6 +999,7 @@ async fn dispatch_command(
                     message: format!(
                         "audio command '{tag}' rejected: this is a secondary window — open it on the spawning window instead"
                     ),
+                    target_peer_id: Some(peer_id.to_string()),
                 },
             )
             .await;
@@ -991,6 +1023,7 @@ async fn dispatch_command(
                         message: format!(
                             "unauthenticated guest attempted '{tag}' — must sign in first"
                         ),
+                        target_peer_id: Some(peer_id.to_string()),
                     },
                 )
                 .await;
@@ -1000,12 +1033,13 @@ async fn dispatch_command(
                 let allowed = state.roles_policy.read().await.allows(role_id, tag);
                 if !allowed {
                     tracing::warn!("RBAC: '{recipient}' (role '{role_id}') denied '{tag}'");
-                    // Include recipient + role in the message so the
-                    // host (who sees all error broadcasts in the
-                    // startup-errors banner) can tell which specific
-                    // guest tripped the rule. The same message reaches
-                    // the offender — slightly redundant for them but
-                    // consistent and harmless.
+                    // The message names the recipient + role so any
+                    // admin/LAN console operator who receives it can
+                    // attribute the denial to a specific guest. The
+                    // event is targeted at the offender's peer_id so
+                    // routing limits the broadcast to that peer +
+                    // LAN/admin connections; other guests don't see
+                    // another guest's denial banner flash by.
                     broadcast_event(
                         state,
                         Event::Error {
@@ -1013,6 +1047,7 @@ async fn dispatch_command(
                             message: format!(
                                 "{recipient} (role '{role_id}') is not permitted to invoke '{tag}'"
                             ),
+                            target_peer_id: Some(peer_id.to_string()),
                         },
                     )
                     .await;
@@ -1031,6 +1066,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "undo_group_begin_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -1043,6 +1079,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "undo_group_end_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -1339,6 +1376,7 @@ async fn dispatch_command(
                             message: format!(
                                 "Action `{id_str}` isn't wired up in the current backend yet."
                             ),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1404,6 +1442,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "browse_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1415,6 +1454,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "no_jail".into(),
                         message: "filesystem browsing is disabled (no --jail configured)".into(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -1445,6 +1485,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "open_session_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -1459,6 +1500,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "save_session_failed".into(),
                             message,
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1476,6 +1518,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "save_session_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -1576,6 +1619,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "update_region_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1601,6 +1645,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "delete_region_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1624,6 +1669,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "waveform_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1641,6 +1687,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "clear_cache_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1701,6 +1748,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "ingress_open_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1731,6 +1779,7 @@ async fn dispatch_command(
                 Event::Error {
                     code: "not_implemented".into(),
                     message: "audio command not yet wired".into(),
+                    target_peer_id: None,
                 },
             )
             .await;
@@ -1752,6 +1801,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "no_spawner".into(),
                         message: "this sidecar has no backend spawner configured".into(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -1938,6 +1988,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "launch_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1967,6 +2018,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "update_track_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -1980,6 +2032,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "delete_track_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -1992,6 +2045,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "reorder_tracks_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2024,6 +2078,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "set_midi_channel_mode_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -2075,6 +2130,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "set_track_input_mismatch".into(),
                         message,
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2117,6 +2173,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "set_track_input_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -2134,6 +2191,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "list_ports_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -2156,6 +2214,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "add_send_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2168,6 +2227,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "remove_send_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2180,6 +2240,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "set_send_level_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2205,6 +2266,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "add_plugin_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2217,6 +2279,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "remove_plugin_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2278,6 +2341,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "audio_egress_unavailable".into(),
                             message: "backend has no audio source — connect a DAW to listen".into(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -2301,6 +2365,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "audio_egress_unavailable".into(),
                             message: format!("audio source unavailable: {e}"),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -2350,6 +2415,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "audio_stream_open_failed".into(),
                             message: e,
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -2372,6 +2438,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "set_loop_range_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2396,6 +2463,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "add_note_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2417,6 +2485,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "update_note_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2434,6 +2503,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "delete_note_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2455,6 +2525,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "add_patch_change_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2476,6 +2547,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "update_patch_change_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2496,6 +2568,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "delete_patch_change_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2518,6 +2591,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "set_track_midi_patch_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2546,6 +2620,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "duplicate_region_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2575,6 +2650,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "duplicate_region_range_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2605,6 +2681,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "stretch_region_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2618,6 +2695,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "split_region_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2631,6 +2709,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "reverse_region_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2644,6 +2723,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "combine_regions_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2672,6 +2752,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "strip_silence_region_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2690,6 +2771,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "pitch_shift_region_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2714,6 +2796,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "create_region_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2804,6 +2887,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "set_sequencer_layout_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -2819,6 +2903,7 @@ async fn dispatch_command(
                             Event::Error {
                                 code: "replace_region_notes_failed".into(),
                                 message: e.to_string(),
+                                target_peer_id: None,
                             },
                         )
                         .await;
@@ -2850,6 +2935,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "replace_region_notes_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2873,6 +2959,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "clear_sequencer_layout_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -2995,6 +3082,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "undo_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3007,6 +3095,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "redo_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3026,6 +3115,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "set_automation_mode_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3043,6 +3133,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "add_automation_point_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3065,6 +3156,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "update_automation_point_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3085,6 +3177,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "delete_automation_point_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3102,6 +3195,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "replace_automation_lane_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3124,6 +3218,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "list_plugin_presets_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -3146,6 +3241,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "list_midi_patch_names_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -3167,6 +3263,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "load_plugin_preset_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3196,6 +3293,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "locate_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3333,6 +3431,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "session_not_found".into(),
                             message: format!("no open session with id {session_id:?}"),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -3357,6 +3456,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "orphan_not_found".into(),
                         message: format!("no orphan with id {orphan_id:?}"),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3372,6 +3472,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "no_spawner".into(),
                         message: "this sidecar has no spawner; cannot reattach".into(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3388,6 +3489,7 @@ async fn dispatch_command(
                             "orphan {} has no socket path on disk; can't reattach. Use Dismiss + Reopen to relaunch.",
                             info.name,
                         ),
+                                            target_peer_id: None,
                     },
                 )
                 .await;
@@ -3490,6 +3592,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "reattach_failed".into(),
                             message: format!("reattach to {} failed: {e}", info.name,),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -3556,6 +3659,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "create_group_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3568,6 +3672,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "update_group_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3580,6 +3685,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "delete_group_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3612,6 +3718,7 @@ async fn dispatch_command(
                         Event::Error {
                             code: "tunnel_create_failed".into(),
                             message: e.to_string(),
+                            target_peer_id: None,
                         },
                     )
                     .await;
@@ -3625,6 +3732,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "tunnel_revoke_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3680,6 +3788,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "tunnel_start_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3735,6 +3844,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "move_plugin_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3754,6 +3864,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "show_plugin_gui_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3767,6 +3878,7 @@ async fn dispatch_command(
                     Event::Error {
                         code: "hide_plugin_gui_failed".into(),
                         message: e.to_string(),
+                        target_peer_id: None,
                     },
                 )
                 .await;
@@ -3794,6 +3906,7 @@ async fn dispatch_command(
                         "command {:?} accepted by schema but not yet wired to the backend",
                         std::mem::discriminant(&env.body)
                     ),
+                    target_peer_id: None,
                 },
             )
             .await;

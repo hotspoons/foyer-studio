@@ -225,9 +225,18 @@ pub enum Event {
         report: LatencyReport,
     },
     /// Generic error the peer should surface to the user.
+    ///
+    /// `target_peer_id`, when set, restricts the visibility of this
+    /// error: the server forwards the event only to the connection(s)
+    /// owned by that peer plus LAN / tunnel-admin connections. Most
+    /// errors are session-wide (target = `None`); RBAC denials and
+    /// other "addressed at the offender" diagnostics fill it in so
+    /// other guests don't see denial banners flash by.
     Error {
         code: String,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_peer_id: Option<String>,
     },
     /// Reply to `Command::ProbeSessionRecovery`. `artifacts` is empty
     /// when the project has nothing to recover and the launch can

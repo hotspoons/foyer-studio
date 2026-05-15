@@ -230,12 +230,16 @@ export class AutomationLane extends LitElement {
       letter-spacing: 0.06em;
       text-transform: uppercase;
     }
+    /* Gesture chips are decorative-only — pointer-events off so the
+     * user can drag through them onto the lane underneath without
+     * the chip cursor/hover state interfering. */
     /* Always-visible gesture toolbar in the lane header. Beats a
      * hover-only question-mark chip for discoverability — the user
      * can actually see what they can do at a glance. Each gesture
      * chip has a tooltip with the full description. Hover state
      * pops the chip to make it readable when scanning. */
     .label .gesture-bar {
+      pointer-events: none;
       display: inline-flex;
       align-items: center;
       gap: 4px;
@@ -249,13 +253,7 @@ export class AutomationLane extends LitElement {
       color: var(--color-text-muted);
       font-size: 8px;
       letter-spacing: 0.04em;
-      cursor: help;
       user-select: none;
-      transition: background 0.1s ease, color 0.1s ease;
-    }
-    .label .gesture:hover {
-      background: color-mix(in oklab, var(--color-accent-2, #22d3ee) 30%, transparent);
-      color: var(--color-text);
     }
   `;
 
@@ -1046,11 +1044,11 @@ export class AutomationLane extends LitElement {
           <span class="sel-chip" title="Backspace / Delete to remove · Escape to clear">${this._selectedTimes.size} selected · Del removes · Esc clears</span>
         ` : null}
         <span class="gesture-bar">
-          <span class="gesture" title="Click on empty grid + drag to free-draw a curve">draw</span>
-          <span class="gesture" title="Cmd/Ctrl + drag to marquee-select multiple points">⌘drag = pick</span>
-          <span class="gesture" title="Shift + click a point to toggle it in the selection">⇧click = add</span>
-          <span class="gesture" title="Click any selected point and drag to move the whole selection">drag = move</span>
-          <span class="gesture" title="Alt + click a point to delete it">⌥click = del</span>
+          <span class="gesture">draw</span>
+          <span class="gesture">⌘drag = pick</span>
+          <span class="gesture">⇧click = add</span>
+          <span class="gesture">drag = move</span>
+          <span class="gesture">⌥click = del</span>
         </span>
       </div>
       <svg style="--lane-color:${color}"

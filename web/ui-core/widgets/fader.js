@@ -12,10 +12,18 @@ export class Fader extends LitElement {
 
   static styles = css`
     :host {
+      /* Width is pinned to the track's column so a wider label
+       * ("−120.0 dB") doesn't push the channel-strip's meter or
+       * pan controls sideways. The label paints absolutely below
+       * the track and is allowed to overflow the host horizontally
+       * (it stays centered under the column). */
+      position: relative;
       display: inline-flex;
       flex-direction: column;
       align-items: center;
-      gap: 6px;
+      width: 22px;
+      flex: 0 0 22px;
+      padding-bottom: 18px;
       user-select: none;
     }
     .track {
@@ -56,11 +64,24 @@ export class Fader extends LitElement {
       border-color: var(--color-accent);
     }
     .label {
+      /* Absolute-positioned so the readout text doesn't expand the
+       * host's column width when it shifts between, say, "0.0 dB"
+       * and "−120.0 dB". Right-anchored to the track column so a
+       * wider negative-dB string spills LEFT into the gap between
+       * this fader and its previous neighbor's meter, never RIGHT
+       * into this strip's own meter (which sits immediately to the
+       * fader's right and was clipping the readout). */
+      position: absolute;
+      right: -4px;
+      bottom: 0;
       color: var(--color-text-muted);
       font-family: var(--font-mono);
       font-size: 10px;
       font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      pointer-events: none;
       min-height: 12px;
+      text-align: right;
     }
   `;
 

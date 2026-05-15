@@ -220,6 +220,51 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
       modal so the lane has everything it needs to render
       endpoints + snap to states without round-tripping the
       session snapshot.
+  - **Patch picker rework** ([automation-modal.js]
+    `_renderPatchPicker`): the bank/program/channel three-prompt
+    chain was replaced by a single floating panel anchored inside
+    the modal. Channel + bank dropdowns up top (bank options come
+    from MIDNAM via `list_midi_patch_names` so each entry shows
+    its instrument name); a search box filters across every program
+    in every bank by name, bank, or program number; a scrolling
+    program list renders one row per patch with the instrument name
+    visible. Clicking a row selects (Save commits, double-click
+    saves immediately). The picker seeds new add-flows from the
+    last committed `{channel, bank, program}` so dropping multiple
+    copies of the same patch around a track stays one-click.
+  - **Lane-head sits above every overlay**: the sticky `.lane-head`
+    z-index was raised from 2 to 10 so wide crossfade badges +
+    long automation polylines no longer paint into the track-
+    header strip at the scroll origin (the long badge text was
+    `transform: translate(-50%)` to its own width — when the
+    overlap zone sat near sample 0, the badge extended well left
+    of `HEAD_WIDTH` and visibly straddled the head). Companion to
+    the existing per-region `isolation: isolate` rule.
+  - **Layer ops actually layer in Ardour now**: `RegionPatch.layer`
+    was wired through the shim ([shims/ardour/src/dispatch.cc]
+    new `patch_layer` field + `Playlist::set_layer` call inside
+    `UpdateRegion`, plus a `StatefulDiffCommand` on the playlist
+    so Ctrl+Z undoes the layer move). `RegionDesc.layer` is now
+    populated from `Region::layer()` and emitted in
+    `emit_region_map` so the FE's `(layer, source-order)` sort
+    reflects what Ardour paints. The FE got an optimistic
+    in-place layer update so the visual reorder happens on the
+    pointer-up instead of waiting on the round-trip — this was
+    the immediate root cause of "bring to front does nothing"
+    against the previous shim (echo carried the old layer and
+    snapped the sort back).
+  - **Right-click adds "Automation editor…"**: the region context
+    menu and the lane-head context menu both surface the entry,
+    each pointing at `_openAutomationModal(track_id)`. Was only
+    reachable via double-click on the "A" lane button before.
+  - **Gesture chips no longer absorb pointer events**: the
+    automation-lane header chips (`draw`, `⌘drag = pick`,
+    `⇧click = add`, `drag = move`, `⌥click = del`) dropped their
+    `cursor: help` + `title` tooltips and got `pointer-events:
+    none` on the bar. They're still visible as documentation but
+    a free-draw stroke that starts near the header now passes
+    through the chip onto the lane instead of getting eaten by
+    the chip's hit area.
 
 
 ## Ingress drain — port off MasterTap dependency
@@ -281,14 +326,20 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 
 ## Long term
-- [ ] Scope RBAC denials to offender + admins
-  - Today `forbidden_for_role` / `auth_required` errors broadcast to every connected
-    client, so a viewer can see another viewer's denial banner flash by. Clean fix: add
-    an optional `target_peer_id` field to `Event::Error` (or a new admin-only
-    `Event::RbacDenied`) and extend `should_forward_event` in
-    `crates/foyer-server/src/ws.rs` to route denials only to the offending connection +
-    LAN/admin roles. Message already names the recipient in current builds (DECISION 38);
-    this is the client-scope half.
+- [x] Scope RBAC denials to offender + admins
+  - `Event::Error` grew an optional `target_peer_id` field
+    ([crates/foyer-schema/src/message.rs]); when set, `should_forward_event`
+    in [crates/foyer-server/src/ws.rs] forwards the event only to the
+    matching peer's connection(s) plus LAN connections and tunnel roles
+    that hold `tunnel_create_token` (the same admin proxy used for
+    tunnel-admin events). All three "addressed at the offender"
+    denial sites — `secondary_window_audio`, `auth_required`,
+    `forbidden_for_role` — fill it with the dispatching connection's
+    `peer_id`. Every other Error broadcast keeps `target_peer_id: None`
+    (session-wide). The field is `#[serde(default, skip_serializing_if =
+    "Option::is_none")]` so legacy clients see the same wire shape and
+    new clients can be added without a schema bump beyond the additive
+    field. Companion to DECISION 38 (message-side recipient naming).
 - [ ] Semantic plugin search
   - Plugin picker today is substring match on name + vendor. Search by sonic description
     ("warm saturation", "long reverb tail") using a local embeddings model against the
