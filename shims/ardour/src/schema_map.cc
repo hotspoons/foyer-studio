@@ -771,6 +771,13 @@ describe_region (const Region& r, const std::string& track_id)
 		}
 	}
 
+	// Render layer within the playlist's stack. `Region::layer()` is
+	// the order index Ardour paints in; we emit it verbatim so the
+	// FE's `(layer, source-order)` sort matches Ardour's playback
+	// stack. Set even for non-audio regions (MIDI lanes can stack
+	// too).
+	d.layer = static_cast<std::int64_t> (const_cast<ARDOUR::Region&> (r).layer ());
+
 	if (auto const* ar = dynamic_cast<const ARDOUR::AudioRegion*> (&r)) {
 		d.emit_audio_envelope = true;
 		d.gain_linear         = ar->scale_amplitude ();
@@ -786,6 +793,14 @@ describe_region (const Region& r, const std::string& track_id)
 }
 
 } // namespace
+
+std::shared_ptr<ARDOUR::Playlist>
+playlist_for_track_id (Session& session, const std::string& track_id)
+{
+	auto track = track_by_foyer_id (session, track_id);
+	if (!track) return {};
+	return track->playlist ();
+}
 
 std::vector<RegionDesc>
 enumerate_regions (Session& session, const std::string& track_id)

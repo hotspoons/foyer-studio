@@ -557,6 +557,7 @@ impl HostClient {
         length_samples: Option<u64>,
         kind: String,
         name: Option<String>,
+        source_path: Option<String>,
     ) -> Result<(), ClientError> {
         self.send_command(Command::CreateRegion {
             track_id,
@@ -564,6 +565,7 @@ impl HostClient {
             length_samples,
             kind,
             name,
+            source_path,
         })
         .await
     }
@@ -1210,7 +1212,7 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                         }
                     }
                 }
-                Event::Error { code, message } => {
+                Event::Error { code, message, .. } => {
                     tracing::warn!("shim error: {code}: {message}");
                 }
                 _ => {}

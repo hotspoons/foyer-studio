@@ -523,6 +523,18 @@ struct DecodedCmd
 	std::string   patch_fade_out_shape;
 	bool          has_patch_gain_linear = false;
 	double        patch_gain_linear = 1.0;
+	// Render layer (bring-to-front / send-to-back). Maps onto
+	// `Playlist::set_layer (region, double)`. Optional — when absent
+	// we leave Ardour's auto-layer logic alone.
+	bool          has_patch_layer = false;
+	std::int64_t  patch_layer = 0;
+	// Cross-track move target. When set, the region is removed
+	// from its source playlist and re-added on the destination
+	// playlist (looked up by Foyer track id) at the patched
+	// position. Kind compatibility is the sidecar's job; by the
+	// time this lands in the shim we trust the move is legal.
+	bool          has_patch_track_id = false;
+	std::string   patch_track_id;
 
 	// TrackPatch fields — only read for UpdateTrack. All optional; `name`
 	// is shared with RegionPatch (both store via has_patch_name / patch_name).
@@ -583,6 +595,12 @@ struct DecodedCmd
 	std::string   dup_source_id;
 	bool          dup_has_length = false;
 	std::uint64_t dup_length_samples = 0;
+	// Cross-track paste destination. When set on DuplicateRegion /
+	// DuplicateRegionRange, the clone is placed on the destination
+	// playlist instead of the source's. Empty = paste onto source
+	// track (back-compat).
+	bool          dup_has_target_track_id = false;
+	std::string   dup_target_track_id;
 	// DuplicateRegionRange payload — same source_id + at_samples as
 	// DuplicateRegion plus a slice carve-out. `dup_source_offset_samples`
 	// is the offset INTO the source region's content, not into the
@@ -591,9 +609,11 @@ struct DecodedCmd
 	std::uint64_t dup_source_offset_samples = 0;
 
 	// CreateRegion payload. Shares at/length/name with DuplicateRegion /
-	// RegionPatch; `create_kind` is the region's media type ("midi" is
-	// the only wired variant).
+	// RegionPatch; `create_kind` is the region's media type ("midi"
+	// or "audio"). Audio regions require `create_source_path` to
+	// resolve to a pool entry.
 	std::string   create_kind;
+	std::string   create_source_path;
 
 	// StretchRegion payload.
 	bool          has_stretch_new_start   = false;
@@ -1166,6 +1186,20 @@ read_region_patch_or_note (In& in, DecodedCmd& out)
 		} else if (pk == "group_id") {
 			if (!in.read_str (out.patch_group_id)) return false;
 			out.has_patch_group_id = true;
+		} else if (pk == "layer") {
+			// `RegionPatch.layer` (Option<i32>) → Playlist::set_layer.
+			// Wire emits as signed i64; we keep the signed view here
+			// so a negative "send to back" value round-trips intact.
+			std::int64_t v = 0;
+			if (!read_i64 (in, v)) return false;
+			out.patch_layer = v;
+			out.has_patch_layer = true;
+		} else if (pk == "track_id") {
+			// `RegionPatch.track_id` — cross-track move. Sidecar emits
+			// the target track's Foyer id; we look up the destination
+			// playlist inside UpdateRegion below.
+			if (!in.read_str (out.patch_track_id)) return false;
+			out.has_patch_track_id = true;
 		} else if (pk == "bus_assign") {
 			if (!in.read_str (out.patch_bus_assign)) return false;
 			out.has_patch_bus_assign = true;
@@ -1298,6 +1332,9 @@ decode (const std::vector<std::uint8_t>& buf)
 				} else if (k == "kind") {
 					// CreateRegion's media-type selector ("midi" | "audio").
 					if (!in.read_str (out.create_kind)) return out;
+				} else if (k == "source_path") {
+					// CreateRegion (audio): path to an existing pool source.
+					if (!in.read_str (out.create_source_path)) return out;
 				} else if (k == "at_samples") {
 					if (!read_i64 (in, out.cmd_at_samples_i64)) return out;
 					out.has_cmd_at_samples = true;
@@ -1415,8 +1452,17 @@ decode (const std::vector<std::uint8_t>& buf)
 					out.pc_program = static_cast<std::uint8_t> (std::min<std::uint64_t> (v, 127));
 					out.has_pc_program = true;
 				} else if (k == "target_track_id") {
-					// AddSend { track_id, target_track_id, pre_fader }
-					if (!in.read_str (out.send_target_track)) return out;
+					// Overloaded: `AddSend { track_id, target_track_id,
+					// pre_fader }` AND `DuplicateRegion / DuplicateRegionRange
+					// { source_region_id, target_track_id }`. The wire key is
+					// the same; the command kind discriminates at dispatch
+					// time, so populate both slots and let the per-kind
+					// handler pick.
+					std::string v;
+					if (!in.read_str (v)) return out;
+					out.send_target_track = v;
+					out.dup_target_track_id = v;
+					out.dup_has_target_track_id = !v.empty ();
 				} else if (k == "send_id") {
 					// RemoveSend / SetSendLevel — send id goes in `id`.
 					if (!in.read_str (out.id)) return out;
@@ -2016,6 +2062,41 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					}
 				}
 				session.set_dirty ();
+				// Emit a fresh pool listing now that the new sources
+				// have been registered. The FE used to chase this
+				// with its own list_audio_pool right after dispatching
+				// the import, but that races the slot system —
+				// SourceFactory runs HERE, after the import command
+				// already returned to the sidecar. Push the listing
+				// from inside the slot so the FE always sees the new
+				// rows without a refresh round-trip. Enumeration
+				// mirrors the ListAudioPool handler below — duplicated
+				// inline (small) rather than factored, to avoid
+				// pulling msgpack_out.h into schema_map.
+				std::vector<msgpack_out::AudioPoolListRow> rows;
+				session.foreach_source ([&] (std::shared_ptr<Source> s) {
+					auto afs = std::dynamic_pointer_cast<AudioFileSource> (s);
+					if (!afs) return;
+					auto fs = std::dynamic_pointer_cast<FileSource> (afs);
+					msgpack_out::AudioPoolListRow row;
+					{
+						std::ostringstream oid;
+						oid << "source." << afs->id ();
+						row.id = oid.str ();
+					}
+					row.name = afs->name ();
+					row.path = fs ? fs->path () : std::string ();
+					row.channel = static_cast<std::uint16_t> (afs->channel ());
+					row.length_samples =
+					    static_cast<std::uint64_t> (afs->readable_length_samples ());
+					row.sample_rate =
+					    static_cast<std::uint32_t> (afs->sample_rate ());
+					rows.push_back (std::move (row));
+				});
+				auto bytes = msgpack_out::encode_audio_pool_listed (rows);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
 			});
 			break;
 		}
@@ -2130,6 +2211,63 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					}
 				}
 				session.add_command (new PBD::StatefulDiffCommand (hit.region));
+				if (snap.has_patch_track_id
+				    && !snap.patch_track_id.empty ()
+				    && snap.patch_track_id != hit.track_id) {
+					// Cross-track move. Look up the source playlist
+					// (scan routes — `find_region` already gave us
+					// the track id, but we need the actual playlist
+					// pointer), and the destination playlist via the
+					// schema_map helper. Mutation pattern matches
+					// DuplicateRegion: clear_changes() + remove/add +
+					// StatefulDiffCommand on each touched playlist
+					// so Ctrl+Z reverses both ends as one entry.
+					std::shared_ptr<ARDOUR::Playlist> src_pl;
+					std::shared_ptr<RouteList const> routes2 =
+						schema_map::safe_get_routes (session);
+					for (auto const& r2 : *routes2) {
+						if (!r2) continue;
+						auto t2 = std::dynamic_pointer_cast<Track> (r2);
+						if (!t2) continue;
+						auto pl2 = t2->playlist ();
+						if (pl2 && pl2->region_by_id (hit.region->id ())) {
+							src_pl = pl2;
+							break;
+						}
+					}
+					auto dst_pl = schema_map::playlist_for_track_id (
+						session, snap.patch_track_id);
+					if (src_pl && dst_pl && src_pl != dst_pl) {
+						// Stash the region's current position; remove
+						// from source can clear it depending on the
+						// playlist implementation, so we capture
+						// before any mutation.
+						auto pos = hit.region->position ();
+						// Bump the region's reference count via shared_ptr
+						// before removing — `remove_region` may drop the
+						// playlist's only reference and we still need to
+						// add it to the dest.
+						auto region_ref = hit.region;
+						src_pl->clear_changes ();
+						src_pl->remove_region (region_ref);
+						dst_pl->clear_changes ();
+						dst_pl->add_region (region_ref, pos);
+						session.add_command (new PBD::StatefulDiffCommand (src_pl));
+						session.add_command (new PBD::StatefulDiffCommand (dst_pl));
+					}
+				}
+				if (snap.has_patch_layer) {
+					// `set_layer` is on `Playlist`; relayer recomputes
+					// other regions on the same playlist to keep the
+					// stack consistent, so a single call is enough for
+					// bring-to-front / send-to-back semantics.
+					if (auto pl = hit.region->playlist ()) {
+						pl->clear_changes ();
+						pl->set_layer (hit.region,
+						               static_cast<double> (snap.patch_layer));
+						session.add_command (new PBD::StatefulDiffCommand (pl));
+					}
+				}
 				if (own_txn) session.commit_reversible_command ();
 				auto bytes = msgpack_out::encode_region_updated (session, snap.id);
 				if (!bytes.empty ()) {
@@ -2444,20 +2582,34 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					return;
 				}
 				// Find the owning playlist so we can add the clone.
+				// Cross-track paste: when `target_track_id` is set
+				// and resolves, redirect to that playlist instead.
+				// Sidecar already validated kind compatibility so we
+				// trust the destination here.
 				std::shared_ptr<ARDOUR::Playlist> playlist;
-				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
-				for (auto const& r : *routes) {
-					if (!r) continue;
-					auto track = std::dynamic_pointer_cast<Track> (r);
-					if (!track) continue;
-					auto pl = track->playlist ();
-					if (pl && pl->region_by_id (hit.region->id ())) {
-						playlist = pl; break;
+				if (snap.dup_has_target_track_id) {
+					playlist = schema_map::playlist_for_track_id (
+						shim->session (), snap.dup_target_track_id);
+					if (!playlist) {
+						PBD::warning << "foyer_shim: duplicate_region: unknown target track: "
+						             << snap.dup_target_track_id << endmsg;
+						return;
 					}
-				}
-				if (!playlist) {
-					PBD::warning << "foyer_shim: duplicate_region: source not on any playlist" << endmsg;
-					return;
+				} else {
+					std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+					for (auto const& r : *routes) {
+						if (!r) continue;
+						auto track = std::dynamic_pointer_cast<Track> (r);
+						if (!track) continue;
+						auto pl = track->playlist ();
+						if (pl && pl->region_by_id (hit.region->id ())) {
+							playlist = pl; break;
+						}
+					}
+					if (!playlist) {
+						PBD::warning << "foyer_shim: duplicate_region: source not on any playlist" << endmsg;
+						return;
+					}
 				}
 				// `RegionFactory::create(shared<const Region>, announce)`
 				// clones the region AND copies `_extra_xml` (the copy
@@ -2524,20 +2676,33 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					             << snap.dup_source_id << endmsg;
 					return;
 				}
+				// Cross-track paste: redirect to target playlist when
+				// the patch carries one. See DuplicateRegion handler
+				// above for the same dance.
 				std::shared_ptr<ARDOUR::Playlist> playlist;
-				std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
-				for (auto const& r : *routes) {
-					if (!r) continue;
-					auto track = std::dynamic_pointer_cast<Track> (r);
-					if (!track) continue;
-					auto pl = track->playlist ();
-					if (pl && pl->region_by_id (hit.region->id ())) {
-						playlist = pl; break;
+				if (snap.dup_has_target_track_id) {
+					playlist = schema_map::playlist_for_track_id (
+						shim->session (), snap.dup_target_track_id);
+					if (!playlist) {
+						PBD::warning << "foyer_shim: duplicate_region_range: unknown target track: "
+						             << snap.dup_target_track_id << endmsg;
+						return;
 					}
-				}
-				if (!playlist) {
-					PBD::warning << "foyer_shim: duplicate_region_range: source not on any playlist" << endmsg;
-					return;
+				} else {
+					std::shared_ptr<RouteList const> routes = schema_map::safe_get_routes (shim->session ());
+					for (auto const& r : *routes) {
+						if (!r) continue;
+						auto track = std::dynamic_pointer_cast<Track> (r);
+						if (!track) continue;
+						auto pl = track->playlist ();
+						if (pl && pl->region_by_id (hit.region->id ())) {
+							playlist = pl; break;
+						}
+					}
+					if (!playlist) {
+						PBD::warning << "foyer_shim: duplicate_region_range: source not on any playlist" << endmsg;
+						return;
+					}
 				}
 				// Use the offset-based RegionFactory overload so the
 				// clone is constructed with `_start = source._start +
@@ -3049,13 +3214,18 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					PBD::warning << "foyer_shim: create_region: track has no playlist" << endmsg;
 					return;
 				}
-				// Media-type gate. Audio regions need a source file
-				// (we don't have a picker for that yet). MIDI creates
-				// a fresh empty source on the session.
+				// Media-type gate. MIDI creates a fresh empty source.
+				// AUDIO looks up an existing pool source by path
+				// (drag-drop from the audio pool modal) and creates
+				// a region referencing every channel of that source.
 				const std::string kind = snap.create_kind.empty () ? "midi" : snap.create_kind;
-				if (kind != "midi") {
+				if (kind != "midi" && kind != "audio") {
 					PBD::warning << "foyer_shim: create_region: kind '"
-					             << kind << "' not yet wired (midi only)" << endmsg;
+					             << kind << "' not supported" << endmsg;
+					return;
+				}
+				if (kind == "audio" && snap.create_source_path.empty ()) {
+					PBD::warning << "foyer_shim: create_region: audio region needs source_path" << endmsg;
 					return;
 				}
 				const std::string region_name =
@@ -3075,6 +3245,56 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					// 1 bar at 120 bpm 4/4 = 2 seconds. Good enough
 					// default — the user can resize.
 					length_samples = static_cast<Temporal::samplepos_t> (spl_rate * 2.0);
+				}
+				if (kind == "audio") {
+					// Resolve every AudioFileSource in the session
+					// whose path matches the requested source. Audio
+					// regions in Ardour reference a vector of sources
+					// (one per channel); collecting all matching
+					// channels here lets a stereo pool entry create
+					// a stereo region in one shot.
+					ARDOUR::SourceList sources;
+					shim->session ().foreach_source (
+					    [&] (std::shared_ptr<ARDOUR::Source> s) {
+						auto afs = std::dynamic_pointer_cast<ARDOUR::AudioFileSource> (s);
+						if (!afs) return;
+						auto fs = std::dynamic_pointer_cast<ARDOUR::FileSource> (afs);
+						if (!fs) return;
+						if (fs->path () != snap.create_source_path) return;
+						sources.push_back (afs);
+					});
+					if (sources.empty ()) {
+						PBD::warning << "foyer_shim: create_region: no pool source matches '"
+						             << snap.create_source_path << "'" << endmsg;
+						return;
+					}
+					// Sort by channel index so a stereo source ends
+					// up with L on channel 0, R on channel 1 (matters
+					// for pan/output routing).
+					std::sort (sources.begin (), sources.end (), [] (
+					    std::shared_ptr<ARDOUR::Source> a,
+					    std::shared_ptr<ARDOUR::Source> b) {
+						auto aa = std::dynamic_pointer_cast<ARDOUR::AudioFileSource> (a);
+						auto bb = std::dynamic_pointer_cast<ARDOUR::AudioFileSource> (b);
+						return aa->channel () < bb->channel ();
+					});
+					PBD::PropertyList plist;
+					plist.add (ARDOUR::Properties::name, region_name);
+					plist.add (ARDOUR::Properties::start,
+						Temporal::timepos_t (
+							static_cast<Temporal::samplepos_t> (0)));
+					plist.add (ARDOUR::Properties::length,
+						Temporal::timecnt_t::from_samples (length_samples));
+					plist.add (ARDOUR::Properties::whole_file, false);
+					auto region = ARDOUR::RegionFactory::create (sources, plist, true /* announce */);
+					if (!region) {
+						PBD::warning << "foyer_shim: create_region: RegionFactory::create (audio) returned null" << endmsg;
+						return;
+					}
+					playlist->add_region (region, Temporal::timepos_t (
+						static_cast<Temporal::samplepos_t> (cmd_at_u64 (snap))));
+					shim->session ().set_dirty ();
+					return;
 				}
 				std::shared_ptr<ARDOUR::MidiSource> src =
 					shim->session ().create_midi_source_for_session (region_name);

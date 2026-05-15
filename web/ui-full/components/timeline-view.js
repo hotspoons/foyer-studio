@@ -81,6 +81,19 @@ export class TimelineView extends LitElement {
     _quantDiv: { state: true, type: Number },
     /** @type {{ grid: boolean, regionEdges: boolean, markers: boolean, playhead: boolean }} */
     _snapPrefs: { state: true, type: Object },
+    /** Drop-target preview while a cross-track region move is in
+     *  flight. `null` when no drag is active or the cursor's lane
+     *  matches the source. When set, the destination lane renders
+     *  a dashed outline at the preview position so the user sees
+     *  WHERE the region will land before releasing. Shape:
+     *    { destTrackId, regions: [{ id, startSamples, lengthSamples }] }
+     *  Multiple entries support group / multi-selection drags. */
+    _crossTrackGhost: { state: true, type: Object },
+    /** Drop-target preview while an audio-pool drag is over a lane.
+     *  Same visual shape as `_crossTrackGhost` — single region in
+     *  flight, sized to the pool source's length. Shape:
+     *    { destTrackId, startSamples, lengthSamples, name } */
+    _poolDropGhost: { state: true, type: Object },
   };
 
   static styles = css`
@@ -325,7 +338,12 @@ export class TimelineView extends LitElement {
       background: color-mix(in oklab, var(--color-accent) 40%, transparent);
     }
     .lane-head {
-      position: sticky; left: 0; z-index: 2;
+      /* z-index 10 keeps the sticky lane-head above the crossfade
+       * overlay (z:5), crossfade badge (z:6), and automation
+       * overlay (z:6). Otherwise a wide crossfade badge or a long
+       * automation polyline paints into the lane-head's column at
+       * the scroll origin. */
+      position: sticky; left: 0; z-index: 10;
       width: ${HEAD_WIDTH}px; height: 100%;
       display: flex; flex-direction: column; justify-content: center;
       padding: 0 10px;
@@ -443,6 +461,42 @@ export class TimelineView extends LitElement {
       outline: 2px dashed var(--color-accent-2, #22d3ee);
       outline-offset: 2px;
       box-shadow: 0 0 14px color-mix(in oklab, var(--color-accent-2, #22d3ee) 60%, transparent);
+    }
+    /* Drop-target ghost shown on the destination lane while a
+     * cross-track region drag is in flight. Sized to match the
+     * source region; positioned at the live drag offset so the
+     * user can sight the landing spot before releasing. Pure
+     * outline (no fill) so the meter/grid behind stays readable. */
+    .cross-track-ghost {
+      position: absolute;
+      top: 4px;
+      bottom: 4px;
+      border: 2px dashed var(--color-accent-2, #22d3ee);
+      border-radius: 4px;
+      background: color-mix(in oklab, var(--color-accent-2, #22d3ee) 12%, transparent);
+      box-shadow: 0 0 14px color-mix(in oklab, var(--color-accent-2, #22d3ee) 50%, transparent);
+      pointer-events: none;
+      z-index: 4;
+    }
+    /* Lane drag-over feedback for an audio-pool drop. Soft accent
+     * tint over the whole lane so the user knows where the dropped
+     * source will land before releasing. */
+    .lane.pool-drop-target {
+      background: color-mix(in oklab, var(--color-accent-2, #22d3ee) 12%, transparent);
+      box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--color-accent-2, #22d3ee) 50%, transparent);
+    }
+    .cross-track-ghost .ghost-label {
+      position: absolute;
+      top: 4px;
+      left: 6px;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--color-text);
+      background: rgba(0, 0, 0, 0.55);
+      padding: 1px 5px;
+      border-radius: 3px;
+      pointer-events: none;
+      white-space: nowrap;
     }
     .region:hover { filter: brightness(1.08); }
     .region.selected {
@@ -1366,6 +1420,12 @@ export class TimelineView extends LitElement {
                       .then((m) => m.openTrackEditor(track.id)),
     });
     items.push({
+      label: "Automation editor…",
+      icon: "chart-bar",
+      title: "Open the full-screen automation editor for this track.",
+      action: () => this._openAutomationModal(track.id),
+    });
+    items.push({
       label: "Move track up",
       icon: "arrow-up",
       action: () => this._moveTrackBy(track.id, -1),
@@ -1452,7 +1512,7 @@ export class TimelineView extends LitElement {
    *  on. Only shown for MIDI tracks (audio region creation needs a
    *  source picker we don't have yet). */
   _onLaneContext(ev, track) {
-    if (track?.kind !== "midi") return;
+    if (!track) return;
     // If the event originated inside a region or lane-head, the
     // bubble reaches us but the original target is one of those
     // children; skip to avoid overriding the more specific menu.
@@ -1465,19 +1525,192 @@ export class TimelineView extends LitElement {
     const contentX = ev.clientX - bounds.left + scroll.scrollLeft - HEAD_WIDTH;
     const sr = this._sampleRate();
     const atSamples = Math.max(0, Math.round((contentX / this._zoom) * sr));
-    showContextMenu(ev, [
+    const meta = this._metaChord();
+    const items = [
       { heading: `${track.name} · ${(atSamples / sr).toFixed(2)}s` },
-      {
+    ];
+    // Per-region creation is MIDI-only today (audio needs a source
+    // picker we don't have yet). Show the entries up top so the
+    // typical "click empty space, add a region" workflow stays
+    // one-click. Audio tracks get straight to paste options.
+    if (track.kind === "midi") {
+      items.push({
         label: "Add region here",
         icon: "plus",
         action: () => this._createRegionAt(track, atSamples),
-      },
-      {
+      });
+      items.push({
         label: "Add region at playhead",
         icon: "play",
         action: () => this._addRegionAtPlayhead(track),
+      });
+      items.push({ separator: true });
+    }
+    // Paste lands the clipboard contents on THIS lane at the
+    // right-click point. We stash the anchor + dest track so
+    // `pasteRegions({at:"mouse"})` lines up with the right-click,
+    // not with the last hover position the timeline tracked. The
+    // kind-compat check inside pasteRegions toasts on mismatch.
+    const grid = this.renderRoot.querySelector(".grid");
+    const captureAnchor = () => {
+      if (grid) {
+        const r = grid.getBoundingClientRect();
+        this._lastMouseGridX = ev.clientX - r.left;
+      }
+      this._lastMouseClientY = ev.clientY;
+    };
+    items.push({
+      label: "Paste here",
+      icon: "clipboard",
+      shortcut: `${meta}+V`,
+      disabled: !this.hasClipboard(),
+      title: this.hasClipboard()
+        ? `Paste clipboard contents at ${(atSamples / sr).toFixed(2)}s on ${track.name}.`
+        : "Clipboard is empty — copy or cut a region first.",
+      action: () => {
+        captureAnchor();
+        // Explicit dest so cut→paste between same-kind tracks lands
+        // on THIS lane even though `at:"mouse"` would normally pick
+        // it up from `_trackAtMouseY` (defensive against any stale
+        // hover state).
+        this.pasteRegions({ at: "mouse", targetTrackId: track.id });
       },
-    ]);
+    });
+    items.push({
+      label: "Paste at playhead",
+      icon: "clipboard",
+      shortcut: `${meta}+Shift+V`,
+      disabled: !this.hasClipboard(),
+      action: () => {
+        // `at:"playhead"` by itself drops the destination resolution
+        // and falls back to the clip's source track — so a cut from
+        // Track A and a right-click on Track B's empty space used to
+        // paste back into Track A. Pass the right-clicked lane
+        // explicitly so it lands here.
+        this.pasteRegions({ at: "playhead", targetTrackId: track.id });
+      },
+    });
+    showContextMenu(ev, items);
+  }
+
+  /** Does this DataTransfer carry an audio-pool drag? Safe to call
+   *  during dragover (only reads `types`, which is the only thing
+   *  most browsers expose during the drag — `getData()` returns ""
+   *  until drop for security reasons). */
+  _isPoolDrag(dt) {
+    if (!dt) return false;
+    const types = Array.from(dt.types || []);
+    return types.includes("application/x-foyer-audio-pool-source");
+  }
+
+  /** Parse the audio-pool drag payload. ONLY callable from a `drop`
+   *  handler — `getData()` is gated until then. Returns the parsed
+   *  source row or null. */
+  _readPoolDragPayload(dt) {
+    if (!dt) return null;
+    try {
+      const raw = dt.getData("application/x-foyer-audio-pool-source");
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch { return null; }
+  }
+
+  /** Whether this lane can accept a pool-row drop. Pool sources are
+   *  audio-only today; MIDI tracks reject. */
+  _laneAcceptsPoolDrop(track) {
+    return !!track && track.kind === "audio";
+  }
+
+  _onLaneDragOver(ev, track) {
+    // Bail on non-pool drags so we don't preventDefault on, e.g.,
+    // a region marquee drag or a browser-native text drag.
+    if (!this._isPoolDrag(ev.dataTransfer)) return;
+    // Always preventDefault on dragover to mark the lane as a valid
+    // drop target — without this the browser refuses to fire `drop`.
+    // We can't read the payload yet (getData returns "" during drag
+    // in every modern browser); the kind-compat toast lives in the
+    // drop handler. Effect hint is best-effort.
+    ev.preventDefault();
+    if (this._laneAcceptsPoolDrop(track)) {
+      ev.dataTransfer.dropEffect = "copy";
+      ev.currentTarget.classList.add("pool-drop-target");
+      // Ghost preview: same idea as the cross-track drag ghost.
+      // The pool stashes its row payload on `window.__foyer._poolDrag`
+      // at dragstart so we can read the source length without
+      // touching getData (gated until drop). Resolve drop-X from the
+      // current cursor and update on every dragover so the ghost
+      // tracks the pointer in real time.
+      const stash = window.__foyer?._poolDrag;
+      if (stash) {
+        const scroll = this.renderRoot?.querySelector?.(".scroll");
+        if (scroll) {
+          const bounds = scroll.getBoundingClientRect();
+          const contentX = ev.clientX - bounds.left + scroll.scrollLeft - HEAD_WIDTH;
+          const sr = this._sampleRate();
+          const atSamples = Math.max(0, Math.round((contentX / this._zoom) * sr));
+          this._poolDropGhost = {
+            destTrackId: track.id,
+            startSamples: atSamples,
+            lengthSamples: Number(stash.length_samples) || sr,
+            name: stash.name || "",
+          };
+        }
+      }
+    } else {
+      ev.dataTransfer.dropEffect = "none";
+    }
+  }
+
+  _onLaneDragLeave(ev, _track) {
+    // The dragleave fires while moving over children too; only clear
+    // the indicator when the cursor truly leaves the lane element.
+    if (ev.target === ev.currentTarget) {
+      ev.currentTarget.classList.remove("pool-drop-target");
+      // Clear the ghost only when leaving the lane that owned it.
+      if (this._poolDropGhost
+          && this._poolDropGhost.destTrackId === ev.currentTarget?.dataset?.trackId) {
+        this._poolDropGhost = null;
+      }
+    }
+  }
+
+  _onLaneDrop(ev, track) {
+    if (!this._isPoolDrag(ev.dataTransfer)) return;
+    const payload = this._readPoolDragPayload(ev.dataTransfer);
+    if (!payload) return;
+    ev.preventDefault();
+    ev.currentTarget.classList.remove("pool-drop-target");
+    this._poolDropGhost = null;
+    if (!this._laneAcceptsPoolDrop(track)) {
+      toast(`Can't drop an audio source onto a ${track.kind} track.`, { tone: "warn", ttl: 2800 });
+      return;
+    }
+    // Resolve the drop sample from the grid X position. The lane's
+    // scroll container is .scroll on the host; the grid is offset
+    // from the scroll's left edge by HEAD_WIDTH.
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const bounds = scroll.getBoundingClientRect();
+    const contentX = ev.clientX - bounds.left + scroll.scrollLeft - HEAD_WIDTH;
+    const sr = this._sampleRate();
+    const atSamples = Math.max(0, Math.round((contentX / this._zoom) * sr));
+    // Snap to the active grid if enabled so dragged regions line up
+    // with beat/bar markers (matches the paste / nudge paths).
+    const snapped = this._snapLeaderStart
+      ? this._snapLeaderStart(atSamples, new Set(), ev.altKey)
+      : atSamples;
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    ws.send({
+      type: "create_region",
+      track_id: track.id,
+      at_samples: snapped,
+      length_samples: Math.max(1, Number(payload.length_samples) || 0),
+      source_path: payload.path || undefined,
+      name: payload.name || undefined,
+      kind: "audio",
+    });
+    toast(`Inserted ${payload.name || "audio"} on ${track.name}`, { tone: "info", ttl: 2000 });
   }
 
   _createRegionAt(track, atSamples, lengthSamples = null) {
@@ -1867,7 +2100,7 @@ export class TimelineView extends LitElement {
    * For cut-mode, the originals are deleted after the duplicates land.
    * Returns the number of regions written.
    */
-  pasteRegions({ at = "mouse" } = {}) {
+  pasteRegions({ at = "mouse", targetTrackId = null } = {}) {
     const clip = this._regionClipboard;
     if (!clip || !clip.items.length) {
       toast("Clipboard is empty — copy a region first", { tone: "warn", ttl: 2400 });
@@ -1890,38 +2123,40 @@ export class TimelineView extends LitElement {
         : Number(window.__foyer?.store?.state?.controls?.get("transport.position") || 0);
     }
     const cut = clip.mode === "cut";
-    // Resolve a destination track if the paste anchor came from the
-    // mouse (`at === "mouse"`). Playhead / explicit-sample pastes
-    // don't carry a track — they land on the source's own track,
-    // matching legacy behavior. Mouse-anchored paste resolves the
-    // lane under the cursor and pastes there, with a kind-compat
-    // guard so audio↔midi mismatches abort with a toast instead of
-    // a wire-level rejection (and the originals on a cut don't get
-    // deleted out from under us).
+    // Resolve a destination track. Three sources, in priority order:
+    //   1. Explicit `targetTrackId` (the lane context menu passes the
+    //      right-clicked track for both "Paste here" and "Paste at
+    //      playhead" so cross-lane paste works for keyboard-style
+    //      gestures too).
+    //   2. `at === "mouse"` → resolve lane under the cursor (legacy).
+    //   3. Otherwise: no destination → paste lands on each clip
+    //      item's source track (back-compat for Ctrl+V / Ctrl+Shift+V).
     let destTrackByItem = null;
-    if (at === "mouse") {
-      const destTrack = this._trackAtMouseY();
-      if (destTrack) {
-        // Validate the entire clipboard against the destination
-        // kind. The clipboard captured each item's source track id;
-        // mixing kinds in one paste is rare but possible, so we
-        // require every source to match the destination's kind.
-        const tracks = this.session?.tracks || [];
-        const incompat = clip.items.filter((it) => {
-          const src = tracks.find((t) => t.id === it.track_id);
-          return src && src.kind !== destTrack.kind;
-        });
-        if (incompat.length) {
-          toast(
-            `Can't paste ${incompat.length === clip.items.length ? "" : "some "}` +
-              `${incompat[0] && (tracks.find((t) => t.id === incompat[0].track_id)?.kind) || "audio"} ` +
-              `region(s) onto a ${destTrack.kind} track.`,
-            { tone: "warn", ttl: 3000 },
-          );
-          return 0;
-        }
-        destTrackByItem = destTrack.id;
+    const explicitDest = targetTrackId
+      ? (this.session?.tracks || []).find((t) => t.id === targetTrackId)
+      : null;
+    const destTrack = explicitDest
+      || (at === "mouse" ? this._trackAtMouseY() : null);
+    if (destTrack) {
+      // Validate the entire clipboard against the destination kind.
+      // The clipboard captured each item's source track id; mixing
+      // kinds in one paste is rare but possible, so we require every
+      // source to match the destination's kind.
+      const tracks = this.session?.tracks || [];
+      const incompat = clip.items.filter((it) => {
+        const src = tracks.find((t) => t.id === it.track_id);
+        return src && src.kind !== destTrack.kind;
+      });
+      if (incompat.length) {
+        toast(
+          `Can't paste ${incompat.length === clip.items.length ? "" : "some "}` +
+            `${incompat[0] && (tracks.find((t) => t.id === incompat[0].track_id)?.kind) || "audio"} ` +
+            `region(s) onto a ${destTrack.kind} track.`,
+          { tone: "warn", ttl: 3000 },
+        );
+        return 0;
       }
+      destTrackByItem = destTrack.id;
     }
     const groupLabel = cut
       ? `Foyer paste ${clip.items.length} regions (cut)`
@@ -3229,6 +3464,14 @@ export class TimelineView extends LitElement {
           layers.set(r.id, newLayer);
         }
       }
+      // Optimistic local update — patch the region's layer in
+      // `_regionsByTrack` immediately so the visual stack reorders
+      // on the next render. Without this, the user sees no change
+      // until the backend echoes back: stub is fast (~10 ms) but
+      // the Ardour shim was previously dropping the field entirely,
+      // which made the menu feel broken. Server echo overwrites
+      // this on arrival.
+      const tracksTouched = new Set();
       for (const [r, newLayer] of assignments || []) {
         if (newLayer === layerOf(r)) continue;
         ws.send({
@@ -3236,7 +3479,18 @@ export class TimelineView extends LitElement {
           id: r.id,
           patch: { layer: newLayer },
         });
+        const list = this._regionsByTrack[r.track_id];
+        if (list) {
+          const idx = list.findIndex((x) => x.id === r.id);
+          if (idx >= 0) {
+            const copy = list.slice();
+            copy[idx] = { ...copy[idx], layer: newLayer };
+            this._regionsByTrack = { ...this._regionsByTrack, [r.track_id]: copy };
+            tracksTouched.add(r.track_id);
+          }
+        }
       }
+      if (tracksTouched.size) this.requestUpdate();
     }
     ws.send({ type: "undo_group_end" });
   }
@@ -3768,7 +4022,11 @@ export class TimelineView extends LitElement {
     const selected = !!store?.isTrackSelected?.(track.id);
     return html`
       <div class="lane ${selected ? "selected" : ""}" style="height:${h}px"
-           @contextmenu=${(e) => this._onLaneContext(e, track)}>
+           data-track-id=${track.id}
+           @contextmenu=${(e) => this._onLaneContext(e, track)}
+           @dragover=${(e) => this._onLaneDragOver(e, track)}
+           @dragleave=${(e) => this._onLaneDragLeave(e, track)}
+           @drop=${(e) => this._onLaneDrop(e, track)}>
         <div class="lane-head" style="height:${h}px"
              title="Click to select · double-click for track editor · right-click for more"
              @click=${(e) => this._onLaneHeadClick(e, track.id)}
@@ -3895,6 +4153,8 @@ export class TimelineView extends LitElement {
           `;
         })}
         ${this._renderCrossfadeOverlaysForTrack(track, sr)}
+        ${this._renderCrossTrackGhostForLane(track, sr)}
+        ${this._renderPoolDropGhostForLane(track, sr)}
         ${(() => {
           const recording = !!(controls && controls.get("transport.recording"));
           const span = this._recordingSpanPixels(controls);
@@ -4088,6 +4348,46 @@ export class TimelineView extends LitElement {
    * each region; if the fades don't cover the whole overlap we show
    * a faint guide rect over the orphan band as a hint to snap fades.
    */
+  /** Drop-target ghost for a cross-track region drag. Returns
+   *  nothing when no drag is in flight or this lane isn't the
+   *  destination. Renders a dashed outline lozenge per moving
+   *  region at the live preview position so the user can sight
+   *  the landing layout before releasing. */
+  _renderCrossTrackGhostForLane(track, sr) {
+    const ghost = this._crossTrackGhost;
+    if (!ghost || ghost.destTrackId !== track.id) return null;
+    const tracks = this.session?.tracks || [];
+    const srcTrack = tracks.find((t) => t.kind === track.kind);
+    return ghost.regions.map((g) => {
+      const leftPx = HEAD_WIDTH + (Number(g.startSamples) / sr) * this._zoom;
+      const widthPx = Math.max(10, (Number(g.lengthSamples) / sr) * this._zoom);
+      return html`
+        <div class="cross-track-ghost"
+             style="left:${leftPx}px;width:${widthPx}px"
+             title=${`Drop onto ${track.name}`}>
+          <span class="ghost-label">→ ${track.name}</span>
+        </div>
+      `;
+    });
+  }
+
+  /** Ghost preview for an audio-pool drag hovering over this lane.
+   *  Reuses the cross-track ghost element style — same dashed
+   *  outline + pill label, sized to the source's length and tracking
+   *  the live drop position. */
+  _renderPoolDropGhostForLane(track, sr) {
+    const ghost = this._poolDropGhost;
+    if (!ghost || ghost.destTrackId !== track.id) return null;
+    const leftPx = HEAD_WIDTH + (Number(ghost.startSamples) / sr) * this._zoom;
+    const widthPx = Math.max(10, (Number(ghost.lengthSamples) / sr) * this._zoom);
+    return html`
+      <div class="cross-track-ghost"
+           style="left:${leftPx}px;width:${widthPx}px">
+        <span class="ghost-label">+ ${ghost.name || "audio"}</span>
+      </div>
+    `;
+  }
+
   _renderCrossfadeOverlaysForTrack(track, sr) {
     const pairs = this._overlappingPairsForTrack(track.id);
     if (!pairs.length) return null;
@@ -4498,6 +4798,13 @@ export class TimelineView extends LitElement {
         action: () => this._openBeatSequencer(region),
       });
     }
+    items.push({ separator: true });
+    items.push({
+      label: "Automation editor…",
+      icon: "chart-bar",
+      title: "Open the full-screen automation editor for this region's track.",
+      action: () => this._openAutomationModal(region.track_id),
+    });
     items.push({ separator: true });
     items.push(...this._regionEditMenuActions());
     items.push({ separator: true });
@@ -5147,9 +5454,26 @@ export class TimelineView extends LitElement {
             && trackUnder.kind === trackKindByLeader) {
           destTrackId = trackUnder.id;
           for (const el of els) el.classList.add("cross-track-pending");
+          // Ghost outline on the destination lane. Drawn for every
+          // moving region — for a group / multi-select drag, the
+          // destination lane is the leader's; sibling regions also
+          // show ghosts there so the user can sight the whole
+          // landing layout at once.
+          const ghostRegions = [];
+          for (const id of movingIds) {
+            const o = origs.get(id);
+            if (!o) continue;
+            ghostRegions.push({
+              id,
+              startSamples: o.start + dxSamples + moveSnapAdj,
+              lengthSamples: o.len,
+            });
+          }
+          this._crossTrackGhost = { destTrackId, regions: ghostRegions };
         } else {
           destTrackId = null;
           for (const el of els) el.classList.remove("cross-track-pending");
+          if (this._crossTrackGhost) this._crossTrackGhost = null;
         }
       }
       for (const id of movingIds) {
@@ -5232,6 +5556,10 @@ export class TimelineView extends LitElement {
         el.classList.remove("cross-track-pending");
         delete el.dataset.stretchMode;
       }
+      // Drop the cross-track drop preview regardless of which branch
+      // commits — the dispatched update_region / duplicate_region
+      // will land the region on the destination lane on its own.
+      if (this._crossTrackGhost) this._crossTrackGhost = null;
       // Drop the waveform freeze + placeholder. The post-commit
       // RegionUpdated event will invalidate the wf cache and the
       // next ensure() call refetches peaks for the new offset+length.
@@ -5239,6 +5567,16 @@ export class TimelineView extends LitElement {
       const edgeResize = mode === "resize-left" || mode === "resize-right";
       const commitStretch =
         didDrag && edgeResize && !!(upEv.ctrlKey || upEv.metaKey);
+      // Ctrl/Cmd+move = duplicate. The original stays put and a clone
+      // lands at the drop position (and on the destination track when
+      // the drag crossed lanes). Standard Reaper / Pro Tools modifier;
+      // Logic uses Option instead but Option/Alt is already overloaded
+      // here (skip-group-cascade on click, fine-snap on drag), so we
+      // pick Ctrl/Cmd to avoid collisions. Only fires for a real
+      // move-mode drag — edge resize keeps its existing Ctrl=stretch
+      // meaning.
+      const commitDuplicate =
+        didDrag && mode === "move" && !!(upEv.ctrlKey || upEv.metaKey);
       // Click without drag on a member of a multi-selection collapses
       // the selection to just that member — standard "click is a
       // single-select; drag preserves multi" behavior.
@@ -5249,6 +5587,67 @@ export class TimelineView extends LitElement {
         this._selectedRegionIds.add(demoteId);
         this._reconcileCutPending();
         this.requestUpdate();
+      }
+      // Ctrl/Cmd+move = duplicate. Roll back the optimistic move on
+      // each dragged region so the originals snap back to their
+      // pre-drag positions, then fire one `duplicate_region` per
+      // moving region with the destination offset baked in. The
+      // dispatch is wrapped in an undo group so a multi-region
+      // Ctrl+drag-duplicate reverses as one entry.
+      if (commitDuplicate) {
+        // Restore original positions in the local store. The
+        // post-RegionUpdated echoes from the new clones won't touch
+        // the originals.
+        for (const id of movingIds) {
+          const o = origs.get(id);
+          if (!o) continue;
+          const cur = this._regionForId(id);
+          if (!cur) continue;
+          this._patchRegionLocally({
+            ...cur,
+            start_samples: o.start,
+            length_samples: o.len,
+            source_offset_samples: o.offset,
+            track_id: o.trackId,
+          });
+        }
+        const ws = window.__foyer?.ws;
+        const groupLabel = movingIds.length === 1
+          ? "Foyer duplicate region"
+          : `Foyer duplicate ${movingIds.length} regions`;
+        ws?.send({ type: "undo_group_begin", name: groupLabel });
+        for (const id of movingIds) {
+          const o = origs.get(id);
+          if (!o) continue;
+          // Use the leader's destTrackId for the leader; siblings
+          // dropped together carry their source track (matches the
+          // same-direction-only cross-track move semantics above).
+          const leader = id === region.id;
+          const targetTrack = leader && destTrackId && destTrackId !== o.trackId
+            ? destTrackId
+            : null;
+          // The clone lands at the optimistic preview's start. We
+          // read it BEFORE the rollback above clobbered it? No — we
+          // already rolled back. Re-derive from the original + drag
+          // delta + (snap adjustment already applied during move).
+          // Simpler: take origs.get(id).start + (dxAtUp). dxAtUp is
+          // upEv.clientX - startX in samples. moveSnapAdj only
+          // matters for the leader; siblings track raw delta.
+          const dxSamplesUp = ((upEv.clientX - startX) / pxPerSec) * sr;
+          const newStart = Math.round(o.start + dxSamplesUp);
+          ws?.send({
+            type: "duplicate_region",
+            source_region_id: id,
+            at_samples: newStart,
+            length_samples: o.len,
+            ...(targetTrack ? { target_track_id: targetTrack } : {}),
+          });
+        }
+        ws?.send({ type: "undo_group_end" });
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+        return;
       }
       // Single committed update per region, with the final position +
       // length (+ source offset for left-trim drags). The shim wraps

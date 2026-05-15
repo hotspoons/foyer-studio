@@ -91,6 +91,12 @@ export class AudioPoolModal extends LitElement {
       padding: 8px 10px;
       border-bottom: 1px solid var(--color-border);
       font-size: 12px;
+      cursor: grab;
+      user-select: none;
+    }
+    .row:active { cursor: grabbing; }
+    .row:hover {
+      background: color-mix(in oklab, var(--color-accent) 8%, transparent);
     }
     .row:last-child { border-bottom: 0; }
     .name {
@@ -190,11 +196,52 @@ export class AudioPoolModal extends LitElement {
       }
       window.__foyer?.ws?.send({ type: "import_audio", path: j.path });
       toast(`Imported ${file.name}`, { tone: "info" });
-      this._refresh(true);
+      // No explicit list_audio_pool here — the server emits a fresh
+      // `AudioPoolListed` after the backend finishes importing (the
+      // Ardour shim's SourceFactory runs in an async slot, so a
+      // refresh dispatched from the FE races the actual import). The
+      // `change` listener wired in connectedCallback picks up the
+      // store update and re-renders.
     } finally {
       this._importBusy = false;
       this.requestUpdate();
     }
+  }
+
+  /** Build the dataTransfer payload for a pool-row drag. The
+   *  timeline-view registers a matching MIME type so the cursor
+   *  shows "copy" only when dropping on an audio lane that can
+   *  accept the source. We embed the full row as JSON so the drop
+   *  target doesn't need a second WS round-trip to find length /
+   *  sample_rate.
+   *
+   *  We ALSO stash the same payload on `window.__foyer._poolDrag`
+   *  for the duration of the drag. The timeline's dragover handler
+   *  needs the source length to draw the ghost preview, but
+   *  `dataTransfer.getData()` returns "" during a drag in every
+   *  modern browser (only `types` is readable until drop). The
+   *  shared-window ref is the standard workaround. Cleared in
+   *  `dragend` so a cancelled drag doesn't leak state. */
+  _onDragStart(ev, source) {
+    if (!ev.dataTransfer) return;
+    const payload = {
+      id: source.id,
+      name: source.name || "",
+      path: source.path || "",
+      channel: Number(source.channel) || 0,
+      length_samples: Number(source.length_samples) || 0,
+      sample_rate: Number(source.sample_rate) || 48_000,
+    };
+    ev.dataTransfer.setData("application/x-foyer-audio-pool-source", JSON.stringify(payload));
+    if (payload.path) {
+      ev.dataTransfer.setData("text/plain", payload.path.split("/").pop() || payload.name);
+    }
+    ev.dataTransfer.effectAllowed = "copy";
+    if (window.__foyer) window.__foyer._poolDrag = payload;
+  }
+
+  _onDragEnd() {
+    if (window.__foyer) window.__foyer._poolDrag = null;
   }
 
   render() {
@@ -221,7 +268,10 @@ export class AudioPoolModal extends LitElement {
             ? html`<div class="empty">No pool entries yet — import audio or record in Ardour.</div>`
             : this._sources.map(
                 (s) => html`
-                  <div class="row" title=${s.path || ""}>
+                  <div class="row" title="${s.path || ""}\nDrag onto an audio track in the timeline to insert."
+                       draggable="true"
+                       @dragstart=${(e) => this._onDragStart(e, s)}
+                       @dragend=${() => this._onDragEnd()}>
                     <span class="name">${s.name || "—"}</span>
                     <span class="meta">
                       ${s.path ? s.path.split("/").pop() : ""}

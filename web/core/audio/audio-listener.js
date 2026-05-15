@@ -208,7 +208,16 @@ export class AudioListener {
     // call `resume()` from within the user-gesture call-stack that
     // invoked `start()`; the "Listen" click handler is what we
     // rely on. Calling resume() is cheap when it's already running.
-    this.ctx = new AudioContext({ sampleRate: this.format.sample_rate });
+    //
+    // `latencyHint: "interactive"` asks the UA for the smallest
+    // output buffer it'll give us. Chrome's default on Linux is
+    // "balanced" which can land at ~100 ms of driver buffer; the
+    // interactive hint typically trims that to ~20 ms with no audible
+    // glitching for our 200 ms-primed jitter ring.
+    this.ctx = new AudioContext({
+      sampleRate: this.format.sample_rate,
+      latencyHint: "interactive",
+    });
     try { await this.ctx.resume(); } catch (e) {
       console.warn("[audio-listener] AudioContext.resume failed:", e);
     }
@@ -217,6 +226,46 @@ export class AudioListener {
       `baseLatency=${this.ctx.baseLatency?.toFixed?.(3)} ` +
       `outputLatency=${this.ctx.outputLatency?.toFixed?.(3)}`,
     );
+
+    // `AudioContext({sampleRate})` is a hint, not a contract. Chrome
+    // on Linux with non-48k devices (USB audio interfaces locked at
+    // 44.1 / 88.2 / 96 / 192 kHz, PulseAudio's legacy 44.1 default)
+    // silently returns a context at the device's native rate. If we
+    // don't notice, the worklet's 2-second ring fills at the rate
+    // difference and steady-state output latency caps at ~2 s —
+    // exactly the symptom Rich saw on a Dell + Steinberg UR22 setup
+    // while the Mac+arm64 path was at 300 ms.
+    //
+    // Adopt whatever the browser actually delivered so the server-
+    // side encoder, the WebCodecs decoder config, and the worklet
+    // all run at the same rate. When the negotiated rate isn't one
+    // Opus supports (Opus is 8 / 12 / 16 / 24 / 48 only), fall back
+    // to raw_f32_le — verbose on the wire but rate-agnostic.
+    const actualSr = Math.round(this.ctx.sampleRate);
+    if (actualSr !== this.format.sample_rate) {
+      const OPUS_RATES = new Set([8000, 12000, 16000, 24000, 48000]);
+      let codec = this.codec;
+      if (codec === "opus" && !OPUS_RATES.has(actualSr)) {
+        console.warn(
+          `[audio-listener] requested ${this.format.sample_rate} Hz Opus but ` +
+          `ctx is ${actualSr} Hz — Opus doesn't support that rate; ` +
+          `falling back to raw_f32_le`,
+        );
+        codec = "raw_f32_le";
+      } else {
+        console.warn(
+          `[audio-listener] requested ${this.format.sample_rate} Hz but ctx is ` +
+          `${actualSr} Hz; adopting actual rate to keep the worklet ring drained`,
+        );
+      }
+      this.codec = codec;
+      this.format = {
+        ...this.format,
+        sample_rate: actualSr,
+        frame_size: Math.round(actualSr * 0.020),
+        codec,
+      };
+    }
 
     // Load + instantiate the audio-thread ring buffer. `new URL(...,
     // import.meta.url)` resolves the worklet file relative to THIS

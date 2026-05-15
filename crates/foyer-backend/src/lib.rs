@@ -503,9 +503,11 @@ pub trait Backend: Send + Sync + 'static {
         ))
     }
 
-    /// Create a brand-new empty region on the given track.
+    /// Create a brand-new region on the given track.
     /// Fire-and-forget: the host echoes a `RegionsList` once the
-    /// playlist has committed.
+    /// playlist has committed. For audio regions, `source_path` must
+    /// point at an existing pool entry; the backend resolves it to
+    /// the matching source. MIDI regions ignore the field.
     async fn create_region(
         &self,
         _track_id: EntityId,
@@ -513,6 +515,7 @@ pub trait Backend: Send + Sync + 'static {
         _length_samples: Option<u64>,
         _kind: String,
         _name: Option<String>,
+        _source_path: Option<String>,
     ) -> Result<(), BackendError> {
         Err(BackendError::Other("create_region not supported".into()))
     }

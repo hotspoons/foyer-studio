@@ -1282,6 +1282,11 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	const bool emit_patches     = !r.patch_changes.empty ();
 	const bool emit_sequencer   = r.sequencer.present;
 	const bool emit_audio_env   = r.emit_audio_envelope;
+	// Always emit layer when non-zero so bring-to-front / send-to-back
+	// round-trips intact. Layer 0 is the default for fresh regions and
+	// the schema decodes a missing field as 0, so we can skip it when
+	// it's untouched to keep the wire small.
+	const bool emit_layer       = r.layer != 0;
 	if (emit_color)       ++n;
 	if (emit_source_path) ++n;
 	if (emit_source_off)  ++n;
@@ -1289,6 +1294,7 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 	if (emit_notes)       ++n;
 	if (emit_patches)     ++n;
 	if (emit_sequencer)   ++n;
+	if (emit_layer)       ++n;
 	if (emit_audio_env) {
 		n += 3; // gain_linear, fade_in_samples, fade_out_samples
 	}
@@ -1412,6 +1418,10 @@ emit_region_map (Out& o, const schema_map::RegionDesc& r)
 		o.u (r.fade_in_samples);
 		o.str ("fade_out_samples");
 		o.u (r.fade_out_samples);
+	}
+	if (r.layer != 0) {
+		o.str ("layer");
+		o.i (r.layer);
 	}
 }
 

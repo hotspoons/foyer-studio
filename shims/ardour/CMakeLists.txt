@@ -229,6 +229,7 @@ add_library(foyer_shim SHARED
   src/shim_midi_input_port.cc
   src/session_uuid.cc
   src/crash_dialog_handler.cc
+  src/missing_plugin_dialog_handler.cc
 )
 
 # Match the wscript: PACKAGE macro + DLL-export define for portability
