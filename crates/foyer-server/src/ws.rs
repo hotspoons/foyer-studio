@@ -1428,6 +1428,20 @@ async fn dispatch_command(
                 path
             };
             state.backend().await.import_audio(resolved).await?;
+            // Broadcast a fresh pool listing so every connected client
+            // sees the new source land without a manual refresh round-
+            // trip. The FE used to chase this with a list_audio_pool
+            // immediately after the import command, but that races the
+            // Ardour shim's async slot pipeline (SourceFactory is
+            // called from the shim's event loop, so the source isn't
+            // yet visible when the next dispatch runs). Emitting from
+            // the server AFTER `import_audio` resolves removes the
+            // race entirely.
+            if let Some(sid) = state.focus_session_id.read().await.clone() {
+                if let Ok(sources) = state.backend().await.list_audio_pool(&sid).await {
+                    broadcast_event(state, Event::AudioPoolListed { sources }).await;
+                }
+            }
         }
         Command::ListPlugins => {
             let entries = state.backend().await.list_plugins().await?;
@@ -2784,11 +2798,19 @@ async fn dispatch_command(
             length_samples,
             kind,
             name,
+            source_path,
         } => {
             if let Err(e) = state
                 .backend()
                 .await
-                .create_region(track_id, at_samples, length_samples, kind, name)
+                .create_region(
+                    track_id,
+                    at_samples,
+                    length_samples,
+                    kind,
+                    name,
+                    source_path,
+                )
                 .await
             {
                 broadcast_event(

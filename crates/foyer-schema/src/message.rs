@@ -1193,12 +1193,14 @@ pub enum Command {
     DeleteRegion {
         id: EntityId,
     },
-    /// Create a brand-new empty region on `track_id` starting at
+    /// Create a brand-new region on `track_id` starting at
     /// `at_samples`. `length_samples` defaults to one bar at the
     /// session's current tempo if omitted. `kind` selects the
-    /// region's media type — today only "midi" is wired (audio
-    /// regions need a source file, which the UI doesn't yet have a
-    /// picker for). Emits `RegionsList` for the track on success.
+    /// region's media type. MIDI: empty note list, ready to edit.
+    /// AUDIO: requires `source_path` pointing at a pool entry (the
+    /// audio-pool drag-drop path uses this; the backend resolves the
+    /// path to the matching source and creates a region referencing
+    /// it). Emits `RegionsList` for the track on success.
     CreateRegion {
         track_id: EntityId,
         at_samples: u64,
@@ -1208,6 +1210,10 @@ pub enum Command {
         kind: String,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         name: Option<String>,
+        /// Audio regions only: path to the source file in the
+        /// session's pool. Required when `kind == "audio"`.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        source_path: Option<String>,
     },
     /// Clone `source_region_id` into a new region starting at
     /// `at_samples`. If `target_track_id` is set the clone lands on

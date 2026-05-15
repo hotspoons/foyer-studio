@@ -89,6 +89,11 @@ export class TimelineView extends LitElement {
      *    { destTrackId, regions: [{ id, startSamples, lengthSamples }] }
      *  Multiple entries support group / multi-selection drags. */
     _crossTrackGhost: { state: true, type: Object },
+    /** Drop-target preview while an audio-pool drag is over a lane.
+     *  Same visual shape as `_crossTrackGhost` — single region in
+     *  flight, sized to the pool source's length. Shape:
+     *    { destTrackId, startSamples, lengthSamples, name } */
+    _poolDropGhost: { state: true, type: Object },
   };
 
   static styles = css`
@@ -472,6 +477,13 @@ export class TimelineView extends LitElement {
       box-shadow: 0 0 14px color-mix(in oklab, var(--color-accent-2, #22d3ee) 50%, transparent);
       pointer-events: none;
       z-index: 4;
+    }
+    /* Lane drag-over feedback for an audio-pool drop. Soft accent
+     * tint over the whole lane so the user knows where the dropped
+     * source will land before releasing. */
+    .lane.pool-drop-target {
+      background: color-mix(in oklab, var(--color-accent-2, #22d3ee) 12%, transparent);
+      box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--color-accent-2, #22d3ee) 50%, transparent);
     }
     .cross-track-ghost .ghost-label {
       position: absolute;
@@ -1579,6 +1591,126 @@ export class TimelineView extends LitElement {
       },
     });
     showContextMenu(ev, items);
+  }
+
+  /** Does this DataTransfer carry an audio-pool drag? Safe to call
+   *  during dragover (only reads `types`, which is the only thing
+   *  most browsers expose during the drag — `getData()` returns ""
+   *  until drop for security reasons). */
+  _isPoolDrag(dt) {
+    if (!dt) return false;
+    const types = Array.from(dt.types || []);
+    return types.includes("application/x-foyer-audio-pool-source");
+  }
+
+  /** Parse the audio-pool drag payload. ONLY callable from a `drop`
+   *  handler — `getData()` is gated until then. Returns the parsed
+   *  source row or null. */
+  _readPoolDragPayload(dt) {
+    if (!dt) return null;
+    try {
+      const raw = dt.getData("application/x-foyer-audio-pool-source");
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch { return null; }
+  }
+
+  /** Whether this lane can accept a pool-row drop. Pool sources are
+   *  audio-only today; MIDI tracks reject. */
+  _laneAcceptsPoolDrop(track) {
+    return !!track && track.kind === "audio";
+  }
+
+  _onLaneDragOver(ev, track) {
+    // Bail on non-pool drags so we don't preventDefault on, e.g.,
+    // a region marquee drag or a browser-native text drag.
+    if (!this._isPoolDrag(ev.dataTransfer)) return;
+    // Always preventDefault on dragover to mark the lane as a valid
+    // drop target — without this the browser refuses to fire `drop`.
+    // We can't read the payload yet (getData returns "" during drag
+    // in every modern browser); the kind-compat toast lives in the
+    // drop handler. Effect hint is best-effort.
+    ev.preventDefault();
+    if (this._laneAcceptsPoolDrop(track)) {
+      ev.dataTransfer.dropEffect = "copy";
+      ev.currentTarget.classList.add("pool-drop-target");
+      // Ghost preview: same idea as the cross-track drag ghost.
+      // The pool stashes its row payload on `window.__foyer._poolDrag`
+      // at dragstart so we can read the source length without
+      // touching getData (gated until drop). Resolve drop-X from the
+      // current cursor and update on every dragover so the ghost
+      // tracks the pointer in real time.
+      const stash = window.__foyer?._poolDrag;
+      if (stash) {
+        const scroll = this.renderRoot?.querySelector?.(".scroll");
+        if (scroll) {
+          const bounds = scroll.getBoundingClientRect();
+          const contentX = ev.clientX - bounds.left + scroll.scrollLeft - HEAD_WIDTH;
+          const sr = this._sampleRate();
+          const atSamples = Math.max(0, Math.round((contentX / this._zoom) * sr));
+          this._poolDropGhost = {
+            destTrackId: track.id,
+            startSamples: atSamples,
+            lengthSamples: Number(stash.length_samples) || sr,
+            name: stash.name || "",
+          };
+        }
+      }
+    } else {
+      ev.dataTransfer.dropEffect = "none";
+    }
+  }
+
+  _onLaneDragLeave(ev, _track) {
+    // The dragleave fires while moving over children too; only clear
+    // the indicator when the cursor truly leaves the lane element.
+    if (ev.target === ev.currentTarget) {
+      ev.currentTarget.classList.remove("pool-drop-target");
+      // Clear the ghost only when leaving the lane that owned it.
+      if (this._poolDropGhost
+          && this._poolDropGhost.destTrackId === ev.currentTarget?.dataset?.trackId) {
+        this._poolDropGhost = null;
+      }
+    }
+  }
+
+  _onLaneDrop(ev, track) {
+    if (!this._isPoolDrag(ev.dataTransfer)) return;
+    const payload = this._readPoolDragPayload(ev.dataTransfer);
+    if (!payload) return;
+    ev.preventDefault();
+    ev.currentTarget.classList.remove("pool-drop-target");
+    this._poolDropGhost = null;
+    if (!this._laneAcceptsPoolDrop(track)) {
+      toast(`Can't drop an audio source onto a ${track.kind} track.`, { tone: "warn", ttl: 2800 });
+      return;
+    }
+    // Resolve the drop sample from the grid X position. The lane's
+    // scroll container is .scroll on the host; the grid is offset
+    // from the scroll's left edge by HEAD_WIDTH.
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const bounds = scroll.getBoundingClientRect();
+    const contentX = ev.clientX - bounds.left + scroll.scrollLeft - HEAD_WIDTH;
+    const sr = this._sampleRate();
+    const atSamples = Math.max(0, Math.round((contentX / this._zoom) * sr));
+    // Snap to the active grid if enabled so dragged regions line up
+    // with beat/bar markers (matches the paste / nudge paths).
+    const snapped = this._snapLeaderStart
+      ? this._snapLeaderStart(atSamples, new Set(), ev.altKey)
+      : atSamples;
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    ws.send({
+      type: "create_region",
+      track_id: track.id,
+      at_samples: snapped,
+      length_samples: Math.max(1, Number(payload.length_samples) || 0),
+      source_path: payload.path || undefined,
+      name: payload.name || undefined,
+      kind: "audio",
+    });
+    toast(`Inserted ${payload.name || "audio"} on ${track.name}`, { tone: "info", ttl: 2000 });
   }
 
   _createRegionAt(track, atSamples, lengthSamples = null) {
@@ -3890,7 +4022,11 @@ export class TimelineView extends LitElement {
     const selected = !!store?.isTrackSelected?.(track.id);
     return html`
       <div class="lane ${selected ? "selected" : ""}" style="height:${h}px"
-           @contextmenu=${(e) => this._onLaneContext(e, track)}>
+           data-track-id=${track.id}
+           @contextmenu=${(e) => this._onLaneContext(e, track)}
+           @dragover=${(e) => this._onLaneDragOver(e, track)}
+           @dragleave=${(e) => this._onLaneDragLeave(e, track)}
+           @drop=${(e) => this._onLaneDrop(e, track)}>
         <div class="lane-head" style="height:${h}px"
              title="Click to select · double-click for track editor · right-click for more"
              @click=${(e) => this._onLaneHeadClick(e, track.id)}
@@ -4018,6 +4154,7 @@ export class TimelineView extends LitElement {
         })}
         ${this._renderCrossfadeOverlaysForTrack(track, sr)}
         ${this._renderCrossTrackGhostForLane(track, sr)}
+        ${this._renderPoolDropGhostForLane(track, sr)}
         ${(() => {
           const recording = !!(controls && controls.get("transport.recording"));
           const span = this._recordingSpanPixels(controls);
@@ -4232,6 +4369,23 @@ export class TimelineView extends LitElement {
         </div>
       `;
     });
+  }
+
+  /** Ghost preview for an audio-pool drag hovering over this lane.
+   *  Reuses the cross-track ghost element style — same dashed
+   *  outline + pill label, sized to the source's length and tracking
+   *  the live drop position. */
+  _renderPoolDropGhostForLane(track, sr) {
+    const ghost = this._poolDropGhost;
+    if (!ghost || ghost.destTrackId !== track.id) return null;
+    const leftPx = HEAD_WIDTH + (Number(ghost.startSamples) / sr) * this._zoom;
+    const widthPx = Math.max(10, (Number(ghost.lengthSamples) / sr) * this._zoom);
+    return html`
+      <div class="cross-track-ghost"
+           style="left:${leftPx}px;width:${widthPx}px">
+        <span class="ghost-label">+ ${ghost.name || "audio"}</span>
+      </div>
+    `;
   }
 
   _renderCrossfadeOverlaysForTrack(track, sr) {

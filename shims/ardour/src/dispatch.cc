@@ -609,9 +609,11 @@ struct DecodedCmd
 	std::uint64_t dup_source_offset_samples = 0;
 
 	// CreateRegion payload. Shares at/length/name with DuplicateRegion /
-	// RegionPatch; `create_kind` is the region's media type ("midi" is
-	// the only wired variant).
+	// RegionPatch; `create_kind` is the region's media type ("midi"
+	// or "audio"). Audio regions require `create_source_path` to
+	// resolve to a pool entry.
 	std::string   create_kind;
+	std::string   create_source_path;
 
 	// StretchRegion payload.
 	bool          has_stretch_new_start   = false;
@@ -1330,6 +1332,9 @@ decode (const std::vector<std::uint8_t>& buf)
 				} else if (k == "kind") {
 					// CreateRegion's media-type selector ("midi" | "audio").
 					if (!in.read_str (out.create_kind)) return out;
+				} else if (k == "source_path") {
+					// CreateRegion (audio): path to an existing pool source.
+					if (!in.read_str (out.create_source_path)) return out;
 				} else if (k == "at_samples") {
 					if (!read_i64 (in, out.cmd_at_samples_i64)) return out;
 					out.has_cmd_at_samples = true;
@@ -2057,6 +2062,41 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					}
 				}
 				session.set_dirty ();
+				// Emit a fresh pool listing now that the new sources
+				// have been registered. The FE used to chase this
+				// with its own list_audio_pool right after dispatching
+				// the import, but that races the slot system —
+				// SourceFactory runs HERE, after the import command
+				// already returned to the sidecar. Push the listing
+				// from inside the slot so the FE always sees the new
+				// rows without a refresh round-trip. Enumeration
+				// mirrors the ListAudioPool handler below — duplicated
+				// inline (small) rather than factored, to avoid
+				// pulling msgpack_out.h into schema_map.
+				std::vector<msgpack_out::AudioPoolListRow> rows;
+				session.foreach_source ([&] (std::shared_ptr<Source> s) {
+					auto afs = std::dynamic_pointer_cast<AudioFileSource> (s);
+					if (!afs) return;
+					auto fs = std::dynamic_pointer_cast<FileSource> (afs);
+					msgpack_out::AudioPoolListRow row;
+					{
+						std::ostringstream oid;
+						oid << "source." << afs->id ();
+						row.id = oid.str ();
+					}
+					row.name = afs->name ();
+					row.path = fs ? fs->path () : std::string ();
+					row.channel = static_cast<std::uint16_t> (afs->channel ());
+					row.length_samples =
+					    static_cast<std::uint64_t> (afs->readable_length_samples ());
+					row.sample_rate =
+					    static_cast<std::uint32_t> (afs->sample_rate ());
+					rows.push_back (std::move (row));
+				});
+				auto bytes = msgpack_out::encode_audio_pool_listed (rows);
+				if (!bytes.empty ()) {
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				}
 			});
 			break;
 		}
@@ -3174,13 +3214,18 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					PBD::warning << "foyer_shim: create_region: track has no playlist" << endmsg;
 					return;
 				}
-				// Media-type gate. Audio regions need a source file
-				// (we don't have a picker for that yet). MIDI creates
-				// a fresh empty source on the session.
+				// Media-type gate. MIDI creates a fresh empty source.
+				// AUDIO looks up an existing pool source by path
+				// (drag-drop from the audio pool modal) and creates
+				// a region referencing every channel of that source.
 				const std::string kind = snap.create_kind.empty () ? "midi" : snap.create_kind;
-				if (kind != "midi") {
+				if (kind != "midi" && kind != "audio") {
 					PBD::warning << "foyer_shim: create_region: kind '"
-					             << kind << "' not yet wired (midi only)" << endmsg;
+					             << kind << "' not supported" << endmsg;
+					return;
+				}
+				if (kind == "audio" && snap.create_source_path.empty ()) {
+					PBD::warning << "foyer_shim: create_region: audio region needs source_path" << endmsg;
 					return;
 				}
 				const std::string region_name =
@@ -3200,6 +3245,56 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					// 1 bar at 120 bpm 4/4 = 2 seconds. Good enough
 					// default — the user can resize.
 					length_samples = static_cast<Temporal::samplepos_t> (spl_rate * 2.0);
+				}
+				if (kind == "audio") {
+					// Resolve every AudioFileSource in the session
+					// whose path matches the requested source. Audio
+					// regions in Ardour reference a vector of sources
+					// (one per channel); collecting all matching
+					// channels here lets a stereo pool entry create
+					// a stereo region in one shot.
+					ARDOUR::SourceList sources;
+					shim->session ().foreach_source (
+					    [&] (std::shared_ptr<ARDOUR::Source> s) {
+						auto afs = std::dynamic_pointer_cast<ARDOUR::AudioFileSource> (s);
+						if (!afs) return;
+						auto fs = std::dynamic_pointer_cast<ARDOUR::FileSource> (afs);
+						if (!fs) return;
+						if (fs->path () != snap.create_source_path) return;
+						sources.push_back (afs);
+					});
+					if (sources.empty ()) {
+						PBD::warning << "foyer_shim: create_region: no pool source matches '"
+						             << snap.create_source_path << "'" << endmsg;
+						return;
+					}
+					// Sort by channel index so a stereo source ends
+					// up with L on channel 0, R on channel 1 (matters
+					// for pan/output routing).
+					std::sort (sources.begin (), sources.end (), [] (
+					    std::shared_ptr<ARDOUR::Source> a,
+					    std::shared_ptr<ARDOUR::Source> b) {
+						auto aa = std::dynamic_pointer_cast<ARDOUR::AudioFileSource> (a);
+						auto bb = std::dynamic_pointer_cast<ARDOUR::AudioFileSource> (b);
+						return aa->channel () < bb->channel ();
+					});
+					PBD::PropertyList plist;
+					plist.add (ARDOUR::Properties::name, region_name);
+					plist.add (ARDOUR::Properties::start,
+						Temporal::timepos_t (
+							static_cast<Temporal::samplepos_t> (0)));
+					plist.add (ARDOUR::Properties::length,
+						Temporal::timecnt_t::from_samples (length_samples));
+					plist.add (ARDOUR::Properties::whole_file, false);
+					auto region = ARDOUR::RegionFactory::create (sources, plist, true /* announce */);
+					if (!region) {
+						PBD::warning << "foyer_shim: create_region: RegionFactory::create (audio) returned null" << endmsg;
+						return;
+					}
+					playlist->add_region (region, Temporal::timepos_t (
+						static_cast<Temporal::samplepos_t> (cmd_at_u64 (snap))));
+					shim->session ().set_dirty ();
+					return;
 				}
 				std::shared_ptr<ARDOUR::MidiSource> src =
 					shim->session ().create_midi_source_for_session (region_name);

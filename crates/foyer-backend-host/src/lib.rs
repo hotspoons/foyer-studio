@@ -447,9 +447,17 @@ impl Backend for HostBackend {
         length_samples: Option<u64>,
         kind: String,
         name: Option<String>,
+        source_path: Option<String>,
     ) -> Result<(), BackendError> {
         self.client
-            .create_region(track_id, at_samples, length_samples, kind, name)
+            .create_region(
+                track_id,
+                at_samples,
+                length_samples,
+                kind,
+                name,
+                source_path,
+            )
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
