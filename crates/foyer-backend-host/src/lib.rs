@@ -341,9 +341,15 @@ impl Backend for HostBackend {
         source_region_id: EntityId,
         at_samples: u64,
         length_samples: Option<u64>,
+        target_track_id: Option<EntityId>,
     ) -> Result<(), BackendError> {
         self.client
-            .duplicate_region(source_region_id, at_samples, length_samples)
+            .duplicate_region(
+                source_region_id,
+                at_samples,
+                length_samples,
+                target_track_id,
+            )
             .await
             .map_err(|e| BackendError::Other(e.to_string()))
     }
@@ -354,6 +360,7 @@ impl Backend for HostBackend {
         source_offset_samples: u64,
         length_samples: u64,
         at_samples: u64,
+        target_track_id: Option<EntityId>,
     ) -> Result<(), BackendError> {
         self.client
             .duplicate_region_range(
@@ -361,6 +368,7 @@ impl Backend for HostBackend {
                 source_offset_samples,
                 length_samples,
                 at_samples,
+                target_track_id,
             )
             .await
             .map_err(|e| BackendError::Other(e.to_string()))

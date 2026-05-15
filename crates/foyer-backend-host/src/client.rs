@@ -464,11 +464,13 @@ impl HostClient {
         source_region_id: EntityId,
         at_samples: u64,
         length_samples: Option<u64>,
+        target_track_id: Option<EntityId>,
     ) -> Result<(), ClientError> {
         self.send_command(Command::DuplicateRegion {
             source_region_id,
             at_samples,
             length_samples,
+            target_track_id,
         })
         .await
     }
@@ -479,12 +481,14 @@ impl HostClient {
         source_offset_samples: u64,
         length_samples: u64,
         at_samples: u64,
+        target_track_id: Option<EntityId>,
     ) -> Result<(), ClientError> {
         self.send_command(Command::DuplicateRegionRange {
             source_region_id,
             source_offset_samples,
             length_samples,
             at_samples,
+            target_track_id,
         })
         .await
     }

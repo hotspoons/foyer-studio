@@ -18,6 +18,7 @@
 // different sessions with different rates render correctly.
 
 import { LitElement, html, css } from "lit";
+import { repeat } from "lit/directives/repeat.js";
 import { WaveformCache } from "foyer-ui-core/layout/waveform-cache.js";
 import "foyer-ui-core/viz/waveform-gl.js";
 import "./midi-strip.js";
@@ -432,6 +433,17 @@ export class TimelineView extends LitElement {
       isolation: isolate;
     }
     .region.dragging { cursor: grabbing; filter: brightness(1.15); }
+    /* Visible hint while the cursor is over a foreign lane during a
+     * move drag — the region will be relocated to that lane on
+     * pointer-up. A dashed accent outline + soft glow reads as
+     * "this is the drop target" without needing a real DOM reparent
+     * during the drag (we keep the lozenge in its source lane and
+     * commit the move on release). */
+    .region.cross-track-pending {
+      outline: 2px dashed var(--color-accent-2, #22d3ee);
+      outline-offset: 2px;
+      box-shadow: 0 0 14px color-mix(in oklab, var(--color-accent-2, #22d3ee) 60%, transparent);
+    }
     .region:hover { filter: brightness(1.08); }
     .region.selected {
       border-color: color-mix(in oklab, var(--color-accent-3) 75%, #fff 25%);
@@ -439,6 +451,35 @@ export class TimelineView extends LitElement {
         0 0 0 1px color-mix(in oklab, var(--color-accent-3) 45%, transparent),
         0 1px 3px rgba(0, 0, 0, 0.35);
       filter: brightness(1.08);
+    }
+    /* Automation overlay — color-coded polylines drawn over the
+     * regions, one per active automation lane on the track. Sits
+     * above region bodies (z-index above .region's stacking context
+     * since .region uses isolation: isolate, which means the SVG
+     * sibling at z-index 6 stays on top of every region). Pointer
+     * events are off by default; individual path children opt in
+     * via pointer-events:stroke so clicking the line opens the
+     * modal but the user can still click regions through the gaps. */
+    .automation-overlay {
+      position: absolute;
+      pointer-events: none;
+      z-index: 6;
+      overflow: visible;
+    }
+    /* Group-membership indicator: a 3 px tinted bar at the very top
+     * of the lozenge, color derived from the group_id so every
+     * sibling reads as one unit at a glance. Sits BEHIND the gain
+     * strip (which is also at top:0) — gain strip's left:12px /
+     * right:12px gap means a sliver of the group bar peeks out at
+     * each corner, which is enough visual signal without arguing
+     * with the gain UI. */
+    .region .group-bar {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      z-index: 3;
+      pointer-events: none;
+      border-radius: 3px 3px 0 0;
     }
     /* Resize-preview placeholder: while a left-edge resize-drag is
      * extending the region beyond the source bounds we have peaks
@@ -541,9 +582,18 @@ export class TimelineView extends LitElement {
       stroke-width: 1.25;
       vector-effect: non-scaling-stroke;
     }
-    /* Crossfade curves render at the lane level (between regions on the
-     * same track) using their own SVG layer. Two paths — one per region's
-     * contribution — drawn over the overlap span. */
+    /* Crossfade curves render at the lane level (between regions on
+     * the same track) using their own SVG layer. The overlap zone is
+     * the only place the user can confirm a crossfade is doing
+     * anything, so the visual has to read at a glance even when both
+     * regions are painting opaque waveforms underneath it. Strategy:
+     *   - bright stroked X-curves with a contrasting dark halo
+     *   - diagonal-hatch fill on the overlap rectangle so the band
+     *     itself is recognizable as a crossfade zone, separate from
+     *     either region's body
+     *   - hatch dims when fades fully cover the overlap (clean
+     *     crossfade); brightens when fades don't cover (call-to-
+     *     action: snap fades to overlap). */
     .crossfade-svg {
       position: absolute;
       pointer-events: none;
@@ -552,21 +602,53 @@ export class TimelineView extends LitElement {
     }
     .crossfade-svg .xfade-line-out {
       fill: none;
-      stroke: rgba(255, 255, 255, 0.85);
-      stroke-width: 1.25;
+      stroke: #ffd166;
+      stroke-width: 2;
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7));
       vector-effect: non-scaling-stroke;
     }
     .crossfade-svg .xfade-line-in {
       fill: none;
-      stroke: rgba(120, 220, 255, 0.85);
-      stroke-width: 1.25;
+      stroke: #78dbff;
+      stroke-width: 2;
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7));
       vector-effect: non-scaling-stroke;
     }
-    .crossfade-svg .xfade-tint {
-      fill: rgba(255, 255, 255, 0.06);
-      stroke: rgba(255, 255, 255, 0.25);
+    /* Hash-pattern overlap-zone band — confirms the user that
+     * "this region is a crossfade zone" even when both regions paint
+     * identical-looking waveforms underneath. Defined via inline SVG
+     * pattern in the renderer (see _renderCrossfadeOverlaysForTrack). */
+    .crossfade-svg .xfade-zone {
+      stroke: rgba(255, 255, 255, 0.32);
       stroke-width: 1;
-      stroke-dasharray: 3 3;
+    }
+    .crossfade-svg .xfade-zone.incomplete {
+      stroke: rgba(255, 209, 102, 0.7);
+      stroke-dasharray: 4 3;
+    }
+    /* Small badge at the top of the overlap zone naming both regions
+     * + showing the overlap length. Plain DOM, lives in a sibling
+     * absolutely-positioned div so it can pick up text rendering. */
+    .crossfade-badge {
+      position: absolute;
+      top: 0;
+      transform: translateY(-100%);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: var(--font-sans);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      background: rgba(0, 0, 0, 0.72);
+      color: #fff;
+      pointer-events: none;
+      z-index: 6;
+      white-space: nowrap;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    }
+    .crossfade-badge.incomplete {
+      background: rgba(120, 70, 0, 0.85);
+      color: #ffd166;
     }
 
     /* Fade-length grab handle — a small triangle anchored to the
@@ -1808,6 +1890,39 @@ export class TimelineView extends LitElement {
         : Number(window.__foyer?.store?.state?.controls?.get("transport.position") || 0);
     }
     const cut = clip.mode === "cut";
+    // Resolve a destination track if the paste anchor came from the
+    // mouse (`at === "mouse"`). Playhead / explicit-sample pastes
+    // don't carry a track — they land on the source's own track,
+    // matching legacy behavior. Mouse-anchored paste resolves the
+    // lane under the cursor and pastes there, with a kind-compat
+    // guard so audio↔midi mismatches abort with a toast instead of
+    // a wire-level rejection (and the originals on a cut don't get
+    // deleted out from under us).
+    let destTrackByItem = null;
+    if (at === "mouse") {
+      const destTrack = this._trackAtMouseY();
+      if (destTrack) {
+        // Validate the entire clipboard against the destination
+        // kind. The clipboard captured each item's source track id;
+        // mixing kinds in one paste is rare but possible, so we
+        // require every source to match the destination's kind.
+        const tracks = this.session?.tracks || [];
+        const incompat = clip.items.filter((it) => {
+          const src = tracks.find((t) => t.id === it.track_id);
+          return src && src.kind !== destTrack.kind;
+        });
+        if (incompat.length) {
+          toast(
+            `Can't paste ${incompat.length === clip.items.length ? "" : "some "}` +
+              `${incompat[0] && (tracks.find((t) => t.id === incompat[0].track_id)?.kind) || "audio"} ` +
+              `region(s) onto a ${destTrack.kind} track.`,
+            { tone: "warn", ttl: 3000 },
+          );
+          return 0;
+        }
+        destTrackByItem = destTrack.id;
+      }
+    }
     const groupLabel = cut
       ? `Foyer paste ${clip.items.length} regions (cut)`
       : `Foyer paste ${clip.items.length} regions`;
@@ -1821,6 +1936,7 @@ export class TimelineView extends LitElement {
           source_offset_samples: it.slice_start,
           length_samples: it.slice_len,
           at_samples,
+          ...(destTrackByItem ? { target_track_id: destTrackByItem } : {}),
         });
       } else {
         ws?.send({
@@ -1828,6 +1944,7 @@ export class TimelineView extends LitElement {
           source_region_id: it.region_id,
           at_samples,
           length_samples: it.length_samples,
+          ...(destTrackByItem ? { target_track_id: destTrackByItem } : {}),
         });
       }
     }
@@ -1906,6 +2023,33 @@ export class TimelineView extends LitElement {
     if (x < 0) return null;
     const samples = (x / this._zoom) * sr;
     return Math.max(0, Math.round(samples));
+  }
+
+  /**
+   * Find the track whose lane element contains the last-known mouse
+   * Y position. Returns the Track object, or `null` when the
+   * cursor isn't currently over any lane (mouse never moved, mouse
+   * is outside the scroll viewport, etc.). Used by cross-track
+   * paste to figure out the destination track at paste-time.
+   */
+  _trackAtMouseY() {
+    return this._trackAtClientY(this._lastMouseClientY);
+  }
+
+  /** Like `_trackAtMouseY` but takes an explicit Y so live-drag
+   *  handlers can resolve the destination from their pointermove
+   *  events without relying on the hover-cache. */
+  _trackAtClientY(y) {
+    if (!Number.isFinite(y)) return null;
+    const lanes = this.renderRoot.querySelectorAll(".lane");
+    const tracks = this.session?.tracks || [];
+    for (let i = 0; i < lanes.length; i++) {
+      const r = lanes[i].getBoundingClientRect();
+      if (y >= r.top && y <= r.bottom) {
+        return tracks[i] || null;
+      }
+    }
+    return null;
   }
 
   /**
@@ -2141,8 +2285,11 @@ export class TimelineView extends LitElement {
       const r = grid.getBoundingClientRect();
       this._lastMouseGridX = ev.clientX - r.left;
     }
-    // Throttle via rAF — pointermove fires at hardware rate and we
-    // only need one update per paint frame.
+    // Cross-track paste needs the destination track too — capture
+    // the clientY at every move so `pasteRegions()` can resolve
+    // "which lane is the cursor over" without re-running pointer-
+    // event plumbing on the keybind path.
+    this._lastMouseClientY = ev.clientY;
     if (this._hoverRaf) return;
     this._hoverRaf = requestAnimationFrame(() => {
       this._hoverRaf = 0;
@@ -2449,11 +2596,26 @@ export class TimelineView extends LitElement {
       // Skip the round-trip if nothing actually changed.
       const wasSamples = side === "in" ? origInSamples : origOutSamples;
       if (wasSamples === lastFade && this._fadeDragShape === origShape) return;
-      window.__foyer?.ws?.send({
-        type: "update_region",
-        id: r.id,
-        patch,
-      });
+      // Region-group fanout: apply the same fade patch to every
+      // group sibling so a fade tweak propagates linked-edit-style.
+      // Wrap in an undo group so one Ctrl+Z restores every member.
+      const group = this._groupOf(r);
+      const targets = group
+        ? this._regionsInGroup(group).filter((s) => this._trackKind(s.track_id) === "audio")
+        : [r];
+      if (targets.length > 1) {
+        window.__foyer?.ws?.send({ type: "undo_group_begin", name: "Foyer group fade" });
+      }
+      for (const t of targets) {
+        window.__foyer?.ws?.send({
+          type: "update_region",
+          id: t.id,
+          patch,
+        });
+      }
+      if (targets.length > 1) {
+        window.__foyer?.ws?.send({ type: "undo_group_end" });
+      }
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -2478,7 +2640,17 @@ export class TimelineView extends LitElement {
     const patch = side === "in"
       ? { fade_in_samples: 0 }
       : { fade_out_samples: 0 };
-    ws.send({ type: "update_region", id: region.id, patch });
+    const group = this._groupOf(region);
+    const targets = group
+      ? this._regionsInGroup(group).filter((s) => this._trackKind(s.track_id) === "audio")
+      : [region];
+    if (targets.length > 1) {
+      ws.send({ type: "undo_group_begin", name: "Foyer group clear fade" });
+    }
+    for (const t of targets) {
+      ws.send({ type: "update_region", id: t.id, patch });
+    }
+    if (targets.length > 1) ws.send({ type: "undo_group_end" });
   }
 
   /**
@@ -2591,11 +2763,23 @@ export class TimelineView extends LitElement {
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
       if (Math.abs(lastLinear - startLinear) < 1e-4) return;
-      window.__foyer?.ws?.send({
-        type: "update_region",
-        id: region.id,
-        patch: { gain_linear: lastLinear },
-      });
+      const group = this._groupOf(region);
+      const targets = group
+        ? this._regionsInGroup(group).filter((s) => this._trackKind(s.track_id) === "audio")
+        : [region];
+      if (targets.length > 1) {
+        window.__foyer?.ws?.send({ type: "undo_group_begin", name: "Foyer group gain" });
+      }
+      for (const t of targets) {
+        window.__foyer?.ws?.send({
+          type: "update_region",
+          id: t.id,
+          patch: { gain_linear: lastLinear },
+        });
+      }
+      if (targets.length > 1) {
+        window.__foyer?.ws?.send({ type: "undo_group_end" });
+      }
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -2607,11 +2791,23 @@ export class TimelineView extends LitElement {
     if (!region) return;
     const cur = Number(region.gain_linear);
     if (!Number.isFinite(cur) || Math.abs(cur - 1) < 1e-4) return;
-    window.__foyer?.ws?.send({
-      type: "update_region",
-      id: region.id,
-      patch: { gain_linear: 1 },
-    });
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    const group = this._groupOf(region);
+    const targets = group
+      ? this._regionsInGroup(group).filter((s) => this._trackKind(s.track_id) === "audio")
+      : [region];
+    if (targets.length > 1) {
+      ws.send({ type: "undo_group_begin", name: "Foyer group reset gain" });
+    }
+    for (const t of targets) {
+      ws.send({
+        type: "update_region",
+        id: t.id,
+        patch: { gain_linear: 1 },
+      });
+    }
+    if (targets.length > 1) ws.send({ type: "undo_group_end" });
   }
 
   /** Crop every selected region to the carved time selection. Mirror of
@@ -2828,6 +3024,223 @@ export class TimelineView extends LitElement {
     ws.send({ type: "undo_group_end" });
   }
 
+  /**
+   * Region groups (linked-edit). Helpers + commands. A group is
+   * identified by an opaque string `group_id` carried on every
+   * member region; `null` / missing = ungrouped. Members may live
+   * on different tracks (matches Ardour's RegionGroup model).
+   */
+  _freshGroupId() {
+    const rand = Math.random().toString(36).slice(2, 10);
+    const t = Date.now().toString(36);
+    return `group.${t}.${rand}`;
+  }
+
+  /** Every region currently in `groupId`, across all tracks. */
+  _regionsInGroup(groupId) {
+    if (!groupId) return [];
+    const out = [];
+    for (const list of Object.values(this._regionsByTrack || {})) {
+      for (const r of list || []) {
+        if (r.group_id && r.group_id === groupId) out.push(r);
+      }
+    }
+    return out;
+  }
+
+  /** group_id for a region (or null). */
+  _groupOf(region) {
+    if (!region) return null;
+    const g = region.group_id;
+    if (!g || typeof g !== "string" || g === "") return null;
+    return g;
+  }
+
+  /**
+   * Expand a set of region ids to include every group sibling of
+   * every member. Used by selection fanout + drag fanout so a
+   * single-region pick acts on the whole group.
+   */
+  _expandIdsToGroups(ids) {
+    const out = new Set(ids);
+    for (const id of ids) {
+      const r = this._regionForId(id);
+      const g = this._groupOf(r);
+      if (!g) continue;
+      for (const s of this._regionsInGroup(g)) out.add(s.id);
+    }
+    return out;
+  }
+
+  /** Group selected regions under a fresh group_id (≥2 regions). */
+  groupSelectedRegions() {
+    const ids = [...this._selectedRegionIds];
+    if (ids.length < 2) {
+      toast("Pick two or more regions to group.", { tone: "warn" });
+      return;
+    }
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    // If any member is already in a group, reuse the first-seen id so
+    // "extend an existing group" works without a separate command.
+    let groupId = null;
+    for (const id of ids) {
+      const r = this._regionForId(id);
+      const g = this._groupOf(r);
+      if (g) { groupId = g; break; }
+    }
+    if (!groupId) groupId = this._freshGroupId();
+    ws.send({ type: "undo_group_begin", name: "Foyer group regions" });
+    for (const id of ids) {
+      ws.send({
+        type: "update_region",
+        id,
+        patch: { group_id: groupId },
+      });
+    }
+    ws.send({ type: "undo_group_end" });
+    toast(`Grouped ${ids.length} regions.`, { tone: "info", ttl: 2400 });
+  }
+
+  /** Clear group_id on every selected region (and every sibling
+   *  of those, so "ungroup any member" dissolves the whole group). */
+  ungroupSelectedRegions() {
+    const ids = [...this._selectedRegionIds];
+    if (!ids.length) return;
+    const ws = window.__foyer?.ws;
+    if (!ws) return;
+    // Collapse every selected member's group → set of region ids to
+    // clear. Walking the union, not just the selection, so picking
+    // one member of a 4-region group dissolves all 4.
+    const toClear = new Set();
+    for (const id of ids) {
+      const r = this._regionForId(id);
+      const g = this._groupOf(r);
+      if (!g) continue;
+      for (const s of this._regionsInGroup(g)) toClear.add(s.id);
+    }
+    if (!toClear.size) {
+      toast("Selected regions aren't in a group.", { tone: "warn" });
+      return;
+    }
+    ws.send({ type: "undo_group_begin", name: "Foyer ungroup regions" });
+    for (const id of toClear) {
+      // Empty-string sentinel = clear (see RegionPatch.group_id docs).
+      ws.send({
+        type: "update_region",
+        id,
+        patch: { group_id: "" },
+      });
+    }
+    ws.send({ type: "undo_group_end" });
+    toast(`Ungrouped ${toClear.size} regions.`, { tone: "info", ttl: 2400 });
+  }
+
+  /** Stable color from a group_id. Same id → same hue across renders. */
+  _colorForGroup(groupId) {
+    if (!groupId) return null;
+    let h = 0;
+    for (let i = 0; i < groupId.length; i++) {
+      h = (h * 31 + groupId.charCodeAt(i)) & 0xffff;
+    }
+    const hue = h % 360;
+    return `hsl(${hue}, 78%, 62%)`;
+  }
+
+  /**
+   * Layer / z-order ops. Per-track operations: compute new layer
+   * values for the selected regions relative to their siblings on
+   * the same track and emit a single `update_region { layer }`
+   * patch per region. `mode` is `"front"`, `"back"`, `"forward"`,
+   * or `"backward"`.
+   */
+  _adjustSelectedRegionLayers(mode) {
+    const ws = window.__foyer?.ws;
+    if (!ws) {
+      toast("Not connected.", { tone: "warn" });
+      return;
+    }
+    // Group by track — layering only makes sense relative to siblings.
+    const byTrack = new Map();
+    for (const id of this._selectedRegionIds) {
+      const r = this._regionForId(id);
+      if (!r) continue;
+      const list = byTrack.get(r.track_id) || [];
+      list.push(r);
+      byTrack.set(r.track_id, list);
+    }
+    if (!byTrack.size) return;
+    const labels = {
+      front: "Foyer bring to front",
+      back: "Foyer send to back",
+      forward: "Foyer bring forward",
+      backward: "Foyer send backward",
+    };
+    ws.send({ type: "undo_group_begin", name: labels[mode] || "Foyer layer" });
+    for (const [trackId, selectedOnTrack] of byTrack) {
+      const all = (this._regionsByTrack[trackId] || []).slice();
+      const layerOf = (r) => Number(r.layer) || 0;
+      const selIds = new Set(selectedOnTrack.map((r) => r.id));
+      const others = all.filter((r) => !selIds.has(r.id));
+      let assignments;
+      if (mode === "front") {
+        // Stack the selection above every non-selected region.
+        const top = others.length ? Math.max(...others.map(layerOf)) : 0;
+        assignments = selectedOnTrack
+          .slice()
+          .sort((a, b) => layerOf(a) - layerOf(b))
+          .map((r, i) => [r, top + 1 + i]);
+      } else if (mode === "back") {
+        const bottom = others.length ? Math.min(...others.map(layerOf)) : 0;
+        assignments = selectedOnTrack
+          .slice()
+          .sort((a, b) => layerOf(a) - layerOf(b))
+          .map((r, i) => [r, bottom - 1 - (selectedOnTrack.length - 1 - i)]);
+      } else if (mode === "forward") {
+        // Find each selected region's immediate higher neighbor and
+        // bump above it by setting layer = neighbor+1. Works pairwise
+        // so a multi-selection bubbles up cleanly without all members
+        // landing on the same layer.
+        const sorted = all.slice().sort((a, b) => layerOf(a) - layerOf(b));
+        const layers = new Map(sorted.map((r) => [r.id, layerOf(r)]));
+        const orderIdx = new Map(sorted.map((r, i) => [r.id, i]));
+        assignments = [];
+        for (const r of selectedOnTrack) {
+          const idx = orderIdx.get(r.id);
+          if (idx == null || idx >= sorted.length - 1) continue;
+          const above = sorted[idx + 1];
+          if (selIds.has(above.id)) continue;
+          const newLayer = (layers.get(above.id) ?? 0) + 1;
+          assignments.push([r, newLayer]);
+          layers.set(r.id, newLayer);
+        }
+      } else if (mode === "backward") {
+        const sorted = all.slice().sort((a, b) => layerOf(a) - layerOf(b));
+        const layers = new Map(sorted.map((r) => [r.id, layerOf(r)]));
+        const orderIdx = new Map(sorted.map((r, i) => [r.id, i]));
+        assignments = [];
+        for (const r of selectedOnTrack) {
+          const idx = orderIdx.get(r.id);
+          if (idx == null || idx <= 0) continue;
+          const below = sorted[idx - 1];
+          if (selIds.has(below.id)) continue;
+          const newLayer = (layers.get(below.id) ?? 0) - 1;
+          assignments.push([r, newLayer]);
+          layers.set(r.id, newLayer);
+        }
+      }
+      for (const [r, newLayer] of assignments || []) {
+        if (newLayer === layerOf(r)) continue;
+        ws.send({
+          type: "update_region",
+          id: r.id,
+          patch: { layer: newLayer },
+        });
+      }
+    }
+    ws.send({ type: "undo_group_end" });
+  }
+
   _regionEditMenuActions() {
     const nSel = this._selectedRegionIds.size;
     const combineSel = this._combineRegionSelection();
@@ -2971,6 +3384,63 @@ export class TimelineView extends LitElement {
           ? "Select a region."
           : "Shift pitch for audio (Rubber Band) or transpose MIDI notes.",
       action: () => this._pitchShiftSelectedRegions(),
+    });
+    items.push({ separator: true });
+    // Region groups
+    {
+      const anyGrouped = [...this._selectedRegionIds].some((id) => {
+        const r = this._regionForId(id);
+        return !!this._groupOf(r);
+      });
+      items.push({
+        label: anyGrouped ? "Add to group" : "Group regions",
+        icon: "link",
+        disabled: nSel < 2,
+        title: nSel < 2
+          ? "Pick two or more regions to link them."
+          : anyGrouped
+            ? "Extend the existing group with the newly-selected regions."
+            : "Link selected regions so move / trim / fade / delete cascades to siblings.",
+        action: () => this.groupSelectedRegions(),
+      });
+      items.push({
+        label: "Ungroup",
+        icon: "no-symbol",
+        disabled: !anyGrouped,
+        title: anyGrouped
+          ? "Dissolve the group(s) the selection belongs to."
+          : "No grouped region in the selection.",
+        action: () => this.ungroupSelectedRegions(),
+      });
+    }
+    items.push({ separator: true });
+    items.push({
+      label: "Bring to front",
+      icon: "arrow-up",
+      disabled: nSel === 0,
+      title: "Stack selected regions above every other region on their track.",
+      action: () => this._adjustSelectedRegionLayers("front"),
+    });
+    items.push({
+      label: "Bring forward",
+      icon: "chevron-up",
+      disabled: nSel === 0,
+      title: "Move selected regions one layer above the next neighbor.",
+      action: () => this._adjustSelectedRegionLayers("forward"),
+    });
+    items.push({
+      label: "Send backward",
+      icon: "chevron-down",
+      disabled: nSel === 0,
+      title: "Move selected regions one layer below the previous neighbor.",
+      action: () => this._adjustSelectedRegionLayers("backward"),
+    });
+    items.push({
+      label: "Send to back",
+      icon: "arrow-down",
+      disabled: nSel === 0,
+      title: "Stack selected regions below every other region on their track.",
+      action: () => this._adjustSelectedRegionLayers("back"),
     });
     return items;
   }
@@ -3273,7 +3743,20 @@ export class TimelineView extends LitElement {
   }
 
   _renderLane(track) {
-    const regions = this._regionsByTrack[track.id] || [];
+    // Sort by (layer ASC, source order) so a later DOM position
+    // means a higher layer — the region rendered last paints on
+    // top. With per-region `isolation: isolate` (see CSS) this is
+    // load-bearing for the layering commands to actually change
+    // what the user sees in an overlap.
+    const rawRegions = this._regionsByTrack[track.id] || [];
+    const regions = [...rawRegions]
+      .map((r, i) => [r, i])
+      .sort((a, b) => {
+        const la = Number(a[0].layer) || 0;
+        const lb = Number(b[0].layer) || 0;
+        return la - lb || a[1] - b[1];
+      })
+      .map((pair) => pair[0]);
     const sr = this._sampleRate();
     const h = this._laneHeightFor(track.id);
     const store = window.__foyer?.store;
@@ -3314,25 +3797,22 @@ export class TimelineView extends LitElement {
             ` : null}
             ${(track.automation_lanes && track.automation_lanes.length > 0) ? html`
               <div class="lane-ctl-btn auto ${this._automationOpen(track.id) ? "on" : ""}"
-                   title="Show / hide automation lanes"
-                   @click=${(e) => { e.stopPropagation(); this._toggleAutomation(track.id); }}>A</div>
+                   title="Toggle automation overlay · double-click to open editor"
+                   @click=${(e) => { e.stopPropagation(); this._toggleAutomation(track.id); }}
+                   @dblclick=${(e) => { e.stopPropagation(); this._openAutomationModal(track.id); }}>A</div>
             ` : null}
           </div>
         </div>
-        ${this._automationOpen(track.id) && track.automation_lanes?.length ? html`
-          <div class="automation-stack" style="left:${HEAD_WIDTH}px">
-            ${track.automation_lanes.map((lane) => html`
-              <foyer-automation-lane
-                .lane=${lane}
-                .totalSamples=${this._timeline?.length_samples || 0}
-                .pxPerSec=${this._zoom}
-                .sampleRate=${sr}
-                .color=${track.color || ""}
-              ></foyer-automation-lane>
-            `)}
-          </div>
-        ` : null}
-        ${regions.map(r => {
+        ${this._automationOpen(track.id) ? this._renderAutomationOverlay(track, sr, h) : null}
+        ${repeat(regions, (r) => r.id, (r) => {
+          // Keyed render: when the layer-sort reorders this array,
+          // Lit physically moves the DOM nodes instead of reusing
+          // them positionally. With per-region `isolation: isolate`,
+          // DOM order IS paint order, so this is what makes
+          // bring-to-front / send-to-back actually move regions in
+          // the visual stack rather than just rewriting attrs in
+          // place. (Rich, 2026-05-14: layer ops were a no-op without
+          // this swap.)
           const leftPx = HEAD_WIDTH + (r.start_samples / sr) * this._zoom;
           const widthPx = Math.max(10, (r.length_samples / sr) * this._zoom);
           // MIDI regions paint their actual note list — audio regions
@@ -3373,6 +3853,12 @@ export class TimelineView extends LitElement {
           const gainStrip = !isMidi
             ? this._renderRegionGainStrip(r)
             : null;
+          const groupId = this._groupOf(r);
+          const groupColor = groupId ? this._colorForGroup(groupId) : null;
+          const groupBar = groupColor
+            ? html`<div class="group-bar" style="background:${groupColor}"
+                        title=${`Region group · click any member to select all (Alt+click to break)`}></div>`
+            : null;
           return html`
             <div class="region ${regionSelected ? "selected" : ""}" data-id=${r.id}
                  tabindex="0"
@@ -3393,6 +3879,7 @@ export class TimelineView extends LitElement {
                 : html`<foyer-waveform-gl class="viz" data-id=${r.id}></foyer-waveform-gl>`}
               ${fadeOverlay}
               ${cutOverlay}
+              ${groupBar}
               <div class="name">${r.name}</div>
               ${gainStrip}
               ${fadeHandles}
@@ -3676,23 +4163,192 @@ export class TimelineView extends LitElement {
           rInPath += i === 0 ? `M ${x.toFixed(2)} ${y.toFixed(2)} ` : `L ${x.toFixed(2)} ${y.toFixed(2)} `;
         }
       }
-      // Hint rect when fades don't cover the whole overlap (user can
-      // "Snap fades to overlap" from the menu to fix in one click).
-      const showHint = (lFadeOut < overlapSamples) || (rFadeIn < overlapSamples);
+      // Diagonal-hatch fill for the overlap zone — gives the band a
+      // distinct visual identity even when both regions paint the
+      // same waveform underneath. Color cue: white-on-dark when fades
+      // cover the whole overlap (clean crossfade), amber when there's
+      // a gap (call-to-action: "Snap fades to overlap").
+      const incomplete = (lFadeOut < overlapSamples) || (rFadeIn < overlapSamples);
+      // Pattern id has to be unique per overlap or two SVGs in the
+      // same lane share the same defs and one wins.
+      const patternId = `xfade-hatch-${p.L.id}-${p.R.id}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const hatchColor = incomplete ? "rgba(255, 209, 102, 0.45)" : "rgba(255, 255, 255, 0.32)";
+      const overlapMs = Math.max(1, Math.round((overlapSamples / sr) * 1000));
+      const badgeLabel = `${p.L.name} ⟷ ${p.R.name} · ${overlapMs} ms`;
       out.push(html`
         <svg class="crossfade-svg"
              style="left:${leftPx}px;top:4px;height:calc(100% - 8px);width:${widthPx}px"
              viewBox="0 0 ${widthPx} ${H}"
              preserveAspectRatio="none">
-          ${showHint
-            ? html`<rect class="xfade-tint" x="0" y="0" width=${widthPx} height=${H}></rect>`
-            : null}
+          <defs>
+            <pattern id=${patternId}
+                     patternUnits="userSpaceOnUse"
+                     width="8" height="8"
+                     patternTransform="rotate(45)">
+              <line x1="0" y1="0" x2="0" y2="8" stroke=${hatchColor} stroke-width="2"></line>
+            </pattern>
+          </defs>
+          <rect class="xfade-zone ${incomplete ? "incomplete" : ""}"
+                x="0" y="0" width=${widthPx} height=${H}
+                fill="url(#${patternId})"></rect>
           ${lOutPath ? html`<path class="xfade-line-out" d=${lOutPath}></path>` : null}
           ${rInPath ? html`<path class="xfade-line-in" d=${rInPath}></path>` : null}
         </svg>
+        <div class="crossfade-badge ${incomplete ? "incomplete" : ""}"
+             style="left:${leftPx + widthPx / 2}px;transform:translate(-50%, -100%)">
+          ${badgeLabel}
+        </div>
       `);
     }
     return out;
+  }
+
+  /**
+   * Stable color from an automation lane's control_id. Reuses the
+   * group-color hash with a different seed so automation lines and
+   * region group bars sit in distinct palette bands.
+   */
+  _colorForAutomationLane(controlId) {
+    if (!controlId) return "var(--color-accent)";
+    // Core lanes get fixed palette positions so users build muscle
+    // memory across sessions (Gain = orange, Pan = teal, etc.).
+    const suffix = String(controlId).split(".").pop();
+    const fixed = {
+      gain: "#f59e0b",
+      pan: "#22d3ee",
+      mute: "#fbbf24",
+      solo: "#f87171",
+    };
+    if (fixed[suffix]) return fixed[suffix];
+    let h = 1234;
+    for (let i = 0; i < controlId.length; i++) {
+      h = (h * 31 + controlId.charCodeAt(i)) & 0xffff;
+    }
+    return `hsl(${h % 360}, 70%, 60%)`;
+  }
+
+  /**
+   * Automation overlay — color-coded polylines drawn ON TOP of the
+   * region row (one per active automation lane on the track). Lines
+   * span the lane's full height between the ruler and the lane-resize
+   * grip so curves are readable even at thin lane heights.
+   *
+   * Distinct from the lane-stack model: no extra vertical space
+   * eaten under the regions. Hover surfaces a label tooltip with
+   * `Track → Control` so multiple lines on one track stay legible.
+   * Click any line opens the automation modal scoped to that lane.
+   *
+   * Opacity + stroke width come from the viz prefs
+   * (`automationOverlayAlpha`, `automationOverlayWidth`) so users
+   * can dial the overlay into the background without disabling it
+   * entirely.
+   */
+  _renderAutomationOverlay(track, sr, laneHeight) {
+    const lanes = track.automation_lanes || [];
+    if (!lanes.length) return null;
+    const totalSamples = Math.max(1, Number(this._timeline?.length_samples) || sr * 60);
+    const prefs = getVizPrefs();
+    const alpha = Number.isFinite(prefs?.automationOverlayAlpha)
+      ? prefs.automationOverlayAlpha
+      : 0.7;
+    const strokeWidth = Number.isFinite(prefs?.automationOverlayWidth)
+      ? prefs.automationOverlayWidth
+      : 1.5;
+    // Total content width in px = HEAD_WIDTH gap + timeline px.
+    const contentWidth = (totalSamples / sr) * this._zoom;
+    // Lane SVG sits inside the lane content area (after HEAD_WIDTH).
+    // Height matches the lane minus its top/bottom region padding so
+    // a polyline that hits gain=1 lines up visually with the top of
+    // the region row.
+    const H = Math.max(20, laneHeight - 8);
+    // Per-control y-range mapping. Core controls use the same ranges
+    // the inline lane editor exposes; everything else falls back to
+    // 0..1.
+    const META = {
+      gain:  { min: -60, max: 6 },
+      pan:   { min: -1,  max: 1 },
+      mute:  { min: 0,   max: 1 },
+      solo:  { min: 0,   max: 1 },
+    };
+    const pathFor = (lane) => {
+      const pts = lane.points || [];
+      if (!pts.length) return "";
+      const suffix = String(lane.control_id || "").split(".").pop();
+      const m = META[suffix] || { min: 0, max: 1 };
+      const range = m.max - m.min || 1;
+      let d = "";
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i];
+        const x = (Number(p.time_samples) / totalSamples) * contentWidth;
+        const norm = (Number(p.value) - m.min) / range;
+        const y = H - Math.max(0, Math.min(1, norm)) * H;
+        d += i === 0
+          ? `M ${x.toFixed(2)} ${y.toFixed(2)} `
+          : `L ${x.toFixed(2)} ${y.toFixed(2)} `;
+      }
+      return d;
+    };
+    const paths = [];
+    // Skip lanes that are inert — Off mode and no points means the
+    // user hasn't engaged this control yet. The stub seeds an empty
+    // AutomationLane per Parameter (including every plugin param)
+    // so the wire commands have a target to mutate; if we paint a
+    // polyline for each one we'd draw 80+ idle paths per track and
+    // bury the active automations.
+    const activeLanes = lanes.filter((l) =>
+      (l.points || []).length > 0
+      || String(l.mode || "off").toLowerCase() !== "off"
+    );
+    for (const lane of activeLanes) {
+      const d = pathFor(lane);
+      const suffix = String(lane.control_id || "").split(".").pop();
+      const color = this._colorForAutomationLane(lane.control_id);
+      const labelText = `${track.name} → ${suffix}`;
+      paths.push(html`
+        <path d=${d}
+              fill="none"
+              stroke=${color}
+              stroke-width=${strokeWidth}
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              opacity=${alpha}
+              vector-effect="non-scaling-stroke"
+              style="pointer-events:stroke;cursor:pointer"
+              @click=${(e) => {
+                e.stopPropagation();
+                this._openAutomationModal(track.id, lane.control_id);
+              }}
+              @pointerenter=${(e) => {
+                e.currentTarget.setAttribute("stroke-width", String(strokeWidth + 1));
+                e.currentTarget.setAttribute("opacity", "1");
+              }}
+              @pointerleave=${(e) => {
+                e.currentTarget.setAttribute("stroke-width", String(strokeWidth));
+                e.currentTarget.setAttribute("opacity", String(alpha));
+              }}>
+          <title>${labelText}</title>
+        </path>
+      `);
+    }
+    return html`
+      <svg class="automation-overlay"
+           style="left:${HEAD_WIDTH}px;top:4px;width:${contentWidth}px;height:${H}px"
+           viewBox="0 0 ${contentWidth} ${H}"
+           preserveAspectRatio="none">
+        ${paths}
+      </svg>
+    `;
+  }
+
+  /**
+   * Open the automation editor modal scoped to a track (and an
+   * optional initial control_id to focus). Lazy-loads the modal
+   * module so the timeline boot stays light.
+   */
+  _openAutomationModal(trackId, focusControlId) {
+    import("./automation-modal.js").then((m) => {
+      m.openAutomationModal({ trackId, focusControlId });
+    });
   }
 
   /**
@@ -3956,9 +4612,20 @@ export class TimelineView extends LitElement {
       return;
     }
     // Otherwise (single-select replace, or click on an unselected region):
-    // collapse to just this region.
+    // collapse to just this region — UNLESS it's a member of a region
+    // group, in which case selection fans out to every sibling so
+    // subsequent edits (drag, trim, fade, delete) act on the group as
+    // a unit. Hold Alt to break the link for this click and pick a
+    // single grouped region.
     this._selectedRegionIds.clear();
-    this._selectedRegionIds.add(region.id);
+    const g = this._groupOf(region);
+    if (g && !ev.altKey) {
+      for (const s of this._regionsInGroup(g)) {
+        this._selectedRegionIds.add(s.id);
+      }
+    } else {
+      this._selectedRegionIds.add(region.id);
+    }
     this._pendingDemoteRegionId = null;
     this._reconcileCutPending();
     this.requestUpdate();
@@ -4343,9 +5010,24 @@ export class TimelineView extends LitElement {
     ev.preventDefault();
     ev.stopPropagation();
     const isMulti = this._selectedRegionIds.has(region.id) && this._selectedRegionIds.size > 1;
-    const movingIds = isMulti && mode === "move"
-      ? [...this._selectedRegionIds]
-      : [region.id];
+    // Region groups expand the moving set for ALL drag modes — not
+    // just `mode === "move"` — so trim/resize/stretch on a single
+    // grouped region cascades to siblings with the same delta. The
+    // multi-select branch keeps its existing semantics (move-only).
+    // Alt during the click bypassed group selection in
+    // `_onRegionPointerDown`, so a deliberate solo-drag stays solo.
+    let movingIds;
+    if (isMulti && mode === "move") {
+      movingIds = [...this._selectedRegionIds];
+    } else {
+      const group = this._groupOf(region);
+      if (group) {
+        movingIds = this._regionsInGroup(group).map((r) => r.id);
+        if (!movingIds.includes(region.id)) movingIds.push(region.id);
+      } else {
+        movingIds = [region.id];
+      }
+    }
     const els = [];
     for (const id of movingIds) {
       const el = this.renderRoot.querySelector(`.region[data-id="${id}"]`);
@@ -4362,8 +5044,17 @@ export class TimelineView extends LitElement {
         start: Number(r.start_samples) || 0,
         len: Number(r.length_samples) || 0,
         offset: Number(r.source_offset_samples || 0),
+        trackId: r.track_id,
       });
     }
+    // Cross-track move: track which lane the cursor is currently
+    // over so a "drop region on a different lane" gesture can commit
+    // `track_id` on pointer-up. Only meaningful for `mode === "move"`
+    // (edge resize stays within the source track). Updated on every
+    // pointermove; the commit path validates kind compatibility
+    // before writing.
+    let destTrackId = null;
+    const trackKindByLeader = this._trackKind(region.track_id);
 
     // For resize-left we freeze the waveform at its pre-drag pixel
     // resolution (`origPeaksPx`) and slide it under the region's
@@ -4448,6 +5139,18 @@ export class TimelineView extends LitElement {
           const snapped = this._snapLeaderStart(rawLeader, movingIds, e.altKey);
           moveSnapAdj = snapped - rawLeader;
         }
+        // Resolve the lane under the cursor for cross-track move. Kind
+        // mismatches (audio→midi, etc.) skip — the original lane wins
+        // so the user gets visible feedback that the drop won't take.
+        const trackUnder = this._trackAtClientY(e.clientY);
+        if (trackUnder && trackUnder.id !== region.track_id
+            && trackUnder.kind === trackKindByLeader) {
+          destTrackId = trackUnder.id;
+          for (const el of els) el.classList.add("cross-track-pending");
+        } else {
+          destTrackId = null;
+          for (const el of els) el.classList.remove("cross-track-pending");
+        }
       }
       for (const id of movingIds) {
         const o = origs.get(id);
@@ -4526,6 +5229,7 @@ export class TimelineView extends LitElement {
       for (const el of els) {
         el.classList.remove("dragging");
         el.classList.remove("stretch-active");
+        el.classList.remove("cross-track-pending");
         delete el.dataset.stretchMode;
       }
       // Drop the waveform freeze + placeholder. The post-commit
@@ -4572,18 +5276,30 @@ export class TimelineView extends LitElement {
         }
         const newOffset = Number(r.source_offset_samples || 0);
         const offsetMoved = newOffset !== o.offset;
+        // Cross-track move: when the drop landed on a different
+        // lane (and the kind check passed during the drag),
+        // include `track_id` in the patch so the backend relocates
+        // the region. Only applies to the leader region — group
+        // siblings on other tracks shouldn't be dragged along to
+        // the new lane just because the leader moved.
+        const movedTrack = mode === "move"
+          && id === region.id
+          && destTrackId
+          && destTrackId !== o.trackId;
         // Skip the round-trip if nothing actually moved (e.g. the
         // user click-dragged but landed back at the start).
         if (
           r.start_samples === o.start
           && r.length_samples === o.len
           && !offsetMoved
+          && !movedTrack
         ) continue;
         const patch = {
           start_samples: r.start_samples,
           length_samples: r.length_samples,
         };
         if (offsetMoved) patch.source_offset_samples = newOffset;
+        if (movedTrack) patch.track_id = destTrackId;
         window.__foyer?.ws?.send({
           type: "update_region",
           id: r.id,

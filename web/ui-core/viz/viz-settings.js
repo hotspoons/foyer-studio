@@ -132,6 +132,14 @@ export const DEFAULT_VIZ_PREFS = Object.freeze({
   /** User-defined palette colors. Active when `palette === "custom"`. */
   customFill:       "#a78bfa",
   customEdge:       "#c4b5fd",
+
+  /** Automation overlay opacity (0..1) — applied to the color-coded
+   *  polylines drawn on top of regions when a track's automation
+   *  overlay is enabled. Lets the user dim the lines so they don't
+   *  fight the waveform underneath, without removing them entirely. */
+  automationOverlayAlpha: 0.7,
+  /** Stroke width of automation overlay polylines in CSS px. */
+  automationOverlayWidth: 1.5,
 });
 
 /** Resolve the current MIDI note color, falling through to `trackColor`

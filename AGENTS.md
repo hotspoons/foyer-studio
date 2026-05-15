@@ -193,6 +193,26 @@ just ui-probe eval 'window.__foyer.store.state.status'
 just ui-probe click 'foyer-transport-bar button[title*="Play"]'
 ```
 
+### Always run `just fmt-check` after any non-trivial Rust change
+
+CI gates merges on `cargo fmt --check` and it is the **#1 cause of
+pipeline failures** in this repo. The autofixers run quietly during
+local builds, but `cargo check` does NOT fail on formatting, so an
+agent can finish a Rust task with everything green locally and still
+break the pipeline. After any meaningful Rust edit — schema, trait,
+new function, stub change — run:
+
+```bash
+just fmt-check
+# if it reports drift:
+cargo fmt
+just fmt-check     # confirm clean
+```
+
+Don't wait for `just verify` to catch it. The fmt step is cheap (<1 s)
+and the fix is one command. Make this a reflex on every lift that
+touches `crates/`.
+
 ### Talking to the running UI (agent-oriented)
 
 The browser exposes a single global for external control:

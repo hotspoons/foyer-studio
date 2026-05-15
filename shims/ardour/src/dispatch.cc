@@ -4868,7 +4868,22 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer add automation point");
 				XMLNode& before = alist->get_state ();
-				alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_point.time_samples)), snap.auto_point.value);
+				// Wire → internal unit conversion. Same contract as
+				// the live ControlSet path in this file (line ~1935):
+				// the wire ships gain in dB and pan in [-1, 1], but
+				// Ardour's AutomationList stores raw INTERNAL values
+				// (linear amplitude for gain, [0, 1] for pan). Without
+				// this conversion, a -10 dB point in the UI ended up
+				// as a -10 linear coefficient in the lane and got
+				// clamped to silence on playback — the "automation
+				// looks flat at -140 dB" bug Rich reported 2026-05-15.
+				double write_value = snap.auto_point.value;
+				if (schema_map::is_gain_id (snap.lane_id)) {
+					write_value = schema_map::gain_wire_to_ardour (write_value);
+				} else if (schema_map::is_pan_id (snap.lane_id)) {
+					write_value = schema_map::pan_wire_to_ardour (write_value);
+				}
+				alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_point.time_samples)), write_value);
 				session.add_command (new MementoCommand<ARDOUR::AutomationList> (
 				    *alist, &before, &alist->get_state ()));
 				if (own_txn) session.commit_reversible_command ();
@@ -4919,10 +4934,19 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				const Temporal::samplepos_t new_time = static_cast<Temporal::samplepos_t> (
 				    snap.has_auto_new_time ? snap.auto_new_time : snap.auto_orig_time);
+				// Convert the incoming wire value into Ardour's
+				// internal units (see AddAutomationPoint above for
+				// the rationale).
+				double write_value = snap.auto_point.value;
+				if (schema_map::is_gain_id (snap.lane_id)) {
+					write_value = schema_map::gain_wire_to_ardour (write_value);
+				} else if (schema_map::is_pan_id (snap.lane_id)) {
+					write_value = schema_map::pan_wire_to_ardour (write_value);
+				}
 				if (best_idx != static_cast<std::size_t> (-1)) {
-					pts[best_idx] = { new_time, snap.auto_point.value };
+					pts[best_idx] = { new_time, write_value };
 				} else {
-					pts.push_back ({ new_time, snap.auto_point.value });
+					pts.push_back ({ new_time, write_value });
 				}
 				alist->clear ();
 				for (auto const& pt : pts) {
@@ -4951,9 +4975,21 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				const bool own_txn = (self->_undo_group_depth == 0);
 				if (own_txn) session.begin_reversible_command ("Foyer delete automation point");
 				XMLNode& before = alist->get_state ();
+				// The (time, value) pair we use to identify which
+				// point to erase has to match what's actually stored
+				// in the lane — i.e. the internal-unit value, not
+				// the wire-unit value the UI sent. Apply the same
+				// dB→linear / pan→[0,1] conversion as the add /
+				// update paths.
+				double erase_value = snap.auto_point.value;
+				if (schema_map::is_gain_id (snap.lane_id)) {
+					erase_value = schema_map::gain_wire_to_ardour (erase_value);
+				} else if (schema_map::is_pan_id (snap.lane_id)) {
+					erase_value = schema_map::pan_wire_to_ardour (erase_value);
+				}
 				alist->erase (
 					Temporal::timepos_t (static_cast<Temporal::samplepos_t> (snap.auto_point.time_samples)),
-					snap.auto_point.value);
+					erase_value);
 				session.add_command (new MementoCommand<ARDOUR::AutomationList> (
 				    *alist, &before, &alist->get_state ()));
 				if (own_txn) session.commit_reversible_command ();
@@ -4981,8 +5017,17 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (own_txn) session.begin_reversible_command ("Foyer replace automation lane");
 				XMLNode& before = alist->get_state ();
 				alist->clear ();
+				// Pre-bind the converter for this lane id so we don't
+				// re-check the suffix on every point. Most lanes
+				// don't need conversion (pass-through identity), the
+				// gain + pan ones do.
+				const bool is_gain = schema_map::is_gain_id (snap.lane_id);
+				const bool is_pan  = schema_map::is_pan_id  (snap.lane_id);
 				for (auto const& pt : snap.auto_points) {
-					alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (pt.time_samples)), pt.value);
+					double v = pt.value;
+					if (is_gain) v = schema_map::gain_wire_to_ardour (v);
+					else if (is_pan) v = schema_map::pan_wire_to_ardour (v);
+					alist->add (Temporal::timepos_t (static_cast<Temporal::samplepos_t> (pt.time_samples)), v);
 				}
 				alist->mark_dirty ();
 				session.add_command (new MementoCommand<ARDOUR::AutomationList> (

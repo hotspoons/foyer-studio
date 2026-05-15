@@ -1200,16 +1200,22 @@ pub enum Command {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         name: Option<String>,
     },
-    /// Clone `source_region_id` into a new region on the same track,
-    /// starting at `at_samples`. If `length_samples` is `None` the
-    /// clone adopts the source's length. Carries over MIDI notes
-    /// AND extra_xml (so Foyer sequencer layouts duplicate too).
-    /// Emits a `RegionsList` echo for the track on success.
+    /// Clone `source_region_id` into a new region starting at
+    /// `at_samples`. If `target_track_id` is set the clone lands on
+    /// that track instead of the source's own — used by cross-track
+    /// paste; backend MUST reject when the destination's kind is
+    /// incompatible with the source (audio↔midi). If
+    /// `length_samples` is `None` the clone adopts the source's
+    /// length. Carries over MIDI notes AND extra_xml (so Foyer
+    /// sequencer layouts duplicate too). Emits a `RegionsList` echo
+    /// for the destination track on success.
     DuplicateRegion {
         source_region_id: EntityId,
         at_samples: u64,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         length_samples: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        target_track_id: Option<EntityId>,
     },
     /// Clone a SLICE of `source_region_id` — the contiguous range
     /// `[source_offset_samples, source_offset_samples + length_samples)`
@@ -1231,6 +1237,11 @@ pub enum Command {
         length_samples: u64,
         /// Destination position on the timeline in samples.
         at_samples: u64,
+        /// Destination track. `None` = same track as the source
+        /// (back-compat). When set, backend MUST reject incompatible
+        /// kinds (audio↔midi).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        target_track_id: Option<EntityId>,
     },
     /// Time-stretch or squash region contents so they fill a new timeline
     /// span. `anchor` is `"start"` when the left edge stays fixed (typical
