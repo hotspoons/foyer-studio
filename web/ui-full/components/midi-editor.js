@@ -132,12 +132,18 @@ export class MidiEditor extends LitElement {
     }
     .toolbar {
       display: flex; align-items: center; gap: 10px;
+      /* Wrap to a second row when the editor is narrow — was a single
+       * unwrapped row before, which clipped the rightmost controls on
+       * any constrained layout (Rich's screenshot). Pattern mirrors
+       * the beat-sequencer's .tb. */
+      flex-wrap: wrap; row-gap: 6px;
       padding: 6px 12px;
       background: var(--color-surface-elevated);
       border-bottom: 1px solid var(--color-border);
       color: var(--color-text-muted);
       flex: 0 0 auto;
     }
+    .toolbar .group { flex: 0 0 auto; }
     .toolbar .title { color: var(--color-text); font-weight: 600; }
     .toolbar .group { display: flex; align-items: center; gap: 6px; }
     .toolbar .group.disabled { opacity: 0.4; pointer-events: none; }

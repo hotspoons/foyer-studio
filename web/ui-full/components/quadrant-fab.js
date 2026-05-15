@@ -409,10 +409,25 @@ export class QuadrantFab extends LitElement {
   }
 
   /** Pop this FAB out of the rail and restore it to its last floating
-   *  position. Used by the Undock button in the docked-panel header. */
+   *  position. Used by the Undock button in the docked-panel header.
+   *
+   *  When the FAB is currently mounted inside the right-dock's
+   *  slide-out slot, `undockFab()` alone wasn't enough — the rail
+   *  remembers the fab as floating, but the dock kept rendering the
+   *  slide-out (with _slideOpen = true and us still slotted into
+   *  it), so the panel stayed on screen and the floating FAB
+   *  appeared underneath it (Rich's screenshot). Exit slide mode +
+   *  notify the dock so it collapses its slide column too. */
   _undock() {
     const layout = window.__foyer?.layout;
     if (!layout) return;
+    const wasSlide = this._slideMode;
+    if (wasSlide) {
+      try { this.exitSlideMode(); } catch {}
+      window.dispatchEvent(new CustomEvent("foyer:fab-slide-close", {
+        detail: { id: this.storageKey },
+      }));
+    }
     layout.undockFab(this.storageKey);
     this._open = false;
     this._persist();
@@ -427,6 +442,17 @@ export class QuadrantFab extends LitElement {
     this.requestUpdate();
   }
   closeFromDock() {
+    // Same fix as `_undock`: if the panel is currently in slide
+    // mode, our local _open flag isn't what's keeping the panel
+    // on screen — the right-dock's _slideOpen is. Notify the dock
+    // so it collapses, and exit slide mode so we reparent out of
+    // its slot before the dock unmounts the slide column.
+    if (this._slideMode) {
+      try { this.exitSlideMode(); } catch {}
+      window.dispatchEvent(new CustomEvent("foyer:fab-slide-close", {
+        detail: { id: this.storageKey },
+      }));
+    }
     this._open = false;
     this._persist();
     this.requestUpdate();

@@ -440,6 +440,21 @@ export class RightDock extends LitElement {
     // unrelated store tick.
     window.__foyer?.chat?.addEventListener?.("change", this._storeHandler);
     document.addEventListener("pointerdown", this._docPointerDown, true);
+    // Fab-driven slide-close (×/Undock on the panel header). The fab
+    // dispatches `foyer:fab-slide-close` because its local `_open`
+    // flag isn't what's keeping the slide column visible — our
+    // `_slideOpen` is. Without this listener the X button looked
+    // dead and Undock left an empty panel on screen with the
+    // floating FAB stuck under it.
+    this._slideCloseHandler = (ev) => {
+      const id = ev.detail?.id;
+      if (!id || id !== this._slideFabId) return;
+      this._slideOpen = false;
+      this._slideFabId = "";
+      this._announceDockChanged();
+      this.requestUpdate();
+    };
+    window.addEventListener("foyer:fab-slide-close", this._slideCloseHandler);
     // Expose self on the global so shadow-DOM-hidden siblings (FABs,
     // tile-leaf tear-outs) can call methods on us without trying to
     // querySelector past a shadow root boundary.
@@ -451,6 +466,9 @@ export class RightDock extends LitElement {
     window.__foyer?.layout?.removeEventListener("change", this._layoutHandler);
     window.__foyer?.chat?.removeEventListener?.("change", this._storeHandler);
     document.removeEventListener("pointerdown", this._docPointerDown, true);
+    if (this._slideCloseHandler) {
+      window.removeEventListener("foyer:fab-slide-close", this._slideCloseHandler);
+    }
     if (window.__foyer?.rightDock === this) window.__foyer.rightDock = null;
     super.disconnectedCallback();
   }

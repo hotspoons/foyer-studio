@@ -420,6 +420,21 @@ export class TimelineView extends LitElement {
       border-color: var(--color-accent-2, #22d3ee);
       color: var(--color-accent-2, #22d3ee);
     }
+    /* Slot-keeper for tracks that don't have a record-arm or
+     * automation control (master, busses, etc.). Same flex weight as
+     * a real button but invisible — keeps M/S/●/A aligned across
+     * every track in the lane head. Non-interactive. */
+    .lane-ctl-btn.placeholder {
+      background: transparent;
+      border-color: transparent;
+      pointer-events: none;
+      cursor: default;
+    }
+    .lane-ctl-btn.placeholder:hover { border-color: transparent; }
+    /* The record-arm button uses "●" as its label to match the
+     * mixer. Bump the glyph size so it reads visually similar to
+     * "M" / "S" / "A" at the same 9px font size. */
+    .lane-ctl-btn.rec { font-size: 11px; line-height: 1; }
     .automation-stack {
       position: absolute;
       right: 0;
@@ -4051,14 +4066,24 @@ export class TimelineView extends LitElement {
             ${canArm ? html`
               <div class="lane-ctl-btn rec ${armed ? "on" : ""}"
                    title="Record arm (${armed ? "on" : "off"})"
-                   @click=${(e) => { e.stopPropagation(); this._toggleTrackBool(track.record_arm?.id); }}>R</div>
-            ` : null}
+                   @click=${(e) => { e.stopPropagation(); this._toggleTrackBool(track.record_arm?.id); }}>●</div>
+            ` : html`
+              <!-- Placeholder so M/S [R] A stay visually aligned with
+                   tracks that DO have a record-arm control (master,
+                   buses, MIDI thru). Same flex weight as a real
+                   lane-ctl-btn but rendered as an empty box so the
+                   user reads "no record arm here" instead of "missing
+                   button shifted my layout." -->
+              <div class="lane-ctl-btn placeholder" aria-hidden="true"></div>
+            `}
             ${(track.automation_lanes && track.automation_lanes.length > 0) ? html`
               <div class="lane-ctl-btn auto ${this._automationOpen(track.id) ? "on" : ""}"
                    title="Toggle automation overlay · double-click to open editor"
                    @click=${(e) => { e.stopPropagation(); this._toggleAutomation(track.id); }}
                    @dblclick=${(e) => { e.stopPropagation(); this._openAutomationModal(track.id); }}>A</div>
-            ` : null}
+            ` : html`
+              <div class="lane-ctl-btn placeholder" aria-hidden="true"></div>
+            `}
           </div>
         </div>
         ${this._automationOpen(track.id) ? this._renderAutomationOverlay(track, sr, h) : null}

@@ -354,3 +354,37 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     be a good fit for fixing DAW bitrot issues
       - WIP got the basics done, conceptually it would work but it needs to be tested
       and further refined
+
+## AI Agent
+- [ ] AI Agent harness in GUI
+  - Should have access to UI visualizations for:
+    - waveforms
+    - event heatmaps
+    - MIDI viz with notes
+    - automation visualization
+    - mixer state visualization
+    - plugin visualizations
+    - midi config form visualizations
+    - timeline visualization
+    - look into back end generated spectogrpaphy (instant and temporal, per channel and from main mix), and look at hooking up through shim
+  - Should have textual reports (minimal, either hand crafted or sparsified JSON) for:
+    - channel + audio region start/end
+    - automation points per channel
+    - mixer config including each channel's state w/ fader, M/S/R/I, plugins, plugin configs (base)
+    - midi config per channel
+    - automation events per channel (e.g. fade in/out, full automation spectrum including plugins (and list unused plugin automations))
+    - latency reports and front end config
+    - Messages (add AI agent to chat)
+  - WebLLM integration for in-browser assistant (should already be in codebase)
+  - Add chat completions endpoint with optional api key (should already be in codebase)
+  - Needs strong prompting with a handful of skills that can be managed by and extended by the user and stored under ~/.local/share/foyer, including the ability
+    to save off project templates, browse the templates from there, and use them for new projects
+  - Agent should have a memory tool that will save off snippets of knowledge as one or more .md files somewhere under ~/.local/share/foyer that are
+    automatically injected into context on each session start, and the user should be able to direct the agent to remember something
+  - Try to push as much of this as far down as possible into the back end so Claude could engineer a session via MCP and have access to all of this stuff. Investigate
+    using rendering captured from the front-end of the app and sending it to the back end MCP tools for the visualizations
+
+- [ ] MCP tools (minimum number of tools with rich + polymorphic with subcommands)
+- [ ] Agent's native tools mapped to MCP tools but without MCP overhead
+- [ ] Map out back end vs front end tools, move as much as possible to back end via MCP 
+    so it can be used by other agents

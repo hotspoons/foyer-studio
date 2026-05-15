@@ -37,15 +37,27 @@ export class Toggle extends LitElement {
       border-color: transparent;
       box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
     }
-    :host([on][tone="mute"]) button,
-    :host([on][tone="rec"])  button {
-      background: var(--color-danger);
-      box-shadow: 0 2px 8px rgba(239, 68, 68, 0.35);
-    }
-    :host([on][tone="solo"]) button {
+    /* Tone palette matches the timeline's lane-ctl-btn styling so the
+     * mixer + timeline read as one consistent surface. Mixer keeps
+     * the soft drop-shadow glow that the timeline doesn't have, but
+     * the actual color identity per tone is unified:
+     *   mute → warning yellow (was danger red — collided with rec)
+     *   solo → #dece5c (timeline's distinct yellow-green)
+     *   rec  → danger red */
+    :host([on][tone="mute"]) button {
       background: var(--color-warning);
       color: #0f172a;
-      box-shadow: 0 2px 8px rgba(234, 179, 8, 0.35);
+      box-shadow: 0 2px 8px color-mix(in oklab, var(--color-warning) 45%, transparent);
+    }
+    :host([on][tone="solo"]) button {
+      background: #dece5c;
+      color: #0f172a;
+      box-shadow: 0 2px 8px rgba(222, 206, 92, 0.45);
+    }
+    :host([on][tone="rec"])  button {
+      background: var(--color-danger);
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(239, 68, 68, 0.35);
     }
   `;
 

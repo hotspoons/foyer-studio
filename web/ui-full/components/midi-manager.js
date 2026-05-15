@@ -31,6 +31,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import "foyer-ui-core/widgets/param-control.js";
+import "./patch-picker.js";
 
 // Parameter kinds the shim emits where "discrete or enumerated" is
 // true — these are the ones most likely to be the synth's patch /
@@ -160,12 +161,14 @@ export class MidiManager extends LitElement {
   static styles = css`
     :host {
       display: flex; flex-direction: column;
-      width: 100%; height: 100%; min-height: 0;
+      width: 100%; height: 100%; min-height: 0; min-width: 0;
       background: var(--color-surface);
       color: var(--color-text);
       font-family: var(--font-sans);
       font-size: 12px;
     }
+    .body { min-width: 0; }
+    .card { min-width: 0; }
     .tb {
       display: flex; align-items: center; gap: 10px;
       padding: 8px 14px;
@@ -453,8 +456,14 @@ export class MidiManager extends LitElement {
     }
     .patch-summary {
       display: grid;
-      grid-template-columns: minmax(120px, 1fr) minmax(150px, 2fr) auto;
-      gap: 10px;
+      /* Narrow-friendly: was minmax(120px, 1fr) + minmax(150px, 2fr)
+       * which forced a >270 px min before the actions column. In a
+       * docked-sidebar layout that overflows horizontally and the
+       * right column's actions get clipped. Drop the mins so the
+       * card collapses cleanly; the .region/.choice cells already
+       * ellipsize on overflow. */
+      grid-template-columns: minmax(60px, 1fr) minmax(80px, 2fr) auto;
+      gap: 8px;
       align-items: center;
     }
     .patch-summary .region {
@@ -512,6 +521,15 @@ export class MidiManager extends LitElement {
     .preset-grid .preset:hover {
       background: var(--color-surface-muted);
       border-color: var(--color-accent);
+    }
+    /* Active-preset highlight. Reads `instrument.current_preset`
+     * from the snapshot (PluginInstance.current_preset) so the
+     * loaded preset is visually obvious in the grid. */
+    .preset-grid .preset.active {
+      background: color-mix(in oklab, var(--color-accent-2, #38bdf8) 25%, var(--color-surface-muted));
+      border-color: var(--color-accent-2, #38bdf8);
+      color: var(--color-text);
+      box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-accent-2, #38bdf8) 35%, transparent);
     }
     .reload {
       background: transparent;
@@ -778,10 +796,16 @@ export class MidiManager extends LitElement {
     const list = this._presets || [];
     const factory = list.filter((p) => p.is_factory !== false);
     const user    = list.filter((p) => p.is_factory === false);
+    // Active preset is whichever id matches `instrument.current_preset`
+    // (PluginInstance.current_preset in the snapshot — written by the
+    // shim after a load_plugin_preset round-trip). Names can collide
+    // across factory/user folders so match strictly on id.
+    const activeId = instrument.current_preset || "";
     const group = (items) => html`
       <div class="preset-grid">
         ${items.map((p) => html`
-          <button class="preset" title=${p.id}
+          <button class="preset ${activeId && p.id === activeId ? "active" : ""}"
+                  title=${p.id}
                   @click=${() => this._loadPreset(instrument.id, p.id)}>
             ${p.name || p.id}
           </button>
@@ -1206,12 +1230,23 @@ export class MidiManager extends LitElement {
     const programLike = (instrument?.params || []).filter(
       (p) => PROGRAM_KINDS.has(p.kind) && !p.id?.endsWith(".bypass"),
     );
+    // Section-visibility rules (Rich's feedback):
+    //   · No instrument → don't show "Patches & banks" or "Instrument
+    //     parameters" (both depend on a loaded plugin).
+    //   · Instrument with zero discrete/enum params → hide "Instrument
+    //     parameters" entirely (previously surfaced "none exposed",
+    //     which clutters the form for the typical case of a synth
+    //     that takes program-change MIDI events instead of param
+    //     automation).
+    //   · MIDI channel always renders, but at the BOTTOM of the form
+    //     so it doesn't drown the more frequently-used sections.
 
     const inDefault = isDefaultChannelState(t);
     const channelLabel = channelSummary(t);
     const sectionMode = this.mode || "all";
     const showSetup = sectionMode !== "patches";
-    const showPatches = sectionMode !== "setup";
+    const showPatches = sectionMode !== "setup" && !!instrument;
+    const showParameters = !!instrument && programLike.length > 0;
     const patchEventCount = this._regions.reduce((n, r) => n + (r.patch_changes?.length || 0), 0);
 
     return html`
@@ -1274,9 +1309,11 @@ export class MidiManager extends LitElement {
               </div>
             `}
           </section>
-          ${this._renderFold("channel", "MIDI channel", channelLabel, this._renderChannelSection(t))}
-          ${this._renderFold("parameters", "Instrument parameters", programLike.length > 0 ? `${programLike.length} parameter${programLike.length === 1 ? "" : "s"}` : "none exposed", html`
-            ${programLike.length > 0 ? html`
+          ${showParameters ? this._renderFold(
+            "parameters",
+            "Instrument parameters",
+            `${programLike.length} parameter${programLike.length === 1 ? "" : "s"}`,
+            html`
               <div class="card" style="gap:8px">
                 ${programLike.map((p) => html`
                   <foyer-param-control
@@ -1294,18 +1331,16 @@ export class MidiManager extends LitElement {
                 route program / bank selection through these — change
                 a value and the patch updates immediately. (If the synth
                 doesn't expose a parameter for program, use the
-                "Patches &amp; banks" section above instead.)
+                "Patches &amp; banks" section instead.)
               </div>
-            ` : html`
-              <div class="card muted">
-                The instrument on this track doesn't expose any
-                discrete / enumerated parameters, so there's no
-                plugin-side patch selector to display here. Use the
-                "Patches &amp; banks" section above to send standard
-                MIDI program-change events to the instrument.
-              </div>
-            `}
-          `)}
+            `,
+          ) : null}
+          ${showPatches ? this._renderFold(
+            "patches",
+            "Patches & banks",
+            `${this._livePatchSummary(t)} · ${patchEventCount} event${patchEventCount === 1 ? "" : "s"}`,
+            this._renderPatchChanges(),
+          ) : null}
           ${otherPlugins.length > 0 ? html`
             <section>
               <h3>Inserts</h3>
@@ -1320,9 +1355,10 @@ export class MidiManager extends LitElement {
               </div>
             </section>
           ` : null}
+          ${this._renderFold("channel", "MIDI channel", channelLabel, this._renderChannelSection(t))}
         ` : null}
 
-        ${showPatches ? this._renderFold(
+        ${sectionMode === "patches" && instrument ? this._renderFold(
           "patches",
           "Patches & banks",
           `${this._livePatchSummary(t)} · ${patchEventCount} event${patchEventCount === 1 ? "" : "s"}`,
@@ -1332,6 +1368,36 @@ export class MidiManager extends LitElement {
     `;
   }
   _renderPatchPickerInline() {
+    // Replaced the bespoke bank-dropdown + 128-program grid with the
+    // shared `<foyer-patch-picker>` (lives in patch-picker.js, used
+    // here AND by the automation editor). Same MIDNAM-driven UX as
+    // the automation editor's picker — one searchable list, one
+    // form, no chip-grid. The picker is `inline` so it renders
+    // in-flow inside the patch row's expanded body, not as a modal
+    // scrim. Commit shape: { channel, bank, program }. Cancel
+    // closes the row without writing.
+    return html`
+      <foyer-patch-picker
+        inline
+        .mode=${"edit"}
+        .trackId=${this.trackId}
+        .initialChannel=${this._pickerChannel}
+        .initialBank=${this._pickerBank}
+        .initialProgram=${this._pickerProgram}
+        @commit=${(e) => {
+          this._pickerChannel = e.detail.channel;
+          this._pickerBank = e.detail.bank;
+          this._pickerProgram = e.detail.program;
+          this._commitPatchPicker();
+        }}
+        @cancel=${() => this._closePatchPicker()}
+      ></foyer-patch-picker>
+    `;
+  }
+  // Legacy inline picker render kept below for the field-level
+  // editor (Advanced event fields). Not invoked from the main flow
+  // anymore.
+  _renderPatchPickerInlineLegacy() {
     const banks = this._pickerBanks();
     const programs = this._pickerPrograms();
     const currentBank = this._pickerProgramBank() || banks[0];

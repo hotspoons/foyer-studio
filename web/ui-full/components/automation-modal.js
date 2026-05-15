@@ -30,6 +30,7 @@ import { icon } from "foyer-ui-core/icons.js";
 import "./automation-lane.js";
 import "foyer-ui-core/viz/waveform-gl.js";
 import "./midi-strip.js";
+import "./patch-picker.js";
 
 const STORAGE_KEY = "foyer-automation-modal";
 // Per-track visible-control set (legend checkboxes). UI pref, not
@@ -1094,9 +1095,7 @@ export class AutomationModal extends LitElement {
       channel: Math.max(0, Math.min(15, Number(init.channel) || 0)),
       bank: normalizePatchBank(init.bank),
       program: Math.max(0, Math.min(127, Number(init.program) || 0)),
-      search: "",
     };
-    this._requestPatchNamesForChannel(this._patchPicker.channel);
   }
 
   _closePatchPicker() {
@@ -1188,123 +1187,31 @@ export class AutomationModal extends LitElement {
     ws.send({ type: "undo_group_end" });
   }
 
-  /** Render the patch picker overlay (or nothing if closed). One
-   *  form: channel + bank dropdowns up top, a search box that
-   *  filters across every program in every bank, and a scrolling
-   *  list of program rows. Selecting a row sets channel/bank/program
-   *  in one shot; Save commits, Cancel/click-outside closes. */
+  /** Mount the reusable `<foyer-patch-picker>` when a patch flow
+   *  is active. The picker carries its own MIDNAM subscription and
+   *  state; we only feed it the seed values and listen for commit
+   *  / cancel events. */
   _renderPatchPicker() {
     const p = this._patchPicker;
     if (!p) return null;
-    // Make sure MIDNAM is loaded for the picker's current channel.
-    // Called from render is unusual but cheap (the request is
-    // deduped against `_patchNamesFor`). Loading state surfaces in
-    // the picker hint below.
-    this._requestPatchNamesForChannel(p.channel);
-    const all = flattenPatchNames(this._patchNames);
-    const banks = (this._patchNames?.banks || [])
-      .map((b) => ({ bank: normalizePatchBank(b.bank), name: b.name || "" }))
-      .filter((b) => b.bank >= 0);
-    const q = (p.search || "").trim().toLowerCase();
-    const rows = all.filter((r) => {
-      if (p.bank >= 0 && r.bank !== p.bank) return false;
-      if (!q) return true;
-      return r.name.toLowerCase().includes(q)
-          || r.bankName.toLowerCase().includes(q)
-          || String(r.program + 1).includes(q);
-    });
-    const activeRow = rows.find((r) => r.program === p.program
-        && (p.bank < 0 || r.bank === p.bank));
-    const model = this._patchNames?.model || "";
-    const mode = this._patchNames?.mode || "";
-    const onScrim = (e) => {
-      if (e.target.classList.contains("pp-scrim")) this._closePatchPicker();
-    };
     return html`
-      <div class="pp-scrim" @click=${onScrim}>
-        <div class="pp-panel" role="dialog" aria-label="Patch change">
-          <div class="pp-head">
-            <div class="title">${p.mode === "edit" ? "Edit patch change" : "Add patch change"}</div>
-            <button class="x" title="Close" @click=${() => this._closePatchPicker()}>×</button>
-          </div>
-          <div class="pp-controls">
-            <label>Channel</label>
-            <select
-              .value=${String(p.channel + 1)}
-              @change=${(e) => {
-                const ch = Math.max(0, Math.min(15, Number(e.currentTarget.value) - 1));
-                this._updatePicker({ channel: ch });
-                this._requestPatchNamesForChannel(ch);
-              }}
-            >
-              ${Array.from({ length: 16 }).map((_, i) => html`
-                <option value=${String(i + 1)}>${i + 1}</option>
-              `)}
-            </select>
-
-            <label>Bank</label>
-            <select
-              .value=${String(p.bank)}
-              @change=${(e) => this._updatePicker({
-                bank: normalizePatchBank(Number(e.currentTarget.value)),
-              })}
-            >
-              <option value="-1">Any · program only</option>
-              ${banks.map((b) => html`
-                <option value=${String(b.bank)}>
-                  ${b.name || `Bank ${b.bank}`}
-                </option>
-              `)}
-            </select>
-
-            <label>Search</label>
-            <input type="search"
-                   placeholder="Filter by patch name, bank, or program number…"
-                   .value=${p.search}
-                   @input=${(e) => this._updatePicker({ search: e.currentTarget.value })}>
-
-            ${(model || mode || this._patchNamesLoading) ? html`
-              <div class="pp-hint">
-                ${this._patchNamesLoading
-                  ? "Loading patch names from Ardour…"
-                  : `${model || "No MIDNAM"}${model && mode ? " · " : ""}${mode || ""}`}
-              </div>
-            ` : null}
-          </div>
-          <div class="pp-list">
-            ${rows.length === 0 ? html`
-              <div class="pp-empty">No patches match.</div>
-            ` : rows.map((r) => html`
-              <div class="pp-row ${activeRow === r ? "active" : ""}"
-                   @click=${() => this._updatePicker({
-                     bank: r.bank,
-                     program: r.program,
-                   })}
-                   @dblclick=${() => {
-                     this._updatePicker({ bank: r.bank, program: r.program });
-                     this._commitPatchPicker();
-                   }}
-                   title="Click to select · double-click to save">
-                <span class="prog">${r.program + 1}</span>
-                <span class="name">${r.name}</span>
-                <span class="bk">${r.bank < 0 ? "" : r.bankName}</span>
-              </div>
-            `)}
-          </div>
-          <div class="pp-foot">
-            <div class="summary">
-              Ch <strong>${p.channel + 1}</strong>
-              · Bank <strong>${p.bank < 0 ? "—" : p.bank}</strong>
-              · Program <strong>${p.program + 1}</strong>
-              ${activeRow ? html` · <strong>${activeRow.name}</strong>` : ""}
-            </div>
-            <button @click=${() => this._closePatchPicker()}>Cancel</button>
-            <button class="primary" @click=${() => this._commitPatchPicker()}>
-              ${p.mode === "edit" ? "Save" : "Add"}
-            </button>
-          </div>
-        </div>
-      </div>
+      <foyer-patch-picker
+        .mode=${p.mode}
+        .trackId=${this.trackId}
+        .initialChannel=${p.channel}
+        .initialBank=${p.bank}
+        .initialProgram=${p.program}
+        @commit=${(e) => {
+          this._patchPicker = {
+            ...this._patchPicker,
+            channel: e.detail.channel,
+            bank: e.detail.bank,
+            program: e.detail.program,
+          };
+          this._commitPatchPicker();
+        }}
+        @cancel=${() => this._closePatchPicker()}
+      ></foyer-patch-picker>
     `;
   }
 
