@@ -77,6 +77,52 @@ namespace ArdourSurface::msgpack_out {
 
 namespace {
 
+/// Enumerate AutomationControls for every automatable plugin parameter
+/// on `route`, returning only the ones whose AutomationList actually
+/// has events OR whose automation_state isn't Off. Without this filter
+/// we'd ship hundreds of empty lanes per track (a plugin can expose
+/// 50+ params), bloating every snapshot.
+///
+/// Why this exists: the older lane-emit code only enumerated the four
+/// core lanes (gain/pan/mute/solo). Plugin automation was invisible
+/// from the FE — the user could draw on Ardour and see nothing
+/// reflected in Foyer, then any FE-side edit would overwrite Ardour's
+/// state. Reported 2026-05-15.
+///
+/// Returned as plain pairs so each caller can push into its own local
+/// LaneSrc struct without type-cross-talk.
+static std::vector<std::pair<std::string, std::shared_ptr<ARDOUR::AutomationControl>>>
+enumerate_plugin_automation_lanes (
+	const std::shared_ptr<ARDOUR::Route>& route)
+{
+	std::vector<std::pair<std::string, std::shared_ptr<ARDOUR::AutomationControl>>> out;
+	if (!route) return out;
+	auto plugins = schema_map::enumerate_plugins (route);
+	for (auto const& pd : plugins) {
+		for (auto const& pp : pd.params) {
+			// pp.id is "plugin.<pi-id>.param.<n>" or ".bypass".
+			// Bypass isn't backed by an Ardour AutomationControl
+			// (see schema_map::resolve_automation_control comments),
+			// so just skip it for the lane list.
+			if (pp.id.size () > 7 && pp.id.compare (pp.id.size () - 7, 7, ".bypass") == 0) continue;
+			auto ac = std::dynamic_pointer_cast<ARDOUR::AutomationControl> (
+				schema_map::resolve_automation_control (
+					route->session (), pp.id));
+			if (!ac) continue;
+			auto alist = ac->alist ();
+			if (!alist) continue;
+			bool has_data = false;
+			{
+				Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
+				if (!alist->events ().empty ()) has_data = true;
+			}
+			if (!has_data && alist->automation_state () == ARDOUR::Off) continue;
+			out.emplace_back (pp.id, ac);
+		}
+	}
+	return out;
+}
+
 // A single aux send on a route, shaped for the schema's `Send` struct.
 struct SendDesc {
 	std::string id;              // "send.<processor-pbd-id>"
@@ -806,6 +852,14 @@ encode_session_snapshot (Session& session,
 				lane_srcs.push_back ({ s.self_id + ".pan",  r->pan_azimuth_control () });
 				lane_srcs.push_back ({ s.self_id + ".mute", r->mute_control () });
 				lane_srcs.push_back ({ s.self_id + ".solo", r->solo_control () });
+				// Plugin-parameter automation lanes (filtered to
+				// ones that actually carry data). Without these the
+				// FE never sees automation set in Ardour for plugin
+				// params, and editing the FE then clobbers Ardour's
+				// state on the next round-trip.
+				for (auto const& pl : enumerate_plugin_automation_lanes (r)) {
+					lane_srcs.push_back ({ pl.first, pl.second });
+				}
 				auto io = r->input ();
 				if (io && io->n_ports ().n_audio () > 0) {
 					const uint32_t n_audio = io->n_ports ().n_audio ();
@@ -989,15 +1043,30 @@ encode_session_snapshot (Session& session,
 					if (!l.ac) continue;
 					auto alist = l.ac->alist ();
 					if (!alist) continue;
+					// Pre-bind the wire-unit converter for this lane.
+					// Same rationale as the write path in dispatch.cc:
+					// AutomationList stores Ardour's INTERNAL units
+					// (linear gain, [0,1] pan, etc.), but the wire
+					// schema declares gain in dB and pan in [-1, 1].
+					// Without this read-side conversion, the UI sees
+					// raw linear values, which renders as "near-zero"
+					// throughout the -60..+6 dB scale (the bug Rich
+					// reported 2026-05-15 with the FE showing flat
+					// near-silence after drawing in Ardour).
+					const bool is_gain = schema_map::is_gain_id (l.control_id);
+					const bool is_pan  = schema_map::is_pan_id  (l.control_id);
 					std::vector<std::pair<std::uint64_t, double>> pts;
 					{
 						Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
 						for (auto const* ev : alist->events ()) {
 							if (!ev) continue;
 							const auto sp = ev->when.samples ();
+							double v = ev->value;
+							if (is_gain) v = schema_map::gain_ardour_to_wire (v);
+							else if (is_pan) v = schema_map::pan_ardour_to_wire (v);
 							pts.emplace_back (
 							    static_cast<std::uint64_t> (std::max<Temporal::samplepos_t> (sp, 0)),
-							    ev->value);
+							    v);
 						}
 					}
 					o.map (3);
@@ -1609,6 +1678,13 @@ encode_track_updated (Session& session, const std::string& track_id)
 	lane_srcs.push_back ({ matched.self_id + ".pan",  route->pan_azimuth_control () });
 	lane_srcs.push_back ({ matched.self_id + ".mute", route->mute_control () });
 	lane_srcs.push_back ({ matched.self_id + ".solo", route->solo_control () });
+	// Plugin-parameter automation lanes (see snapshot encoder for
+	// the why — symptom was "FE shows flat, Ardour has a curve,
+	// then FE edit clobbers Ardour" because plugin lanes never
+	// rode the wire).
+	for (auto const& pl : enumerate_plugin_automation_lanes (route)) {
+		lane_srcs.push_back ({ pl.first, pl.second });
+	}
 	std::size_t lane_count = 0;
 	for (auto const& l : lane_srcs) {
 		if (l.ac && l.ac->alist ()) ++lane_count;
@@ -1764,15 +1840,24 @@ encode_track_updated (Session& session, const std::string& track_id)
 				if (!l.ac) continue;
 				auto alist = l.ac->alist ();
 				if (!alist) continue;
+				// See the snapshot encoder above for the rationale —
+				// AutomationList values are internal units (linear gain,
+				// [0,1] pan); the wire wants the same human-friendly
+				// units the live control surface uses (dB, [-1, 1]).
+				const bool is_gain = schema_map::is_gain_id (l.control_id);
+				const bool is_pan  = schema_map::is_pan_id  (l.control_id);
 				std::vector<std::pair<std::uint64_t, double>> pts;
 				{
 					Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
 					for (auto const* ev : alist->events ()) {
 						if (!ev) continue;
 						const auto sp = ev->when.samples ();
+						double v = ev->value;
+						if (is_gain) v = schema_map::gain_ardour_to_wire (v);
+						else if (is_pan) v = schema_map::pan_ardour_to_wire (v);
 						pts.emplace_back (
 						    static_cast<std::uint64_t> (std::max<Temporal::samplepos_t> (sp, 0)),
-						    ev->value);
+						    v);
 					}
 				}
 				o.map (3);

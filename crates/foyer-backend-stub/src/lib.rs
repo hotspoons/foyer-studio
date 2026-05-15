@@ -133,6 +133,67 @@ impl StubBackend {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Find the track owning an automation lane and broadcast its
+    /// fresh state to every subscriber. Called after any automation
+    /// mutation (set_mode / add / update / delete / replace point) so
+    /// every client sees the change land — previously the stub
+    /// mutated silently and the UI never refreshed past the
+    /// optimistic local apply, which made plugin-param automation
+    /// look broken even though the wire round-trip worked.
+    async fn broadcast_track_for_lane(&self, lane_id: &EntityId) {
+        let updated_track = {
+            let st = self.state.lock().await;
+            let session = st.session_clone();
+            session
+                .tracks
+                .into_iter()
+                .find(|t| t.automation_lanes.iter().any(|l| &l.control_id == lane_id))
+        };
+        if let Some(track) = updated_track {
+            let _ = self.tx.send(Event::TrackUpdated {
+                track: Box::new(track),
+            });
+        }
+    }
+
+    /// Reject a cross-track paste when source and destination track
+    /// kinds disagree (audio↔midi). Returns `Ok(())` for same-track
+    /// pastes and same-kind cross-track pastes; an error containing
+    /// both track ids otherwise. Caller must hold the regions store
+    /// lock to ensure the track lookup is consistent.
+    async fn validate_cross_track_paste(
+        &self,
+        source_track_id: &EntityId,
+        dest_track_id: &EntityId,
+    ) -> Result<(), BackendError> {
+        if source_track_id == dest_track_id {
+            return Ok(());
+        }
+        let session = self.state.lock().await.session_clone();
+        let source_kind = session
+            .tracks
+            .iter()
+            .find(|t| &t.id == source_track_id)
+            .map(|t| t.kind);
+        let dest_kind = session
+            .tracks
+            .iter()
+            .find(|t| &t.id == dest_track_id)
+            .map(|t| t.kind);
+        match (source_kind, dest_kind) {
+            (Some(a), Some(b)) if a == b => Ok(()),
+            (Some(a), Some(b)) => Err(BackendError::Other(format!(
+                "cross-kind paste not supported: source is {a:?}, target is {b:?}"
+            ))),
+            (None, _) => Err(BackendError::Other(format!(
+                "duplicate_region: unknown source track {source_track_id}"
+            ))),
+            (_, None) => Err(BackendError::Other(format!(
+                "duplicate_region: unknown target track {dest_track_id}"
+            ))),
+        }
+    }
+
     /// `TimelineMeta` snapshot for the stub's fake 60-second timeline.
     /// Sample rate comes from the live atomic so future "switch SR
     /// at runtime" wiring (whenever it lands) doesn't have to hunt
@@ -483,22 +544,39 @@ impl Backend for StubBackend {
         source_region_id: EntityId,
         at_samples: u64,
         length_samples: Option<u64>,
+        target_track_id: Option<EntityId>,
     ) -> Result<(), BackendError> {
         let (track_id, regions) = {
             let mut store = self.regions.lock().await;
-            let (track_id, source) = store
+            let (source_track_id, source) = store
                 .find(&source_region_id)
                 .ok_or_else(|| BackendError::Other(format!("unknown region {source_region_id}")))?;
+            let dest_track_id = match &target_track_id {
+                Some(t) => t.clone(),
+                None => source_track_id.clone(),
+            };
+            self.validate_cross_track_paste(&source_track_id, &dest_track_id)
+                .await?;
             let id = crate::regions::fresh_region_id(self.next_dup_seed());
             let mut clone = source.clone();
             clone.id = id;
+            clone.track_id = dest_track_id.clone();
             clone.start_samples = at_samples as i64;
             clone.length_samples = length_samples.unwrap_or(source.length_samples).max(4_800);
+            // A cross-track paste lands in a fresh group context, so
+            // drop the source's group_id — preserving it would link
+            // the clone to siblings on a different track which is
+            // not what users expect.
+            if target_track_id.is_some() {
+                clone.group_id = None;
+            }
             // Keep the same source-media offset so MIDI / audio
             // duplicates point at the same content as the source.
             store.insert(clone);
-            let regions = store.regions_for(&track_id, self.sample_rate()).clone();
-            (track_id, regions)
+            let regions = store
+                .regions_for(&dest_track_id, self.sample_rate())
+                .clone();
+            (dest_track_id, regions)
         };
         let _ = self.tx.send(Event::RegionsList {
             track_id,
@@ -514,6 +592,7 @@ impl Backend for StubBackend {
         source_offset_samples: u64,
         length_samples: u64,
         at_samples: u64,
+        target_track_id: Option<EntityId>,
     ) -> Result<(), BackendError> {
         if length_samples == 0 {
             return Err(BackendError::Other(
@@ -522,9 +601,15 @@ impl Backend for StubBackend {
         }
         let (track_id, regions) = {
             let mut store = self.regions.lock().await;
-            let (track_id, source) = store
+            let (source_track_id, source) = store
                 .find(&source_region_id)
                 .ok_or_else(|| BackendError::Other(format!("unknown region {source_region_id}")))?;
+            let dest_track_id = match &target_track_id {
+                Some(t) => t.clone(),
+                None => source_track_id.clone(),
+            };
+            self.validate_cross_track_paste(&source_track_id, &dest_track_id)
+                .await?;
             // Clamp the slice to the source's actual length so a
             // range that runs past the end gets truncated, not
             // negative-clamped to a zero-length region.
@@ -535,8 +620,12 @@ impl Backend for StubBackend {
             let id = crate::regions::fresh_region_id(self.next_dup_seed());
             let mut clone = source.clone();
             clone.id = id;
+            clone.track_id = dest_track_id.clone();
             clone.start_samples = at_samples as i64;
             clone.length_samples = len;
+            if target_track_id.is_some() {
+                clone.group_id = None;
+            }
             // For sliced duplicates we shift the source-media offset
             // forward by `offset` so the new region's content aligns
             // with what the user grabbed.
@@ -555,8 +644,10 @@ impl Backend for StubBackend {
             // renders something sensible. Acceptable for tests since
             // the audio cut/copy/paste path is what users care about.
             store.insert(clone);
-            let regions = store.regions_for(&track_id, self.sample_rate()).clone();
-            (track_id, regions)
+            let regions = store
+                .regions_for(&dest_track_id, self.sample_rate())
+                .clone();
+            (dest_track_id, regions)
         };
         let _ = self.tx.send(Event::RegionsList {
             track_id,
@@ -716,17 +807,24 @@ impl Backend for StubBackend {
         lane_id: EntityId,
         mode: foyer_schema::AutomationMode,
     ) -> Result<(), BackendError> {
-        self.state.lock().await.set_automation_mode(&lane_id, mode)
+        {
+            let mut st = self.state.lock().await;
+            st.set_automation_mode(&lane_id, mode)?;
+        }
+        self.broadcast_track_for_lane(&lane_id).await;
+        Ok(())
     }
     async fn add_automation_point(
         &self,
         lane_id: EntityId,
         point: foyer_schema::AutomationPoint,
     ) -> Result<(), BackendError> {
-        self.state
-            .lock()
-            .await
-            .add_automation_point(&lane_id, point)
+        {
+            let mut st = self.state.lock().await;
+            st.add_automation_point(&lane_id, point)?;
+        }
+        self.broadcast_track_for_lane(&lane_id).await;
+        Ok(())
     }
     async fn update_automation_point(
         &self,
@@ -735,32 +833,36 @@ impl Backend for StubBackend {
         new_time_samples: u64,
         value: f64,
     ) -> Result<(), BackendError> {
-        self.state.lock().await.update_automation_point(
-            &lane_id,
-            original_time_samples,
-            new_time_samples,
-            value,
-        )
+        {
+            let mut st = self.state.lock().await;
+            st.update_automation_point(&lane_id, original_time_samples, new_time_samples, value)?;
+        }
+        self.broadcast_track_for_lane(&lane_id).await;
+        Ok(())
     }
     async fn delete_automation_point(
         &self,
         lane_id: EntityId,
         time_samples: u64,
     ) -> Result<(), BackendError> {
-        self.state
-            .lock()
-            .await
-            .delete_automation_point(&lane_id, time_samples)
+        {
+            let mut st = self.state.lock().await;
+            st.delete_automation_point(&lane_id, time_samples)?;
+        }
+        self.broadcast_track_for_lane(&lane_id).await;
+        Ok(())
     }
     async fn replace_automation_lane(
         &self,
         lane_id: EntityId,
         points: Vec<foyer_schema::AutomationPoint>,
     ) -> Result<(), BackendError> {
-        self.state
-            .lock()
-            .await
-            .replace_automation_lane(&lane_id, points)
+        {
+            let mut st = self.state.lock().await;
+            st.replace_automation_lane(&lane_id, points)?;
+        }
+        self.broadcast_track_for_lane(&lane_id).await;
+        Ok(())
     }
 
     async fn update_region(
@@ -768,6 +870,27 @@ impl Backend for StubBackend {
         id: EntityId,
         patch: RegionPatch,
     ) -> Result<Region, BackendError> {
+        // Cross-track move: when the patch carries a different
+        // `track_id`, validate kind compatibility, relocate the
+        // region between the store's per-track buckets, AND emit a
+        // `RegionRemoved` for the source track so every client clears
+        // it from the old lane (the `RegionUpdated` below adds it to
+        // the new lane). Pure same-track patches skip all of this.
+        let mut prior_track_id: Option<EntityId> = None;
+        if let Some(new_track_id) = patch.track_id.clone() {
+            let current_track_id = {
+                let store = self.regions.lock().await;
+                store.find(&id).map(|(tid, _)| tid)
+            };
+            if let Some(cur) = current_track_id {
+                if cur != new_track_id {
+                    self.validate_cross_track_paste(&cur, &new_track_id).await?;
+                    let mut store = self.regions.lock().await;
+                    store.move_to_track(&id, &new_track_id)?;
+                    prior_track_id = Some(cur);
+                }
+            }
+        }
         let updated = self
             .regions
             .lock()
@@ -776,6 +899,12 @@ impl Backend for StubBackend {
             .ok_or_else(|| BackendError::Other(format!("unknown region {id}")))?;
         // Moving or resizing invalidates the cached peaks for that region.
         self.waveforms.lock().await.clear_region(&id);
+        if let Some(old_track) = prior_track_id {
+            let _ = self.tx.send(Event::RegionRemoved {
+                track_id: old_track,
+                region_id: id.clone(),
+            });
+        }
         // Broadcast so every other subscriber repaints.
         let _ = self.tx.send(Event::RegionUpdated {
             region: Box::new(updated.clone()),

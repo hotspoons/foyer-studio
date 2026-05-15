@@ -107,6 +107,22 @@ pub struct Region {
     /// for regions not sourced from a browser ingress capture.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub ingress_latency_ms: Option<f32>,
+    /// Region group identifier. All regions sharing a non-empty
+    /// `group_id` are treated as a linked-edit unit by the UI:
+    /// selecting one selects every sibling, and move / trim / fade
+    /// / mute / delete fan out to the whole group. `None` (or `Some("")`
+    /// on the wire) means "not in a group". Ardour's native
+    /// `RegionGroup` maps onto this field; shim integration is
+    /// pending — stub backends round-trip it as opaque.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub group_id: Option<EntityId>,
+    /// Render-order index within the region's track. Higher values
+    /// paint on top of lower ones; `None` is treated as `0`. Maps to
+    /// Ardour's `Region::set_layer`; stub backends round-trip.
+    /// Bring-to-front / send-to-back commands recompute deltas
+    /// client-side and emit a single `update_region` per region.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub layer: Option<i32>,
 }
 
 /// Minimal viewport/scale info UIs need to lay out regions consistently.
@@ -161,6 +177,12 @@ pub struct WaveformRequest {
 /// Keeps the wire shape small for drag/resize events.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RegionPatch {
+    /// Move the region to a different track. `None` = leave the
+    /// track assignment alone. Backend MUST reject when the
+    /// destination kind is incompatible with the region's content
+    /// (audio↔midi). Used for cross-track region drag.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub track_id: Option<EntityId>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub start_samples: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -188,6 +210,14 @@ pub struct RegionPatch {
     /// Linear gain coefficient (`AudioRegion::set_scale_amplitude`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub gain_linear: Option<f64>,
+    /// Linked-edit group membership. `Some(id)` joins this region to
+    /// the named group; `Some("")` (empty string) clears membership;
+    /// `None` leaves the field untouched. See `Region.group_id`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub group_id: Option<EntityId>,
+    /// Render layer within the region's track. See `Region.layer`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub layer: Option<i32>,
 }
 
 #[cfg(test)]
@@ -216,6 +246,8 @@ mod tests {
             fade_in_shape: None,
             fade_out_shape: None,
             ingress_latency_ms: None,
+            group_id: None,
+            layer: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         let back: Region = serde_json::from_str(&j).unwrap();

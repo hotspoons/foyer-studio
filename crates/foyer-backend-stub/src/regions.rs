@@ -79,10 +79,55 @@ impl RegionStore {
                 } else if let Some(s) = patch.fade_out_shape {
                     r.fade_out_shape = Some(s);
                 }
+                if let Some(g) = &patch.group_id {
+                    // Empty-string sentinel clears membership so the
+                    // wire can express "remove from group" without a
+                    // separate command (see `RegionPatch.group_id`).
+                    if g.as_str().is_empty() {
+                        r.group_id = None;
+                    } else {
+                        r.group_id = Some(g.clone());
+                    }
+                }
+                if let Some(layer) = patch.layer {
+                    r.layer = Some(layer);
+                }
                 return Some(r.clone());
             }
         }
         None
+    }
+
+    /// Move a region between track buckets. Updates the region's own
+    /// `track_id` field so subsequent serializations report the new
+    /// home, removes it from the source bucket, and inserts into the
+    /// destination bucket in start-time order. Returns the source
+    /// track id on success. Caller is responsible for kind-compat
+    /// checks — by the time we get here we assume the move is legal.
+    pub fn move_to_track(
+        &mut self,
+        id: &EntityId,
+        new_track_id: &EntityId,
+    ) -> Result<EntityId, foyer_backend::BackendError> {
+        let mut moved_region: Option<Region> = None;
+        let mut source_track: Option<EntityId> = None;
+        for (track_key, list) in self.by_track.iter_mut() {
+            if let Some(pos) = list.iter().position(|r| r.id == *id) {
+                let mut r = list.remove(pos);
+                source_track = Some(EntityId::new(track_key.clone()));
+                r.track_id = new_track_id.clone();
+                moved_region = Some(r);
+                break;
+            }
+        }
+        let r = moved_region.ok_or_else(|| {
+            foyer_backend::BackendError::Other(format!("move_to_track: unknown region {id}"))
+        })?;
+        let src = source_track.ok_or_else(|| {
+            foyer_backend::BackendError::Other("move_to_track: missing source track".into())
+        })?;
+        self.insert(r);
+        Ok(src)
     }
 
     /// Remove the region with the given id. Returns the track id it was on
@@ -273,6 +318,8 @@ fn synthesize_for(track_id: &EntityId, sample_rate: u32) -> Vec<Region> {
             fade_in_shape: None,
             fade_out_shape: None,
             ingress_latency_ms: None,
+            group_id: None,
+            layer: None,
         });
     }
     out

@@ -7,8 +7,8 @@
 //! plausibly alive in demo mode.
 
 use foyer_schema::{
-    ControlKind, ControlValue, EntityId, Parameter, PluginInstance, ScaleCurve, Session, Track,
-    TrackKind, Transport, SCHEMA_VERSION,
+    AutomationLane, AutomationMode, ControlKind, ControlValue, EntityId, Parameter, PluginInstance,
+    ScaleCurve, Session, Track, TrackKind, Transport, SCHEMA_VERSION,
 };
 
 pub(crate) fn fader(id: &str, db: f64) -> Parameter {
@@ -69,30 +69,65 @@ pub(crate) fn meter(id: &str) -> Parameter {
 
 pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>) -> Track {
     let is_midi = matches!(kind, TrackKind::Midi);
+    let plugins = default_inserts_for(slug);
+    // Seed an empty automation lane for every Parameter the track
+    // exposes — core (gain/pan/mute/solo) AND every plugin param.
+    // The lane sits at `mode: Off` with no points until the user
+    // engages it, at which point the client-side auto-seed (see
+    // `_cycleMode` in automation-lane.js) adds per-region endpoints.
+    // Without this seed, plugin params would have no `AutomationLane`
+    // for `find_lane_mut` to mutate when the UI sent automation
+    // commands, and the wire would round-trip nothing.
+    let track_id = EntityId::new(format!("track.{slug}"));
+    let gain = fader(&format!("track.{slug}.gain"), 0.0);
+    let pan_ctl = pan(&format!("track.{slug}.pan"));
+    let mute = toggle(&format!("track.{slug}.mute"), "Mute");
+    let solo = toggle(&format!("track.{slug}.solo"), "Solo");
+    let mut automation_lanes: Vec<AutomationLane> = Vec::new();
+    automation_lanes.push(empty_lane(&gain.id));
+    automation_lanes.push(empty_lane(&pan_ctl.id));
+    automation_lanes.push(empty_lane(&mute.id));
+    automation_lanes.push(empty_lane(&solo.id));
+    for plugin in &plugins {
+        for param in &plugin.params {
+            automation_lanes.push(empty_lane(&param.id));
+        }
+    }
     Track {
-        id: EntityId::new(format!("track.{slug}")),
+        id: track_id,
         name: name.into(),
         kind,
         color: color.map(str::to_string),
-        gain: fader(&format!("track.{slug}.gain"), 0.0),
-        pan: pan(&format!("track.{slug}.pan")),
-        mute: toggle(&format!("track.{slug}.mute"), "Mute"),
-        solo: toggle(&format!("track.{slug}.solo"), "Solo"),
+        gain,
+        pan: pan_ctl,
+        mute,
+        solo,
         record_arm: Some(toggle(&format!("track.{slug}.rec"), "Rec")),
         monitoring: Some("auto".into()),
         sends: vec![],
-        plugins: default_inserts_for(slug),
+        plugins,
         peak_meter: Some(EntityId::new(format!("track.{slug}.meter"))),
         group_id: None,
         bus_assign: None,
         inputs: vec![],
         outputs: vec![],
-        automation_lanes: vec![],
+        automation_lanes,
         capture_channel_mode: is_midi.then(|| "force".into()),
         capture_channel_mask: is_midi.then_some(0x0001),
         playback_channel_mode: is_midi.then(|| "force".into()),
         playback_channel_mask: is_midi.then_some(0x0001),
         midi_patches: vec![],
+    }
+}
+
+/// Empty automation lane scaffold — `Off` mode, no points. The lane
+/// becomes useful once the client engages it (which triggers per-
+/// region endpoint seeding via the modal).
+fn empty_lane(control_id: &EntityId) -> AutomationLane {
+    AutomationLane {
+        control_id: control_id.clone(),
+        mode: AutomationMode::Off,
+        points: vec![],
     }
 }
 

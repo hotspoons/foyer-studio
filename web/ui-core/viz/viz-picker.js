@@ -277,6 +277,24 @@ export class VizPicker extends LitElement {
               <span class="num">${(this._prefs.quantGridAlpha ?? 0.5).toFixed(2)}</span>
             </div>
           </div>
+
+          <div class="row" style="border-top:1px solid var(--color-border);padding-top:10px;margin-top:4px">
+            <div class="label">Automation overlay</div>
+            <div class="slider-row" title="Opacity of automation polylines drawn over the regions">
+              <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Opacity</span>
+              <input type="range" min="0" max="1" step="0.05" style="flex:1"
+                     .value=${String(this._prefs.automationOverlayAlpha ?? 0.7)}
+                     @input=${(e) => this._set("automationOverlayAlpha", Number(e.currentTarget.value))}>
+              <span class="num">${(this._prefs.automationOverlayAlpha ?? 0.7).toFixed(2)}</span>
+            </div>
+            <div class="slider-row" title="Stroke width of automation polylines">
+              <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Width</span>
+              <input type="range" min="0.5" max="4" step="0.25" style="flex:1"
+                     .value=${String(this._prefs.automationOverlayWidth ?? 1.5)}
+                     @input=${(e) => this._set("automationOverlayWidth", Number(e.currentTarget.value))}>
+              <span class="num">${(this._prefs.automationOverlayWidth ?? 1.5).toFixed(2)}px</span>
+            </div>
+          </div>
         </div>
       ` : null}
     `;

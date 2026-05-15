@@ -423,29 +423,31 @@ pub trait Backend: Send + Sync + 'static {
         Err(BackendError::Other("delete_region not supported".into()))
     }
 
-    /// Duplicate an existing region onto the same track at a new time
-    /// position. Used by the beat sequencer's arrangement "+" button.
+    /// Duplicate an existing region at a new time position. When
+    /// `target_track_id` is `None` the clone lands on the source's
+    /// own track; otherwise it lands on the named track (backend must
+    /// reject incompatible kinds, e.g. audio→midi).
     async fn duplicate_region(
         &self,
         _source_region_id: EntityId,
         _at_samples: u64,
         _length_samples: Option<u64>,
+        _target_track_id: Option<EntityId>,
     ) -> Result<(), BackendError> {
         Err(BackendError::Other("duplicate_region not supported".into()))
     }
 
     /// Duplicate a SLICE of an existing region (the contiguous range
     /// `[source_offset_samples, source_offset_samples + length_samples)`
-    /// inside the source's content) onto the same track at
-    /// `at_samples`. Used by the timeline's range-aware cut/copy/paste
-    /// when the user has both a region selection and a time-range
-    /// selection.
+    /// inside the source's content) at `at_samples`. `target_track_id`
+    /// works the same as `duplicate_region`.
     async fn duplicate_region_range(
         &self,
         _source_region_id: EntityId,
         _source_offset_samples: u64,
         _length_samples: u64,
         _at_samples: u64,
+        _target_track_id: Option<EntityId>,
     ) -> Result<(), BackendError> {
         Err(BackendError::Other(
             "duplicate_region_range not supported".into(),

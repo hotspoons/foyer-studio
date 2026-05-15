@@ -12,69 +12,214 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 ---
 
 ## Timeline edits outstanding:
-- [ ] Crossfades on overlapping regions
-  - When two regions on the same track overlap, render a crossfade
-    in the overlap region (linear by default, exposed shape later).
-    Ardour models this as `AudioRegion::set_fade_in_length` /
-    `set_fade_out_length` plus the playlist-level overlap detection.
-    Schema needs `RegionPatch.fade_{in,out}_samples` + a fade-shape
-    enum, and the timeline view needs to draw the X curve in the
-    overlap. Hover handles on the overlap edges adjust the curve.
-  - **Shim (2026-05):** `RegionPatch` carries `fade_{in,out}_samples`,
-    `fade_{in,out}_shape` (`FadeShape`), and `gain_linear`; Ardour
-    `update_region` maps them to `AudioRegion::set_fade_in` /
-    `set_fade_out`, `set_fade_in/out_shape`, and `set_scale_amplitude`.
-    **Still not 1:1 here:** pairing overlaps, mutual autofades, and
-    drawing the crossfade curve are UI/playlist concerns — not done.
-- [ ] Fade-in / fade-out per region (independent of crossfade)
-  - Same `fade_{in,out}_samples` patch fields, applied to a
-    non-overlapping region. UI: a small triangular handle in the top-
-    inside corner of the lozenge that you drag inward to set the fade
-    length. Holding the modifier rotates through fade shapes (linear,
-    log, exp, S-curve).
-  - **Shim (2026-05):** backend + schema above; Ardour exposes linear,
-    fast, slow, constant_power, symmetric — not separate log/exp/S
-    names. **UI handles** still needed.
-- [ ] Region groups (linked-edit)
-  - Mark several regions as a group; subsequent move / trim / fade /
-    delete on any one applies to all. Ardour has a native
-    `RegionGroup` concept; surface it as
-    `Command::CreateRegionGroup { region_ids }` + a group-id field
-    in the `Region` payload, then the timeline view applies edits to
-    every group sibling.
-    (or MIDI note transform) — skip.
-- [ ] Region gain handle (per-region volume)
-  - A draggable strip across the region top renders gain in dB. Edge
-    cases: live preview during the drag without sending N
-    `update_region`s (use a `RegionGainPreview` envelope or just one
-    write on pointer-up, like the move/resize commit pattern).
-  - **Shim (2026-05):** `RegionPatch.gain_linear` →
-    `AudioRegion::set_scale_amplitude` (linear gain). **UI** (dB strip,
-    drag preview) still TODO — wire is ready.
-- [ ] Nudge region left/right by grid step (arrow keys)
-  - Plain Left/Right when a region is selected nudges by the active
-    grid sub-step (16th by default); Shift+arrow nudges by a beat;
-    Ctrl/Cmd+arrow nudges by 1 sample. Already partially wired for
-    automation points; extend the same handler to regions.
-  - **Already expressible** as `update_region { start_samples }` with
-    client-computed deltas — no new backend mapping.
-- [ ] Crop / trim around time selection
-  - With a region + ruler time selection, "Crop to selection" trims
-    the region to the carved range (mirror of Cut, but destructive
-    on the original — the slice REPLACES the region). One menu
-    entry; reuses the existing slice-capture math.
-  - **Compose-only:** combine `update_region` (start, length,
-    `source_offset_samples`) — UI orchestration; skip shim.
-- [ ] Move/cut/copy/paste regions between audio and midi tracks
-- [ ] Add region options (mute/quantize start/fade in/out/reverse
-    /strip/pitch shift/duplicate) to edit menu under a contextual
+- [x] Crossfades on overlapping regions
+  - Drawn as paired X-curve overlays at the lane level whenever two
+    audio regions on the same track share time. The L region's
+    fade-out and R region's fade-in are read directly from
+    `fade_out_samples` / `fade_in_samples`; when the fades don't
+    cover the whole overlap, a faint dashed tint rect hints at the
+    "Snap fades to overlap" menu entry that snaps both fades to the
+    full overlap in one click. Curve shape comes from each region's
+    own `fade_*_shape`. (timeline-view.js
+    `_renderCrossfadeOverlaysForTrack`, `_applyCrossfadeToSelection`.)
+- [x] Fade-in / fade-out per region (independent of crossfade)
+  - Triangular grab handles anchored at each fade endpoint inside
+    the region lozenge — at the corner when no fade exists, else
+    flush with the fade's inside edge. Drag inward to grow, outward
+    past the corner to clear. **Alt+drag** rotates through Ardour's
+    five shapes (linear → fast → slow → constant_power → symmetric).
+    **Shift+click** clears that fade. The curve renders as an SVG
+    path inside the region with a semi-transparent fill over the
+    attenuated portion. One `update_region` per drag, on pointer-up,
+    same as move/resize. (`_startFadeDrag`,
+    `_renderRegionFadeOverlay`, `_renderRegionFadeHandles`.)
+- [x] Region groups (linked-edit)
+  - `Region.group_id` + `RegionPatch.group_id` on the schema; clients
+    allocate a fresh group slug and patch every member with it
+    (empty-string sentinel clears membership so no separate command
+    is needed). Click any member → selection fans out to every
+    sibling automatically; hold **Alt** to break the link and pick
+    one. Drag / trim / resize / fade / gain / mute / delete all
+    cascade to siblings (delta-per-region for position, same value
+    for everything else). Visual indicator: a 3 px color bar at the
+    top of each lozenge, color hashed from the group_id so siblings
+    read as one unit. Menu entries: **Group regions** /
+    **Add to group** / **Ungroup**. (`groupSelectedRegions`,
+    `ungroupSelectedRegions`, `_expandIdsToGroups`, `_colorForGroup`,
+    `_groupOf`.) Ardour `RegionGroup` shim integration is a follow-up
+    — stub round-trips the field today.
+- [x] Region gain handle (per-region volume)
+  - Thin strip across the lozenge top — hidden at unity, visible on
+    hover or whenever the gain diverges from 0 dB. Drag up/down for a
+    logarithmic dB response (10 px/dB, **Shift** = fine at 50 px/dB).
+    Range clamped to −60..+6 dB. Double-click resets to unity. One
+    `update_region { gain_linear }` on pointer-up; local-only
+    optimistic preview during the drag matches the move/fade pattern.
+    (`_startGainDrag`, `_renderRegionGainStrip`.)
+- [x] Nudge region left/right by grid step (arrow keys)
+  - `←` / `→` nudge selected regions by the active grid sub-step
+    (or 50 ms when no grid). **Shift+arrow** nudges by a beat;
+    **Ctrl/Cmd+arrow** nudges by 1 sample. Wired through
+    `Keybinds._onKey` in [web/ui-core/layout/keybinds.js] →
+    `TimelineView.nudgeSelectedRegions`. One undo group per arrow
+    press so multi-selection moves replay atomically.
+- [x] Crop / trim around time selection
+  - "Crop to time selection" in the region edit menu (and the global
+    Edit menu's contextual Region section). Replaces each selected
+    region with the slice carved by the ruler selection — adjusts
+    `start_samples`, `length_samples`, AND `source_offset_samples`
+    in a single patch so the audio content lines up with the new
+    timeline span. Single undo entry per region.
+- [x] Move/cut/copy/paste regions between same-kind tracks (audio↔audio,
+    midi↔midi); cross-kind paste rejected with a friendly toast
+  - Schema: optional `target_track_id` on `DuplicateRegion` and
+    `DuplicateRegionRange` ([crates/foyer-schema/src/message.rs]).
+    `None` = source track (back-compat). Backend trait + stub honor
+    it; stub validates kind compatibility and rejects audio↔midi
+    pastes server-side. UI resolves the destination track from the
+    mouse Y position at paste time
+    ([web/ui-full/components/timeline-view.js] `_trackAtMouseY`,
+    `pasteRegions`) and pre-flights kind compatibility so an
+    audio→midi paste shows a toast instead of bouncing off the
+    server. The Ardour shim hasn't yet been taught to respect the
+    new field — its existing same-track paste path still works. True
+    audio→midi conversion (transcription / note rendering) is out of
+    scope; reject is the right answer.
+- [x] Add region options to the edit menu under a contextual
     section that appears only when one or more regions are selected
-- [ ] Z-index controls for regions (layering in ardour)
-- [ ] Automation needs to support *all* automation including plugin
-    controls. Suggest making a dedicated UI that opens in a modal
-    for editing automation with an automation channel picker (allow
-    picking multiple automation channels at once, drawing the same
-    automation for each type)
+  - The Edit dropdown grows a "Region" / "N regions" header + the
+    same action list the right-click menu surfaces (Quantize, Crop
+    to selection, Snap fades to overlap, Clear fades, Reset gain,
+    Glue, Reverse audio, Strip silence, Pitch shift). Driven by
+    `_renderEditRegionSection` in [main-menu.js] which delegates to
+    the timeline's `_regionEditMenuActions()` so behavior stays one
+    source of truth.
+- [x] Z-index controls for regions (layering)
+  - `Region.layer` + `RegionPatch.layer` on the schema; `_renderLane`
+    sorts by `(layer, dom-tiebreaker)` AND uses Lit's `repeat()`
+    keyed by `r.id` so the DOM nodes physically reorder when the
+    sort changes (positional reuse silently broke the first cut —
+    the sort changed but Lit reused nodes in place, so layer ops
+    were a visual no-op). Combined with per-region
+    `isolation: isolate` (from the earlier overlap-flicker fix),
+    changing layer now actually changes what the user sees in an
+    overlap. Menu entries: **Bring to front / Bring forward / Send
+    backward / Send to back**, each emitting one
+    `update_region { layer }` per region in an undo group.
+    (`_adjustSelectedRegionLayers`.) Stub round-trips today; Ardour
+    `set_layer` shim integration is a follow-up.
+- [x] Cross-track region drag
+  - `RegionPatch.track_id` on the schema; stub honors the move
+    between bucket-per-track storage via `RegionStore::move_to_track`
+    and validates kind compatibility (audio↔midi rejected
+    server-side). The drag's `move` handler reads the lane under the
+    cursor on every pointermove (`_trackAtClientY`) and adds a
+    `cross-track-pending` outline + glow when the destination
+    differs and the kind matches; on pointer-up the commit patch
+    includes `track_id` so the backend relocates. `RegionRemoved`
+    fires for the source track so every client clears the old lane
+    cleanly. Ardour shim integration is a follow-up.
+- [x] Crossfade visibility in the overlap zone
+  - Crossfade curves bumped to 2 px stroke with a dark drop-shadow
+    halo so they read against any waveform. The overlap rectangle
+    fills with a diagonal-hatch pattern (white when fades cover the
+    whole overlap = clean crossfade; amber when there's a gap =
+    call-to-action to "Snap fades to overlap"). A floating badge
+    above the overlap names both regions and the overlap length in
+    ms so the user can sanity-check the math at a glance.
+- [x] Automation reimagined — overlay on the timeline + dedicated modal
+  - **Overlay** ([web/ui-full/components/timeline-view.js]
+    `_renderAutomationOverlay`): each track's "A" lane-head button
+    toggles an SVG of color-coded polylines drawn **on top of** the
+    region row, one per active automation lane. Color is fixed per
+    well-known control (Gain=orange, Pan=teal, Mute=amber, Solo=red)
+    and hashed from `control_id` for everything else. Hover surfaces
+    a `Track → Control` tooltip; click a line opens the modal
+    focused on that lane. Alpha + stroke width come from the Viz
+    panel (`automationOverlayAlpha`, `automationOverlayWidth`) so
+    users can dial it into the background without losing it. The
+    legacy inline lane stack under the regions is gone.
+  - **Modal** ([web/ui-full/components/automation-modal.js],
+    `openAutomationModal`): full-window editor opened by
+    double-clicking the "A" button or by clicking a polyline. Top
+    bar has a track switcher dropdown so the user can move between
+    tracks without closing, a **zoom slider** that writes back to
+    the timeline's `_zoom` (and a `SYNC` chip), and a filter input.
+    Pan/zoom is **always synced with the timeline** via a low-cost
+    rAF watcher — panning in the modal pans the timeline and vice
+    versa. A shared ruler across the top of the editors panel shows
+    seconds + adaptive minor ticks at whatever the synced zoom is.
+  - **Legend** is a tree of expandable sections — *Core* (Gain /
+    Pan / Mute / Solo) at the top, then one section per plugin on
+    the track. Each section header has a chevron + a **master
+    checkbox** with proper indeterminate state (set imperatively in
+    Lit's `updated()` since the attribute isn't declarative). Click
+    master → check/uncheck every enabled child. Section bodies
+    collapse/expand on click; state persists per track in
+    localStorage. Plugin-param rows render disabled with a "soon"
+    tag until the shim ships them.
+  - **Plugin parameter automation is real** (third time it was
+    asked for, finally landed). The stub seeds an `AutomationLane`
+    per Parameter on every track — core (gain/pan/mute/solo) AND
+    every plugin param ([crates/foyer-backend-stub/src/fixtures.rs]
+    `empty_lane`). The wire commands (`add_automation_point`,
+    `set_automation_mode`, `update_automation_point`,
+    `delete_automation_point`, `replace_automation_lane`) now
+    broadcast `Event::TrackUpdated` after every mutation
+    (`broadcast_track_for_lane`) so every connected client sees the
+    change land — previously the stub mutated silently. The modal
+    legend drops the "soon" / disabled treatment; plugin params
+    show their live point counts in the legend like core lanes do.
+    Default-visible set stays at core only (a track has 22+ plugin
+    params; defaulting them all visible would bury the user); they
+    opt in via the legend checkbox.
+  - **Waveform behind each editor card** — `foyer-waveform-gl` per
+    region rendered at the same x scale as the lane SVG, dimmed to
+    35% so the automation polyline stays readable on top. Peaks
+    come from the active timeline-view's `WaveformCache` via
+    deep-find; the existing rAF sync tick pushes fresh peaks on
+    every frame. Lets users align automation moves to audible
+    events without flipping back to the timeline.
+  - **Vertically resizable editor cards** — native CSS
+    `resize: vertical` on each `.card-body`, default 120 px / max
+    600 px / min 60 px. The lane's internal coordinate math reads
+    `host.offsetHeight` (with a `ResizeObserver` to re-render on
+    drag) instead of a hardcoded 48 px, so taller cards give finer
+    dB-per-pixel control on continuous params (the original "gain
+    snaps almost always" complaint — it was just 1.65 dB/px on a
+    -60..+6 range at the default 48 px lane height).
+  - **Selection UX**: Shift+click on a point toggles it in the
+    multi-selection (additive to the existing Cmd/Ctrl marquee).
+    A `?` chip in each lane header surfaces all the gestures
+    (free-draw, marquee, shift-click, alt-click) on hover.
+  - **Per-lane editor** ([automation-lane.js]) reworked from
+    Ardour's clunky model:
+    · **Per-region endpoints**: when a control transitions from
+      `off` → any active mode and points is empty, the lane auto-
+      seeds a point at every region edge (start + end of each
+      region on the track) at the current value, wrapped in one
+      undo group. Endpoints render as squares with a `▶` / `■`
+      glyph so the user can grab them directly to adjust the
+      value at t=region-start without faking it with a new point.
+    · **Discrete / state-machine inference**: `Parameter.kind` of
+      `trigger` / `enum` / `discrete` (plus the muted/solo fallback)
+      flips the curve to **stepped rendering** (horizontal-then-
+      vertical at each transition) and snaps drag values to the
+      nearest allowed option. A `N-state` chip in the lane header
+      makes the discrete behavior visible at a glance.
+    · **Alt+click on a point** → delete it (faster than right-click
+      for mouse-only workflows).
+    · **Click+drag on empty grid** → **pen mode**: a free-draw
+      stroke that samples points at ~6 px intervals and commits
+      them as a single `replace_automation_lane` (one undo entry).
+    · **Cmd/Ctrl+click+drag** → **marquee select**: rubber-band
+      picks every point inside; drag any selected point to move
+      the whole set; Backspace / Delete clears the selection in
+      one undo group; Escape cancels.
+    · Region list + Parameter struct are passed down from the
+      modal so the lane has everything it needs to render
+      endpoints + snap to states without round-tripping the
+      session snapshot.
 
 
 ## Ingress drain — port off MasterTap dependency

@@ -2528,11 +2528,17 @@ async fn dispatch_command(
             source_region_id,
             at_samples,
             length_samples,
+            target_track_id,
         } => {
             if let Err(e) = state
                 .backend()
                 .await
-                .duplicate_region(source_region_id, at_samples, length_samples)
+                .duplicate_region(
+                    source_region_id,
+                    at_samples,
+                    length_samples,
+                    target_track_id,
+                )
                 .await
             {
                 broadcast_event(
@@ -2550,6 +2556,7 @@ async fn dispatch_command(
             source_offset_samples,
             length_samples,
             at_samples,
+            target_track_id,
         } => {
             if let Err(e) = state
                 .backend()
@@ -2559,6 +2566,7 @@ async fn dispatch_command(
                     source_offset_samples,
                     length_samples,
                     at_samples,
+                    target_track_id,
                 )
                 .await
             {
