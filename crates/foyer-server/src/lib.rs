@@ -11,6 +11,57 @@
 
 #![forbid(unsafe_code)]
 
+mod agent_render;
+
+/// Public re-export so the CLI can fire the chromium boot probe.
+/// Keeps the rest of `agent_render` private (its `pub fn`s take
+/// `Weak<AppState>`, an internal-only type).
+pub fn probe_headless_chromium_at_boot() {
+    agent_render::probe_headless_chromium_at_boot();
+}
+
+/// Print a copy-paste `.mcp.json` snippet pointing at this server's
+/// `/mcp` endpoint. Called at boot RIGHT AFTER the listener binds so
+/// the user sees it inline with the "listening on …" line and can
+/// drop it into Claude Code / Codex / any MCP client without having
+/// to guess the URL.
+///
+/// No-op when MCP isn't attached (eg. tests that build a `Server`
+/// without `attach_agent`).
+async fn log_mcp_connection_snippet(
+    state: &Arc<AppState>,
+    listen: std::net::SocketAddr,
+    tls: bool,
+) {
+    if state.mcp.read().await.is_none() {
+        return;
+    }
+    let scheme = if tls { "https" } else { "http" };
+    // Bind addresses are often 0.0.0.0 / [::]; print loopback in the
+    // snippet so an MCP client running on the same host connects
+    // without guessing the public IP. The port comes from the actual
+    // bind so a non-default --listen propagates.
+    let port = listen.port();
+    let url = format!("{scheme}://127.0.0.1:{port}/mcp");
+    let snippet = serde_json::json!({
+        "mcpServers": {
+            "foyer-studio": {
+                "type": "http",
+                "url": url,
+            }
+        }
+    });
+    let pretty = serde_json::to_string_pretty(&snippet).unwrap_or_default();
+    tracing::info!(
+        "\n\n\
+         ╔══════════════════════════════════════════════════════════╗\n\
+         ║  MCP READY — paste this into Claude Code / Codex          ║\n\
+         ║  (~/.mcp.json or the client's MCP config)                 ║\n\
+         ╚══════════════════════════════════════════════════════════╝\n\
+         {pretty}\n"
+    );
+}
+mod agent_ws;
 mod archive;
 mod audio;
 mod audio_opus;
@@ -38,6 +89,7 @@ mod session_scrub;
 mod sessions;
 mod tunnel;
 mod tunnel_provider;
+mod webllm_bridge;
 pub(crate) mod ws;
 
 pub use backend_profile::{ArdourProfile, BackendProfile, BackendProfileRegistry, StubProfile};
@@ -535,6 +587,29 @@ pub(crate) struct AppState {
     /// here: bump the per-region version on arrival, defer the regen,
     /// and skip outright when the layout matches the last one rendered.
     pub(crate) sequencer_coalescer: Arc<Mutex<HashMap<EntityId, SequencerCoalesceState>>>,
+
+    /// AI agent runtime. `None` until `attach_agent` is called by
+    /// `foyer-cli` at startup; absent in tests that don't need the
+    /// agent surface. The browser FAB + MCP transports both read
+    /// through this slot.
+    pub(crate) agent: RwLock<Option<std::sync::Arc<foyer_agent::AgentRuntime>>>,
+
+    /// rmcp Model Context Protocol bridge. Wraps the same agent tool
+    /// registry that the in-process agent uses, exposing it over
+    /// `/mcp` (streamable HTTP) to external clients like Claude Code
+    /// and Codex. `None` in builds that don't link foyer-mcp or in
+    /// tests that don't need it.
+    pub(crate) mcp: RwLock<Option<foyer_mcp::FoyerMcpServer>>,
+
+    /// WebLLM bridge — accepts `/llm/v1/*` HTTP traffic and relays
+    /// it to whichever browser tab is currently registered via
+    /// `/ws/webllm`. The agent harness points its config here when
+    /// the user picks WebLLM as the LLM transport.
+    pub(crate) webllm_bridge: std::sync::Arc<webllm_bridge::WebLlmBridge>,
+
+    /// FE-attached renderer for the `visualize` agent tool.
+    /// `None` until `attach_agent()` runs.
+    pub(crate) fe_renderer: RwLock<Option<std::sync::Arc<agent_render::FeRendererImpl>>>,
 }
 
 /// Tracking state for the sequencer SetSequencerLayout coalescer.
@@ -616,6 +691,26 @@ impl AppState {
         self.backend.read().await.clone()
     }
 
+    /// Replace `state.backend` with `next` AND re-point the agent
+    /// runtime at the new Arc. The agent holds a `Weak<dyn Backend>`
+    /// captured at attach time; dropping the previous Arc here (via
+    /// `RwLock::write` overwrite) would otherwise leave that Weak
+    /// dangling and every agent tool call would return `BackendGone`.
+    /// Call this from every site that swaps the active backend.
+    pub(crate) async fn install_active_backend(&self, next: Arc<dyn Backend>) {
+        *self.backend.write().await = next.clone();
+        if let Some(agent) = self.agent.read().await.clone() {
+            agent.attach_backend(std::sync::Arc::downgrade(&next)).await;
+        }
+        // Keep the MCP bridge tracking the same backend the in-process
+        // agent points at — external clients (Claude Code, Codex)
+        // would otherwise see "backend not attached" after a session
+        // swap until the next mcp restart.
+        if let Some(mcp) = self.mcp.read().await.clone() {
+            mcp.attach_backend(std::sync::Arc::downgrade(&next)).await;
+        }
+    }
+
     /// Same key set as [`Event::ClientGreeting`]: backend [`Backend::features`]
     /// merged with server-only flags (e.g. `native_plugin_gui`).
     pub(crate) async fn merged_feature_map(&self) -> std::collections::BTreeMap<String, bool> {
@@ -645,7 +740,7 @@ impl AppState {
         session_name: Option<String>,
         process: Option<Box<dyn ProcessHandle>>,
     ) {
-        *self.backend.write().await = next.clone();
+        self.install_active_backend(next.clone()).await;
         *self.active_backend_id.write().await = Some(backend_id.clone());
         *self.cached_snapshot.write().await = None;
         // Drop the sequencer-regen coalescer's per-region cache.
@@ -832,8 +927,81 @@ impl Server {
             xpra_available: probe_xpra_available(),
             login_gate: tokio::sync::Mutex::new(HashMap::new()),
             sequencer_coalescer: Arc::new(Mutex::new(HashMap::new())),
+            agent: RwLock::new(None),
+            mcp: RwLock::new(None),
+            webllm_bridge: std::sync::Arc::new(webllm_bridge::WebLlmBridge::new()),
+            fe_renderer: RwLock::new(None),
         });
         Self { state }
+    }
+
+    /// Attach the agent runtime. Called by foyer-cli after the
+    /// AppState is constructed so the agent's filesystem store has a
+    /// chance to fail gracefully without blocking the rest of the
+    /// server from coming up.
+    pub async fn attach_agent(
+        &self,
+    ) -> Result<std::sync::Arc<foyer_agent::AgentRuntime>, foyer_agent::store::StoreError> {
+        let runtime = foyer_agent::AgentRuntime::new().await?;
+        let backend = self.state.backend.read().await.clone();
+        runtime
+            .attach_backend(std::sync::Arc::downgrade(&backend))
+            .await;
+        *self.state.agent.write().await = Some(runtime.clone());
+        // Bring up the MCP bridge alongside the runtime. Same tools,
+        // same backend Weak — external clients (Claude Code / Codex)
+        // see what the in-process agent sees.
+        let mcp = foyer_mcp::FoyerMcpServer::new(runtime.clone());
+        mcp.attach_backend(std::sync::Arc::downgrade(&backend))
+            .await;
+        *self.state.mcp.write().await = Some(mcp);
+        // Renderer installation is deferred to `run()` — see
+        // `install_agent_renderers` below. Each renderer holds a
+        // `Weak<AppState>`, and `Arc::get_mut` (which `run()` uses
+        // to install the jail) requires BOTH zero other strong refs
+        // AND zero weak refs. Creating renderers here would leak
+        // Weaks into the AppState refcount and crash boot.
+        // NOTE: we deliberately do NOT spawn the forwarder here.
+        // `run()` calls `Arc::get_mut(&mut self.state)` to install
+        // the jail, which requires a strong refcount of 1. Any task
+        // we spawn before `run()` could be scheduled in between and
+        // briefly hold an `Arc::upgrade()`, causing the get_mut to
+        // panic. `run()` spawns the forwarder itself after the
+        // get_mut succeeds.
+        Ok(runtime)
+    }
+
+    /// Re-attach the (possibly-swapped) backend reference into the
+    /// agent runtime. Called by the backend-swap path.
+    pub async fn attach_agent_backend(&self) {
+        let agent = match self.state.agent.read().await.clone() {
+            Some(a) => a,
+            None => return,
+        };
+        let backend = self.state.backend.read().await.clone();
+        agent
+            .attach_backend(std::sync::Arc::downgrade(&backend))
+            .await;
+    }
+
+    /// Install the visualize renderers onto the live agent runtime.
+    /// Called from `run()` AFTER the `Arc::get_mut` jail install
+    /// because both renderers hold `Weak<AppState>` references and
+    /// any outstanding Weak would defeat the get_mut.
+    async fn install_agent_renderers(&self) {
+        let Some(agent) = self.state.agent.read().await.clone() else {
+            return;
+        };
+        let fe_renderer = agent_render::FeRendererImpl::new(std::sync::Arc::downgrade(&self.state));
+        *self.state.fe_renderer.write().await = Some(fe_renderer.clone());
+        let headless_renderer =
+            agent_render::HeadlessChromeRendererImpl::new(std::sync::Arc::downgrade(&self.state));
+        agent_render::attach_renderers(
+            &agent,
+            fe_renderer as std::sync::Arc<dyn foyer_agent::tools::FeRenderer>,
+            headless_renderer as std::sync::Arc<dyn foyer_agent::tools::HeadlessRenderer>,
+        )
+        .await;
     }
 
     /// Load tunnel configuration from the parsed config.yaml so WS handlers
@@ -921,6 +1089,11 @@ impl Server {
             Arc::get_mut(&mut self.state)
                 .expect("AppState not yet shared")
                 .jail = Some(jail);
+            // Now safe to spawn long-lived background tasks AND
+            // install renderers — `Arc::get_mut` requires zero
+            // weak refs too, and the renderers each hold one.
+            agent_ws::spawn_forwarder(std::sync::Arc::downgrade(&self.state));
+            self.install_agent_renderers().await;
             // Canonicalize the jail root so SessionRegistry can strip
             // it from UI-facing paths. We use the canonical form
             // because `swap_backend` also canonicalizes the project
@@ -929,6 +1102,12 @@ impl Server {
             let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
             *self.state.sessions.jail_root.write().await = Some(canonical);
             tracing::info!("file jail rooted at {}", root.display());
+        } else {
+            // No jail to install means no get_mut; spawn the agent
+            // forwarder + install renderers here so they land
+            // regardless of jail config.
+            agent_ws::spawn_forwarder(std::sync::Arc::downgrade(&self.state));
+            self.install_agent_renderers().await;
         }
 
         // Kick off the initial backend→broadcast pump and stash its
@@ -994,12 +1173,14 @@ impl Server {
                         )))
                     })?;
             tracing::info!("foyer-server listening on https://{}", config.listen);
+            log_mcp_connection_snippet(&self.state, config.listen, true).await;
             axum_server::bind_rustls(config.listen, tls_config)
                 .serve(service)
                 .await?;
         } else {
             let listener = tokio::net::TcpListener::bind(config.listen).await?;
             tracing::info!("foyer-server listening on http://{}", config.listen);
+            log_mcp_connection_snippet(&self.state, config.listen, false).await;
             axum::serve(listener, service).await?;
         }
         Ok(())
@@ -1031,6 +1212,18 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
         // path construction is idiosyncratic across versions.
         .route("/ws/plugin-gui", get(plugin_gui_ws::upgrade))
         .route("/ws/plugin-gui/", get(plugin_gui_ws::upgrade))
+        // WebLLM bridge — browser registers itself as an OpenAI-
+        // compatible inference target. See DECISIONS.md 49.
+        .route("/ws/webllm", get(webllm_bridge::ws_upgrade))
+        .route(
+            "/llm/v1/chat/completions",
+            axum::routing::post(webllm_bridge::chat_completions),
+        )
+        .route("/llm/v1/models", get(webllm_bridge::list_models))
+        .route(
+            "/llm/v1/responses",
+            axum::routing::post(webllm_bridge::responses_unsupported),
+        )
         .route("/files/*path", get(files::serve_file))
         // Project archive surface: upload accepts a zip or tar.gz body
         // and extracts under the jail; export tar.gz's a project
@@ -1084,8 +1277,16 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
 
     let web_root = state.web_root.read().await.clone();
     let overlays = state.web_overlays.read().await.clone();
+    // Mount the MCP bridge under `/mcp` if it's been attached
+    // (`attach_agent` brings it up). The mcp router carries its own
+    // axum state (the FoyerMcpServer), so we nest BEFORE
+    // `with_state(state)` to avoid a state-type collision.
+    let mcp_route = state.mcp.read().await.clone();
+    let mut router = router.with_state(state);
+    if let Some(mcp) = mcp_route {
+        router = router.nest("/mcp", foyer_mcp::mcp_router(mcp));
+    }
     let mut router = router
-        .with_state(state)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
 

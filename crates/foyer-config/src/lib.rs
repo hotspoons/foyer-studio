@@ -80,6 +80,44 @@ pub struct Config {
     /// run mode picker so subsequent launches skip the prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop: Option<DesktopConfig>,
+    /// AI agent harness server-side settings. The user-facing
+    /// model / key / autonomy live on the live runtime (and the
+    /// settings modal); only deployment-level knobs land here.
+    #[serde(default)]
+    pub agent: AgentConfig,
+}
+
+/// Deployment-level agent settings, set in `config.yaml`. None of
+/// these are user-facing — the in-app settings modal handles the
+/// per-session LLM transport (endpoint / key / model) and autonomy
+/// mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    /// When `true`, the `visualize` tool prefers the headless
+    /// chromium renderer over an attached browser tab. **Defaults to
+    /// `true`** — the FE-attached path can only render views that are
+    /// currently mounted in the user's browser (mixer, midi-roll,
+    /// etc. fail when those panels aren't open), whereas the headless
+    /// renderer loads each view fresh into its own offscreen page
+    /// and always succeeds for every supported subcommand. Set to
+    /// `false` if you specifically want to reuse the live tab's cached
+    /// peaks and have accepted the mount-state dependency. Requires
+    /// the `headless-render` cargo feature (default on) and chromium
+    /// on PATH (`apt install chromium` on Debian/Ubuntu).
+    #[serde(default = "default_prefer_headless_render")]
+    pub prefer_headless_render: bool,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            prefer_headless_render: default_prefer_headless_render(),
+        }
+    }
+}
+
+fn default_prefer_headless_render() -> bool {
+    true
 }
 
 /// Behaviour of the `foyer-desktop` native shell.
@@ -444,6 +482,7 @@ pub fn seed_default() -> Config {
         backends,
         docker: None,
         desktop: None,
+        agent: AgentConfig::default(),
     }
 }
 

@@ -16,10 +16,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
   // WebLLM
   webllmModel: "Llama-3.1-8B-Instruct-q4f32_1-MLC",
   webllmContextSize: 16384,
-  // External
-  externalEndpoint: "https://api.anthropic.com/v1",
+  // External — empty by default; user supplies endpoint + key for
+  // whichever provider they're pointing at (OpenAI, Anthropic, an
+  // in-house gateway, etc.).
+  externalEndpoint: "",
   externalApiKey: "",
-  externalModel: "claude-sonnet-4-6",
+  externalModel: "",
 });
 
 /// Representative WebLLM catalog. Real WebLLM has dozens; these are the ones

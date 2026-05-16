@@ -843,6 +843,8 @@ export class TileLeaf extends LitElement {
       .trackId=${props.trackId || ""}
       .regionId=${props.regionId || ""}
       .pluginId=${props.pluginId || ""}
+      .controlId=${props.controlId || ""}
+      .focusControlId=${props.focusControlId || props.controlId || ""}
       .initialTab=${props.initialTab || ""}
     ></${tag}>`;
   }

@@ -1,0 +1,32 @@
+[package]
+name = "foyer-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+foyer-agent  = { workspace = true }
+foyer-backend = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+tracing     = { workspace = true }
+anyhow      = { workspace = true }
+
+# Official Rust MCP SDK. The hand-rolled JSON-RPC impl this crate
+# used to ship was replaced wholesale — rmcp gives us protocol
+# compliance, resumable sessions, cancellation / progress
+# notifications, and forward-compat with new MCP spec revisions.
+# `transport-streamable-http-server` mounts as a tower::Service we
+# nest into the existing axum router at /mcp; `transport-io` is the
+# stdio transport for `foyer mcp` subprocess invocations.
+rmcp = { version = "1.7.0", features = ["server", "transport-streamable-http-server", "transport-io"] }
+axum = { version = "0.7" }

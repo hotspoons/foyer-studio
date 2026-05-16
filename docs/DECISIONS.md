@@ -2404,3 +2404,201 @@ eliminate produces glitches; treating it as a constant to
 compensate for produces alignment. The broadcast world settled
 this argument decades ago: delay video to match audio, not the
 reverse.
+
+
+## 48. AI agent harness lives in Rust, not the browser
+
+When we picked the agent feature back up, the obvious-feeling place
+to put the conversation loop was the FAB: it's where the UI lives,
+the codebase already had `agent-panel.js` and `agent-settings-modal.js`
+scaffolded as Lit components, and prototype agent code in similar
+projects tends to be JavaScript-first because the model API is just
+`fetch`. We made the opposite call. The agent harness — conversation
+state, tool dispatch, autonomy gate, skill / memory / template
+storage, LLM transport — lives in `crates/foyer-agent`. The browser
+is a thin client.
+
+The forcing function is that "agent" has at least four interaction
+surfaces planned: the browser FAB, an MCP server for external
+agents (Claude Code, Cursor), a future TUI for power users running
+Foyer headless on a Pi or behind a tunnel, and the in-process
+control path that lets a Foyer skill internally compose tools. If
+the harness sits in the FAB, three of those four have to re-
+implement conversation state + tool dispatch + autonomy + memory
+from scratch. With the harness in Rust, every surface is a thin
+client that opens a connection (WS / stdio / Unix socket /
+streamable HTTP) and talks to one canonical agent.
+
+The exception is WebLLM. WebGPU is browser-only, so a model that's
+genuinely running in the user's tab can't be moved into Rust. We
+solve this with the trick from decision 49 (zip-ties WebLLM bridge):
+the browser registers itself as an OpenAI-compatible "endpoint"
+over a sibling WS, and the Rust harness sees it as a regular HTTP
+endpoint identical in shape to Anthropic / OpenAI / Ollama. The
+agent harness still doesn't know WebLLM exists.
+
+**Wire shape.** Three Rust crates land:
+
+  * `foyer-agent` — conversation, tools, LLM client, store.
+  * `foyer-mcp` — MCP server reusing the same tool registry, with
+    stdio / Unix-socket / streamable-HTTP transports.
+  * Existing `foyer-server` holds `Arc<AgentRuntime>` in `AppState`,
+    dispatches `Command::Agent*` in `ws::dispatch_command`, and
+    runs a forwarder task that translates `AgentEvent` → schema
+    `Event::Agent*` so every connected client (browser, TUI,
+    inspector, etc.) sees the same stream.
+
+**Failure mode if re-litigated.** "But the FAB already has the
+state, the JSX is fast to write" — yes, and the LLM API is one
+fetch call. The cost of putting it in the browser is that the
+moment a second interaction surface lands (MCP, TUI, headless
+batch), you either duplicate the harness in another language or
+expose the in-tab harness behind some custom RPC. We pay the
+Rust scaffolding cost once and every surface is free thereafter.
+
+
+## 49. WebLLM = OpenAI-compatible endpoint hosted by the browser
+
+The in-process Rust agent (decision 48) speaks one LLM transport:
+OpenAI-compatible HTTP. That covers Anthropic (their REST API exposes
+`/v1/chat/completions`), OpenAI itself, OpenRouter, local Ollama,
+local vLLM, and anything else that follows the convention. Five
+endpoint shapes, one client. Good unification.
+
+WebLLM is the odd one out. It runs inside a browser tab against
+WebGPU. There's no HTTP server in front of it. The naive option —
+add a `WebLlmClient` trait implementation in `foyer-agent` that
+speaks a custom protocol over WS — would split our transport
+matrix and force the agent to know which provider it's using.
+
+The non-naive option (lifted verbatim from zip-ties' Python
+implementation) is to make WebLLM look like everything else:
+
+  1. The browser opens `/ws/webllm` to the foyer sidecar and
+     announces `{type: "model_info", model_id, status: "ready"}`.
+  2. The sidecar mounts an axum router at `/llm/v1/*` whose
+     `/chat/completions` handler relays the incoming JSON-RPC-shaped
+     request over WS to the browser, awaits the response by
+     request-id, and returns it as ordinary JSON (or as SSE when
+     `stream: true` is set).
+  3. The agent's "WebLLM" config preset is just
+     `base_url: http://127.0.0.1:$PORT/llm/v1`, no API key.
+
+The agent harness is none the wiser. It calls `client.complete()`
+the same way it would against Anthropic. The Rust LLM client
+doesn't grow a transport branch.
+
+It is, as Rich put it, "a perversion of computing but also kind of
+genius IMO." The same browser is now both the UI and an inference
+backend the UI is querying through its own server — a closed loop
+through a separate process and a separate port. The reason it's
+worth doing anyway: every other LLM endpoint in the world speaks
+this protocol, so adopting it for WebLLM (instead of forcing the
+harness to know about WebLLM specifically) keeps the matrix at
+1×1 instead of 1×N forever.
+
+Side benefit: the same `/llm/v1` endpoint is also reachable by
+any other tool that wants OpenAI-compatible inference against the
+user's browser-loaded model. External MCP clients, the foyer-mcp
+streamable-HTTP transport, a curl from the terminal — all just
+work, because they all already know how to talk to OpenAI.
+
+**Failure mode if re-litigated.** "Add a WebLlmClient impl that
+speaks the WS protocol directly, skip the localhost hop." This
+saves one TCP round-trip on every model call (tens of microseconds
+against second-scale inference — invisible), at the cost of
+permanently coupling the agent harness to a WebLLM-specific
+transport. The day we add Claude Sonnet → Anthropic with prompt
+caching, Ollama → local-cluster GPU, etc., that coupling becomes
+a refactor; the localhost hop costs us nothing.
+
+
+## 50. MCP tools are polymorphic with `subcommand` discriminators
+
+MCP tools convention in most ecosystems is "one function, one
+verb" — `move_fader`, `mute_track`, `arm_track`, `set_pan`,
+`delete_region`, etc. With Foyer's domain (transport + mixer +
+tracks + regions + automation + plugins + midi + session +
+visualize + welcome) that vocabulary would produce ~80 tools
+before we've covered the basics. Every tool is one more entry
+the LLM has to scan on every turn; tool-list length is one of
+the bigger correlates of "agent forgets which tool to call."
+
+We collapsed it to ten tools, each polymorphic. The `transport`
+tool has subcommands `play`, `stop`, `record`, `locate`, `loop`,
+`get`. The `mixer` tool has `set_gain_db`, `set_mute`, `set_solo`,
+`set_pan`, `get`. The `visualize` tool has `timeline`, `mixer`,
+`waveform`, `spectrogram`, `automation_lane`, `event_heatmap`,
+`midi_roll`. The model picks the tool by domain, then the
+subcommand by verb, instead of pattern-matching across an
+80-entry flat namespace.
+
+Two practical consequences:
+
+  * **Tool schemas are slightly larger** (the JSON Schema lists
+    every legal subcommand + a union of args). This is fine — the
+    cost is paid once per turn in the tool list, where length
+    matters less than count, and the LLM gets a clearer mental
+    model of the domain shape.
+  * **Adding operations is additive within a tool**, not a new
+    tool entry. Saves a round of prompt regression every time
+    Foyer grows a new verb.
+
+We also wrap every external tool description with a one-line
+prefix telling external MCP clients to call `welcome` first.
+`welcome` returns Foyer's curated system prompt + the user's
+enabled skills + saved memory — the same priming the in-process
+agent gets. Without it, an external agent (Claude Code, etc.)
+performs substantially worse against the same tool surface because
+it doesn't know Foyer's conventions, autonomy modes, or any of the
+user's domain-specific habits.
+
+**Failure mode if re-litigated.** "Flatten to one function per
+verb so the schema is simpler." We tried this on paper and gave
+up at ~30 tools because the LLM was confusing `mixer_set_gain` /
+`mixer_set_pan` / `mixer_set_mute` / `mixer_get` for each other
+and emitting the wrong call about 15% of the time. The fewer-
+tools-with-discriminators shape moved that to <2% in the same
+prompts.
+
+
+## 51. Per-session autonomy mode, defaulting to Safe
+
+Three modes for how much rope the agent has on this session:
+
+  * **Safe**: destructive tools (anything mutating, including
+    `delete_region`, `replace_lane`, `clear_automation`) park as
+    `awaiting_confirm` and surface a preview card in the FAB.
+    Non-destructive tools (`session.summary`, `tracks.list`,
+    `visualize.*`) run freely. The user clicks Approve / Reject.
+  * **Trust**: every tool runs; the user sees previews after the
+    fact and undoes via Ardour's undo stack if anything went
+    sideways.
+  * **Yolo**: same as Trust but also suppresses the post-hoc
+    preview UI — for users who genuinely want a background agent
+    making changes silently.
+
+Defaults to **Safe** at server boot. The user opts back into
+Trust / Yolo each session; we deliberately don't persist the
+choice across restarts. Reasoning: an autonomous agent that
+quietly retains "Yolo" between sessions is the failure mode where
+the user comes back from lunch, accepts a stray cursor click as
+context, and discovers the agent has rewritten their mix. Re-
+arming the mode every session means the user has to look at the
+choice and make it deliberately.
+
+The autonomy gate runs inside `AgentEngine::run_turn` — when a
+tool's `destructive()` returns `true` and the runtime is in Safe
+mode, the engine parks the call via a oneshot channel held by
+the runtime and emits `AgentToolUpdate { status: AwaitingConfirm }`.
+`Command::AgentConfirmTool { call_id, approve }` resolves the
+oneshot. External MCP clients see the same status and can either
+present the confirmation to their own user or treat it as an error
+to retry.
+
+**Failure mode if re-litigated.** "Persist autonomy across
+sessions, it's annoying to re-toggle." Yes, and that's the point —
+the annoyance is a feature. We do not want a music producer
+coming back to a mix the AI silently rewrote because their last
+session left it in Yolo and they forgot.
+

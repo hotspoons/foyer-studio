@@ -80,7 +80,8 @@ export class FoyerChatPanel extends LitElement {
   exitSlideMode() {
     if (!this._slideMode) return;
     this._slideMode = false;
-    this._open = false;
+    // `_open` left as-is so the caller decides (tear-out wants
+    // open, X-close wants closed).
     this.removeAttribute("slot");
     if (this.parentElement && this.parentElement !== document.body) {
       document.body.appendChild(this);
@@ -157,37 +158,43 @@ export class FoyerChatPanel extends LitElement {
     }
 
     header {
-      display: flex; align-items: center; gap: 8px;
-      padding: 10px 12px;
+      display: flex; align-items: center; gap: 4px;
+      padding: 4px 6px;
       border-bottom: 1px solid var(--color-border);
       cursor: grab;
-      background: linear-gradient(180deg, var(--color-surface-muted), var(--color-surface-elevated));
+      background: var(--color-surface-elevated);
+      font-family: var(--font-sans);
+      font-size: 10px;
+      color: var(--color-text-muted);
     }
     header.dragging { cursor: grabbing; }
     header .title {
-      font-family: var(--font-sans);
+      font-size: 10px;
       font-weight: 600;
-      font-size: 12px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      background: linear-gradient(135deg, var(--color-accent-3), var(--color-accent-2));
-      -webkit-background-clip: text;
-      background-clip: text;
-      color: transparent;
+      color: var(--color-text);
     }
     header .spacer { flex: 1; }
     header button {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
       background: transparent;
       color: var(--color-text-muted);
       border: 1px solid transparent;
       border-radius: var(--radius-sm);
-      padding: 3px 6px;
+      padding: 2px 6px;
       font: inherit;
-      font-size: 11px;
+      font-size: 10px;
       cursor: pointer;
-      transition: all 0.15s ease;
+      transition: all 0.12s ease;
     }
-    header button:hover { color: var(--color-text); border-color: var(--color-border); }
+    header button:hover {
+      color: var(--color-text);
+      border-color: var(--color-border);
+      background: var(--color-surface);
+    }
     header .ptt-banner {
       display: inline-flex; align-items: center; gap: 4px;
       padding: 2px 8px;
@@ -428,7 +435,7 @@ export class FoyerChatPanel extends LitElement {
       this.storageKey,
       {
         label: "Chat",
-        icon: "chat-bubble-left-right",
+        icon: "users",
         accent: "accent-2",
         expandsRail: true,
         dockWidth: 400,
@@ -465,8 +472,33 @@ export class FoyerChatPanel extends LitElement {
   }
 
   openFromDock(top) { this._dockIconTop = top; this._open = true; this._onOpen(); this._persist(); this.requestUpdate(); }
-  closeFromDock() { this._open = false; this._persist(); this.requestUpdate(); }
+  closeFromDock() {
+    this._open = false;
+    this._persist();
+    this.requestUpdate();
+    if (this._slideMode) {
+      window.dispatchEvent(new CustomEvent("foyer:fab-slide-close", {
+        detail: { id: this.storageKey },
+      }));
+    }
+  }
   toggleFromDock(t) { if (this._open) this.closeFromDock(); else this.openFromDock(t); }
+
+  /** Tear-out icon handler: hand off to the right-dock so it can
+   *  stagger our position against other floating FABs and open our
+   *  panel atomically. */
+  _tearOutToFloating() {
+    const rd = window.__foyer?.rightDock;
+    if (rd && typeof rd.tearFabToFloating === "function") {
+      rd.tearFabToFloating(this.storageKey);
+      return;
+    }
+    if (this._slideMode) this.exitSlideMode();
+    this._open = true;
+    this._persist();
+    this.requestUpdate();
+    window.__foyer?.layout?.undockFab?.(this.storageKey);
+  }
 
   dockPanelContent() { return this._renderPanelBody({ compact: true }); }
   /** Chat's compact body brings its own header with action buttons,
@@ -731,7 +763,7 @@ export class FoyerChatPanel extends LitElement {
               aria-label=${this._open ? "Close chat" : "Open chat"}
               title=${someoneSpeaking ? `${speaker.label} is speaking` : (this._open ? "Close chat" : "Open chat")}>
         ${someoneSpeaking ? html`<span class="speaker-ring"></span>` : nothing}
-        ${icon("chat-bubble-left-right", 22)}
+        ${icon("users", 22)}
         ${unread > 0 && !this._open ? html`<span class="badge">${unread > 99 ? "99+" : unread}</span>` : nothing}
       </button>
       ${this._open ? this._renderFloatingPanel() : nothing}
@@ -781,8 +813,9 @@ export class FoyerChatPanel extends LitElement {
                   @click=${this._clearHistory}>${icon("trash", 14)}</button>
         ` : nothing}
         ${compact ? html`
-          <button title="Undock" @pointerdown=${(e) => e.stopPropagation()}
-                  @click=${() => window.__foyer?.layout?.undockFab?.(this.storageKey)}>
+          <button title="Tear out — return to floating FAB"
+                  @pointerdown=${(e) => e.stopPropagation()}
+                  @click=${() => this._tearOutToFloating()}>
             ${icon("arrow-top-right-on-square", 14)}
           </button>
           <button title="Close" @pointerdown=${(e) => e.stopPropagation()}

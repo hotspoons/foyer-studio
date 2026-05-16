@@ -522,7 +522,7 @@ export class MidiManager extends LitElement {
       background: var(--color-surface-muted);
       border-color: var(--color-accent);
     }
-    /* Active-preset highlight. Reads `instrument.current_preset`
+    /* Active-preset highlight. Reads instrument.current_preset
      * from the snapshot (PluginInstance.current_preset) so the
      * loaded preset is visually obvious in the grid. */
     .preset-grid .preset.active {

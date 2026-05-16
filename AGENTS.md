@@ -30,6 +30,42 @@ panels, keyboard-first commands, remote-over-WS collaboration).
 └──────────────────────────┘
 ```
 
+## Working with the human
+
+Foyer is built by Rich Siomporas (richard.siomporas@patapsco.ai). A few
+notes that make the collaboration smoother:
+
+- **Speech-to-text quirks.** Rich often dictates longer prompts. Expect
+  transcription artifacts — "our door" or "order" usually means Ardour,
+  "rating" usually means writing — and infer intent over taking the
+  literal transcript.
+- **Domain fluency.** Comfortable reasoning about DAW internals,
+  WebSockets / WebRTC / WebAssembly, distributed-system tradeoffs
+  (CRDT vs OT vs LWW), and GPL-linking nuances. Don't over-explain
+  fundamentals. Strong preference for Rust over C++ — when a feature
+  touches both, keep the C++ footprint minimal and push as much as
+  possible into Rust.
+- **Hand-off mode.** Often drafts plans and hands the implementation
+  to a coding agent. Concrete plan docs with file paths and milestones
+  beat conversational lists. Don't be shy about course-correcting
+  mid-task — he isn't.
+- **Ship first, log decisions.** When a real tradeoff appears, pick
+  the first sensible option and append an ADR entry to
+  [docs/DECISIONS.md](docs/DECISIONS.md) — don't stop to ask. Reserve
+  the "here are N options" pattern for choices that materially affect
+  his workflow or commit to external dependencies.
+- **Ship features whole.** "We need X" is the feature name, not the
+  acceptance criteria. Real data flowing end-to-end, edit/drag/resize
+  actually working, empty states handled, the obvious next click
+  surfaced, adjacent primitives wired (a MIDI editor needs a patch
+  manager; modals should be draggable like real windows). When
+  scaffolding is intentional for a later pass, say so loudly — don't
+  let half-work pass for whole-work.
+- **Tone on corrections.** When he flags an antipattern and you
+  refactor in response, lead with what the thing now is, not with
+  what it isn't. Bolded "we don't do X anymore" headlines read as
+  defensive — describe the new design matter-of-factly and move on.
+
 ## Repo layout
 
 ```
@@ -175,9 +211,26 @@ NOT edit `index.html` or `boot.js`.
     next to it correctly read `foyer-studio/sessions/asdf` — same
     project, two labels, immediate "where does this Foyer instance
     actually live?" leak.
-- **Per-layer licensing.** `shims/ardour/` inherits GPLv2+ (links
-  libardour). The Rust sidecar + web UI sit above the IPC boundary
-  and stay non-copyleft. See DECISION 15.
+- **Foyer is non-GPL.** The shipping project license is permissive
+  (MIT / Apache-2.0 / similar — final pick TBD). The architecture is
+  shaped to contain GPL blast radius to the C++ Ardour shim, which
+  inherits GPLv2+ by linking libardour; everything above the IPC
+  boundary stays non-copyleft. When picking deps prefer MIT /
+  Apache-2.0 / BSD / ISC; do not pull GPL / AGPL / LGPL into the Rust
+  sidecar or web UI. Upstream patches to Ardour itself are GPL by
+  construction — keep those scoped, don't drift into Foyer's tree.
+  See DECISION 15.
+- **MCP work uses `rmcp = "1.7.0"`.** The official Rust SDK from
+  crates.io. It handles streamable-HTTP / stdio / SSE / batch requests
+  / cancellation / progress notifications / protocol-version negotiation
+  for you — don't hand-roll a JSON-RPC implementation. Build a single
+  `ServerHandler` that forwards `tools/list` + `tools/call` to the
+  existing `foyer_agent::tools::ToolRegistry`. Keep MCP ceremony out
+  of the in-process agent's prompt: Foyer tools have NO rmcp `#[tool]`
+  decorations or MCP-specific schemas, so the internal agent stays
+  MCP-agnostic and external clients get the SDK's protocol compliance
+  for free. The bridge lives in [crates/foyer-mcp/](crates/foyer-mcp/),
+  mounted at `/mcp` on the main axum router.
 
 ## How to run + probe
 
@@ -417,6 +470,13 @@ or schema changes require `cargo run` + restart.
   *optimistic*.** A missing entry is rendered as "supported." Only
   explicit `false` hides the surface. See
   [web/core/registry/features.js](web/core/registry/features.js).
+- **Don't leave orphan test processes.** If you boot a foyer instance
+  or stub for verification, kill it before the end of the turn. Rich
+  routinely has his own foyer running on `:3838`; orphans collide on
+  the port and the second process exits with `Address already in use`,
+  leaving him to chase the PID. After Playwright runs / boot probes /
+  manual smoke tests, run `pgrep -af "target/.*/foyer serve"`, kill
+  anything you started, confirm `ss -tln | grep 3838` is empty.
 
 ## Writing a new UI variant
 

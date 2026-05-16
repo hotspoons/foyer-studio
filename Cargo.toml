@@ -9,6 +9,8 @@ members = [
     "crates/foyer-backend",
     "crates/foyer-backend-stub",
     "crates/foyer-backend-host",
+    "crates/foyer-agent",
+    "crates/foyer-mcp",
     "crates/foyer-server",
     "crates/foyer-cli",
     "crates/foyer-desktop",
@@ -41,6 +43,8 @@ foyer-ipc           = { path = "crates/foyer-ipc" }
 foyer-backend       = { path = "crates/foyer-backend" }
 foyer-backend-stub  = { path = "crates/foyer-backend-stub" }
 foyer-backend-host  = { path = "crates/foyer-backend-host" }
+foyer-agent         = { path = "crates/foyer-agent" }
+foyer-mcp           = { path = "crates/foyer-mcp" }
 foyer-server        = { path = "crates/foyer-server" }
 foyer-cli           = { path = "crates/foyer-cli" }
 foyer-desktop       = { path = "crates/foyer-desktop" }

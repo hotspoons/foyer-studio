@@ -66,6 +66,18 @@ export function bootFoyerCore(opts = {}) {
   store.attach(ws);
   chat.attach();
   attachRecents(store);
+  // FE-side renderer for the `visualize` agent tool. Hooks the WS
+  // envelope stream and dispatches `agent_render_request` → component
+  // capture → `agent_render_result`. Idempotent.
+  import("./viz-capture.js")
+    .then(({ installVizCapture }) => installVizCapture())
+    .catch((e) => console.warn("[bootstrap] viz-capture install failed:", e));
+  // Headless-viz mode: when the URL carries `?subcommand=...` (the
+  // chromiumoxide-driven renderer hits this), swap to a single
+  // full-window tile + signal ready for the screenshot.
+  import("./headless-viz.js")
+    .then(({ installHeadlessVizIfRequested }) => installHeadlessVizIfRequested())
+    .catch((e) => console.warn("[bootstrap] headless-viz install failed:", e));
   // Multi-window: BroadcastChannel between sibling tabs of the same
   // logical peer + helpers for spawning secondary windows. Audio I/O
   // is rejected by the server on secondaries — feature code should

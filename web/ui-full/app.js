@@ -40,10 +40,11 @@ import "./components/status-bar.js";
 import "./components/transport-bar.js";
 import "./components/main-menu.js";
 import "./components/right-dock.js";
-// Agent panel disabled — leaving the import OUT (and the tag below
-// commented) parks the chat-agent surface without deleting the file.
-// Revisit when the agent integration is re-enabled.
-// import "./components/agent-panel.js";
+// Agent panel — wired to the foyer-agent runtime in the Rust
+// sidecar. The FAB dispatches `agent_send` over the control WS and
+// renders the `agent_message` / `agent_token` / `agent_tool_update`
+// event stream. See crates/foyer-agent + DECISIONS.md 48-51.
+import "./components/agent-panel.js";
 import "foyer-ui-core/chat-panel.js";
 // Actions + Session-info FABs removed — they didn't add value over
 // the menu bar / project picker. The components remain on disk but
@@ -441,6 +442,26 @@ export class FoyerApp extends LitElement {
   }
 
   render() {
+    // Headless-viz mode: the renderer URL carries `?subcommand=...`
+    // (or `?headless-viz=...`). In that path the headless-viz hook
+    // calls layout.setTree() with the requested view BEFORE we
+    // signal ready; render ONLY that tile and nothing else so the
+    // screenshot is exactly the viz. Skips the welcome-screen gate
+    // entirely — the FE registry is often empty in headless flows
+    // (e.g. `foyer serve --backend ardour /path` injects a snapshot
+    // but no SessionInfo) and we don't care about it.
+    if (_isHeadlessViz()) {
+      return html`
+        <div class="main headless">
+          <div class="workspace">
+            <foyer-tile-container
+              .node=${this.layout.tree}
+              .store=${this.layout}
+            ></foyer-tile-container>
+          </div>
+        </div>
+      `;
+    }
     // Welcome screen replaces the tile workspace whenever no real
     // session is attached. We check `sessions.length` (the
     // authoritative multi-session list from the sidecar) rather than
@@ -477,7 +498,7 @@ export class FoyerApp extends LitElement {
       </div>
       <foyer-plugin-layer .store=${this.layout}></foyer-plugin-layer>
       <foyer-floating-tiles .store=${this.layout}></foyer-floating-tiles>
-      <!-- <foyer-agent-panel></foyer-agent-panel> disabled, see import comment -->
+      <foyer-agent-panel></foyer-agent-panel>
       <foyer-chat-panel></foyer-chat-panel>
       <!-- <foyer-actions-fab>, <foyer-session-fab>, <foyer-windows-fab> retired -->
       <foyer-layout-fab .store=${this.layout}></foyer-layout-fab>
@@ -488,5 +509,25 @@ export class FoyerApp extends LitElement {
       <foyer-login-modal></foyer-login-modal>
     `;
   }
+}
+
+function _isHeadlessViz() {
+  // Multiple signals because the chromiumoxide-driven browser has, in
+  // practice, occasionally lost the query string between new_page and
+  // the first render. We accept any of:
+  //   ?subcommand=...      — the renderer's canonical entry point
+  //   ?headless-viz=...    — alternate spelling
+  //   #headless-viz        — hash fallback (survives query-strip)
+  //   document.body.dataset.foyerHeadlessViz — set by headless-viz.js
+  //     itself as soon as it sees either of the above; useful in case
+  //     a later route change clears location.search.
+  try {
+    if (document.body?.dataset?.foyerHeadlessViz === "true") return true;
+    const sp = new URLSearchParams(window.location.search || "");
+    if (sp.get("subcommand") || sp.get("headless-viz")) return true;
+    const hash = window.location.hash || "";
+    if (hash.includes("headless-viz") || hash.includes("subcommand=")) return true;
+  } catch {}
+  return false;
 }
 customElements.define("foyer-app", FoyerApp);

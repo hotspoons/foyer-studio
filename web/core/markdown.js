@@ -56,14 +56,17 @@ function loadStylesheet(url) {
 export function ensureMarkdownReady() {
   if (_ready) return _ready;
   _ready = (async () => {
-    loadStylesheet(HLJS_CSS_URL);
-    // Load marked + hljs in parallel; the yaml grammar depends on hljs.
-    await Promise.all([loadScript(MARKED_URL), loadScript(HLJS_URL)]);
-    await loadScript(HLJS_YAML_URL).catch((e) => {
-      // YAML grammar failing to load isn't fatal — plain fenced blocks
-      // still render.
-      console.warn("[markdown] yaml grammar:", e);
-    });
+    // marked is required — without it we'd render <pre>-only.
+    await loadScript(MARKED_URL);
+    // hljs + grammars + theme stylesheet are all optional. Any
+    // failure here just means fenced code blocks render plain.
+    try {
+      loadStylesheet(HLJS_CSS_URL);
+      await loadScript(HLJS_URL);
+      await loadScript(HLJS_YAML_URL);
+    } catch (e) {
+      // hljs/grammar not present — fine, plain rendering still works.
+    }
     configureMarked();
   })();
   return _ready;

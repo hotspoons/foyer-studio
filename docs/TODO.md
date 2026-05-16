@@ -11,6 +11,12 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 ---
 
+## Local monitor config
+- [ ] Unify local monitoring config - add a local audio monitor in 
+  addition to local MIDI monitor, show a new button on the mixer 
+  that only appears when ingress is enabled on a channel that enables
+  local monitoring, and have a little slider to adjust volume
+
 ## Timeline edits outstanding:
 - [x] Crossfades on overlapping regions
   - Drawn as paired X-curve overlays at the lane level whenever two
@@ -314,7 +320,28 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     for tile layer, make sure z-indexes for pop-outs make sense, remove nonsense or
     old controls
 - [x] Drop original "share" dialog and share button from main menu
-
+- [ ] Sequencer - clicking on an arrangement cell navigates the timeline to
+  that cell. Add arrangement-relative looping functionality so you can select
+  part of the arrangement and loop it as if it were arbitrary on the timeline
+- [ ] Sequencer view writes a fresh starter layout back to the backend on
+  mount, clobbering whatever was just persisted. Reproduces by setting a
+  layout via `sequencer.set_layout` (MCP) and then opening the beat-sequencer
+  tile in any browser tab — round-tripping `sequencer.show` immediately
+  before/after the mount shows the persisted "Groove" pattern being replaced
+  with the auto-generated `Pattern 1` + extended row set. Fix: mounting
+  should be read-only against the region; only explicit user edits inside
+  the grid should emit `set_sequencer_layout`. Component: `foyer-beat-sequencer`
+  in `web/ui-full/components/beat-sequencer.js`.
+- [ ] Sequencer layout `note_count` is 0 after a successful `set_layout` with
+  non-empty cells. The set call reports `(N cell+note events)` but the
+  subsequent `sequencer.show` reads `note_count: 0` from the region snapshot,
+  suggesting the shim either isn't expanding the layout into MIDI notes or
+  isn't updating `region.notes` until a follow-up event. Check
+  `expand_sequencer_layout` plumbing on the Ardour shim side; the FE-only
+  stub backend may behave differently than the live ardour shim and that's
+  worth a side-by-side.
+- [ ] Large resizable bottom scroll area with zoom and scrub and track high levels
+   like ardour, that is really well done
 
 ## Infra + ops
 
@@ -356,35 +383,52 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
       and further refined
 
 ## AI Agent
-- [ ] AI Agent harness in GUI
-  - Should have access to UI visualizations for:
-    - waveforms
-    - event heatmaps
-    - MIDI viz with notes
-    - automation visualization
-    - mixer state visualization
-    - plugin visualizations
-    - midi config form visualizations
-    - timeline visualization
-    - look into back end generated spectogrpaphy (instant and temporal, per channel and from main mix), and look at hooking up through shim
-  - Should have textual reports (minimal, either hand crafted or sparsified JSON) for:
-    - channel + audio region start/end
-    - automation points per channel
-    - mixer config including each channel's state w/ fader, M/S/R/I, plugins, plugin configs (base)
-    - midi config per channel
-    - automation events per channel (e.g. fade in/out, full automation spectrum including plugins (and list unused plugin automations))
-    - latency reports and front end config
-    - Messages (add AI agent to chat)
-  - WebLLM integration for in-browser assistant (should already be in codebase)
-  - Add chat completions endpoint with optional api key (should already be in codebase)
-  - Needs strong prompting with a handful of skills that can be managed by and extended by the user and stored under ~/.local/share/foyer, including the ability
-    to save off project templates, browse the templates from there, and use them for new projects
-  - Agent should have a memory tool that will save off snippets of knowledge as one or more .md files somewhere under ~/.local/share/foyer that are
-    automatically injected into context on each session start, and the user should be able to direct the agent to remember something
-  - Try to push as much of this as far down as possible into the back end so Claude could engineer a session via MCP and have access to all of this stuff. Investigate
-    using rendering captured from the front-end of the app and sending it to the back end MCP tools for the visualizations
+- [/] AI Agent harness — Rust-first (see DECISIONS.md 48-51)
+  - [x] `foyer-agent` crate: conversation, LLM client, engine loop, tool dispatch,
+        autonomy gate, filesystem store under `$XDG_DATA_HOME/foyer/agent/{skills,memory,templates}/`
+  - [x] `foyer-mcp` crate exposing the same tool registry over stdio + Unix socket
+        + streamable HTTP (per the wishlist, on a separate port so deployments can
+        firewall the MCP surface independently)
+  - [x] Polymorphic tools (one per domain, `subcommand` discriminator inside args):
+        `welcome`, `transport`, `mixer`, `tracks`, `regions`, `automation`, `plugins`,
+        `midi`, `session`, `visualize`. The `welcome` tool is the priming surface
+        external MCP agents (Claude Code, Cursor) must call first to load Foyer's
+        system prompt + enabled skills + memory.
+  - [x] Schema: `Event::Agent*` (Message / Token / ToolUpdate / History / State /
+        SkillsListed / MemoriesListed / TemplatesListed) + 14 `Command::Agent*` (Send /
+        Stop / ClearHistory / SetAutonomy / SetConfig / ConfirmTool / HistoryRequest +
+        skill / memory / template management).
+  - [x] Server wiring: `AppState.agent: RwLock<Option<Arc<AgentRuntime>>>`, all
+        agent commands dispatched in `ws::dispatch_command`, forwarder task
+        translates `AgentEvent` → schema `Event::Agent*` for fan-out, foyer-cli
+        attaches at boot.
+  - [x] WebLLM bridge — zip-ties pattern (DECISION 49): browser registers itself
+        as an OpenAI-compatible "endpoint" at `/llm/v1/*` via `/ws/webllm`, the Rust
+        harness sees it as a regular HTTP endpoint identical in shape to Anthropic /
+        OpenAI / Ollama. Same config surface across all providers.
+  - [x] Browser FAB unparked: `agent-panel.js` dispatches `agent_send` and renders
+        `agent_message` / `agent_token` / `agent_tool_update` / `agent_state` events
+        into the existing transcript UI; settings modal carries autonomy toggle
+        (Safe/Trust/Yolo, per-session per DECISION 51), skills picker, memory viewer.
+  - [x] Visualization tools — both renderers wired. The `visualize` tool prefers
+        the FE-attached path (`Event::AgentRenderRequest` round-trip; the browser's
+        [viz-capture.js](web/core/viz-capture.js) deep-finds the requested viz and
+        captures via canvas.toBlob / SVG-to-canvas) and falls back to the headless
+        path (`chromiumoxide` driving a chromium subprocess against `/?subcommand=…`;
+        [headless-viz.js](web/core/headless-viz.js) swaps the layout to a single
+        full-window tile and signals `data-foyer-viz-ready`). Headless is gated by
+        the `headless-render` cargo feature (default on); when chromium isn't on
+        PATH the error string carries platform-specific install commands.
+  - [ ] Backend-side spectrography (instant + temporal, per-channel + main mix)
+        through the shim — separate piece from FE viz capture, requires shim work.
+  - [ ] One of the hardest parts of DAWs is the insane number of controls, even for a very stripped down one like this one. We need a tool that the agent can call that takes a screencapture of exactly what the user sees so the agent can guide them on what to click or drag where to achieve a goal
+  - [ ] Fuck ton of `.unwrap()` with dubious error handling - lock this down so we
+    have a minimally panicky app, use `.unwrap_or_else()`, `.expect()` with a value,
+    or more robust pattern matching
 
-- [ ] MCP tools (minimum number of tools with rich + polymorphic with subcommands)
-- [ ] Agent's native tools mapped to MCP tools but without MCP overhead
-- [ ] Map out back end vs front end tools, move as much as possible to back end via MCP 
-    so it can be used by other agents
+- [x] MCP tools — implemented as 10 polymorphic tools with subcommands (DECISION 50)
+- [x] Agent's native tools mapped to MCP tools but without MCP overhead — same
+      `ToolRegistry` is dispatched directly from `AgentEngine` (no serialization
+      hop) and exposed verbatim through `foyer-mcp` for external consumers
+- [x] Back end vs front end split mapped — everything except live DOM-rendered
+      visualizations lives in Rust and is reachable via MCP for external agents

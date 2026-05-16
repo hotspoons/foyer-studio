@@ -176,6 +176,10 @@ registerWindowKind("beat-sequencer", (props) => {
 });
 
 const PANEL_KEY = "foyer.rightdock.v1";
+/// Slide-out persistence: which docked FAB was last expanded into
+/// the slide column. Separate key so a one-shot wipe doesn't reset
+/// the dock's geometry (`PANEL_KEY`). `{open: bool, fabId: string}`.
+const SLIDE_STATE_KEY = "foyer.rightdock.slide.v1";
 
 function loadPanelState() {
   try { return JSON.parse(localStorage.getItem(PANEL_KEY) || "{}") || {}; }
@@ -183,6 +187,18 @@ function loadPanelState() {
 }
 function savePanelState(s) {
   try { localStorage.setItem(PANEL_KEY, JSON.stringify(s)); } catch {}
+}
+function loadSlideState() {
+  try { return JSON.parse(localStorage.getItem(SLIDE_STATE_KEY) || "{}") || {}; }
+  catch { return {}; }
+}
+function saveSlideState(open, fabId) {
+  try {
+    localStorage.setItem(
+      SLIDE_STATE_KEY,
+      JSON.stringify({ open: !!open, fabId: fabId || "" }),
+    );
+  } catch {}
 }
 
 const VIEW_ICON = {
@@ -451,6 +467,7 @@ export class RightDock extends LitElement {
       if (!id || id !== this._slideFabId) return;
       this._slideOpen = false;
       this._slideFabId = "";
+      saveSlideState(false, "");
       this._announceDockChanged();
       this.requestUpdate();
     };
@@ -460,6 +477,35 @@ export class RightDock extends LitElement {
     // querySelector past a shadow root boundary.
     if (window.__foyer) window.__foyer.rightDock = this;
     this._refreshMinimized();
+    // Restore slide-out if the user had one open before a page
+    // refresh. The FAB instance may not be registered yet — it
+    // mounts in its own connectedCallback, which may race ours.
+    // Poll the layout's `fabInstance(id)` every animation frame
+    // until either the fab shows up (and we open the slide) or a
+    // short timeout elapses (the fab's UI variant might not be
+    // registered in this build — drop the saved state so we don't
+    // keep trying).
+    const persisted = loadSlideState();
+    if (persisted.open && persisted.fabId) {
+      const target = persisted.fabId;
+      const deadline = performance.now() + 5_000;
+      const tryRestore = () => {
+        if (this._slideOpen) return; // already restored / changed
+        const layout = window.__foyer?.layout;
+        if (layout?.fabInstance?.(target) && layout.isFabDocked?.(target)) {
+          this._toggleSlideForFab(target);
+          return;
+        }
+        if (performance.now() > deadline) {
+          // Give up cleanly — the variant probably doesn't include
+          // this fab. Don't clobber state in case the variant is
+          // still loading in another tab.
+          return;
+        }
+        requestAnimationFrame(tryRestore);
+      };
+      requestAnimationFrame(tryRestore);
+    }
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("change", this._storeHandler);
@@ -481,6 +527,31 @@ export class RightDock extends LitElement {
     // The dock surfaces them all, regardless of which renderer paints
     // them, so the user has a single inventory + group-control surface.
     this._widgets = layout?.allWidgets?.() || [];
+    // If a slide-out is currently open for a FAB that just got
+    // undocked (via the panel's own tear-out button, a right-click
+    // on the rail icon, etc.), close the slide and exit slide-mode
+    // on that fab so we don't strand an empty panel hiding the
+    // newly-floating FAB underneath.
+    //
+    // Key detail: read the raw dock flag via `isFabDocked` rather
+    // than filtering `dockedFabs()` through the registry. When a
+    // FAB enters slide-mode it gets reparented into our host, which
+    // briefly fires disconnectedCallback → unregisterFab →
+    // _emit() → us, then connectedCallback re-registers. During
+    // that transient the registry-filtered list excludes the FAB
+    // even though `_dockedFabs[id]` is still true; closing the
+    // slide there is what caused the "click once to hide, twice to
+    // show again" bug.
+    if (this._slideOpen && this._slideFabId) {
+      const stillDocked = !!layout?.isFabDocked?.(this._slideFabId);
+      if (!stillDocked) {
+        const fab = layout?.fabInstance?.(this._slideFabId);
+        try { fab?.exitSlideMode?.(); } catch {}
+        this._slideOpen = false;
+        this._slideFabId = "";
+        saveSlideState(false, "");
+      }
+    }
   }
 
   /** Spawn-menu dismissal: a pointerdown anywhere outside the menu
@@ -588,10 +659,16 @@ export class RightDock extends LitElement {
     const fab = layout.fabInstance?.(id);
     if (!fab) return;
     if (this._slideOpen && this._slideFabId === id) {
-      // Same FAB tapped twice — close.
+      // Same FAB tapped twice — close. `exitSlideMode` deliberately
+      // leaves `_open` alone (the tear-out flow relies on it staying
+      // true), so we explicitly close here.
       try { fab.exitSlideMode?.(); } catch {}
+      fab._open = false;
+      try { fab._persist?.(); } catch {}
+      fab.requestUpdate?.();
       this._slideOpen = false;
       this._slideFabId = "";
+      saveSlideState(false, "");
       this._announceDockChanged();
       return;
     }
@@ -599,9 +676,15 @@ export class RightDock extends LitElement {
     if (this._slideFabId && this._slideFabId !== id) {
       const prev = layout.fabInstance?.(this._slideFabId);
       try { prev?.exitSlideMode?.(); } catch {}
+      if (prev) {
+        prev._open = false;
+        try { prev._persist?.(); } catch {}
+        prev.requestUpdate?.();
+      }
     }
     this._slideOpen = true;
     this._slideFabId = id;
+    saveSlideState(true, id);
     // Defer reparent until after our next render so the slot exists.
     this.requestUpdate();
     queueMicrotask(() => {
@@ -964,6 +1047,64 @@ export class RightDock extends LitElement {
     window.__foyer?.layout?.undockFab(id);
     const fab = window.__foyer?.layout?.fabInstance?.(id);
     fab?.closeFromDock?.();
+    this._announceDockChanged();
+  }
+
+  /// Tear a FAB out of the slide-out to a fresh floating-panel
+  /// position with its panel pre-opened. Called from the tear-out
+  /// icon inside each docked panel header. We stagger position so
+  /// multiple simultaneous tear-outs don't pile on top of each
+  /// other — important on first use, where every FAB shares the
+  /// same default (right:24, bottom:24).
+  tearFabToFloating(id) {
+    const layout = window.__foyer?.layout;
+    if (!layout) return;
+    const fab = layout.fabInstance?.(id);
+    if (!fab) return;
+    // Build the set of (right, bottom) anchors already in use by
+    // OTHER floating FABs so we can avoid them.
+    const occupied = new Set();
+    for (const [otherId, entry] of layout._fabRegistry?.entries?.() || []) {
+      if (otherId === id) continue;
+      if (layout.isFabDocked?.(otherId)) continue;
+      const inst = entry.instance;
+      if (!inst) continue;
+      const r = Number(inst._fabRight);
+      const b = Number(inst._fabBottom);
+      if (Number.isFinite(r) && Number.isFinite(b)) {
+        occupied.add(`${Math.round(r)}:${Math.round(b)}`);
+      }
+    }
+    // Try a sequence of bottom-right anchored slots, stepping
+    // leftward in 90 px chunks. Wraps to a higher row when the
+    // bottom row is full. 56 px FAB + 24 px margin = 80 px stride;
+    // bump to 90 to leave a little air.
+    const STEP = 90;
+    let chosen = null;
+    for (let row = 0; row < 6 && !chosen; row++) {
+      for (let col = 0; col < 6 && !chosen; col++) {
+        const r = 24 + col * STEP;
+        const b = 24 + row * STEP;
+        if (!occupied.has(`${r}:${b}`)) chosen = { r, b };
+      }
+    }
+    if (chosen) {
+      fab._fabRight = chosen.r;
+      fab._fabBottom = chosen.b;
+      try { fab._persist?.(); } catch {}
+    }
+    // Exit slide-mode, open the floating panel, and remove from
+    // the rail in that order. Order matters: exitSlideMode
+    // reparents the fab back to body before render runs.
+    try { fab.exitSlideMode?.(); } catch {}
+    fab._open = true;
+    try { fab._persist?.(); } catch {}
+    fab.requestUpdate?.();
+    if (this._slideFabId === id) {
+      this._slideOpen = false;
+      this._slideFabId = "";
+    }
+    layout.undockFab(id);
     this._announceDockChanged();
   }
 

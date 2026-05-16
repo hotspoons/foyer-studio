@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod action;
+pub mod agent;
 pub mod audio;
 pub mod fs;
 pub mod id;
@@ -21,6 +22,10 @@ pub mod tunnel;
 pub mod value;
 
 pub use action::{Action, ActionCategory};
+pub use agent::{
+    AgentAutonomy, AgentConfigPublic, AgentMemoryInfo, AgentMessageRecord, AgentRole,
+    AgentSessionInfo, AgentSkillInfo, AgentTemplateInfo, AgentToolCallRecord, AgentToolStatus,
+};
 pub use audio::{
     AudioCodec, AudioFormat, AudioPoolSource, AudioSource, AudioTransport, IceCandidate,
     LatencyReport, SampleFormat, SdpPayload,

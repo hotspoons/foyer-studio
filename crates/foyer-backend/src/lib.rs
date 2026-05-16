@@ -150,6 +150,18 @@ pub trait Backend: Send + Sync + 'static {
         0
     }
 
+    /// Quick "is this backend's underlying connection still alive?"
+    /// probe — true means a command we issue right now is likely to
+    /// land (modulo race), false means the shim socket is gone and
+    /// every send_command will surface `WriterClosed`. The default
+    /// `true` is correct for stub backends (no IPC). The host
+    /// backend overrides this to query the live disconnect flag so
+    /// the agent layer can fail fast with "backend went away"
+    /// instead of dispatching dozens of doomed commands first.
+    fn is_alive(&self) -> bool {
+        true
+    }
+
     async fn snapshot(&self) -> Result<Session, BackendError>;
     async fn subscribe(&self) -> Result<EventStream, BackendError>;
     async fn set_control(&self, id: EntityId, value: ControlValue) -> Result<(), BackendError>;

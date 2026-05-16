@@ -126,6 +126,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       # separate RUN block below — it isn't packaged in trixie's
       # main repos, so we pull it from xpra.org's apt repo.
       xvfb \
+      # ---- headless renderer for the agent's `visualize.*` tools ----
+      # `agent.prefer_headless_render` (default `true`) spawns a chromium
+      # subprocess via chromiumoxide and screenshots Foyer's standalone
+      # viz pages. Without a chromium on PATH the renderer falls back to
+      # the FE-attached path, which only works for views the user has
+      # mounted in their browser tab — i.e. mixer/midi-roll/etc fail.
+      # Bundle chromium so the agent's `visualize.*` works out of the
+      # box. (Foyer's probe also accepts Playwright's bundled binary
+      # when present; this is the system-wide fallback.)
+      chromium \
       # ---- foyer native deps ----
       libopus-dev \
       # ---- tauri/wry desktop shell (M4.5) ----

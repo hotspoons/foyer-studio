@@ -271,6 +271,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       # instead of the silent exit Cloud Run / docker shows otherwise.
       gdb \
       less file vim-tiny htop \
+      # chromium for the agent's headless visualization renderer
+      # (`visualize.*` agent tools, default-on via
+      # `agent.prefer_headless_render`). Without it the renderer can
+      # only screenshot views that the user has currently mounted in
+      # an attached browser tab — `mixer`, `midi_roll`, `automation_lane`
+      # etc. all fail. The package brings in libxss / libgbm / etc; the
+      # binary stays ~70 MB and we run it `--no-sandbox` because the
+      # container is already a sandbox.
+      chromium \
  && rm -rf /var/lib/apt/lists/*
 
 # ── Runtime deps: Ardour .so set + JACK + a stacked plugin pack ───

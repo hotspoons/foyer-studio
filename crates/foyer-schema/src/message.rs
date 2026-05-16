@@ -669,6 +669,96 @@ pub enum Event {
     TrackBrowserSourcesSnapshot {
         entries: Vec<TrackBrowserSourceEntry>,
     },
+
+    // ───── AI agent (foyer-agent harness; see crates/foyer-agent) ─────
+    /// One transcript turn — user input, assistant reply, system
+    /// note, or tool result. Fanned out to every connected client so
+    /// multiple FABs / TUIs stay in sync. Persisted in-memory only;
+    /// `Command::AgentClearHistory` wipes the ring.
+    AgentMessage {
+        record: crate::agent::AgentMessageRecord,
+    },
+    /// Streaming text delta for an in-flight assistant turn. `id`
+    /// matches the eventual `AgentMessage.record.id` so the UI can
+    /// stitch chunks into the live row. The final `AgentMessage`
+    /// arrives once the LLM stream closes.
+    AgentToken {
+        message_id: u64,
+        delta: String,
+    },
+    /// A tool call's status / preview changed. The matching
+    /// `AgentMessageRecord` carries the tool name + args; this event
+    /// is just the lifecycle update (`pending` → `awaiting_confirm`
+    /// / `running` / `done` / `error`).
+    AgentToolUpdate {
+        message_id: u64,
+        call_id: String,
+        status: crate::agent::AgentToolStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+        /// For `Done` / `Error` — the structured result blob (JSON
+        /// string, may be empty). For other states, empty.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        result_json: String,
+    },
+    /// Reply to `Command::AgentHistoryRequest` — full in-memory
+    /// transcript in insertion order.
+    AgentHistory {
+        records: Vec<crate::agent::AgentMessageRecord>,
+    },
+    /// Snapshot of the live agent config + state. Broadcast on
+    /// connect, on every mutation, and whenever the busy flag flips.
+    AgentState {
+        config: crate::agent::AgentConfigPublic,
+        /// `true` while the harness is mid-turn (streaming, tool
+        /// dispatch, or waiting on tool confirm). UI uses this to
+        /// gate Send and show a busy spinner.
+        busy: bool,
+        /// Number of records currently in the transcript ring.
+        transcript_len: u32,
+    },
+    /// Reply to `Command::AgentListSkills` — current state of the
+    /// `$XDG_DATA_HOME/foyer/agent/skills/` directory.
+    AgentSkillsListed {
+        skills: Vec<crate::agent::AgentSkillInfo>,
+    },
+    /// Reply to `Command::AgentListMemories` — current state of the
+    /// `$XDG_DATA_HOME/foyer/agent/memory/` directory.
+    AgentMemoriesListed {
+        memories: Vec<crate::agent::AgentMemoryInfo>,
+    },
+    /// Reply to `Command::AgentListTemplates` — current state of the
+    /// `$XDG_DATA_HOME/foyer/agent/templates/` directory.
+    AgentTemplatesListed {
+        templates: Vec<crate::agent::AgentTemplateInfo>,
+    },
+    /// Server asks an attached browser to render one of the
+    /// `visualize` tool's subcommands into a PNG and reply via
+    /// `Command::AgentRenderResult`. The first peer to respond wins;
+    /// other peers ignore the request. `request_json` is the same
+    /// shape the `visualize` tool was called with — see
+    /// `foyer_agent::tools::visualize`.
+    AgentRenderRequest {
+        request_id: String,
+        request_json: String,
+    },
+    /// Reply to `Command::AgentSessionList` — current state of the
+    /// `$XDG_DATA_HOME/foyer/agent/sessions/` directory. `active_id`
+    /// is the session whose transcript is currently loaded into the
+    /// runtime (and therefore visible in the FAB).
+    AgentSessionsListed {
+        sessions: Vec<crate::agent::AgentSessionInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_id: Option<String>,
+    },
+    /// A session was switched (load / new / delete-active). The
+    /// transcript ring on every client should drop and reload — the
+    /// server follows up with an `AgentHistory` event carrying the
+    /// new transcript.
+    AgentSessionActivated {
+        id: String,
+        title: String,
+    },
 }
 
 /// One chat message as stored in the server's in-memory ring.
@@ -1803,6 +1893,126 @@ pub enum Command {
     /// initial greeting already includes it, so this is only used
     /// when a client wants a fresh snapshot mid-session.
     ListTrackBrowserSources,
+
+    // ───── AI agent (foyer-agent harness) ────────────────────────
+    /// Send a user-authored message to the agent. The harness
+    /// records the turn, kicks off the LLM call, and streams
+    /// `AgentToken` events as it responds.
+    ///
+    /// Optional `attachments` carry inline media (images, mostly) for
+    /// vision-capable models. When non-empty the engine emits the
+    /// outgoing user message as an OpenAI multi-modal `content` array
+    /// (`{type: "text"}` + `{type: "image_url"}` blocks) instead of a
+    /// plain string — providers that don't speak the multi-modal shape
+    /// will ignore the image parts and see the text alone.
+    AgentSend {
+        body: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<crate::agent::AgentAttachment>,
+    },
+    /// Interrupt the in-flight assistant turn. Closes the LLM
+    /// stream and finalizes the partial message at the current
+    /// point. No-op when the harness is idle.
+    AgentStop,
+    /// Wipe the transcript ring. Broadcasts `AgentHistory { [] }`
+    /// + a fresh `AgentState`.
+    AgentClearHistory,
+    /// Switch the per-session autonomy mode. Defaults to `Safe`
+    /// at server boot; the user has to opt back into looser modes
+    /// each session.
+    AgentSetAutonomy {
+        autonomy: crate::agent::AgentAutonomy,
+    },
+    /// Update the agent's LLM transport config. Any field set to
+    /// `None` keeps the current value. `api_key` is write-only
+    /// (never echoed back); pass an empty string to clear it.
+    AgentSetConfig {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_key: Option<String>,
+    },
+    /// Approve or reject a tool call that's parked in
+    /// `AwaitingConfirm`. Ignored when the call's status is
+    /// anything else (idempotent — late-arriving confirms after
+    /// the user already approved on another FAB are no-ops).
+    AgentConfirmTool {
+        call_id: String,
+        approve: bool,
+    },
+    /// Ask the server for the full transcript ring. Replied to the
+    /// sender with `Event::AgentHistory`. Sent on FAB open.
+    AgentHistoryRequest,
+
+    // Skill / memory / template management — filesystem-backed under
+    // `$XDG_DATA_HOME/foyer/agent/`.
+    AgentListSkills,
+    /// Upload a new skill file (markdown body) to the agent's skills
+    /// directory. Admin-only on tunneled connections; LAN trusted as
+    /// elsewhere. `name` is sanitized server-side.
+    AgentUploadSkill {
+        name: String,
+        body: String,
+    },
+    AgentEnableSkill {
+        name: String,
+    },
+    AgentDisableSkill {
+        name: String,
+    },
+    AgentListMemories,
+    /// Append a new memory file. `name` is sanitized server-side to
+    /// a safe filename stem.
+    AgentSaveMemory {
+        name: String,
+        body: String,
+    },
+    AgentForgetMemory {
+        name: String,
+    },
+    AgentListTemplates,
+    /// Browser reply to `Event::AgentRenderRequest`. Exactly one of
+    /// `png_b64` / `error` should be set; the server keys the
+    /// resolution on `request_id`. Late or duplicate replies are
+    /// dropped (the oneshot is consumed by the first one).
+    AgentRenderResult {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        png_b64: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
+    // ─── Chat sessions ───────────────────────────────────────────
+    /// Ask the server for the list of saved sessions. Replied with
+    /// `Event::AgentSessionsListed`.
+    AgentSessionList,
+    /// Spin up a fresh empty session and activate it. Optional title
+    /// is sanitized server-side; an empty title gets an auto-generated
+    /// one like "Session 2026-05-15 14:32".
+    AgentSessionNew {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// Load an existing session by id. Replaces the live transcript;
+    /// next `AgentHistory` event carries the loaded turns.
+    AgentSessionLoad {
+        id: String,
+    },
+    /// Delete a session. Admin-gated on tunneled connections; LAN
+    /// trusted. Deleting the active session rolls forward into the
+    /// most recently updated remaining session, or a fresh empty one
+    /// if no others exist.
+    AgentSessionDelete {
+        id: String,
+    },
+    /// Rename a session's display title. No-op if id doesn't exist.
+    AgentSessionRename {
+        id: String,
+        title: String,
+    },
 }
 
 #[cfg(test)]

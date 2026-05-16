@@ -94,6 +94,13 @@ export class TimelineView extends LitElement {
      *  flight, sized to the pool source's length. Shape:
      *    { destTrackId, startSamples, lengthSamples, name } */
     _poolDropGhost: { state: true, type: Object },
+    /** When set, renders a thin event-density strip across the named
+     *  track's lane. Hidden in normal interactive use; the headless
+     *  `visualize.event_heatmap` MCP call flips it on through
+     *  `setEventHeatmap(trackId)` so the screenshot has a focused
+     *  "events on track X over time" presentation. `null` = no
+     *  overlay (default). */
+    _eventHeatmapTrackId: { state: true, type: String },
   };
 
   static styles = css`
@@ -998,6 +1005,10 @@ export class TimelineView extends LitElement {
     this._laneHeights = this._loadLaneHeights();
     // { startSamples, endSamples } — null when nothing is selected.
     this._selection = null;
+    // Track id whose event-density strip is currently overlaid.
+    // Set via `setEventHeatmap(trackId)` from the headless renderer;
+    // null in normal interactive use.
+    this._eventHeatmapTrackId = null;
     // Viewport back-stack: `zoomToSelection` pushes the prior {zoom,
     // scrollLeft} here so the user can pop back with "Zoom Previous".
     // Bounded so a trigger-happy user can't balloon memory.
@@ -1911,6 +1922,77 @@ export class TimelineView extends LitElement {
       enabled: true,
     });
     return true;
+  }
+
+  // ── programmatic focus (MCP visualize entry points) ───────────────
+  //
+  // These public methods exist so the headless renderer can pose the
+  // timeline for a specific shot. The interactive UI uses the same
+  // zoom mechanics but driven from user gestures; everything here
+  // composes the existing primitives (selection + zoomToSelection +
+  // scrollLeft).
+
+  /** Zoom + scroll so a single region fills the visible timeline.
+   *  Walks the loaded `_regionsByTrack` map to find the region by id,
+   *  sets `_selection` to its time range, then calls `zoomToSelection`.
+   *  Returns `true` on success, `false` if the region isn't loaded. */
+  focusOnRegion(regionId) {
+    if (!regionId || !this._regionsByTrack) return false;
+    for (const [_tid, list] of Object.entries(this._regionsByTrack)) {
+      const r = (list || []).find((x) => x.id === regionId);
+      if (r) {
+        const start = r.start_samples ?? 0;
+        const len = r.length_samples ?? 0;
+        this._selection = {
+          startSamples: start,
+          endSamples: start + Math.max(1, len),
+        };
+        this.requestUpdate();
+        // Wait for the selection ribbon to render so the
+        // zoomToSelection scroll math sees the correct DOM.
+        this.updateComplete.then(() => this.zoomToSelection());
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Zoom + scroll so all regions on a track fit the viewport, then
+   *  scroll the lane into view vertically. Returns false if the track
+   *  has no regions. */
+  focusOnTrack(trackId) {
+    if (!trackId || !this._regionsByTrack) return false;
+    const regions = this._regionsByTrack[trackId] || [];
+    if (!regions.length) return false;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const r of regions) {
+      const s = r.start_samples ?? 0;
+      const e = s + (r.length_samples ?? 0);
+      if (s < lo) lo = s;
+      if (e > hi) hi = e;
+    }
+    if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return false;
+    this._selection = { startSamples: lo, endSamples: hi };
+    this.requestUpdate();
+    this.updateComplete.then(() => {
+      this.zoomToSelection();
+      // Scroll the lane row into view vertically.
+      const head = this.renderRoot?.querySelector(
+        `[data-track-id="${CSS.escape(trackId)}"]`,
+      );
+      head?.scrollIntoView?.({ block: "center", behavior: "instant" });
+    });
+    return true;
+  }
+
+  /** Enable / disable the event-heatmap overlay for a track. When set,
+   *  a dim strip above the track lane shows region density (Audio /
+   *  MIDI region count per time bin). Hidden by default; only the
+   *  MCP `visualize.event_heatmap` path turns it on. */
+  setEventHeatmap(trackId) {
+    this._eventHeatmapTrackId = trackId || null;
+    this.requestUpdate();
   }
 
   _pushZoomSnapshot(scrollEl) {
@@ -4087,6 +4169,9 @@ export class TimelineView extends LitElement {
           </div>
         </div>
         ${this._automationOpen(track.id) ? this._renderAutomationOverlay(track, sr, h) : null}
+        ${this._eventHeatmapTrackId === track.id
+          ? this._renderEventHeatmap(track, regions, sr)
+          : null}
         ${repeat(regions, (r) => r.id, (r) => {
           // Keyed render: when the layer-sort reorders this array,
           // Lit physically moves the DOM nodes instead of reusing
@@ -4661,6 +4746,85 @@ export class TimelineView extends LitElement {
            viewBox="0 0 ${contentWidth} ${H}"
            preserveAspectRatio="none">
         ${paths}
+      </svg>
+    `;
+  }
+
+  /**
+   * Event-density strip across a track's lane. Bins time into ~120
+   * columns spanning the rendered timeline width and colors each
+   * bin by the count of regions (or, for MIDI regions, embedded
+   * notes) that fall within it. Hidden by default; the headless
+   * `visualize.event_heatmap` path turns it on via
+   * `setEventHeatmap(trackId)` so the screenshot has a clear
+   * "events on track X" presentation overlayed on the timeline.
+   */
+  _renderEventHeatmap(track, regions, sr) {
+    if (!sr || !regions) return null;
+    const totalSamples = Math.max(
+      1,
+      Number(this._timeline?.length_samples) || sr * 60,
+    );
+    const baseSec = Math.max(30, totalSamples / sr);
+    const totalSec = Math.max(baseSec, this._zoomPadSec || 0);
+    const contentWidth = Math.max(1, totalSec * this._zoom);
+    const BIN_COUNT = 120;
+    const binSamples = totalSamples / BIN_COUNT;
+    const counts = new Array(BIN_COUNT).fill(0);
+    // For audio regions count region presence; for MIDI regions
+    // count embedded notes (more meaningful "events on track over
+    // time"). MIDI note arrays live on `region.notes` when the
+    // backend ships them inline; fall back to region density when
+    // the array is absent.
+    for (const r of regions || []) {
+      const start = Number(r.start_samples) || 0;
+      const len = Number(r.length_samples) || 0;
+      if (Array.isArray(r.notes) && r.notes.length) {
+        for (const n of r.notes) {
+          const t = start + (Number(n.time_samples) || 0);
+          const bin = Math.min(BIN_COUNT - 1, Math.floor(t / binSamples));
+          if (bin >= 0) counts[bin] += 1;
+        }
+      } else {
+        const a = Math.floor(start / binSamples);
+        const b = Math.min(
+          BIN_COUNT - 1,
+          Math.floor((start + len) / binSamples),
+        );
+        for (let i = Math.max(0, a); i <= b; i += 1) counts[i] += 1;
+      }
+    }
+    const maxCount = counts.reduce((m, c) => (c > m ? c : m), 0) || 1;
+    const STRIP_H = 18;
+    const rects = counts.map((c, i) => {
+      if (c <= 0) return null;
+      const x = (i * contentWidth) / BIN_COUNT;
+      const w = Math.max(1, contentWidth / BIN_COUNT - 0.5);
+      const t = c / maxCount;
+      // accent → warm gradient: cool blue at low density, hot
+      // orange at peak. opacity scales with density so empty-ish
+      // tracks stay readable.
+      const hue = Math.round(220 - t * 200); // 220 (cool) → 20 (warm)
+      const sat = 90;
+      const lit = Math.round(60 - t * 25);
+      const op = 0.35 + t * 0.55;
+      return html`<rect x=${x.toFixed(1)} y="0" width=${w.toFixed(1)}
+                        height=${STRIP_H} fill=${`hsl(${hue} ${sat}% ${lit}%)`}
+                        opacity=${op.toFixed(2)} />`;
+    });
+    return html`
+      <svg class="event-heatmap-overlay"
+           style="left:${HEAD_WIDTH}px;top:0px;width:${contentWidth}px;height:${STRIP_H}px;position:absolute;pointer-events:none;z-index:6"
+           viewBox="0 0 ${contentWidth} ${STRIP_H}"
+           preserveAspectRatio="none">
+        <rect x="0" y="0" width=${contentWidth} height=${STRIP_H}
+              fill="rgba(0,0,0,0.35)" />
+        ${rects}
+        <text x="6" y="13" font-size="10" font-weight="600"
+              fill="rgba(255,255,255,0.85)"
+              style="font-family:var(--font-mono);letter-spacing:0.04em">
+          EVENTS · ${track.name} · max ${maxCount}/bin
+        </text>
       </svg>
     `;
   }
