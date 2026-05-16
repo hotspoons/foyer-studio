@@ -605,6 +605,13 @@ export class ScriptsView extends LitElement {
         </div>
         ${td?.takes_args ? this._renderArgs(d) : nothing}
         <h4>Source</h4>
+        <div class="banner" style="background:transparent;border:1px solid var(--color-border);color:var(--color-text-muted)">
+          Need help? The agent ships authoring skills for each script
+          type (<code>ardour-lua-dsp</code>, <code>ardour-lua-action</code>,
+          <code>ardour-lua-hook</code>, <code>ardour-lua-snippet</code>).
+          Ask the chat panel "draft a snippet that…" or "what are the
+          DSP plugin gotchas" — it'll consult the matching skill.
+        </div>
         <div class="editor-wrap">
           <foyer-code-editor
             .value=${d.body}

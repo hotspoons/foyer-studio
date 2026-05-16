@@ -78,7 +78,14 @@ not narrate. Be concise; they're mid-session.\n\
 Tools are polymorphic — one tool per domain with a `subcommand` \
 field selecting the operation. Current surface (selected highlights, \
 schema is authoritative):\n\
-  * session — summary, full\n\
+  * session — summary, full, save, save_as, open, new, close, \
+list_open, recents, forget_recent, browse, backends. Save/save_as act \
+on the currently-loaded project; open/new spawn / focus a project via \
+the sidecar's backend launcher (same path as the user's project \
+picker); browse lists directories inside the filesystem jail. If you \
+need to know what backend ids the user has configured, call \
+`backends` before `open`/`new` (`backend_id: \"auto\"` resolves to \
+the currently-active one)\n\
   * transport — play, stop, record, locate, loop, get\n\
   * tracks — list, describe\n\
   * mixer — set_gain_db, set_mute, set_solo, set_pan, get\n\
@@ -98,7 +105,11 @@ arrangement authoring — first-class in Foyer)\n\
 recover_disabled (host scripts — Lua under Ardour. Call `capabilities` \
 FIRST to learn what types/languages/hooks the shim advertises; DSP \
 scripts produce real audio plugins. Recovered scripts come back \
-with `disabled_on_upload=true` so the user can audit before enabling)\n\
+with `disabled_on_upload=true` so the user can audit before enabling. \
+The agent's `skills/` store ships authoring guides as built-in skills \
+— `ardour-lua-dsp`, `ardour-lua-action`, `ardour-lua-hook`, \
+`ardour-lua-snippet` — read them BEFORE drafting a script so you \
+don't trip the silent-instantiation-failure traps documented there)\n\
   * ui — query, open, close, focus, set_tile_tree (drive the user's \
 browser layout: spawn missing windows on their behalf, focus a \
 buried panel, swap the tile tree to a preset. Always `query` first \
@@ -155,6 +166,7 @@ pub struct AgentRuntime {
     fe_render: tokio::sync::RwLock<Option<Arc<dyn crate::tools::FeRenderer>>>,
     headless_render: tokio::sync::RwLock<Option<Arc<dyn crate::tools::HeadlessRenderer>>>,
     ui_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::UiDirector>>>,
+    session_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::SessionDirector>>>,
     /// Active session id. Every record produced by the conversation
     /// is queued for batched JSONL append against this session.
     active_session_id: tokio::sync::RwLock<String>,
@@ -255,6 +267,7 @@ impl AgentRuntime {
             fe_render: tokio::sync::RwLock::new(None),
             headless_render: tokio::sync::RwLock::new(None),
             ui_director: tokio::sync::RwLock::new(None),
+            session_director: tokio::sync::RwLock::new(None),
             active_session_id: tokio::sync::RwLock::new(active_id),
             pending_writes: Arc::new(Mutex::new(Default::default())),
             current_cancel: tokio::sync::RwLock::new(None),
@@ -385,6 +398,21 @@ impl AgentRuntime {
     /// client.
     pub async fn ui_director(&self) -> Option<Arc<dyn crate::tools::UiDirector>> {
         self.ui_director.read().await.clone()
+    }
+
+    /// Install (or replace) the session director — the broker the
+    /// `session` tool uses for multi-session ops (open/new/close/list/
+    /// browse/recents). Wired in `attach_agent`.
+    pub async fn set_session_director(
+        &self,
+        director: Option<Arc<dyn crate::tools::SessionDirector>>,
+    ) {
+        *self.session_director.write().await = director;
+    }
+
+    /// Read the currently installed session director (if any).
+    pub async fn session_director(&self) -> Option<Arc<dyn crate::tools::SessionDirector>> {
+        self.session_director.read().await.clone()
     }
 
     /// Read the current "prefer headless renderer" flag — surfaced to
@@ -547,6 +575,7 @@ impl AgentRuntime {
         let fe_render = self.fe_render.read().await.clone();
         let headless_render = self.headless_render.read().await.clone();
         let ui_director = self.ui_director.read().await.clone();
+        let session_director = self.session_director.read().await.clone();
         Some(ExternalEngineParts {
             llm,
             model,
@@ -557,6 +586,7 @@ impl AgentRuntime {
                 fe_render,
                 headless_render,
                 ui_director,
+                session_director,
                 prefer_headless_render: prefer_headless,
             },
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
@@ -639,6 +669,7 @@ impl AgentRuntime {
         let fe_render = self.fe_render.read().await.clone();
         let headless_render = self.headless_render.read().await.clone();
         let ui_director = self.ui_director.read().await.clone();
+        let session_director = self.session_director.read().await.clone();
         let prefer_headless = {
             let inner = self.inner.lock().await;
             inner.config.prefer_headless_render
@@ -649,6 +680,7 @@ impl AgentRuntime {
             fe_render,
             headless_render,
             ui_director,
+            session_director,
             prefer_headless_render: prefer_headless,
         };
         let engine = AgentEngine {

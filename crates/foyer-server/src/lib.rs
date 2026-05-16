@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod agent_render;
+mod session_director;
 mod ui_director;
 
 /// Public re-export so the CLI can fire the chromium boot probe.
@@ -1027,6 +1028,19 @@ impl Server {
         agent
             .set_ui_director(Some(
                 ui_director as std::sync::Arc<dyn foyer_agent::tools::UiDirector>,
+            ))
+            .await;
+
+        // Session director — gives the `session` agent tool access to
+        // open / new / close / list_open / recents / browse / backends.
+        // No AppState slot needed (the impl holds Weak<AppState> and
+        // doesn't need a correlation table like the UI director's),
+        // so we only hand it to the runtime.
+        let session_dir =
+            session_director::SessionDirectorImpl::new(std::sync::Arc::downgrade(&self.state));
+        agent
+            .set_session_director(Some(
+                session_dir as std::sync::Arc<dyn foyer_agent::tools::SessionDirector>,
             ))
             .await;
     }

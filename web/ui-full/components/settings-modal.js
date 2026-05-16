@@ -16,6 +16,9 @@ import { icon } from "foyer-ui-core/icons.js";
 import { readAudioPrefs, writeAudioPrefs } from "foyer-core/audio/audio-listener.js";
 import { multiWindow } from "foyer-core/multi-window.js";
 import { identifyAllWindows } from "foyer-core/multi-window-identify.js";
+import {
+  listProfiles, getActiveProfileId, setActiveProfile,
+} from "foyer-core/keymap/index.js";
 
 export class SettingsModal extends LitElement {
   static properties = {
@@ -582,12 +585,47 @@ export class SettingsModal extends LitElement {
           <button class="close" title="Close" @click=${this._close}>${icon("x-mark", 16)}</button>
         </header>
         <div class="body">
+          ${this._renderEditorConventionsSection()}
           ${this._renderAudioSection()}
           ${this._renderWindowsSection()}
         </div>
         <footer>
           <button class="primary" @click=${this._close}>Done</button>
         </footer>
+      </div>
+    `;
+  }
+
+  /**
+   * "Editor conventions" — DAW-flavoured keyboard + mouse-wheel
+   * profile. Default is Foyer's native scheme (wheel-zoom-at-cursor,
+   * =/- zoom). Picking another profile swaps the wheel behaviour
+   * across the timeline body / ruler / overview and the keyboard
+   * shortcuts for transport, undo/redo, zoom, split, and mute. See
+   * `web/core/keymap/profiles.js` for the per-profile spec.
+   */
+  _renderEditorConventionsSection() {
+    const active = getActiveProfileId();
+    const profiles = listProfiles();
+    const current = profiles.find((p) => p.id === active) || profiles[0];
+    return html`
+      <div class="section">
+        <h3>Editor conventions</h3>
+        <div class="row">
+          <label title="DAW-style keyboard shortcuts and mouse-wheel behaviour. Affects the timeline body, ruler, overview strip, and transport keys.">
+            Profile
+          </label>
+          <select
+            style="background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;padding:2px 6px"
+            @change=${(e) => { setActiveProfile(e.currentTarget.value); this._refresh(); }}>
+            ${profiles.map((p) => html`
+              <option value=${p.id} ?selected=${p.id === active}>${p.label}</option>
+            `)}
+          </select>
+        </div>
+        <div style="font-size:10px;color:var(--color-text-muted);padding:4px 0 0 2px;line-height:1.5">
+          ${current.description}
+        </div>
       </div>
     `;
   }

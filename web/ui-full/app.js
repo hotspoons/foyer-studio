@@ -80,17 +80,35 @@ document.addEventListener("contextmenu", (ev) => {
   // Text-bearing surfaces keep the native cut/copy/paste menu. Walk
   // the composed path because inputs inside a shadow root surface
   // here as their host element (e.g. <foyer-scripts-view>), and the
-  // direct `ev.target` check then fails — every right-click on a
-  // shadowed input or our contenteditable code editor was getting
-  // its native menu suppressed.
+  // direct `ev.target` check then fails.
   const path = ev.composedPath?.() || [ev.target];
   for (const node of path) {
     if (!node || node === window) continue;
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) return;
     if (node.isContentEditable) return;
   }
+  // Any active selection also gets the native menu — covers
+  // selectable transcript text in the agent panel, log lines in
+  // the console, etc. without us having to enumerate every
+  // selectable surface. `hasActiveTextSelection` walks shadow
+  // roots so a selection inside a custom element still counts.
+  try {
+    // Lazy-load to avoid pulling typing-guard into the app shell
+    // import graph; we already use it for keybinds.
+    const { hasActiveTextSelection } =
+      // eslint-disable-next-line no-undef
+      window.__foyerTypingGuard || {};
+    if (hasActiveTextSelection?.()) return;
+  } catch {}
   ev.preventDefault();
 });
+
+// Stash a global reference to the selection helper so the
+// contextmenu guard above can call it synchronously without
+// awaiting a dynamic import per event.
+import("foyer-ui-core/typing-guard.js").then((mod) => {
+  window.__foyerTypingGuard = mod;
+}).catch(() => {});
 
 // Boot-time: install whatever automation script the user has saved.
 bootAutomation();

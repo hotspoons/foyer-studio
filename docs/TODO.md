@@ -347,8 +347,16 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   `expand_sequencer_layout` plumbing on the Ardour shim side; the FE-only
   stub backend may behave differently than the live ardour shim and that's
   worth a side-by-side.
-- [ ] Large resizable bottom scroll area with zoom and scrub and track high levels
+- [x] Large resizable bottom scroll area with zoom and scrub and track high levels
    like ardour, that is really well done
+- [ ] The + launcher should have other windows from the main menu - audio pool,
+   midi devices, on screen keyboard, remote access, preferences, group manager
+   maybe organized by theme?
+- [ ] FAB is dragged around by the window handle, but the window isn't dragged
+   around by the FAB. 
+- [ ] Dragging the FAB over the dock sometimes show it will land in the dock, but
+   not reliable and releasing it even with the lit up landing area doesn't 
+   dock the FAB
 
 ## Infra + ops
 

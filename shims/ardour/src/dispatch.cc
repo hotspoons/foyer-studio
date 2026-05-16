@@ -4784,6 +4784,18 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				if (!plug) {
 					PBD::warning << "foyer_shim: add_plugin: no plugin with unique_id '" << snap.plugin_uri << "'" << endmsg;
+					// Surface to the client as a typed error event so
+					// the agent / FE see the failure instead of a
+					// silent "command accepted". The previous behavior
+					// returned 0 to the WS layer and the agent thought
+					// the insert worked. Frequent root cause: a
+					// just-saved Lua DSP script whose lua_refresh has
+					// not yet repopulated `PluginManager::_lua_plugin_info`,
+					// so `find_plugin(Lua)` misses by unique_id.
+					auto bytes = msgpack_out::encode_error (
+						"add_plugin_unknown",
+						"no plugin with unique_id '" + snap.plugin_uri + "'");
+					if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 					return;
 				}
 

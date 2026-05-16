@@ -900,18 +900,30 @@ export class AgentPanel extends LitElement {
     }
     .attachments {
       grid-column: 1 / -1;
-      display: flex; flex-wrap: wrap; gap: 4px;
-      align-items: center;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      align-items: stretch;
+      max-height: 120px;
+      overflow-y: auto;
       margin-bottom: 4px;
+      /* Vertical stack with a hard cap so dropping a dozen files
+       * doesn't push the textarea offscreen — chips beyond ~3 rows
+       * scroll inside this container. */
     }
     .attachments .chip {
-      display: inline-flex; align-items: center; gap: 4px;
+      display: flex; align-items: center; gap: 6px;
       background: var(--color-surface);
       border: 1px solid var(--color-border);
-      border-radius: 999px;
-      padding: 2px 4px 2px 8px;
+      border-radius: var(--radius-sm);
+      padding: 3px 6px 3px 8px;
       font-size: 11px;
       color: var(--color-text);
+      /* Each chip takes the FULL width of the stack so the layout
+       * grows DOWN, not across — matches the "stack then scroll"
+       * expectation. */
+      width: 100%;
+      box-sizing: border-box;
     }
     .attachments .chip button {
       width: 16px; height: 16px;
@@ -923,9 +935,30 @@ export class AgentPanel extends LitElement {
       padding: 0;
     }
     .attachments .chip button:hover { color: var(--color-text); }
-    .attachments .attach-note {
-      font-size: 10px; color: var(--color-text-muted);
-      margin-left: 4px;
+    .attachments .chip .name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* Image preview inside the chip — same 24 px sizing the tool-call
+     * media renderer uses so the two surfaces feel consistent. Click
+     * opens the existing zoom modal. */
+    .attachments .chip .thumb {
+      background: transparent;
+      border: 0;
+      padding: 0;
+      cursor: zoom-in;
+      display: inline-flex;
+      align-items: center;
+    }
+    .attachments .chip .thumb img {
+      display: block;
+      height: 22px;
+      width: auto;
+      max-width: 80px;
+      object-fit: contain;
+      border-radius: 3px;
     }
 
     .input-area {
@@ -1100,29 +1133,22 @@ export class AgentPanel extends LitElement {
     if (!mod.wobblyEnabled()) return;
     const fab = this.renderRoot?.querySelector?.(".fab");
     const panel = this.renderRoot?.querySelector?.(".panel");
-    // Same right/bottom-anchored translation rule QuadrantFab uses.
-    const commit = ({ dx, dy }) => {
-      this._fabRight = (this._fabRight || 0) - dx;
-      this._fabBottom = (this._fabBottom || 0) - dy;
-      this._clampToViewport?.();
-      this._persist?.();
-      this.requestUpdate();
-    };
-    if (fab) {
-      // FAB tap toggles the chat panel open; defer wobble takeover
-      // until motion > threshold so taps pass through. Panel
-      // follows the FAB so they move as a unit.
-      mod.attachWobble(fab, undefined, {
-        commit,
-        followers: panel ? [panel] : [],
-        passthroughClick: true,
-      });
-    }
+    // `visualOnly: true` — wobble is decoration only. The host's
+    // native pointer handlers own drag state, position, and any
+    // drop detection. Drop / position math is therefore identical
+    // to the non-jiggle code path.
     if (panel) {
       const header = panel.querySelector?.("header") || panel;
-      mod.attachWobble(panel, header, {
-        commit,
+      const handles = fab ? [header, fab] : [header];
+      mod.attachWobble(panel, handles, {
         followers: fab ? [fab] : [],
+        passthroughClick: true,
+        visualOnly: true,
+      });
+    } else if (fab) {
+      mod.attachWobble(fab, undefined, {
+        passthroughClick: true,
+        visualOnly: true,
       });
     }
     this._wobbleAttached = { fab, panel };
@@ -1365,21 +1391,27 @@ export class AgentPanel extends LitElement {
       const dx = ev.clientX - ds.startX;
       const dy = ev.clientY - ds.startY;
       if (!ds.moved && Math.hypot(dx, dy) > 4) ds.moved = true;
-      this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
-      this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
-      // Hint the dock that a drop here would dock the agent.
+      // Skip per-tick position updates when a wobble is attached —
+      // its matrix3d / follower-translate transforms are providing
+      // the visual movement, and updating _fabRight here would
+      // double-shift the FAB. The final position is committed
+      // from cursor delta in _onWindowPointerUp.
+      if (!this._wobbleAttached) {
+        this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
+      }
       window.__foyer?.rightDock
         ?.setDropHighlight?.(this._isOverRail(ev.clientX, ev.clientY));
       this.requestUpdate();
     } else if (this._dragState?.kind === "panel-header") {
-      // Panel drag actually moves the FAB (since panel position is derived
-      // from FAB quadrant). Update fab position directly.
       const ds = this._dragState;
       const dx = ev.clientX - ds.startX;
       const dy = ev.clientY - ds.startY;
-      this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
-      this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
-      this.requestUpdate();
+      if (!this._wobbleAttached) {
+        this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
+        this.requestUpdate();
+      }
     } else if (this._resizeState) {
       const rs = this._resizeState;
       const dx = ev.clientX - rs.startX;
@@ -1396,18 +1428,34 @@ export class AgentPanel extends LitElement {
     if (this._dragState?.kind === "fab") {
       const ds = this._dragState;
       const wasMoved = ds.moved;
+      // Deferred commit: native onMove skipped the position update
+      // while a wobble was attached. Now that we have the release
+      // coords, set the final FAB position from cursor delta.
+      if (this._wobbleAttached && ev && wasMoved) {
+        const dx = ev.clientX - ds.startX;
+        const dy = ev.clientY - ds.startY;
+        this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
+      }
       this._dragState = null;
       window.__foyer?.rightDock?.setDropHighlight?.(false);
       if (!wasMoved) {
         this._toggle();
       } else if (ev && this._isOverRail(ev.clientX, ev.clientY)) {
-        // Dock to the right rail and close the floating presentation.
         window.__foyer?.layout?.dockFab(this.storageKey);
         this._open = false;
       }
       this._persist();
       this.requestUpdate();
     } else if (this._dragState?.kind === "panel-header") {
+      const ds = this._dragState;
+      if (this._wobbleAttached && ev) {
+        const dx = ev.clientX - ds.startX;
+        const dy = ev.clientY - ds.startY;
+        this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
+        this.requestUpdate();
+      }
       this._dragState = null;
       this._persist();
     } else if (this._resizeState) {
@@ -1896,13 +1944,26 @@ export class AgentPanel extends LitElement {
     if (this._attachments.length === 0) return nothing;
     return html`
       <div class="attachments">
-        ${this._attachments.map((a, i) => html`
-          <div class="chip" title=${`${a.kind} · ${formatBytes(a.bytes)}`}>
-            <span>${a.name}</span>
-            <button @click=${() => this._removeAttachment(i)} title="Remove">${icon("x-mark", 10)}</button>
-          </div>
-        `)}
-        <div class="attach-note">media isn't shipped to the LLM yet — listed only</div>
+        ${this._attachments.map((a, i) => {
+          const isImage = typeof a.kind === "string" && a.kind.startsWith("image/");
+          const src = isImage && a.bytes_b64
+            ? `data:${a.kind};base64,${a.bytes_b64}`
+            : null;
+          return html`
+            <div class="chip" title=${`${a.kind} · ${formatBytes(a.bytes)} · forwarded to the model on send`}>
+              ${src ? html`
+                <button
+                  class="thumb"
+                  title="Click to expand"
+                  @click=${(e) => { e.preventDefault(); this._zoomImage = { src, alt: a.name }; }}>
+                  <img src=${src} alt=${a.name} />
+                </button>
+              ` : nothing}
+              <span class="name">${a.name}</span>
+              <button @click=${() => this._removeAttachment(i)} title="Remove">${icon("x-mark", 10)}</button>
+            </div>
+          `;
+        })}
       </div>
     `;
   }

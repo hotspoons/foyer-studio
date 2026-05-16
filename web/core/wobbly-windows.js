@@ -43,13 +43,40 @@ const DRAG_THRESHOLD = 4;
 class Wobble {
   constructor(el, handle, opts) {
     this.el = el;
-    this.handle = handle || el;
-    /** Called on pointerup with `{ dx, dy, clientX, clientY }`
-     *  so the caller can commit a new persisted position AND
-     *  run any cursor-position-dependent logic (dock-zone
-     *  check, snap to grid, …). Without a commit hook the
-     *  wobble springs back to its original position. */
+    // `handle` is either a single element or an array. Each handle
+    // gets the pointerdown listener so any of them starts a drag
+    // of `el`. (FAB+grip share one panel wobble so dragging from
+    // either makes the window jiggle.)
+    const list = Array.isArray(handle) ? handle.filter(Boolean) : [handle || el];
+    this.handles = list;
+    // Back-compat shim: external callers may inspect `.handle`. Point
+    // it at the first entry — anything more nuanced should walk
+    // `this.handles`.
+    this.handle = list[0];
+    /** Called on pointerup with `{ dx, dy, clientX, clientY,
+     *  startClientX, startClientY }` so the caller can commit a
+     *  new persisted position AND run any cursor-position-dependent
+     *  logic (dock-zone check, snap to grid, …). Without a commit
+     *  hook the wobble springs back to its original position.
+     *
+     *  `dx, dy` are the WOBBLE-PIN displacement (the deforming
+     *  corner's travel). `startClientX/Y` + `clientX/Y` describe
+     *  the CURSOR'S total travel from pointerdown to release.
+     *  Hosts that need drop-detection should prefer the cursor
+     *  values — they always match what a non-jiggle drag would
+     *  see, regardless of where the wobble's pin lands. */
     this.commit = opts?.commit || null;
+    /** Called once at drag start with `{ clientX, clientY }` from
+     *  the pointerdown. Lets the host capture a position snapshot
+     *  for delta-based commit math. */
+    this.onStart = opts?.onStart || null;
+    /** Called on every pointermove DURING the active drag with
+     *  `{ clientX, clientY, dx, dy, startClientX, startClientY }`.
+     *  Lets the host keep cursor-position-dependent visuals alive
+     *  (drop-zone highlight, snap previews) — those can't ride
+     *  the host's own native pointermove because the wobble nulls
+     *  peer `_dragState` at takeover. */
+    this.onMove = opts?.onMove || null;
     /** Sibling elements that should translate by the same delta
      *  as this wobble's mesh. Used to keep FAB + panel moving
      *  together when the user drags either one. Followers get a
@@ -65,6 +92,14 @@ class Wobble {
      *  crossed we cancel the peer's drag state and own the
      *  rest of the gesture. */
     this.passthroughClick = !!opts?.passthroughClick;
+    /** When true, the wobble is purely cosmetic — it runs its
+     *  physics + matrix3d transforms but doesn't suppress peer
+     *  pointerdown handlers, doesn't null peer `_dragState`, and
+     *  doesn't fire `commit` / `onStart` / `onMove` callbacks.
+     *  The host's native pointer handlers stay in control of
+     *  drop detection + position commit; the wobble is just
+     *  decoration on top. */
+    this.visualOnly = !!opts?.visualOnly;
     this.gridW = Math.max(2, getVizPref("wobblyGridW") | 0 || 8);
     this.gridH = Math.max(2, getVizPref("wobblyGridH") | 0 || 6);
     this.k = Number(getVizPref("wobblySpringK")) || 0.2;
@@ -104,7 +139,9 @@ class Wobble {
     // pointerup. Without this, Lit's drag would track the cursor
     // 1:1 with the box, leaving zero relative motion between
     // cursor and box local coords → no spring force → no wobble.
-    this.handle.addEventListener("pointerdown", this._onPointerDown, true);
+    for (const h of this.handles) {
+      h.addEventListener("pointerdown", this._onPointerDown, true);
+    }
   }
 
   _reseed() {
@@ -132,12 +169,20 @@ class Wobble {
 
   _onPointerDown(ev) {
     if (ev.button !== 0) return;
-    // Buttons inside the handle (close, settings, …) shouldn't fire
-    // a wobble drag. The walk through composedPath catches buttons
-    // even when the handle's a shadow-rooted node.
+    // Identify which of our handles owns this pointerdown.
     const path = ev.composedPath?.() || [];
+    let activeHandle = null;
     for (const n of path) {
-      if (n === this.handle) break;
+      if (this.handles.includes(n)) { activeHandle = n; break; }
+    }
+    if (!activeHandle) return;
+    // Buttons NESTED inside the active handle (close, settings, …)
+    // shouldn't fire a wobble drag. The walk through composedPath
+    // catches buttons even when the handle's a shadow-rooted node.
+    // Stop the walk at the handle so a button that IS the handle
+    // (the FAB itself, which is a <button>) still triggers wobble.
+    for (const n of path) {
+      if (n === activeHandle) break;
       const tag = n.tagName?.toLowerCase?.();
       if (tag === "button") return;
     }
@@ -150,22 +195,31 @@ class Wobble {
     this._origRect = { left: cur.left, top: cur.top, width: cur.width, height: cur.height };
     this._startCursor = { x: ev.clientX, y: ev.clientY };
 
-    if (this.passthroughClick) {
-      // Deferred takeover: do NOT suppress peer pointerdown
-      // handlers. The FAB's _onFabDown / panel's _onGripDown
-      // run normally and set up Lit's own drag state. We only
-      // intercept once the cursor has moved beyond the click
-      // threshold — at which point we cancel Lit's drag and
-      // take over with the wobble.
-      this._pendingTakeover = true;
+    if (this.passthroughClick || this.visualOnly) {
+      // Deferred takeover OR visual-only mode: do NOT suppress peer
+      // pointerdown handlers. The host's native drag-down handler
+      // (FAB's _onFabDown / panel's _onGripDown) runs normally and
+      // owns drop detection / position commit. The wobble just
+      // listens along for its physics.
+      //
+      // In passthrough mode we wait for the cursor to cross
+      // DRAG_THRESHOLD before starting the mesh, so a tap-click
+      // still fires the host's click handler. In pure visual-only
+      // mode we start the mesh immediately (no need to defer —
+      // there's no click-takeover to preserve).
+      if (this.visualOnly && !this.passthroughClick) {
+        this._beginDrag(ev);
+      } else {
+        this._pendingTakeover = true;
+      }
       window.addEventListener("pointermove", this._onPointerMove);
       window.addEventListener("pointerup", this._onPointerUp, { once: true });
       return;
     }
 
-    // Immediate takeover (foyer-window case): suppress peer
+    // Immediate takeover (legacy foyer-window case): suppress peer
     // pointerdown handlers. When wobble is on, it owns the drag
-    // end-to-end.
+    // end-to-end and the host's drop logic must defer to `commit`.
     ev.stopImmediatePropagation();
     ev.preventDefault();
     this._beginDrag(ev);
@@ -190,6 +244,14 @@ class Wobble {
     this.pinDy = this.y[best] - ly;
     this.dragging = true;
     this._pendingTakeover = false;
+    if (this.onStart && !this.visualOnly) {
+      try {
+        this.onStart({
+          clientX: this._startCursor.x,
+          clientY: this._startCursor.y,
+        });
+      } catch {}
+    }
     this._startRaf();
   }
 
@@ -200,12 +262,14 @@ class Wobble {
       const dy = ev.clientY - this._startCursor.y;
       if (dx * dx + dy * dy < DRAG_THRESHOLD * DRAG_THRESHOLD) return;
       // Threshold crossed → take over.
-      ev.stopImmediatePropagation();
-      // Cancel peer drag state so Lit's drag handler stops
-      // mutating position behind our back. QuadrantFab /
-      // AgentPanel both use `_dragState` for tracking; clearing
-      // it makes their pointermove a no-op.
-      this._cancelPeerDrag();
+      if (!this.visualOnly) {
+        ev.stopImmediatePropagation();
+        // Cancel peer drag state so Lit's drag handler stops
+        // mutating position behind our back. QuadrantFab /
+        // AgentPanel both use `_dragState` for tracking; clearing
+        // it makes their pointermove a no-op.
+        this._cancelPeerDrag();
+      }
       this._beginDrag(ev);
       // Fall through to the active-drag branch so the same
       // pointermove also seeds the pin position.
@@ -221,6 +285,24 @@ class Wobble {
     this.y[this.pin] = ly + this.pinDy;
     this.vx[this.pin] = 0;
     this.vy[this.pin] = 0;
+    // Let the host respond to the live cursor position (e.g.
+    // keep a dock-zone drop-highlight in sync). The native
+    // pointermove can't drive this any more — peer `_dragState`
+    // was nulled at takeover, so its onMove handler is a no-op.
+    // Skipped in visual-only mode (host's native pointermove
+    // owns highlight + drop detection).
+    if (this.onMove && !this.visualOnly) {
+      const dx = this.x[this.pin] - this.ax[this.pin];
+      const dy = this.y[this.pin] - this.ay[this.pin];
+      try {
+        this.onMove({
+          clientX: ev.clientX, clientY: ev.clientY,
+          dx, dy,
+          startClientX: this._startCursor.x,
+          startClientY: this._startCursor.y,
+        });
+      } catch {}
+    }
   }
 
   /// Reach up the composed path from the handle and clear any
@@ -251,7 +333,7 @@ class Wobble {
       this._pendingTakeover = false;
       return;
     }
-    if (this.pin >= 0 && this.commit && this._origRect) {
+    if (this.pin >= 0 && this.commit && !this.visualOnly && this._origRect) {
       const dx = this.x[this.pin] - this.ax[this.pin];
       const dy = this.y[this.pin] - this.ay[this.pin];
       try {
@@ -259,16 +341,27 @@ class Wobble {
           dx, dy,
           clientX: ev?.clientX ?? this._startCursor.x + dx,
           clientY: ev?.clientY ?? this._startCursor.y + dy,
+          startClientX: this._startCursor.x,
+          startClientY: this._startCursor.y,
         });
       } catch (e) { console.warn("wobble commit failed", e); }
-      const baseDx = dx;
-      const baseDy = dy;
+    }
+    if (this.pin >= 0) {
+      // Snap every particle to rest IMMEDIATELY on release so the
+      // host's CSS-anchored position (which may have just been
+      // committed by native `onUp`) doesn't leave a residual
+      // matrix3d displacement that pushes the element off-screen.
+      // Without this snap, the spring's decay phase would keep
+      // applying the takeover-time displacement against the
+      // already-committed anchor, leaving the FAB invisible until
+      // a resize forced a re-layout.
       for (let idx = 0; idx < this.N; idx++) {
-        this.x[idx] = this.x[idx] - baseDx;
-        this.y[idx] = this.y[idx] - baseDy;
+        this.x[idx] = this.ax[idx];
+        this.y[idx] = this.ay[idx];
+        this.vx[idx] = 0;
+        this.vy[idx] = 0;
       }
-      this._origRect.left += baseDx;
-      this._origRect.top  += baseDy;
+      try { this.el.style.transform = ""; } catch {}
     }
     this.pin = -1;
     // Clear follower translates — they've now been promoted to
@@ -415,9 +508,20 @@ class Wobble {
   detach() {
     if (this._raf) cancelAnimationFrame(this._raf);
     window.removeEventListener("pointermove", this._onPointerMove);
-    this.handle.removeEventListener("pointerdown", this._onPointerDown);
+    // Capture-flag MUST match the registration in the constructor
+    // (`useCapture = true`). Without it, removeEventListener silently
+    // no-ops — the listener stays live, every subsequent pointerdown
+    // on the handle still spawns a wobble, and the user has to refresh
+    // to actually disable the effect.
+    for (const h of this.handles) {
+      h.removeEventListener("pointerdown", this._onPointerDown, true);
+    }
     this.el.style.transform = "";
     this.el.style.transformOrigin = "";
+    // Clear any leftover follower transforms (mid-drag detach).
+    for (const el of this.followers) {
+      try { el.style.transform = ""; el.style.transformOrigin = ""; } catch {}
+    }
   }
 }
 

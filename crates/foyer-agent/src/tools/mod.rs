@@ -81,6 +81,11 @@ pub struct ToolContext {
     /// tool reports that to the agent so it can fall back to
     /// explaining the layout in text.
     pub ui_director: Option<Arc<dyn UiDirector>>,
+    /// Sidecar-state ops for `session.{open,new,close,list_open,
+    /// recents,browse,...}`. The active-backend Save/Save-As path
+    /// goes through `Backend::save_session` instead so it works
+    /// without a director attached (in-process tests, etc.).
+    pub session_director: Option<Arc<dyn SessionDirector>>,
     /// Snapshot of `AgentConfig.prefer_headless_render` at the
     /// moment this turn started. Read by the `visualize` tool to
     /// flip the renderer priority.
@@ -175,6 +180,76 @@ impl From<UiDirectorError> for ToolError {
     fn from(e: UiDirectorError) -> Self {
         match e {
             UiDirectorError::Execution(m) => ToolError::Execution(m),
+        }
+    }
+}
+
+/// Sidecar session-management surface. Distinct from the `Backend`
+/// trait (which acts on the CURRENTLY-OPEN session) — this is the
+/// agent's hook into the sidecar's multi-session registry, the project
+/// launcher, recents, and filesystem browsing inside the jail.
+///
+/// Implemented by `foyer-server::session_director::SessionDirectorImpl`.
+/// Tools call through here; the impl reaches back into `AppState` to
+/// invoke the same launch + close + recents helpers the WS dispatcher
+/// uses, so the agent's "open this project" goes through the same
+/// pipeline as a click on the project picker.
+#[async_trait]
+pub trait SessionDirector: Send + Sync {
+    /// Sessions currently open in the sidecar registry.
+    async fn list_open(&self) -> Result<Vec<foyer_schema::SessionInfo>, SessionDirectorError>;
+    /// Close (and quit shim of) a session by id.
+    async fn close(&self, session_id: &str) -> Result<(), SessionDirectorError>;
+    /// Launch a project. `backend_id` of "" / "auto" resolves to the
+    /// currently-active backend (or the default if none is up yet).
+    /// `project_path` of None launches a fresh in-memory project (stub
+    /// backends only; Ardour requires a path).
+    async fn launch_project(
+        &self,
+        backend_id: &str,
+        project_path: Option<&str>,
+        sample_rate: Option<u32>,
+    ) -> Result<LaunchOutcome, SessionDirectorError>;
+    /// Recents list (canonical order: most-recently-touched first).
+    async fn list_recents(&self) -> Result<Vec<foyer_schema::RecentEntry>, SessionDirectorError>;
+    /// Forget a single recents entry (jail-relative path).
+    async fn forget_recent(&self, path: &str) -> Result<(), SessionDirectorError>;
+    /// Directory listing inside the jail. `path = ""` lists the jail root.
+    async fn browse_path(
+        &self,
+        path: &str,
+        show_hidden: bool,
+    ) -> Result<foyer_schema::PathListing, SessionDirectorError>;
+    /// Configured backend adapters + which is currently live.
+    async fn list_backends(&self) -> Result<BackendsListing, SessionDirectorError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct LaunchOutcome {
+    pub session_id: String,
+    pub backend_id: String,
+    pub project_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackendsListing {
+    pub backends: Vec<foyer_schema::BackendInfo>,
+    pub active: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionDirectorError {
+    #[error("{0}")]
+    Execution(String),
+    #[error("not supported in this deployment: {0}")]
+    Unsupported(String),
+}
+
+impl From<SessionDirectorError> for ToolError {
+    fn from(e: SessionDirectorError) -> Self {
+        match e {
+            SessionDirectorError::Execution(m) => ToolError::Execution(m),
+            SessionDirectorError::Unsupported(m) => ToolError::Execution(m),
         }
     }
 }

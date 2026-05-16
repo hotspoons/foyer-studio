@@ -22,6 +22,32 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+/// Built-in skill files seeded into a fresh `skills/` directory on
+/// first store open. Each entry is `(filename, body)`. The seeded
+/// files are markdown with the same `enabled: true` frontmatter
+/// shape user-authored skills use, so `list_skills` picks them up
+/// without special-casing. New defaults can be added without
+/// breaking existing user data — only filenames that aren't
+/// already on disk get written.
+const DEFAULT_SKILL_SEEDS: &[(&str, &str)] = &[
+    (
+        "ardour-lua-dsp.md",
+        include_str!("skills_seed/ardour-lua-dsp.md"),
+    ),
+    (
+        "ardour-lua-action.md",
+        include_str!("skills_seed/ardour-lua-action.md"),
+    ),
+    (
+        "ardour-lua-hook.md",
+        include_str!("skills_seed/ardour-lua-hook.md"),
+    ),
+    (
+        "ardour-lua-snippet.md",
+        include_str!("skills_seed/ardour-lua-snippet.md"),
+    ),
+];
+
 /// Persisted shape of the agent's LLM transport config. The
 /// runtime's full `AgentConfig` carries deployment knobs that come
 /// from `config.yaml` instead (`prefer_headless_render`); those are
@@ -64,6 +90,20 @@ impl AgentStore {
     pub async fn open_at(root: PathBuf) -> Result<Self, StoreError> {
         for sub in ["skills", "memory", "templates", "sessions", "trace"] {
             fs::create_dir_all(root.join(sub)).await?;
+        }
+        // Drop the built-in skill seeds into `skills/` unless the
+        // user has already written a file by the same name. Lets a
+        // fresh install ship useful agent knowledge (Lua DSP,
+        // editor action / hook / snippet authoring) without
+        // overwriting anything the user has tuned. New skills
+        // added in future versions land automatically — the user
+        // can re-seed by deleting the file.
+        let skills_dir = root.join("skills");
+        for (name, body) in DEFAULT_SKILL_SEEDS {
+            let path = skills_dir.join(name);
+            if fs::metadata(&path).await.is_err() {
+                let _ = fs::write(&path, body).await;
+            }
         }
         Ok(Self { root })
     }

@@ -25,6 +25,7 @@ import "./midi-strip.js";
 import "./automation-lane.js";
 import "foyer-ui-core/viz/viz-picker.js";
 import { getVizPref, getVizPrefs, setVizPref } from "foyer-ui-core/viz/viz-settings.js";
+import { resolveWheel, zoomFactorFromWheel } from "foyer-core/keymap/index.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { toast } from "foyer-ui-core/widgets/toast.js";
@@ -1979,6 +1980,66 @@ export class TimelineView extends LitElement {
     return true;
   }
 
+  /**
+   * Horizontal zoom-in/out step driven by a keyboard shortcut. Anchors
+   * around the playhead if it's currently visible (matches what users
+   * mean by "zoom into where I'm playing"), otherwise around the
+   * scrollLeft viewport center.
+   * @param {number} step — multiplicative factor; >1 zooms in, <1 zooms out.
+   */
+  zoomStepH(step) {
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return false;
+    const sr = this._sampleRate();
+    const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
+    // Anchor sample: playhead if visible, else viewport center.
+    const phPx = (this._playheadSamples / sr) * this._zoom;
+    const phVisible =
+      phPx >= scroll.scrollLeft - HEAD_WIDTH
+      && phPx <= scroll.scrollLeft - HEAD_WIDTH + visiblePx;
+    const anchorPx = phVisible
+      ? phPx
+      : (scroll.scrollLeft - HEAD_WIDTH) + visiblePx / 2;
+    const anchorSamples = (anchorPx / this._zoom) * sr;
+    const next = Math.max(2, Math.min(4000, Math.round(this._zoom * step)));
+    if (next === this._zoom) return false;
+    this._zoom = next;
+    this.updateComplete.then(() => {
+      const sc = this.renderRoot.querySelector(".scroll");
+      if (!sc) return;
+      const newAnchorPx = (anchorSamples / sr) * this._zoom;
+      sc.scrollLeft = Math.max(0, newAnchorPx - (anchorPx - (scroll.scrollLeft - HEAD_WIDTH)));
+    });
+    return true;
+  }
+
+  /**
+   * Vertical lane-height zoom step applied uniformly to every track.
+   * Keyboard counterpart of Alt-wheel; resizes the per-track override
+   * map relative to each track's current height.
+   * @param {number} step — multiplicative factor; >1 grows, <1 shrinks.
+   */
+  zoomStepV(step) {
+    const tracks = this.session?.tracks || [];
+    if (!tracks.length) return false;
+    const next = { ...this._laneHeights };
+    let changed = false;
+    for (const t of tracks) {
+      const cur = this._laneHeightFor(t.id);
+      const n = Math.max(LANE_HEIGHT_MIN, Math.min(LANE_HEIGHT_MAX, Math.round(cur * step)));
+      if (n !== cur) {
+        next[t.id] = n;
+        changed = true;
+      }
+    }
+    if (!changed) return false;
+    this._laneHeights = next;
+    this._saveLaneHeights();
+    this.requestUpdate();
+    requestAnimationFrame(() => this._repaintWaveforms());
+    return true;
+  }
+
   _setLoopToSelection() {
     if (!this._selection) return false;
     const ws = window.__foyer?.ws;
@@ -2313,22 +2374,27 @@ export class TimelineView extends LitElement {
     window.addEventListener("pointerup", up);
   }
 
-  // Mouse wheel over the overview:
-  //   - plain wheel → zoom main timeline toward the sample under the
-  //     cursor (same as Ardour's editor summary behavior)
-  //   - shift- or ctrl-wheel → horizontal pan
-  // Vertical deltaY is the wheel rotation; we also fold in deltaX for
-  // trackpads that report horizontal scroll natively.
+  // Mouse wheel over the overview strip. The keymap profile decides what
+  // plain/shift/ctrl/alt + wheel means here — default (Foyer/Ardour) is
+  // plain=zoom-at-cursor and shift/ctrl=hscroll, matching Ardour's editor
+  // summary. Pro Tools / Cubase profiles swap to "scroll first, ctrl zooms".
   _onOverviewWheel(ev, stripWidthPx, totalSec) {
-    ev.preventDefault();
-    ev.stopPropagation();
     const scroll = this.renderRoot?.querySelector?.(".scroll");
     if (!scroll) return;
-    if (ev.shiftKey || ev.ctrlKey) {
+    const op = resolveWheel("timeline_overview", ev);
+    if (op === "hscroll") {
+      ev.preventDefault();
+      ev.stopPropagation();
       const delta = (ev.deltaY || 0) + (ev.deltaX || 0);
       scroll.scrollLeft = Math.max(0, scroll.scrollLeft + delta);
       return;
     }
+    if (op === "vscroll" || op === "none") {
+      return;
+    }
+    // op === "hzoom" — zoom anchored at the strip-x sample under the cursor.
+    ev.preventDefault();
+    ev.stopPropagation();
     const sr = this._sampleRate();
     const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
     const svgEl = ev.currentTarget;
@@ -2336,7 +2402,7 @@ export class TimelineView extends LitElement {
     const vbX = ((ev.clientX - rect.left) / Math.max(1, rect.width)) * stripWidthPx;
     const fraction = Math.max(0, Math.min(1, vbX / stripWidthPx));
     const sampleAtCursor = fraction * totalSec * sr;
-    const factor = ev.deltaY < 0 ? 1.2 : 1 / 1.2;
+    const factor = zoomFactorFromWheel(ev.deltaY);
     this._zoom = Math.max(2, Math.min(4000, this._zoom * factor));
     this.updateComplete.then(() => {
       const targetPx = (sampleAtCursor / sr) * this._zoom;
@@ -5212,16 +5278,17 @@ export class TimelineView extends LitElement {
   }
 
   /**
-   * Mouse-wheel zoom. Plain wheel adjusts temporal zoom (px/s); Alt- or
-   * Ctrl-wheel adjusts the lane height of whichever track the pointer is
-   * over. Horizontal scroll still works by holding Shift (browser default)
-   * or by scrolling on empty areas — we only preventDefault when we actually
-   * consume the event so normal scroll in the lane area still works when
-   * content overflows.
+   * Mouse-wheel zoom. The keymap profile (Preferences → Editor conventions)
+   * decides what plain/shift/ctrl/alt + wheel means in this zone. Default
+   * (Foyer / Ardour) is plain=zoom-at-cursor, shift/ctrl=hpan, alt=vzoom.
+   *
+   * We only preventDefault when we actually consume the event so a "vscroll"
+   * op falls through to the browser's native scroll on the ancestor.
    */
   _onWheel(ev) {
     const dy = ev.deltaY;
-    if (!dy) return;
+    const dx = ev.deltaX || 0;
+    if (!dy && !dx) return;
     // Wheel over the sticky lane-head column should scroll the
     // track list vertically — Rich's report 2026-04-21: "should do
     // vertical scrolling, not timeline zoom" when the pointer is
@@ -5229,12 +5296,10 @@ export class TimelineView extends LitElement {
     // lane-head (matches "modifier to scroll a long list" ask).
     const overHead = !!ev.target?.closest?.(".lane-head");
     if (overHead && !ev.shiftKey) {
-      // Default: let the .scroll container's native vertical scroll
-      // handle this. We don't preventDefault, so the browser
-      // forwards the wheel to the scroll ancestor.
       return;
     }
-    if (ev.altKey || ev.ctrlKey) {
+    const op = resolveWheel("timeline_main", ev);
+    if (op === "vzoom") {
       // Vertical (lane-height) zoom. Find the lane the pointer is over.
       const lane = ev.target?.closest?.(".lane");
       if (!lane) return;
@@ -5249,10 +5314,21 @@ export class TimelineView extends LitElement {
       this._laneHeights = { ...this._laneHeights, [trackId]: next };
       this._saveLaneHeights();
       this.requestUpdate();
-      // Give the canvas a beat to resize before repainting.
       requestAnimationFrame(() => this._repaintWaveforms());
       return;
     }
+    if (op === "hscroll") {
+      ev.preventDefault();
+      const scroll = ev.currentTarget;
+      const delta = Math.abs(dx) > Math.abs(dy) ? dx : dy;
+      scroll.scrollLeft = Math.max(0, scroll.scrollLeft + delta);
+      return;
+    }
+    if (op === "vscroll" || op === "none") {
+      // Yield to the browser's native vertical scroll on the .scroll ancestor.
+      return;
+    }
+    // op === "hzoom" — fall through into the temporal-zoom path below.
     // Temporal zoom — anchor around the pointer's current time so the
     // user's cursor stays over the same sample while the scale changes.
     //
@@ -5269,7 +5345,7 @@ export class TimelineView extends LitElement {
     const pointerScreenX = ev.clientX - bounds.left;   // viewport-relative
     const pointerContentX = pointerScreenX + scroll.scrollLeft - HEAD_WIDTH;
     const t0 = pointerContentX / this._zoom;
-    const factor = dy < 0 ? 1.18 : 1 / 1.18;
+    const factor = zoomFactorFromWheel(dy);
     const next = Math.max(2, Math.min(4000, Math.round(this._zoom * factor)));
     if (next === this._zoom) return;
     this._zoom = next;
@@ -5707,17 +5783,41 @@ export class TimelineView extends LitElement {
   }
 
   /**
-   * Wheel over the ruler scrolls horizontally instead of zooming — the
-   * ruler is a navigation surface, the waveforms underneath are for zoom.
-   * Stop propagation so the outer `.scroll` wheel handler doesn't zoom.
+   * Wheel over the ruler. Default profile scrolls horizontally (the ruler is a
+   * navigation surface, not a zoom one), but Pro Tools / Cubase users expect
+   * Ctrl-wheel here to zoom in at the cursor — the keymap profile decides.
+   * Stop propagation so the outer `.scroll` wheel handler doesn't double-fire.
    */
   _onRulerWheel(ev) {
     const scroll = this.renderRoot.querySelector(".scroll");
     if (!scroll) return;
-    ev.preventDefault();
-    ev.stopPropagation();
     const dx = ev.deltaX || 0;
     const dy = ev.deltaY || 0;
+    if (!dx && !dy) return;
+    const op = resolveWheel("timeline_ruler", ev);
+    if (op === "hzoom") {
+      // Anchor zoom around the pointer's current time.
+      ev.preventDefault();
+      ev.stopPropagation();
+      const bounds = scroll.getBoundingClientRect();
+      const pointerScreenX = ev.clientX - bounds.left;
+      const pointerContentX = pointerScreenX + scroll.scrollLeft - HEAD_WIDTH;
+      const t0 = pointerContentX / this._zoom;
+      const factor = zoomFactorFromWheel(dy);
+      const next = Math.max(2, Math.min(4000, Math.round(this._zoom * factor)));
+      if (next === this._zoom) return;
+      this._zoom = next;
+      const newPointerContentX = t0 * next;
+      const targetScrollLeft = newPointerContentX - (pointerScreenX - HEAD_WIDTH);
+      requestAnimationFrame(() => { scroll.scrollLeft = Math.max(0, targetScrollLeft); });
+      return;
+    }
+    if (op === "vscroll" || op === "none") {
+      return;  // yield to the browser
+    }
+    // "hscroll" (default) — what the ruler historically did.
+    ev.preventDefault();
+    ev.stopPropagation();
     scroll.scrollLeft += (Math.abs(dx) > Math.abs(dy) ? dx : dy);
   }
 
