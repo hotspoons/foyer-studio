@@ -18,8 +18,9 @@ use async_trait::async_trait;
 use foyer_schema::{
     Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EnginePort, EntityId, Event,
     LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch,
-    PathListing, PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session,
-    TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    PathListing, PluginCatalogEntry, PluginPreset, Region, RegionPatch, Script, ScriptRunResult,
+    ScriptingCapabilities, SequencerLayout, Session, TimelineMeta, Track, TrackPatch,
+    WaveformPeaks,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -869,6 +870,60 @@ pub trait Backend: Send + Sync + 'static {
         _samples: u32,
     ) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    // ── DAW scripting ──────────────────────────────────────────────
+    //
+    // Backends that have no scripting layer leave the defaults below,
+    // which advertise an empty surface and reject mutations. The Ardour
+    // shim advertises its real `LuaScriptInfo::ScriptType` enum + the
+    // hook taxonomy, and `register_lua_function` / `unregister_lua_function`
+    // ride underneath.
+
+    /// Capabilities the active backend advertises — types, languages,
+    /// and feature flags. Default returns `None`, which signals the
+    /// FE to hide the script-manager affordance entirely.
+    async fn scripting_capabilities(&self) -> Result<Option<ScriptingCapabilities>, BackendError> {
+        Ok(None)
+    }
+
+    /// Full current list of persisted scripts.
+    async fn list_scripts(&self) -> Result<Vec<Script>, BackendError> {
+        Ok(Vec::new())
+    }
+
+    /// Insert or update a script. Backend stamps `id` (when empty) +
+    /// `updated_at` and returns the canonical post-save shape.
+    async fn save_script(&self, _script: Script) -> Result<Script, BackendError> {
+        Err(BackendError::Other("scripting not supported".into()))
+    }
+
+    /// Delete a script. Idempotent; unknown ids are a no-op.
+    async fn delete_script(&self, _id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("scripting not supported".into()))
+    }
+
+    /// Flip the enabled flag without touching the body. Also used to
+    /// confirm a `disabled_on_upload` script after audit.
+    async fn enable_script(&self, _id: EntityId, _enabled: bool) -> Result<Script, BackendError> {
+        Err(BackendError::Other("scripting not supported".into()))
+    }
+
+    /// Manually invoke a script. The backend captures the script's
+    /// stdout + any raised error; result is wrapped in `ScriptRunResult`.
+    async fn run_script(
+        &self,
+        _id: EntityId,
+        _args_override: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<ScriptRunResult, BackendError> {
+        Err(BackendError::Other("scripting not supported".into()))
+    }
+
+    /// Scan the project file for disabled-on-upload scripts and
+    /// surface them via the normal save channel with the flag set.
+    /// Returns the list it just recovered (may be empty). Default no-op.
+    async fn recover_disabled_scripts(&self) -> Result<Vec<Script>, BackendError> {
+        Ok(Vec::new())
     }
 }
 

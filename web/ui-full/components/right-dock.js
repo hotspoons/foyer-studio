@@ -149,6 +149,7 @@ function _retargetBeatSequencer(seq, found) {
   seq.regionName = found.region.name || "";
   seq.notes = Array.isArray(found.region.notes) ? found.region.notes : [];
   seq.layout = found.region.foyer_sequencer || null;
+  seq._layoutFromBackend = !!found.region.foyer_sequencer;
   seq.trackId = found.trackId || "";
 }
 

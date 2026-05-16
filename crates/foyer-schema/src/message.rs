@@ -759,6 +759,35 @@ pub enum Event {
         id: String,
         title: String,
     },
+
+    // ───── DAW scripting (shim-declared, host-agnostic) ─────
+    /// Full current list of persisted scripts. Sent on connect and
+    /// after any structural change so a freshly attached client gets
+    /// the whole set without having to diff.
+    ScriptList {
+        scripts: Vec<crate::scripting::Script>,
+    },
+    /// A script was added or modified. `script` carries the post-
+    /// mutation state (id stamped if the save was a create).
+    ScriptSaved {
+        script: crate::scripting::Script,
+    },
+    /// A script was deleted.
+    ScriptRemoved {
+        id: EntityId,
+    },
+    /// Result of a manual `RunScript` invocation.
+    ScriptRunResult {
+        result: crate::scripting::ScriptRunResult,
+    },
+    /// Backend scripting capabilities changed (typically on backend
+    /// swap — different shim advertises a different surface). The
+    /// authoritative copy still lives on the session snapshot; this
+    /// event lets already-connected clients refresh without forcing a
+    /// full resync.
+    ScriptingCapabilitiesChanged {
+        capabilities: Option<crate::scripting::ScriptingCapabilities>,
+    },
 }
 
 /// One chat message as stored in the server's in-memory ring.
@@ -2013,6 +2042,49 @@ pub enum Command {
         id: String,
         title: String,
     },
+
+    // ─── DAW scripting (shim-declared, host-agnostic) ────────────
+    /// Request the current list of persisted scripts. Replied with
+    /// `Event::ScriptList`. Optional — clients normally receive a
+    /// list at connect-time from the session snapshot's follow-up,
+    /// but a fresh `ScriptList` is the canonical resync path.
+    ListScripts,
+    /// Insert or update a script. Empty `id` means create — the
+    /// backend allocates an id, stamps `updated_at`, and echoes
+    /// `Event::ScriptSaved` with the canonical post-save shape. The
+    /// shim is responsible for translating special types (e.g.
+    /// `dsp` → a luaproc plugin source) at save time.
+    SaveScript {
+        script: crate::scripting::Script,
+    },
+    /// Delete a script by id. Idempotent; unknown ids are a no-op.
+    DeleteScript {
+        id: EntityId,
+    },
+    /// Flip the enabled flag without touching the body. Also used to
+    /// confirm a `disabled_on_upload` script after the user has
+    /// audited the source.
+    EnableScript {
+        id: EntityId,
+        enabled: bool,
+    },
+    /// Manually invoke a script. Result returned in
+    /// `Event::ScriptRunResult`. `args_override` lets a caller bind
+    /// fresh args without modifying the persisted script's args
+    /// table — handy for editor "Run with these inputs…" UIs.
+    RunScript {
+        id: EntityId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args_override: Option<std::collections::BTreeMap<String, String>>,
+    },
+    /// Scan the backing project file for scripts that were stripped
+    /// to disabled state on upload (the base64 payload is still in
+    /// the file). Returns recovered scripts via the normal
+    /// `Event::ScriptList` / `ScriptSaved` channel with
+    /// `disabled_on_upload` set so the UI can flag them for review.
+    /// No-op when the backend's caps don't set
+    /// `features.can_recover_disabled`.
+    RecoverDisabledScripts,
 }
 
 #[cfg(test)]

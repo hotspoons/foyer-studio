@@ -17,7 +17,7 @@
 // All sample-math uses `sample_rate` from the TimelineMeta payload so
 // different sessions with different rates render correctly.
 
-import { LitElement, html, css } from "lit";
+import { LitElement, html, css, svg } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { WaveformCache } from "foyer-ui-core/layout/waveform-cache.js";
 import "foyer-ui-core/viz/waveform-gl.js";
@@ -101,6 +101,14 @@ export class TimelineView extends LitElement {
      *  "events on track X over time" presentation. `null` = no
      *  overlay (default). */
     _eventHeatmapTrackId: { state: true, type: String },
+    /** Live mirror of `.scroll.scrollLeft` and `.scroll.clientWidth`
+     *  for the overview-strip's viewport rectangle. Updated from a
+     *  `scroll` listener + a one-shot read in `firstUpdated`. */
+    _scrollX: { state: true, type: Number },
+    _scrollViewW: { state: true, type: Number },
+    /** In-flight strip height during a top-edge resize. Persisted
+     *  to viz prefs on drag end (overviewStripHeight). */
+    _overviewHeight: { state: true, type: Number },
   };
 
   static styles = css`
@@ -293,8 +301,57 @@ export class TimelineView extends LitElement {
        163px-wide lane-head while regions positioned at 140px got
        covered by its opaque background. */
     :host, *, *::before, *::after { box-sizing: border-box; }
-    .scroll { flex: 1; overflow: auto; }
+    .scroll { flex: 1; overflow: auto; min-height: 0; }
     .grid { position: relative; min-width: 100%; }
+
+    /* Ardour-style summary strip — mini whole-session view + draggable
+       viewport rectangle. Pinned to the bottom of the timeline-view.
+       Hidden when the overviewStripOn viz pref is false. Resizable
+       from its top edge via the .overview-resize handle. */
+    .overview-strip {
+      position: relative;
+      flex: 0 0 auto;
+      border-top: 1px solid var(--color-border);
+      background: var(--color-surface-elevated);
+      overflow: hidden;
+      user-select: none;
+    }
+    .overview-resize {
+      position: absolute; left: 0; right: 0; top: -3px;
+      height: 6px; cursor: ns-resize; z-index: 4;
+    }
+    .overview-resize::after {
+      content: "";
+      position: absolute; left: 50%; top: 50%;
+      transform: translate(-50%, -50%);
+      width: 36px; height: 2px;
+      background: color-mix(in oklab, var(--color-border) 70%, transparent);
+      border-radius: 1px;
+    }
+    .overview-svg {
+      display: block; width: 100%; height: 100%;
+      cursor: pointer;
+    }
+    .overview-viewport {
+      fill: color-mix(in oklab, var(--color-accent) 18%, transparent);
+      stroke: var(--color-accent);
+      stroke-width: 1.5;
+      cursor: grab;
+      pointer-events: all;
+    }
+    .overview-viewport.dragging { cursor: grabbing; }
+    .overview-viewport-edge {
+      cursor: ew-resize; fill: transparent;
+      pointer-events: all;
+    }
+    .overview-playhead {
+      stroke: var(--color-error);
+      stroke-width: 1; opacity: 0.9; pointer-events: none;
+    }
+    .overview-track-row.audio { fill: color-mix(in oklab, var(--color-accent-3) 70%, transparent); }
+    .overview-track-row.midi { fill: color-mix(in oklab, var(--color-accent-2) 70%, transparent); }
+    .overview-track-row.sequencer { fill: color-mix(in oklab, var(--color-accent-2) 80%, transparent); }
+    .overview-track-row.master { fill: color-mix(in oklab, var(--color-text-muted) 50%, transparent); }
     .ruler {
       position: sticky; top: 0; z-index: 3;
       height: ${RULER_HEIGHT}px;
@@ -1009,6 +1066,12 @@ export class TimelineView extends LitElement {
     // Set via `setEventHeatmap(trackId)` from the headless renderer;
     // null in normal interactive use.
     this._eventHeatmapTrackId = null;
+    // Overview strip — live scroll mirror + persisted height.
+    this._scrollX = 0;
+    this._scrollViewW = 1;
+    this._overviewHeight = Number.isFinite(getVizPref("overviewStripHeight"))
+      ? getVizPref("overviewStripHeight")
+      : 90;
     // Viewport back-stack: `zoomToSelection` pushes the prior {zoom,
     // scrollLeft} here so the user can pop back with "Zoom Previous".
     // Bounded so a trigger-happy user can't balloon memory.
@@ -1811,6 +1874,9 @@ export class TimelineView extends LitElement {
         seq.regionName   = r?.name || "";
         seq.notes        = Array.isArray(r?.notes) ? r.notes : [];
         seq.layout       = r?.foyer_sequencer || null;
+        // Flag layout as backend-sourced so the tempo-change
+        // re-persist path doesn't refuse to fire on real edits.
+        seq._layoutFromBackend = !!r?.foyer_sequencer;
         seq.trackId      = trackId || "";
         seq.trackRegions = this._regionsByTrack[trackId] || [];
       };
@@ -1824,7 +1890,10 @@ export class TimelineView extends LitElement {
         const fresh = list.find((r) => r.id === seq.regionId);
         if (fresh) {
           seq.notes  = Array.isArray(fresh.notes) ? fresh.notes : [];
-          if (fresh.foyer_sequencer) seq.layout = fresh.foyer_sequencer;
+          if (fresh.foyer_sequencer) {
+            seq.layout = fresh.foyer_sequencer;
+            seq._layoutFromBackend = true;
+          }
         }
       };
       this.addEventListener("foyer:regions-updated", onUpdate);
@@ -1853,6 +1922,7 @@ export class TimelineView extends LitElement {
           existingSeq.regionName = seq.regionName;
           existingSeq.notes = seq.notes;
           existingSeq.layout = seq.layout;
+          existingSeq._layoutFromBackend = seq._layoutFromBackend;
           existingSeq.trackId = seq.trackId;
           existingSeq.trackRegions = seq.trackRegions;
         },
@@ -1993,6 +2063,305 @@ export class TimelineView extends LitElement {
   setEventHeatmap(trackId) {
     this._eventHeatmapTrackId = trackId || null;
     this.requestUpdate();
+  }
+
+  // ── overview strip ────────────────────────────────────────────────
+  //
+  // Bottom-pinned summary view: every track rendered as a thin lane
+  // showing region coverage across the whole session, plus a draggable
+  // viewport rectangle mirroring the main `.scroll` container. Drag
+  // the rect to pan; drag its left/right edges to zoom. Double-click
+  // anywhere to recenter on that point. Modeled on Ardour's editor
+  // summary (the bottom strip).
+
+  firstUpdated() {
+    // Seed scroll mirror immediately so the first paint sizes the
+    // viewport rect correctly. Lit only fires `firstUpdated` once,
+    // after the initial render lands.
+    this._syncScrollMirror();
+    // ResizeObserver picks up window / sibling layout changes (the
+    // mixer takes / yields width when the user drags the pane
+    // divider) without us having to wire a global resize listener.
+    if (typeof ResizeObserver === "function") {
+      this._scrollObserver = new ResizeObserver(() => this._syncScrollMirror());
+      const scroll = this.renderRoot?.querySelector?.(".scroll");
+      if (scroll) this._scrollObserver.observe(scroll);
+    }
+    this._onVizPrefsChange = () => {
+      const h = getVizPref("overviewStripHeight");
+      if (Number.isFinite(h) && h !== this._overviewHeight) {
+        this._overviewHeight = h;
+      }
+      this.requestUpdate();
+    };
+    window.addEventListener("foyer:viz-prefs-changed", this._onVizPrefsChange);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._scrollObserver?.disconnect?.();
+    if (this._onVizPrefsChange) {
+      window.removeEventListener("foyer:viz-prefs-changed", this._onVizPrefsChange);
+    }
+  }
+
+  _onScrollChanged() {
+    this._syncScrollMirror();
+  }
+
+  _syncScrollMirror() {
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const x = scroll.scrollLeft;
+    const w = Math.max(1, scroll.clientWidth - HEAD_WIDTH);
+    if (x !== this._scrollX) this._scrollX = x;
+    if (w !== this._scrollViewW) this._scrollViewW = w;
+  }
+
+  _renderOverviewStrip(tracks, totalSec) {
+    if (getVizPref("overviewStripOn") === false) return null;
+    const sr = this._sampleRate();
+    const sessionSamples = Math.max(1, totalSec * sr);
+    const stripHeight = Math.max(40, Math.min(240, this._overviewHeight || 90));
+    // Lane rows fill everything below a 12 px ruler band.
+    const rulerH = 12;
+    const visibleTracks = (tracks || []).filter((t) => t.kind !== "Master");
+    const laneCount = Math.max(1, visibleTracks.length);
+    const lanesH = stripHeight - rulerH;
+    const laneH = Math.max(2, lanesH / laneCount);
+    const stripWidthPx = 1000; // SVG viewBox; the actual width fills via CSS.
+    const xOfSamples = (s) => (s / sessionSamples) * stripWidthPx;
+
+    // Viewport rect — mirror of main timeline's visible range.
+    // scrollLeft is in main-grid px including HEAD_WIDTH; subtract
+    // so we're working in content-px (samples × zoom).
+    const contentX = Math.max(0, this._scrollX - HEAD_WIDTH);
+    const visibleSec0 = contentX / Math.max(1, this._zoom);
+    const visibleSecW = this._scrollViewW / Math.max(1, this._zoom);
+    const vpLeft = (visibleSec0 / totalSec) * stripWidthPx;
+    const vpW = Math.max(2, (visibleSecW / totalSec) * stripWidthPx);
+
+    // Per-track region rectangles.
+    const trackRects = visibleTracks.map((t, idx) => {
+      const y = rulerH + idx * laneH;
+      const regions = this._regionsByTrack?.[t.id] || [];
+      const kindClass = t.kind === "Midi"
+        ? regions.some((r) => r.kind === "sequencer") ? "sequencer" : "midi"
+        : t.kind === "Master" ? "master" : "audio";
+      return svg`
+        <g class="overview-track-row ${kindClass}">
+          ${regions.map((r) => {
+            const start = Number(r.start_samples) || 0;
+            const len = Number(r.length_samples) || 0;
+            const x = xOfSamples(start);
+            const w = Math.max(0.5, xOfSamples(start + len) - x);
+            return svg`<rect x=${x.toFixed(2)} y=${(y + 1).toFixed(2)}
+                              width=${w.toFixed(2)} height=${(laneH - 2).toFixed(2)}
+                              rx="0.5" />`;
+          })}
+        </g>
+      `;
+    });
+
+    // Playhead.
+    const playheadX = xOfSamples(this._playheadSamples || 0);
+
+    // Ruler ticks every nice-second-step.
+    const tickStep = totalSec <= 30 ? 5 : totalSec <= 90 ? 10 : 30;
+    const ticks = [];
+    for (let t = 0; t <= totalSec; t += tickStep) {
+      const x = (t / totalSec) * stripWidthPx;
+      ticks.push(svg`<line x1=${x} y1="0" x2=${x} y2=${rulerH}
+                          stroke="color-mix(in oklab, var(--color-border) 60%, transparent)"
+                          stroke-width="0.5" />`);
+      if (t > 0) {
+        ticks.push(svg`<text x=${x + 2} y="9" font-size="8"
+                          fill="var(--color-text-muted)"
+                          font-family="var(--font-mono)">${t}s</text>`);
+      }
+    }
+
+    return html`
+      <div class="overview-strip" style="height:${stripHeight}px"
+           title="Drag the highlighted viewport to scroll; drag its edges to zoom; wheel to zoom (shift/ctrl-wheel scrolls); double-click to recenter">
+        <div class="overview-resize"
+             @pointerdown=${(e) => this._startOverviewResize(e)}></div>
+        <svg class="overview-svg"
+             viewBox="0 0 ${stripWidthPx} ${stripHeight}"
+             preserveAspectRatio="none"
+             @pointerdown=${(e) => this._onOverviewPointerDown(e, stripWidthPx, totalSec)}
+             @dblclick=${(e) => this._onOverviewDoubleClick(e, stripWidthPx, totalSec)}
+             @wheel=${(e) => this._onOverviewWheel(e, stripWidthPx, totalSec)}>
+          ${ticks}
+          ${trackRects}
+          <line class="overview-playhead"
+                x1=${playheadX.toFixed(2)} y1="0"
+                x2=${playheadX.toFixed(2)} y2=${stripHeight} />
+          <rect class="overview-viewport"
+                x=${vpLeft.toFixed(2)} y="0"
+                width=${vpW.toFixed(2)} height=${stripHeight}
+                rx="2"
+                @pointerdown=${(e) => this._startOverviewDrag(e, "pan", stripWidthPx, totalSec)} />
+          <rect class="overview-viewport-edge"
+                x=${(vpLeft - 4).toFixed(2)} y="0"
+                width="8" height=${stripHeight}
+                @pointerdown=${(e) => this._startOverviewDrag(e, "left", stripWidthPx, totalSec)} />
+          <rect class="overview-viewport-edge"
+                x=${(vpLeft + vpW - 4).toFixed(2)} y="0"
+                width="8" height=${stripHeight}
+                @pointerdown=${(e) => this._startOverviewDrag(e, "right", stripWidthPx, totalSec)} />
+        </svg>
+      </div>
+    `;
+  }
+
+  /** SVG `x` is in viewBox units; convert pointer event to that. */
+  _overviewClientToVbX(ev, stripWidthPx) {
+    const svgEl = ev.currentTarget.closest?.("svg") || ev.currentTarget;
+    const rect = svgEl.getBoundingClientRect();
+    const ratio = stripWidthPx / Math.max(1, rect.width);
+    return (ev.clientX - rect.left) * ratio;
+  }
+
+  _onOverviewPointerDown(ev, stripWidthPx, totalSec) {
+    // Anywhere on the SVG that isn't a viewport rect / edge handle
+    // (those stopPropagation in their own handlers): recenter on the
+    // clicked sample, then continue as a pan drag so the user can
+    // fine-tune without releasing — Ardour summary-strip behavior.
+    ev.preventDefault();
+    const x = this._overviewClientToVbX(ev, stripWidthPx);
+    this._recenterOverview(x, stripWidthPx, totalSec);
+    this._startOverviewDrag(ev, "pan", stripWidthPx, totalSec);
+  }
+
+  _onOverviewDoubleClick(ev, stripWidthPx, totalSec) {
+    ev.preventDefault();
+    const x = this._overviewClientToVbX(ev, stripWidthPx);
+    this._recenterOverview(x, stripWidthPx, totalSec);
+  }
+
+  _recenterOverview(targetVbX, stripWidthPx, totalSec) {
+    const sr = this._sampleRate();
+    const sampleAtX = (targetVbX / stripWidthPx) * totalSec * sr;
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
+    const targetPx = (sampleAtX / sr) * this._zoom;
+    scroll.scrollLeft = Math.max(0, targetPx - visiblePx / 2);
+  }
+
+  _startOverviewDrag(ev, mode, stripWidthPx, totalSec) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    // Cache the SVG's client rect ONCE at gesture start. The window
+    // `pointermove` listener sees `currentTarget === window`, so the
+    // generic _overviewClientToVbX helper (which does .closest("svg"))
+    // fails partway through every drag — every move computed NaN
+    // before this fix, which is why pan/zoom-edge drags appeared dead.
+    const svgEl =
+      ev.currentTarget?.closest?.("svg") ||
+      this.renderRoot?.querySelector?.(".overview-svg");
+    if (!svgEl) return;
+    const svgRect = svgEl.getBoundingClientRect();
+    const clientToVbX = (clientX) =>
+      ((clientX - svgRect.left) / Math.max(1, svgRect.width)) * stripWidthPx;
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
+    const startVbX = clientToVbX(ev.clientX);
+    const startScrollX = scroll.scrollLeft;
+    const startZoom = this._zoom;
+    const startVpLeftSec = (startScrollX - HEAD_WIDTH) / Math.max(1, startZoom);
+    const startVpWSec = visiblePx / Math.max(1, startZoom);
+    const move = (e) => {
+      const vbX = clientToVbX(e.clientX);
+      const deltaSec =
+        ((vbX - startVbX) / stripWidthPx) * totalSec;
+      if (mode === "pan") {
+        const newLeftSec = Math.max(0, startVpLeftSec + deltaSec);
+        scroll.scrollLeft = newLeftSec * this._zoom + HEAD_WIDTH;
+      } else if (mode === "right") {
+        // Right edge: viewport keeps its left anchor; width grows
+        // with drag. New zoom maps visiblePx to the new viewport
+        // width in seconds. Clamp to the engine's zoom range.
+        const newWSec = Math.max(0.05, startVpWSec + deltaSec);
+        const newZoom = Math.max(2, Math.min(4000, visiblePx / newWSec));
+        this._zoom = newZoom;
+        // Lit re-render → scrollLeft must stay anchored to the
+        // viewport's left edge in seconds, recomputed under the
+        // new zoom.
+        this.updateComplete.then(() => {
+          scroll.scrollLeft = startVpLeftSec * this._zoom + HEAD_WIDTH;
+        });
+      } else if (mode === "left") {
+        // Left edge: viewport keeps its right anchor.
+        const startVpRightSec = startVpLeftSec + startVpWSec;
+        const newLeftSec = Math.max(0, startVpLeftSec + deltaSec);
+        const newWSec = Math.max(0.05, startVpRightSec - newLeftSec);
+        const newZoom = Math.max(2, Math.min(4000, visiblePx / newWSec));
+        this._zoom = newZoom;
+        this.updateComplete.then(() => {
+          scroll.scrollLeft = newLeftSec * this._zoom + HEAD_WIDTH;
+        });
+      }
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  // Mouse wheel over the overview:
+  //   - plain wheel → zoom main timeline toward the sample under the
+  //     cursor (same as Ardour's editor summary behavior)
+  //   - shift- or ctrl-wheel → horizontal pan
+  // Vertical deltaY is the wheel rotation; we also fold in deltaX for
+  // trackpads that report horizontal scroll natively.
+  _onOverviewWheel(ev, stripWidthPx, totalSec) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    if (ev.shiftKey || ev.ctrlKey) {
+      const delta = (ev.deltaY || 0) + (ev.deltaX || 0);
+      scroll.scrollLeft = Math.max(0, scroll.scrollLeft + delta);
+      return;
+    }
+    const sr = this._sampleRate();
+    const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
+    const svgEl = ev.currentTarget;
+    const rect = svgEl.getBoundingClientRect();
+    const vbX = ((ev.clientX - rect.left) / Math.max(1, rect.width)) * stripWidthPx;
+    const fraction = Math.max(0, Math.min(1, vbX / stripWidthPx));
+    const sampleAtCursor = fraction * totalSec * sr;
+    const factor = ev.deltaY < 0 ? 1.2 : 1 / 1.2;
+    this._zoom = Math.max(2, Math.min(4000, this._zoom * factor));
+    this.updateComplete.then(() => {
+      const targetPx = (sampleAtCursor / sr) * this._zoom;
+      scroll.scrollLeft = Math.max(0, targetPx - visiblePx / 2 + HEAD_WIDTH);
+    });
+  }
+
+  _startOverviewResize(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const startY = ev.clientY;
+    const startH = this._overviewHeight;
+    const move = (e) => {
+      // Drag UP shrinks; drag DOWN grows. Inverted from naive math
+      // because the resize handle sits at the strip's TOP edge.
+      const delta = startY - e.clientY;
+      this._overviewHeight = Math.max(40, Math.min(240, startH + delta));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      setVizPref("overviewStripHeight", this._overviewHeight);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   }
 
   _pushZoomSnapshot(scrollEl) {
@@ -2550,6 +2919,7 @@ export class TimelineView extends LitElement {
       <div class="scroll"
            @wheel=${(e) => this._onWheel(e)}
            @pointerdown=${(e) => this._onScrollPointerDown(e)}
+           @scroll=${() => this._onScrollChanged()}
            @auxclick=${(e) => { if (e.button === 1) e.preventDefault(); }}>
         <div class="grid" style="width:${gridWidth}px"
              @pointermove=${(e) => this._onGridHoverMove(e)}
@@ -2580,6 +2950,7 @@ export class TimelineView extends LitElement {
           ${this._renderRecordingPlaceholder()}
         </div>
       </div>
+      ${this._renderOverviewStrip(tracks, totalSec)}
     `;
   }
 

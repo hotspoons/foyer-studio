@@ -58,6 +58,11 @@ const SUBCOMMAND_TO_VIEW = {
   // beat_sequencer on a region that doesn't carry a sequencer
   // layout.
   beat_sequencer: "beat-sequencer",
+  // `screen` is intentionally absent from this map — the subcommand
+  // means "screenshot whatever is currently mounted", so the headless
+  // hook deliberately skips its layout-swap step (see
+  // `installHeadlessVizIfRequested` below). The FE-attached path
+  // ignores this map entirely and captures the live foyer-app.
 };
 
 function readSubcommand() {
@@ -164,6 +169,15 @@ export async function installHeadlessVizIfRequested() {
   } catch {}
   try {
     const { sub, params } = requested;
+    // `screen` is a literal "what's on the page right now" shot —
+    // skip the chrome-hide + layout-swap so the screenshot reflects
+    // the current state without us mutating it.
+    if (sub === "screen") {
+      // Give whatever variant booted a beat to paint, then signal.
+      await new Promise((r) => setTimeout(r, 600));
+      signalReady();
+      return;
+    }
     const view = SUBCOMMAND_TO_VIEW[sub];
     if (!view) {
       console.error("[headless-viz] unknown subcommand:", sub);

@@ -735,6 +735,15 @@ export class BeatSequencer extends LitElement {
     this.regionName = "";
     this.trackId = "";
     this.layout = null;
+    // True only after `this.layout` has been seeded from a backend
+    // source (the `.layout` property assigned externally, or a
+    // `foyer:sequencer-layout-changed` event carrying a layout). When
+    // false, we're rendering against a local fallback that
+    // `_currentLayout()` synthesized — auto-persisting that one would
+    // clobber whatever the agent / another client just set. Set true
+    // in the property accessor below + in the sequencer-layout-changed
+    // listener; checked by the tempo-change re-persist path.
+    this._layoutFromBackend = false;
     this.notes = [];
     this.trackRegions = [];
     this._tick = 0;
@@ -780,7 +789,16 @@ export class BeatSequencer extends LitElement {
       // grid.  Without this, step counts are fixed but the tick→
       // sample conversion changes silently, making the notes drift
       // relative to the visual ruler until the user edits the grid.
-      if (ev.detail === "transport.tempo" && this.layout?.active) {
+      // Only re-persist when the layout was actually loaded from the
+      // backend. Lazy local defaults from `_currentLayout()` should
+      // not be written back — that's the read-on-mount → echo-as-write
+      // bug that clobbered MCP-authored patterns the moment a tab
+      // opened the sequencer view.
+      if (
+        ev.detail === "transport.tempo"
+        && this.layout?.active
+        && this._layoutFromBackend
+      ) {
         this._persistLayout();
       }
     };
@@ -798,6 +816,7 @@ export class BeatSequencer extends LitElement {
       if (!d.regionId || d.regionId !== this.regionId) return;
       if (!d.layout) return;
       this.layout = d.layout;
+      this._layoutFromBackend = true;
       this._tick++;
       this.requestUpdate();
     };
@@ -909,6 +928,29 @@ export class BeatSequencer extends LitElement {
   }
 
   updated(changed) {
+    if (changed.has("regionId") && this.regionId && !this.layout) {
+      // Tile-leaf mounts pass only `regionId` / `trackId` — no
+      // `.layout`. Look up the region in the live snapshot and
+      // adopt its persisted sequencer layout. Without this, the
+      // component falls through to `defaultLayout()` in
+      // `_currentLayout()` and any MCP-authored pattern reads as
+      // an empty fresh starter to the user (and to the next
+      // re-persist).
+      try {
+        const byTrack = window.__foyer?.store?.state?.regionsByTrack;
+        if (byTrack && typeof byTrack.entries === "function") {
+          for (const [tid, list] of byTrack.entries()) {
+            const found = (list || []).find((r) => r.id === this.regionId);
+            if (found?.foyer_sequencer) {
+              this.layout = found.foyer_sequencer;
+              this._layoutFromBackend = true;
+              this.trackId = this.trackId || tid;
+              break;
+            }
+          }
+        }
+      } catch {}
+    }
     if (changed.has("layout") || changed.has("regionId")) {
       // Always route incoming layouts through migrateToV2 so both
       // v1 and v2 get normalized (resolution clamped, pattern_steps

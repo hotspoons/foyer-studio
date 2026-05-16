@@ -140,6 +140,18 @@ export const DEFAULT_VIZ_PREFS = Object.freeze({
   automationOverlayAlpha: 0.7,
   /** Stroke width of automation overlay polylines in CSS px. */
   automationOverlayWidth: 1.5,
+
+  /** Ardour-style summary strip pinned to the bottom of the timeline
+   *  view. Mini region thumbnails for every track + a draggable
+   *  viewport rectangle that mirrors the main timeline's scroll
+   *  position and zoom. Drag the rect to pan; drag its edges to
+   *  zoom; double-click anywhere to recenter. Off-by-default would
+   *  hide a discoverability win; on-by-default keeps the user one
+   *  glance from "where am I in the song". */
+  overviewStripOn: true,
+  /** Strip height in CSS px. User-resizable from its top edge; the
+   *  height persists here so a refresh keeps it. */
+  overviewStripHeight: 90,
 });
 
 /** Resolve the current MIDI note color, falling through to `trackColor`

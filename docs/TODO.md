@@ -421,10 +421,33 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
         PATH the error string carries platform-specific install commands.
   - [ ] Backend-side spectrography (instant + temporal, per-channel + main mix)
         through the shim — separate piece from FE viz capture, requires shim work.
-  - [ ] One of the hardest parts of DAWs is the insane number of controls, even for a very stripped down one like this one. We need a tool that the agent can call that takes a screencapture of exactly what the user sees so the agent can guide them on what to click or drag where to achieve a goal
+  - [x] One of the hardest parts of DAWs is the insane number of controls, even for a very stripped down one like this one. We need a tool that the agent can call that takes a screencapture of exactly what the user sees so the agent can guide them on what to click or drag where to achieve a goal
   - [ ] Fuck ton of `.unwrap()` with dubious error handling - lock this down so we
     have a minimally panicky app, use `.unwrap_or_else()`, `.expect()` with a value,
     or more robust pattern matching
+  - [ ] Scripting editor - support DAW scripting in a generic fashion, look at Ardour's
+        lua support, expose tools for all layers bidning to what Ardour exposes, query
+        the active shim on start up so we can limit the the available scripting to what
+        is in the DAW, but make this binding work.
+
+        We'll need a way to view and edit these scripts in the front end too - I made a 
+        lightweight text-highlighting editor view in the app jig under ext using the 
+        same UI stack that can be used for reference - we'll want to support Lua 
+        hightlighting for starters. We can add a script manager panel using the same
+        launcher as conole and diagnostics, and the script mananager should show the
+        script types and allow adding and removing.
+
+        We should also query the ardour file for disabled scripts in case it was 
+        uploaded (disabled on upload because they can run abitrary commands) - 
+        they are base64 encoded and recoverable, we should allow listing and recoving 
+        scripts in this UI. 
+
+        So three things - the script manager, the script editor with the ability to 
+        parse and run the script against the project, and then the agent's ability
+        to manage the script manager, edit the script, and run it. And the recovery
+        path.
+
+        
 
 - [x] MCP tools — implemented as 10 polymorphic tools with subcommands (DECISION 50)
 - [x] Agent's native tools mapped to MCP tools but without MCP overhead — same

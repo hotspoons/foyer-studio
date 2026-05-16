@@ -51,6 +51,15 @@ pub enum VisualizeRequest {
         track_id: String,
         region_id: String,
     },
+    /// Capture exactly what the user currently sees in the attached
+    /// browser tab — full app shell, current tile layout, any open
+    /// modals or floating windows. Use this when the user asks for
+    /// help with the UI ("what should I click?") or to verify a
+    /// recent edit visually. Requires an attached browser session
+    /// (FE renderer); the headless renderer screenshots whatever the
+    /// throwaway tab happens to be showing, which is usually less
+    /// informative.
+    Screen,
 }
 
 #[async_trait]
@@ -62,8 +71,10 @@ impl Tool for VisualizeTool {
     fn description(&self) -> &'static str {
         "Render a Foyer visualization to PNG and return it inline. \
          Subcommands: timeline, mixer, waveform, spectrogram, \
-         automation_lane, event_heatmap, midi_roll, beat_sequencer. \
-         Prefers an attached browser; falls back to a headless renderer."
+         automation_lane, event_heatmap, midi_roll, beat_sequencer, \
+         screen (captures literally what the user sees right now — \
+         use for 'what should I click?' guidance). Prefers an attached \
+         browser; falls back to a headless renderer."
     }
 
     fn schema(&self) -> Value {
@@ -76,7 +87,7 @@ impl Tool for VisualizeTool {
                     "enum": [
                         "timeline", "mixer", "waveform", "spectrogram",
                         "automation_lane", "event_heatmap",
-                        "midi_roll", "beat_sequencer"
+                        "midi_roll", "beat_sequencer", "screen"
                     ]
                 },
                 "track_id": { "type": "string" },

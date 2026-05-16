@@ -16,6 +16,7 @@ pub mod io;
 pub mod message;
 pub mod midi;
 pub mod plugin;
+pub mod scripting;
 pub mod session;
 pub mod timeline;
 pub mod tunnel;
@@ -44,6 +45,10 @@ pub use midi::{
     PatchChangePatch, SequencerCell, SequencerLayout, SequencerPattern, SequencerRow,
 };
 pub use plugin::{PluginCatalogEntry, PluginFormat, PluginPreset, PluginRole};
+pub use scripting::{
+    Script, ScriptLanguage, ScriptRunResult, ScriptTypeDescriptor, ScriptingCapabilities,
+    ScriptingFeatures,
+};
 pub use session::{
     Bus, Group, GroupPatch, MidiPatchState, PluginInstance, Send, Session, Track, TrackKind,
     TrackPatch, Transport, DEFAULT_SAMPLE_RATE,
