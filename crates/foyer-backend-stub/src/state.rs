@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use foyer_backend::BackendError;
 use foyer_schema::{
     AutomationLane, AutomationMode, AutomationPoint, ControlUpdate, ControlValue, EntityId, Group,
-    GroupPatch, Parameter, Session, Track, TrackKind, TrackPatch,
+    GroupPatch, Parameter, Script, ScriptRunResult, Session, Track, TrackKind, TrackPatch,
 };
 
 /// Enumerates the track-level controls that participate in group
@@ -52,6 +52,11 @@ pub(crate) struct StubState {
     /// `None` if the message was a shared-port broadcast. Lets
     /// tests verify per-track routing decisions made client-side.
     pub(crate) last_midi_input_track: Option<EntityId>,
+    /// Persisted scripts. Stub keeps them in memory; the real shim
+    /// rides on the `<Script>` node in the .ardour XML.
+    pub(crate) scripts: Vec<Script>,
+    /// Monotonic counter for auto-generated script ids.
+    pub(crate) next_script_seq: u64,
 }
 
 impl StubState {
@@ -67,6 +72,8 @@ impl StubState {
             midi_input_count: 0,
             last_midi_input: None,
             last_midi_input_track: None,
+            scripts: fixtures::seed_scripts(),
+            next_script_seq: 1,
         }
     }
 
@@ -79,6 +86,8 @@ impl StubState {
             midi_input_count: 0,
             last_midi_input: None,
             last_midi_input_track: None,
+            scripts: fixtures::seed_scripts(),
+            next_script_seq: 1,
         }
     }
 
@@ -91,6 +100,85 @@ impl StubState {
     /// reaches the snapshot consumers, not just the cached atomic.
     pub(crate) fn set_sample_rate(&mut self, sr: u32) {
         self.session.sample_rate = sr;
+    }
+
+    pub(crate) fn list_scripts(&self) -> Vec<Script> {
+        self.scripts.clone()
+    }
+
+    /// Upsert by id; allocates a fresh id when empty. Stamps
+    /// `updated_at` and returns the canonical post-save shape.
+    pub(crate) fn save_script(&mut self, mut script: Script) -> Result<Script, BackendError> {
+        if script.id.as_str().is_empty() {
+            self.next_script_seq += 1;
+            script.id = EntityId::new(format!("script-{}", self.next_script_seq));
+        }
+        script.updated_at = current_epoch_ms();
+        match self.scripts.iter().position(|s| s.id == script.id) {
+            Some(i) => self.scripts[i] = script.clone(),
+            None => self.scripts.push(script.clone()),
+        }
+        Ok(script)
+    }
+
+    pub(crate) fn delete_script(&mut self, id: &EntityId) -> bool {
+        let before = self.scripts.len();
+        self.scripts.retain(|s| &s.id != id);
+        self.scripts.len() != before
+    }
+
+    pub(crate) fn enable_script(
+        &mut self,
+        id: &EntityId,
+        enabled: bool,
+    ) -> Result<Script, BackendError> {
+        let Some(s) = self.scripts.iter_mut().find(|s| &s.id == id) else {
+            return Err(BackendError::Other(format!(
+                "unknown script: {}",
+                id.as_str()
+            )));
+        };
+        s.enabled = enabled;
+        if enabled {
+            s.disabled_on_upload = false;
+        }
+        s.updated_at = current_epoch_ms();
+        Ok(s.clone())
+    }
+
+    /// Stub execution — no real Lua runtime here; we echo the script's
+    /// metadata as stdout. The FE iteration loop only needs a result
+    /// shape, and the real shim will overwrite the stdout/error fields
+    /// with the actual VM output.
+    pub(crate) fn run_script_stub(
+        &mut self,
+        id: &EntityId,
+        args_override: Option<std::collections::BTreeMap<String, String>>,
+    ) -> ScriptRunResult {
+        let Some(s) = self.scripts.iter().find(|s| &s.id == id) else {
+            return ScriptRunResult {
+                id: id.clone(),
+                ok: false,
+                stdout: String::new(),
+                error: Some(format!("unknown script: {}", id.as_str())),
+                elapsed_ms: Some(0),
+            };
+        };
+        let args = args_override.unwrap_or_else(|| s.args.clone());
+        let mut stdout = format!("[stub] would run {} ({})\n", s.name, s.script_type);
+        if !args.is_empty() {
+            stdout.push_str("[stub] with args:\n");
+            for (k, v) in args.iter() {
+                stdout.push_str(&format!("  {k} = {v}\n"));
+            }
+        }
+        ScriptRunResult {
+            id: id.clone(),
+            ok: true,
+            stdout,
+            error: None,
+            elapsed_ms: Some(1),
+        }
     }
 
     pub(crate) fn set_control(
@@ -668,4 +756,11 @@ impl StubState {
         lane.points = points;
         Ok(())
     }
+}
+
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

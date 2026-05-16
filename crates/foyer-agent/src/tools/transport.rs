@@ -15,11 +15,31 @@ pub struct TransportTool;
 enum Op {
     Play,
     Stop,
-    Record { armed: bool },
-    Locate { samples: u64 },
-    Loop { enabled: bool },
+    Record {
+        armed: bool,
+    },
+    Locate {
+        samples: u64,
+    },
+    Loop {
+        enabled: bool,
+    },
     Get,
+    /// Block the agent's turn for `seconds`, then return. Use this
+    /// when an action needs to land before the next one (e.g. "start
+    /// recording, wait 2 minutes, then stop") so the model doesn't
+    /// fire-and-forget. Capped at 600 s so a hallucinated value can't
+    /// strand a session. The model can split a longer wait into
+    /// multiple `wait` calls, surveying state between them.
+    Wait {
+        seconds: u32,
+    },
 }
+
+/// Upper bound for a single `transport.wait` invocation, in seconds.
+/// Picked at 10 minutes — long enough for "wait through a take" but
+/// short enough that a wrong value doesn't strand the session.
+const MAX_WAIT_SECONDS: u32 = 600;
 
 #[async_trait]
 impl Tool for TransportTool {
@@ -30,7 +50,11 @@ impl Tool for TransportTool {
     fn description(&self) -> &'static str {
         "Drive the engine's transport. Subcommands: play, stop, \
          record(armed: bool), locate(samples: u64), loop(enabled: bool), \
-         get (returns current position + state)."
+         get (returns current position + state), wait(seconds: u32) — \
+         block the current turn for a bounded delay (max 600 s) so a \
+         multi-step plan like \"start recording, wait 2 minutes, stop\" \
+         can sequence correctly. Always `get` after a wait to confirm \
+         the transport is still in the state you expect."
     }
 
     fn schema(&self) -> Value {
@@ -40,11 +64,17 @@ impl Tool for TransportTool {
             "properties": {
                 "subcommand": {
                     "type": "string",
-                    "enum": ["play", "stop", "record", "locate", "loop", "get"]
+                    "enum": ["play", "stop", "record", "locate", "loop", "get", "wait"]
                 },
                 "armed": { "type": "boolean" },
                 "samples": { "type": "integer", "minimum": 0 },
-                "enabled": { "type": "boolean" }
+                "enabled": { "type": "boolean" },
+                "seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_WAIT_SECONDS as i64,
+                    "description": "Bounded delay in seconds for the `wait` subcommand."
+                }
             }
         })
     }
@@ -162,6 +192,21 @@ impl Tool for TransportTool {
                         _ => Value::Null,
                     },
                 })))
+            }
+            Op::Wait { seconds } => {
+                if seconds == 0 {
+                    return Err(ToolError::InvalidArgs("wait: seconds must be >= 1".into()));
+                }
+                if seconds > MAX_WAIT_SECONDS {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "wait: seconds capped at {MAX_WAIT_SECONDS} (asked {seconds})"
+                    )));
+                }
+                // Use tokio's timer so the engine's turn-level
+                // cancellation token can interrupt us if the user
+                // hits Stop mid-wait. Drops the future cleanly.
+                tokio::time::sleep(std::time::Duration::from_secs(seconds as u64)).await;
+                Ok(ToolResult::ok(format!("waited {seconds}s")))
             }
         }
     }

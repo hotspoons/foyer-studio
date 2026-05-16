@@ -502,6 +502,7 @@ mod tests {
             sample_rate: 96_000,
             ppqn: Some(1920),
             meta: serde_json::json!({ "project": "demo" }),
+            scripting: None,
         };
 
         let j = serde_json::to_string(&session).unwrap();

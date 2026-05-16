@@ -479,6 +479,12 @@ struct DecodedCmd
 		DeleteGroup,
 		UndoGroupBegin,
 		UndoGroupEnd,
+		ListScripts,
+		SaveScript,
+		DeleteScript,
+		EnableScript,
+		RunScript,
+		RecoverDisabledScripts,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
@@ -726,6 +732,21 @@ struct DecodedCmd
 	// `Session::update_latency_compensation` so future recordings
 	// land at the visually-correct position.
 	std::uint32_t set_latency_samples = 0;
+
+	// Script payload — decoded during SaveScript / RunScript /
+	// EnableScript / DeleteScript. Field set mirrors the
+	// `foyer-schema::scripting::Script` wire shape.
+	std::string   script_id;
+	std::string   script_name;
+	std::string   script_description;
+	std::string   script_type;       // "snippet" | "editor_action" | ...
+	std::string   script_language;   // "lua" today
+	bool          script_enabled = true;
+	bool          has_script_enabled = false;
+	std::string   script_body;
+	std::map<std::string, std::string> script_args;
+	std::string   script_hook;
+	bool          script_has_args_override = false;
 };
 
 // Read an int64 that may be positive or negative on the wire —
@@ -944,6 +965,67 @@ read_one_slot (In& in, schema_map::SequencerLayoutDesc& layout)
 		}
 	}
 	layout.arrangement.push_back (slot);
+	return true;
+}
+
+// Parse a `BTreeMap<String, String>` (args / args_override) into the
+// out parameter. msgpack maps come through fixmap or map16 so the
+// header reader handles both.
+static bool
+read_string_string_map (In& in, std::map<std::string, std::string>& out)
+{
+	std::size_t n = 0;
+	if (!in.read_map_header (n)) return false;
+	for (std::size_t i = 0; i < n; ++i) {
+		std::string k, v;
+		if (!in.read_str (k)) return false;
+		if (!in.read_str (v)) return false;
+		out[std::move (k)] = std::move (v);
+	}
+	return true;
+}
+
+// Parse a Script sub-map — the `script` field on Command::SaveScript.
+// Unknown fields are skipped so a client on a newer schema doesn't
+// hang the shim.
+static bool
+read_script_payload (In& in, DecodedCmd& out)
+{
+	std::size_t n = 0;
+	if (!in.read_map_header (n)) return false;
+	for (std::size_t i = 0; i < n; ++i) {
+		std::string k;
+		if (!in.read_str (k)) return false;
+		if (k == "id") {
+			if (!in.read_str (out.script_id)) return false;
+		} else if (k == "name") {
+			if (!in.read_str (out.script_name)) return false;
+		} else if (k == "description") {
+			if (!in.read_str (out.script_description)) return false;
+		} else if (k == "script_type") {
+			if (!in.read_str (out.script_type)) return false;
+		} else if (k == "language") {
+			if (!in.read_str (out.script_language)) return false;
+		} else if (k == "enabled") {
+			if (!in.read_bool (out.script_enabled)) return false;
+			out.has_script_enabled = true;
+		} else if (k == "body") {
+			if (!in.read_str (out.script_body)) return false;
+		} else if (k == "args") {
+			if (!read_string_string_map (in, out.script_args)) return false;
+		} else if (k == "hook") {
+			// Nullable string. `read_str` skips nil cleanly via the
+			// existing nil handling — we leave `script_hook` empty
+			// when nil arrives.
+			std::string h;
+			if (in.read_str (h)) out.script_hook = std::move (h);
+			else if (!in.skip_value ()) return false;
+		} else {
+			// disabled_on_upload / updated_at are server-stamped;
+			// `description` already consumed. Anything else: skip.
+			if (!in.skip_value ()) return false;
+		}
+	}
 	return true;
 }
 
@@ -1401,6 +1483,24 @@ decode (const std::vector<std::uint8_t>& buf)
 					if (!read_replace_notes_array (in, out)) return out;
 				} else if (k == "layout") {
 					if (!read_sequencer_layout (in, out.seq_layout)) return out;
+				} else if (k == "script") {
+					// Command::SaveScript { script: Script }. Nested
+					// map carries every Script field.
+					if (!read_script_payload (in, out)) return out;
+				} else if (k == "args_override") {
+					// Command::RunScript { args_override: Option<BTreeMap> }.
+					// Nullable on the wire — skip nil cleanly.
+					if (!read_string_string_map (in, out.script_args)) {
+						return out;
+					}
+					out.script_has_args_override = true;
+				} else if (k == "enabled" && (cmd_type == "enable_script")) {
+					// Command::EnableScript { id, enabled }. The
+					// region-edit `enabled` flag is handled elsewhere
+					// (read_region_patch_or_note), so this branch is
+					// only taken for the script command.
+					if (!in.read_bool (out.script_enabled)) return out;
+					out.has_script_enabled = true;
 				} else if (k == "value") {
 					if (!in.read_f64 (out.value)) return out;
 				} else if (k == "patch") {
@@ -1728,6 +1828,12 @@ decode (const std::vector<std::uint8_t>& buf)
             else if (cmd_type == "delete_group")         out.kind = DecodedCmd::Kind::DeleteGroup;
             else if (cmd_type == "undo_group_begin")     out.kind = DecodedCmd::Kind::UndoGroupBegin;
             else if (cmd_type == "undo_group_end")       out.kind = DecodedCmd::Kind::UndoGroupEnd;
+            else if (cmd_type == "list_scripts")             out.kind = DecodedCmd::Kind::ListScripts;
+            else if (cmd_type == "save_script")              out.kind = DecodedCmd::Kind::SaveScript;
+            else if (cmd_type == "delete_script")            out.kind = DecodedCmd::Kind::DeleteScript;
+            else if (cmd_type == "enable_script")            out.kind = DecodedCmd::Kind::EnableScript;
+            else if (cmd_type == "run_script")               out.kind = DecodedCmd::Kind::RunScript;
+            else if (cmd_type == "recover_disabled_scripts") out.kind = DecodedCmd::Kind::RecoverDisabledScripts;
             else if (cmd_type == "audio_stream_open"
                 ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
 			else if (cmd_type == "audio_stream_close"
@@ -3726,6 +3832,96 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (self->_undo_group_depth == 0) {
 					shim->session ().commit_reversible_command ();
 				}
+			});
+			break;
+		}
+		// ── Scripts ───────────────────────────────────────────────
+		case DecodedCmd::Kind::ListScripts: {
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
+				auto scripts = schema_map::ScriptStore::instance ().list ();
+				auto bytes = msgpack_out::encode_script_list (scripts);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::SaveScript: {
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				schema_map::ScriptRecord rec;
+				rec.id = snap.script_id;
+				rec.name = snap.script_name;
+				rec.description = snap.script_description;
+				rec.script_type = snap.script_type;
+				rec.language = snap.script_language.empty () ? std::string ("lua") : snap.script_language;
+				rec.enabled = snap.has_script_enabled ? snap.script_enabled : true;
+				rec.body = snap.script_body;
+				rec.args = snap.script_args;
+				rec.hook = snap.script_hook;
+				auto saved = schema_map::save_script (shim->session (), std::move (rec));
+				auto bytes = msgpack_out::encode_script_saved (saved);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::DeleteScript: {
+			if (cmd.id.empty ()) break;
+			std::string id = cmd.id;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, id] () {
+				schema_map::delete_script (shim->session (), id);
+				auto bytes = msgpack_out::encode_script_removed (id);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::EnableScript: {
+			if (cmd.id.empty () || !cmd.has_script_enabled) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto& store = schema_map::ScriptStore::instance ();
+				auto cur = store.get (snap.id);
+				if (!cur) {
+					auto err = msgpack_out::encode_error (
+						"enable_script_failed", "unknown script: " + snap.id);
+					if (!err.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, err);
+					return;
+				}
+				cur->enabled = snap.script_enabled;
+				if (snap.script_enabled) cur->disabled_on_upload = false;
+				schema_map::ScriptRecord saved = schema_map::save_script (shim->session (), *cur);
+				auto bytes = msgpack_out::encode_script_saved (saved);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::RunScript: {
+			if (cmd.id.empty ()) break;
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, snap] () {
+				auto outcome = schema_map::run_script (
+					shim->session (), snap.id,
+					snap.script_has_args_override ? snap.script_args
+					                              : std::map<std::string, std::string> {});
+				auto bytes = msgpack_out::encode_script_run_result (
+					snap.id, outcome.ok, outcome.stdout_text,
+					outcome.error_text, outcome.elapsed_ms);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::RecoverDisabledScripts: {
+			FoyerShim* shim = &_shim;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim] () {
+				schema_map::recover_disabled_scripts (shim->session ());
+				// After recovery the cache is the source of truth;
+				// echo a fresh ScriptList so every client picks it up.
+				auto scripts = schema_map::ScriptStore::instance ().list ();
+				auto bytes = msgpack_out::encode_script_list (scripts);
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
 			break;
 		}

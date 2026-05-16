@@ -18,7 +18,10 @@
 #include <cmath>
 #include <cstdint>
 #include <list>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -451,6 +454,87 @@ inline bool is_gain_id (const std::string& id) {
     return id.compare (0, 6, "track.") == 0
         || id.compare (0, 4, "bus.") == 0;
 }
+
+// ── Scripting bridge to Ardour's Lua VM ─────────────────────────────
+//
+// The shim caches script records (name, body, type, language, args,
+// hook) keyed by id. The wire schema's `id` is exactly the registered
+// Lua function name — Ardour's `Session::register_lua_function`
+// enforces uniqueness by name and `unregister_lua_function(name)`
+// undoes the same. We could allocate a separate slug but routing
+// through the function name keeps the shim cache and the Lua VM's
+// registration table in 1:1 lock-step.
+
+struct ScriptRecord {
+    std::string id;                       // Lua function name == wire id
+    std::string name;                     // Display name (may differ from id)
+    std::string description;
+    std::string script_type;              // "snippet" | "editor_action" | ...
+    std::string language;                 // "lua"
+    bool        enabled = true;
+    std::string body;                     // Lua source
+    std::map<std::string, std::string> args;
+    std::string hook;                     // empty when type isn't hookable
+    bool        disabled_on_upload = false;
+    std::uint64_t updated_at_ms = 0;
+};
+
+/// Process-wide cache of Foyer-authored scripts. Persists across
+/// `register_lua_function` / `unregister_lua_function` calls because
+/// Ardour's session-side bookkeeping only stores names; the body /
+/// args / metadata Foyer needs to round-trip the UI lives here.
+/// Repopulated from `<Script>` XML on session load via the
+/// `recover_disabled_scripts` path.
+class ScriptStore {
+public:
+    static ScriptStore& instance ();
+    /// Returns a copy so callers can iterate without holding the lock.
+    std::vector<ScriptRecord> list () const;
+    std::optional<ScriptRecord> get (const std::string& id) const;
+    /// Insert-or-update by id. Stamps `updated_at_ms` to the current
+    /// wall clock so the FE can sort recent edits to the top.
+    void put (ScriptRecord rec);
+    /// Returns true when an entry existed.
+    bool remove (const std::string& id);
+    /// Drop everything — used when the active session changes.
+    void clear ();
+    /// Replace the whole set in one shot (used by the
+    /// `recover_disabled_scripts` path after reading `<Script>` XML).
+    void replace_all (std::vector<ScriptRecord> rec);
+
+private:
+    ScriptStore () = default;
+    mutable std::mutex _m;
+    std::map<std::string, ScriptRecord> _by_id;
+};
+
+/// Save a script into Ardour's Lua VM AND the shim cache. Returns
+/// the canonical post-save record (with `updated_at_ms` stamped).
+/// `id` may be empty on create — a deterministic slug is derived
+/// from `name` so the cache and Lua registration agree.
+ScriptRecord save_script (ARDOUR::Session& session, ScriptRecord rec);
+
+/// Unregister + drop. No-op when the id is unknown.
+void delete_script (ARDOUR::Session& session, const std::string& id);
+
+/// Run a registered script. Captures Lua's print() output and any
+/// raised error; returns elapsed wall-clock ms. Only meaningful for
+/// types whose descriptor sets `runnable = true`.
+struct ScriptRunOutcome {
+    bool ok = true;
+    std::string stdout_text;
+    std::string error_text;
+    std::uint32_t elapsed_ms = 0;
+};
+ScriptRunOutcome run_script (
+    ARDOUR::Session& session, const std::string& id,
+    const std::map<std::string, std::string>& args_override);
+
+/// Scan the session XML for `<Script lua="VERSION">` and decode its
+/// base64 payload into individual script records. Records discovered
+/// this way are flagged `disabled_on_upload = true`; the user must
+/// re-enable each one (after review) before re-registering with Lua.
+std::vector<ScriptRecord> recover_disabled_scripts (ARDOUR::Session& session);
 
 } // namespace ArdourSurface::schema_map
 

@@ -12,10 +12,12 @@ pub mod midi;
 pub mod mixer;
 pub mod plugins;
 pub mod regions;
+pub mod scripts;
 pub mod sequencer;
 pub mod session;
 pub mod tracks;
 pub mod transport;
+pub mod ui;
 pub mod visualize;
 pub mod welcome;
 
@@ -73,6 +75,12 @@ pub struct ToolContext {
     pub fe_attached: bool,
     pub fe_render: Option<Arc<dyn FeRenderer>>,
     pub headless_render: Option<Arc<dyn HeadlessRenderer>>,
+    /// Round-trips UI directives through any attached browser tab.
+    /// Wired in `attach_agent` (foyer-server) when the FE WS is up.
+    /// None when there's no FE (TUI-only MCP sessions); the `ui`
+    /// tool reports that to the agent so it can fall back to
+    /// explaining the layout in text.
+    pub ui_director: Option<Arc<dyn UiDirector>>,
     /// Snapshot of `AgentConfig.prefer_headless_render` at the
     /// moment this turn started. Read by the `visualize` tool to
     /// flip the renderer priority.
@@ -142,6 +150,33 @@ pub trait FeRenderer: Send + Sync {
 #[async_trait]
 pub trait HeadlessRenderer: Send + Sync {
     async fn render(&self, request: Value) -> Result<Vec<u8>, ToolError>;
+}
+
+/// Server-side broker for UI actions. The `ui` agent tool calls
+/// `dispatch(action_json)`; the implementation broadcasts an
+/// `Event::UiAction` over the control plane, awaits the first FE
+/// reply via `Command::UiActionResult`, and returns the JSON
+/// payload back (state snapshot on a `query`, empty on mutations).
+#[async_trait]
+pub trait UiDirector: Send + Sync {
+    async fn dispatch(&self, action_json: String) -> Result<String, UiDirectorError>;
+}
+
+/// Error type for `UiDirector::dispatch`. Mirrors `ToolError::Execution`
+/// shape but lives in its own type so a future director impl can
+/// distinguish "no FE attached" from "FE rejected the action".
+#[derive(Debug, thiserror::Error)]
+pub enum UiDirectorError {
+    #[error("{0}")]
+    Execution(String),
+}
+
+impl From<UiDirectorError> for ToolError {
+    fn from(e: UiDirectorError) -> Self {
+        match e {
+            UiDirectorError::Execution(m) => ToolError::Execution(m),
+        }
+    }
 }
 
 #[async_trait]
@@ -242,7 +277,9 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(plugins::PluginsTool),
         Arc::new(midi::MidiTool),
         Arc::new(sequencer::SequencerTool),
+        Arc::new(scripts::ScriptsTool),
         Arc::new(session::SessionTool),
+        Arc::new(ui::UiTool),
         Arc::new(visualize::VisualizeTool),
     ];
     ToolRegistry::from_tools(tools)

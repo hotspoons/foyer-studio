@@ -151,6 +151,37 @@ std::vector<std::uint8_t> encode_audio_ingress_opened (
 /// Encode `Event::AudioIngressClosed { stream_id }`.
 std::vector<std::uint8_t> encode_audio_ingress_closed (std::uint32_t stream_id);
 
+// ── Scripts (Ardour Lua VM bridge) ─────────────────────────────────
+//
+// Schema parity: see `foyer-schema/src/scripting.rs`. The cache
+// of scripts the shim knows about lives in `schema_map::ScriptStore`;
+// these encoders just serialize a `ScriptRecord` over the wire.
+} // namespace ArdourSurface::msgpack_out
+
+// Forward-declare so the script encoders can see the struct without
+// pulling `schema_map.h` into every consumer of `msgpack_out.h`.
+namespace ArdourSurface::schema_map { struct ScriptRecord; }
+
+namespace ArdourSurface::msgpack_out {
+
+/// Encode `Event::ScriptList { scripts }`.
+std::vector<std::uint8_t> encode_script_list (
+    const std::vector<schema_map::ScriptRecord>& scripts);
+
+/// Encode `Event::ScriptSaved { script }`.
+std::vector<std::uint8_t> encode_script_saved (
+    const schema_map::ScriptRecord& script);
+
+/// Encode `Event::ScriptRemoved { id }`.
+std::vector<std::uint8_t> encode_script_removed (const std::string& id);
+
+/// Encode `Event::ScriptRunResult { result }`. `error` is `Option<String>`
+/// on the wire — pass an empty string to omit it (renders as nil).
+std::vector<std::uint8_t> encode_script_run_result (
+    const std::string& id, bool ok,
+    const std::string& stdout_text, const std::string& error_text,
+    std::uint32_t elapsed_ms);
+
 } // namespace ArdourSurface::msgpack_out
 
 #endif

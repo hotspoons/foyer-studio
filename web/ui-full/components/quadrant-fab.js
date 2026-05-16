@@ -233,6 +233,19 @@ export class QuadrantFab extends LitElement {
     window.__foyer?.layout?.addEventListener("change", this._layoutHandler);
     window.__foyer?.layout?.registerFab(this.storageKey, this._dockMeta(), this);
     this._clamp();
+    // Compiz-style wobble — opt-in via viz pref. Both the FAB
+    // button (drag from anywhere) and the panel (drag from the
+    // grip header) get their own spring mesh. The wobble module's
+    // attach/detach is a no-op when the pref is off, so we can
+    // call it unconditionally and just respond to the global
+    // enable/disable events.
+    this._wobbleEnable = () => this._installWobbles();
+    this._wobbleDisable = () => this._uninstallWobbles();
+    window.addEventListener("foyer:wobbly-enabled", this._wobbleEnable);
+    window.addEventListener("foyer:wobbly-disabled", this._wobbleDisable);
+    // First mount: try to attach. Lit hasn't rendered children yet
+    // so we defer via rAF; once renderRoot has a `.fab` we wire up.
+    requestAnimationFrame(() => this._installWobbles());
   }
   disconnectedCallback() {
     window.removeEventListener("pointermove", this._onPointerMove);
@@ -241,7 +254,77 @@ export class QuadrantFab extends LitElement {
     window.removeEventListener("resize", this._onWindowResize);
     window.__foyer?.layout?.removeEventListener("change", this._layoutHandler);
     window.__foyer?.layout?.unregisterFab(this.storageKey);
+    window.removeEventListener("foyer:wobbly-enabled", this._wobbleEnable);
+    window.removeEventListener("foyer:wobbly-disabled", this._wobbleDisable);
+    this._uninstallWobbles();
     super.disconnectedCallback();
+  }
+
+  async _installWobbles() {
+    const mod = await import("foyer-core/wobbly-windows.js");
+    if (!mod.wobblyEnabled()) return;
+    const fab = this.renderRoot?.querySelector?.(".fab");
+    const panel = this.renderRoot?.querySelector?.(".panel");
+    // FAB + panel are right/bottom-anchored, so a positive cursor
+    // delta moves the right/bottom edges closer to the cursor —
+    // `_fabRight -= dx`, `_fabBottom -= dy`. Both surfaces share
+    // `_fabRight/_fabBottom`, so a single commit moves the pair.
+    // After committing, run the same end-of-drag checks the
+    // native handler would have done: dock-zone detection +
+    // drop-highlight cleanup. Without those, the dragged FAB
+    // never reaches the rail and the "drag back to dock"
+    // gesture is broken.
+    const commit = ({ dx, dy, clientX, clientY }) => {
+      this._fabRight = (this._fabRight || 0) - dx;
+      this._fabBottom = (this._fabBottom || 0) - dy;
+      this._clamp?.();
+      if (this._isOverRail?.(clientX, clientY)) {
+        window.__foyer?.rightDock?.setDropHighlight?.(false);
+        window.__foyer?.layout?.dockFab?.(this.storageKey);
+        this._open = false;
+      } else {
+        window.__foyer?.rightDock?.setDropHighlight?.(false);
+      }
+      this._persist?.();
+      this.requestUpdate();
+    };
+    if (fab) {
+      // FAB button uses passthroughClick so a tap still toggles
+      // the panel — the existing `_onUp` toggle path fires when
+      // the cursor never crosses the drag threshold. Panel
+      // follows so they move as a unit.
+      mod.attachWobble(fab, undefined, {
+        commit,
+        followers: panel ? [panel] : [],
+        passthroughClick: true,
+      });
+    }
+    if (panel) {
+      const grip = panel.querySelector?.(".grip") || panel;
+      mod.attachWobble(panel, grip, {
+        commit,
+        followers: fab ? [fab] : [],
+      });
+    }
+    this._wobbleAttached = { fab, panel };
+  }
+
+  async _uninstallWobbles() {
+    if (!this._wobbleAttached) return;
+    const mod = await import("foyer-core/wobbly-windows.js");
+    const { fab, panel } = this._wobbleAttached;
+    if (fab) mod.detachWobble(fab);
+    if (panel) mod.detachWobble(panel);
+    this._wobbleAttached = null;
+  }
+
+  updated(changed) {
+    super.updated?.(changed);
+    // The .panel only renders when `_open` is true. Re-attach after
+    // each render so a freshly-opened panel picks up its wobble.
+    if (this._wobbleAttached || this._open) {
+      this._installWobbles();
+    }
   }
 
   _isDocked() {

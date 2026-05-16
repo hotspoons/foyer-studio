@@ -72,6 +72,18 @@ export function bootFoyerCore(opts = {}) {
   import("./viz-capture.js")
     .then(({ installVizCapture }) => installVizCapture())
     .catch((e) => console.warn("[bootstrap] viz-capture install failed:", e));
+  // FE-side listener for the `ui` agent tool. Subscribes to
+  // `ui_action` envelopes and dispatches against window.__foyer.layout
+  // + spawnWindowKind, replying with `ui_action_result`.
+  import("./ui-director.js")
+    .then(({ installUiDirector }) => installUiDirector())
+    .catch((e) => console.warn("[bootstrap] ui-director install failed:", e));
+  // Compiz-style wobbly windows — viz-pref gated, defaults off.
+  // When enabled, auto-attaches a spring-mass mesh to every
+  // foyer-window and any component that opts in via attachWobble().
+  import("./wobbly-windows.js")
+    .then(({ installWobbly }) => installWobbly())
+    .catch((e) => console.warn("[bootstrap] wobbly install failed:", e));
   // Headless-viz mode: when the URL carries `?subcommand=...` (the
   // chromiumoxide-driven renderer hits this), swap to a single
   // full-window tile + signal ready for the screenshot.

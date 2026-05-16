@@ -753,6 +753,10 @@ export class BeatSequencer extends LitElement {
     this._selectedPatternId = "";
     this._arrCols = 16;
     this._arrH = Number(localStorage.getItem(ARR_HEIGHT_KEY)) || 200;
+    // Last arrangement bar the user clicked. Shift-click on a second
+    // bar uses this as the loop anchor (matches the timeline ruler
+    // shift-click-to-extend-selection pattern).
+    this._lastArrBar = -1;
     this._preview = localStorage.getItem(PREVIEW_PREF_KEY) === "1";
     this._addDrum = false;
     this._drumPitch = 36;
@@ -1178,6 +1182,100 @@ export class BeatSequencer extends LitElement {
       if (idx >= 0) L.arrangement.splice(idx, 1);
       else L.arrangement.push({ pattern_id: patternId, bar, arrangement_row: row });
     });
+  }
+
+  /** Look up the host region in the live region cache. Returns
+   *  `{start_samples, length_samples}` so the navigation/loop math
+   *  can map bar indices onto timeline samples. */
+  _findRegionRecord() {
+    const byTrack = window.__foyer?.store?.state?.regionsByTrack;
+    if (!byTrack?.entries) return null;
+    for (const [, list] of byTrack.entries()) {
+      const r = (list || []).find((x) => x.id === this.regionId);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  /** Samples-per-bar at the current session tempo + time signature.
+   *  Pattern length math falls back to the layout's own
+   *  pattern_steps/resolution when the session doesn't expose a
+   *  time-signature numerator (stub/legacy backends). */
+  _samplesPerBar() {
+    const session = window.__foyer?.store?.state?.session;
+    const sr = Number(session?.sample_rate) || 48_000;
+    const tempo = Number(session?.transport?.tempo?.value) || 120;
+    // Use the layout's beats-per-bar (pattern_steps / resolution)
+    // since that's what the host engine uses when expanding the
+    // layout into MIDI notes. Falls back to 4 if math is degenerate.
+    const L = this._currentLayout();
+    const steps = Math.max(1, Number(L?.pattern_steps) || 16);
+    const res = Math.max(1, Number(L?.resolution) || 4);
+    const beatsPerBar = Math.max(1, steps / res);
+    return Math.round((60 / tempo) * beatsPerBar * sr);
+  }
+
+  /** Timeline-absolute sample position where `bar` (in the
+   *  arrangement) begins. Returns `null` when the region hasn't
+   *  hydrated yet. */
+  _barToTimelineSamples(bar) {
+    const r = this._findRegionRecord();
+    if (!r) return null;
+    const start = Number(r.start_samples) || 0;
+    return start + Math.max(0, bar) * this._samplesPerBar();
+  }
+
+  /** Navigate the engine's transport to the start of `bar`. */
+  _navigateToBar(bar) {
+    const samples = this._barToTimelineSamples(bar);
+    if (samples == null) return;
+    window.__foyer?.ws?.send?.({ type: "locate", samples });
+  }
+
+  /** Set the engine's loop range to cover `[barStart, barEnd]`
+   *  inclusive and enable looping. */
+  _loopBarRange(barStart, barEnd) {
+    const a = Math.min(barStart, barEnd);
+    const b = Math.max(barStart, barEnd);
+    const startSamples = this._barToTimelineSamples(a);
+    const endSamples = this._barToTimelineSamples(b + 1);
+    if (startSamples == null || endSamples == null) return;
+    window.__foyer?.ws?.send?.({
+      type: "set_loop_range",
+      start_samples: startSamples,
+      end_samples: endSamples,
+      enabled: true,
+    });
+  }
+
+  /** Loop the full populated arrangement (bar 0 → max+1). */
+  _loopArrangement() {
+    const L = this._currentLayout();
+    const maxBar = L.arrangement.reduce((m, s) => Math.max(m, s.bar), -1);
+    if (maxBar < 0) return;
+    this._loopBarRange(0, maxBar);
+    this._navigateToBar(0);
+  }
+
+  /** Click on an arrangement cell.
+   *   - plain click: navigate + toggle pattern in slot
+   *   - shift-click: extend loop selection from the last-clicked bar
+   *   - alt-click: loop just this bar
+   *   - right-click: handled separately via context menu (TBD) */
+  _onArrCellClick(ev, patternId, bar) {
+    if (ev.shiftKey && this._lastArrBar >= 0) {
+      this._loopBarRange(this._lastArrBar, bar);
+      return;
+    }
+    if (ev.altKey) {
+      this._loopBarRange(bar, bar);
+      this._navigateToBar(bar);
+      this._lastArrBar = bar;
+      return;
+    }
+    this._toggleArrCell(patternId, bar);
+    this._navigateToBar(bar);
+    this._lastArrBar = bar;
   }
   _addPattern() {
     this._commit((L) => {
@@ -1998,6 +2096,10 @@ export class BeatSequencer extends LitElement {
           <button class="add add-pattern" title="Add a new empty pattern"
                   @click=${() => this._addPattern()}>+ Pattern</button>
           <span>Arrangement · ${L.patterns.length} pattern${L.patterns.length === 1 ? "" : "s"} · ${maxBar + 1} bar${maxBar + 1 === 1 ? "" : "s"}</span>
+          <button class="add"
+                  title="Loop the full populated arrangement on the transport"
+                  ?disabled=${maxBar < 0}
+                  @click=${() => this._loopArrangement()}>Loop arr</button>
           <button class="add bars" title="Show more bars in the arrangement"
                   @click=${() => { this._arrCols = Math.min(cols + 8, 256); }}>+ 8 bars</button>
         </div>
@@ -2022,8 +2124,8 @@ export class BeatSequencer extends LitElement {
                 return html`
                   <div class="arr-cell ${on ? "on" : ""} ${(b + 1) % 4 === 0 ? "beat-edge" : ""}"
                        style=${on ? `--cell-color:${p.color || pickPatternColor(0)}` : ""}
-                       title="bar ${b + 1}"
-                       @click=${() => this._toggleArrCell(p.id, b)}></div>
+                       title="bar ${b + 1} — click navigates the transport; shift-click loops from the last bar; alt-click loops just this bar"
+                       @click=${(ev) => this._onArrCellClick(ev, p.id, b)}></div>
                 `;
               })}
             `)}

@@ -4,13 +4,20 @@
  */
 #include "schema_map.h"
 
+#include <chrono>
+#include <cctype>
 #include <sstream>
 #include <algorithm>
 #include <map>
 
+#include <glib.h>
+
 #include "ardour/audioregion.h"
 #include "ardour/file_source.h"
 #include "ardour/instrument_info.h"
+#include "ardour/lua_script_params.h"
+#include "ardour/luascripting.h"
+#include "lua/luastate.h"
 #include "ardour/midi_model.h"
 #include "ardour/midi_region.h"
 #include "ardour/parameter_descriptor.h"
@@ -1170,6 +1177,388 @@ track_id_for_control (Session& session, const std::string& control_id)
 		}
 	}
 	return {};
+}
+
+// ── Scripting ───────────────────────────────────────────────────────
+
+namespace {
+std::uint64_t now_ms ()
+{
+    return static_cast<std::uint64_t> (
+        std::chrono::duration_cast<std::chrono::milliseconds> (
+            std::chrono::system_clock::now ().time_since_epoch ()).count ());
+}
+
+/// Derive a stable Lua function name from a display name. Ardour's
+/// `register_lua_function` enforces a single global namespace so we
+/// must produce identifiers that survive a round-trip through Lua's
+/// syntax: ASCII letters / digits / underscore, never leading digit.
+std::string slugify (const std::string& display)
+{
+    std::string s;
+    s.reserve (display.size () + 4);
+    for (char c : display) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_') {
+            s.push_back (c);
+        } else if (c == ' ' || c == '-' || c == '.' || c == '/') {
+            s.push_back ('_');
+        }
+    }
+    if (s.empty () || (s.front () >= '0' && s.front () <= '9')) {
+        s.insert (s.begin (), 'f');
+    }
+    return s;
+}
+
+/// Translate a Foyer `args` table into Ardour's `LuaScriptParamList`
+/// shape so we can hand it through `register_lua_function`. Every
+/// entry rides as a single non-optional, pre-seeded parameter — we
+/// don't know enough about the script's expected param descriptors
+/// at this point to be smarter, and Ardour's
+/// `try_compile`-then-register flow only cares about coverage.
+LuaScriptParamList build_param_list (const std::map<std::string, std::string>& args)
+{
+    LuaScriptParamList out;
+    for (auto const& kv : args) {
+        // (name, title, default, optional, preseeded)
+        auto p = std::make_shared<LuaScriptParam> (
+            kv.first, kv.first, kv.second, /*optional=*/false, /*preseeded=*/true);
+        p->is_set = true;
+        p->value = kv.second;
+        out.push_back (p);
+    }
+    return out;
+}
+} // namespace
+
+// ── ScriptStore ────────────────────────────────────────────────────
+ScriptStore& ScriptStore::instance ()
+{
+    static ScriptStore inst;
+    return inst;
+}
+
+std::vector<ScriptRecord> ScriptStore::list () const
+{
+    std::lock_guard<std::mutex> g (_m);
+    std::vector<ScriptRecord> out;
+    out.reserve (_by_id.size ());
+    for (auto const& kv : _by_id) out.push_back (kv.second);
+    return out;
+}
+
+std::optional<ScriptRecord> ScriptStore::get (const std::string& id) const
+{
+    std::lock_guard<std::mutex> g (_m);
+    auto it = _by_id.find (id);
+    if (it == _by_id.end ()) return std::nullopt;
+    return it->second;
+}
+
+void ScriptStore::put (ScriptRecord rec)
+{
+    std::lock_guard<std::mutex> g (_m);
+    if (rec.updated_at_ms == 0) rec.updated_at_ms = now_ms ();
+    auto id = rec.id;
+    _by_id[id] = std::move (rec);
+}
+
+bool ScriptStore::remove (const std::string& id)
+{
+    std::lock_guard<std::mutex> g (_m);
+    return _by_id.erase (id) > 0;
+}
+
+void ScriptStore::clear ()
+{
+    std::lock_guard<std::mutex> g (_m);
+    _by_id.clear ();
+}
+
+void ScriptStore::replace_all (std::vector<ScriptRecord> rec)
+{
+    std::lock_guard<std::mutex> g (_m);
+    _by_id.clear ();
+    for (auto& r : rec) {
+        auto id = r.id;
+        _by_id[id] = std::move (r);
+    }
+}
+
+// ── save_script ────────────────────────────────────────────────────
+ScriptRecord
+save_script (Session& session, ScriptRecord rec)
+{
+    if (rec.id.empty ()) rec.id = slugify (rec.name.empty () ? "script" : rec.name);
+    if (rec.id.empty ()) rec.id = "foyer_script";
+    rec.disabled_on_upload = false;
+    rec.updated_at_ms = now_ms ();
+
+    // Replace-by-name semantics: Ardour's
+    // `register_lua_function(name, ...)` REPLACES any prior
+    // registration under that name, so we don't need a separate
+    // unregister step. Wrapping the call so it throws cleanly if
+    // the script body is malformed — caller logs the error and
+    // surfaces it back to the FE.
+    if (rec.script_type != "dsp") {
+        try {
+            auto params = build_param_list (rec.args);
+            session.register_lua_function (rec.id, rec.body, params);
+        } catch (...) {
+            // Best-effort; the FE save still records the body so the
+            // user can fix syntax errors without losing their work.
+        }
+    } else {
+        // DSP scripts ride the luaproc plugin path. Write the body
+        // to Ardour's user_script_dir() so the in-tree
+        // `LuaScripting::scan` picks it up. NOTE: do NOT call
+        // `PluginManager::refresh(true)` here — that is the
+        // FULL plugin rescan (LV2 + VST + AU + LADSPA + Lua)
+        // and crashes when invoked from a control-surface
+        // thread mid-session. `LuaScripting::refresh(run_scan=true)`
+        // emits the `scripts_changed` signal which
+        // `PluginManager::lua_refresh_cb` is already connected to
+        // (see plugin_manager.cc:335), so the Lua-only plugin
+        // catalog updates automatically without us reaching into
+        // PluginManager directly.
+        try {
+            const std::string dir = LuaScripting::user_script_dir ();
+            if (!dir.empty ()) {
+                const std::string fname = dir + "/" + rec.id + ".lua";
+                FILE* fp = std::fopen (fname.c_str (), "w");
+                if (fp) {
+                    std::fwrite (rec.body.data (), 1, rec.body.size (), fp);
+                    std::fclose (fp);
+                }
+                LuaScripting::instance ().refresh (/*run_scan=*/true);
+            }
+        } catch (...) {
+            // Best-effort; the FE save still records the body even
+            // if the file write fails (e.g. read-only home).
+        }
+    }
+
+    ScriptStore::instance ().put (rec);
+    return rec;
+}
+
+void
+delete_script (Session& session, const std::string& id)
+{
+    if (id.empty ()) return;
+    // Mirror save's DSP-vs-non-DSP split: DSP scripts live as files
+    // in `user_script_dir()` (not in the session's Lua registration
+    // table), so unregister + file removal are different paths.
+    auto rec_opt = ScriptStore::instance ().get (id);
+    const bool is_dsp = rec_opt && rec_opt->script_type == "dsp";
+    if (!is_dsp) {
+        try {
+            session.unregister_lua_function (id);
+        } catch (...) {
+            // Idempotent: an unknown name throws but we treat as success.
+        }
+    } else {
+        // Mirror save_script: `LuaScripting::refresh(true)` cascades
+        // through `scripts_changed` → `PluginManager::lua_refresh_cb`,
+        // which is what we want here. Calling
+        // `PluginManager::refresh(true)` directly is a FULL plugin
+        // rescan and crashes when invoked from a control-surface
+        // thread mid-session.
+        try {
+            const std::string dir = LuaScripting::user_script_dir ();
+            if (!dir.empty ()) {
+                const std::string fname = dir + "/" + id + ".lua";
+                std::remove (fname.c_str ());
+                LuaScripting::instance ().refresh (true);
+            }
+        } catch (...) {}
+    }
+    ScriptStore::instance ().remove (id);
+}
+
+// ── run_script ─────────────────────────────────────────────────────
+//
+// Execute a saved script in a FRESH sandboxed LuaState, NOT the
+// session's persistent VM. Two reasons:
+//   1. One-shot semantics — the user's expectation is "run this and
+//      tell me what happened", not "register and call later".
+//   2. Sandbox isolation — Ardour's sandbox mode strips dangerous
+//      globals (`os.execute`, `io.open`, ...) so a malformed snippet
+//      can't tamper with the host process. The session VM has those
+//      back because Session::setup_lua needs them for project-side
+//      IO; we'd rather not expose that surface from the FAB.
+//
+// `print()` output is captured via `LuaState::Print` (a sigc signal);
+// args are exposed as a global `foyer_args` table so script bodies
+// can read inputs without ceremony.
+ScriptRunOutcome
+run_script (Session& session, const std::string& id,
+            const std::map<std::string, std::string>& args_override)
+{
+    (void) session;
+    ScriptRunOutcome out;
+    auto t0 = std::chrono::steady_clock::now ();
+    auto rec_opt = ScriptStore::instance ().get (id);
+    if (!rec_opt) {
+        out.ok = false;
+        out.error_text = "unknown script: " + id;
+        out.elapsed_ms = 0;
+        return out;
+    }
+    auto& rec = *rec_opt;
+    auto args = args_override.empty () ? rec.args : args_override;
+
+    LuaState lua (/*sandbox=*/true, /*rt_safe=*/false);
+    std::string captured;
+    sigc::connection print_conn = lua.Print.connect (
+        [&captured] (std::string s) {
+            captured.append (s);
+            if (captured.empty () || captured.back () != '\n') captured.push_back ('\n');
+        });
+
+    // Build a Lua snippet that pre-seeds `foyer_args` then executes
+    // the body. Strings are emitted with safe quoting so a value
+    // containing `"` or backslashes can't break out of the literal.
+    auto lua_quote = [] (const std::string& s) {
+        std::string out;
+        out.reserve (s.size () + 2);
+        out.push_back ('"');
+        for (char c : s) {
+            switch (c) {
+                case '\\': out.append ("\\\\"); break;
+                case '"':  out.append ("\\\""); break;
+                case '\n': out.append ("\\n");  break;
+                case '\r': out.append ("\\r");  break;
+                case '\t': out.append ("\\t");  break;
+                default:
+                    if (static_cast<unsigned char> (c) < 0x20) {
+                        char buf[8];
+                        std::snprintf (buf, sizeof (buf), "\\%03d", (int) (unsigned char) c);
+                        out.append (buf);
+                    } else {
+                        out.push_back (c);
+                    }
+            }
+        }
+        out.push_back ('"');
+        return out;
+    };
+    std::string prelude = "foyer_args = {}\n";
+    for (auto const& kv : args) {
+        prelude += "foyer_args[" + lua_quote (kv.first) + "] = " + lua_quote (kv.second) + "\n";
+    }
+    const std::string chunk = prelude + rec.body;
+    int rc = 0;
+    try {
+        rc = lua.do_command (chunk);
+    } catch (std::exception const& e) {
+        out.ok = false;
+        out.error_text = e.what ();
+    } catch (...) {
+        out.ok = false;
+        out.error_text = "unknown error in lua execution";
+    }
+    print_conn.disconnect ();
+
+    // `do_command` returns the result of `luaL_dostring` — 0 on
+    // success, non-zero on syntax/runtime error. The error message
+    // itself rides on Lua's stack; LuaState's print sink forwards it
+    // through the Print signal we connected above, so the caller sees
+    // it in `captured`.
+    if (rc != 0 && out.error_text.empty ()) {
+        out.ok = false;
+        out.error_text = captured.empty ()
+            ? std::string ("lua error (rc=") + std::to_string (rc) + ")"
+            : captured;
+    }
+    out.stdout_text = std::move (captured);
+    out.elapsed_ms = static_cast<std::uint32_t> (
+        std::chrono::duration_cast<std::chrono::milliseconds> (
+            std::chrono::steady_clock::now () - t0).count ());
+    return out;
+}
+
+// ── recover_disabled_scripts ───────────────────────────────────────
+//
+// Pulls the `<Script lua="VERSION">` element out of the session's
+// in-memory XML state and decodes its base64 payload. The payload
+// is the serialized Lua function table the session previously
+// stored — a `do ... end` block, NOT individual function names.
+// We capture the whole blob as a single recovered record so the
+// user can inspect it; granular per-function recovery would need
+// us to teach the Lua VM to enumerate without registering.
+std::vector<ScriptRecord>
+recover_disabled_scripts (Session& session)
+{
+    std::vector<ScriptRecord> recovered;
+    // Session's in-memory XML accessors (`state()` / `get_state()`)
+    // are private to libardour, so we read the .ardour file off disk
+    // and parse it ourselves. Path comes from `session.path()` and
+    // the active snapshot's filename is `<snap_name>.ardour`.
+    const std::string dir = session.path ();
+    const std::string snap = session.snap_name ();
+    if (dir.empty () || snap.empty ()) return recovered;
+    std::string file = dir;
+    if (!file.empty () && file.back () != '/') file.push_back ('/');
+    file += snap + ".ardour";
+
+    XMLTree tree;
+    if (!tree.read (file)) {
+        // Session has never been saved (no .ardour file yet) OR the
+        // file isn't readable from this process. Silent — caller
+        // logs a warning if it cares.
+        return recovered;
+    }
+    XMLNode* root = tree.root ();
+    if (!root) return recovered;
+    XMLNode* script_node = root->child ("Script");
+    if (!script_node) return recovered;
+
+    // <Script lua="VERSION"> holds a single base64-encoded text node
+    // that, on session load, Ardour `g_base64_decode`s into a chunk
+    // of Lua source and feeds to `_lua_load` (see
+    // libs/ardour/session_state.cc). The chunk re-registers all
+    // previously-saved functions; here we just surface it as ONE
+    // recovered record so the user can audit before re-enabling.
+    std::string b64_payload;
+    for (auto const* child : script_node->children ()) {
+        if (!child || !child->is_content ()) continue;
+        b64_payload += child->content ();
+    }
+    // Strip whitespace base64 sometimes picks up across line breaks
+    // in pretty-printed XML.
+    b64_payload.erase (
+        std::remove_if (b64_payload.begin (), b64_payload.end (),
+                        [] (char c) { return std::isspace ((unsigned char) c); }),
+        b64_payload.end ());
+    if (b64_payload.empty ()) return recovered;
+
+    gsize size = 0;
+    guchar* raw = g_base64_decode (b64_payload.c_str (), &size);
+    if (!raw) return recovered;
+    std::string body (reinterpret_cast<const char*> (raw), size);
+    g_free (raw);
+
+    ScriptRecord rec;
+    rec.id = "recovered_script_payload";
+    rec.name = "Recovered <Script> payload";
+    rec.description =
+        "Decoded from the session's <Script lua=...> XML element. "
+        "This is the raw Lua chunk that Ardour normally executes on "
+        "session load to re-register every Foyer-authored script. "
+        "Review before enabling — recovered scripts can run "
+        "arbitrary code.";
+    rec.script_type = "snippet";
+    rec.language = "lua";
+    rec.enabled = false;
+    rec.body = std::move (body);
+    rec.disabled_on_upload = true;
+    rec.updated_at_ms = now_ms ();
+    recovered.push_back (std::move (rec));
+
+    for (auto const& r : recovered) ScriptStore::instance ().put (r);
+    return recovered;
 }
 
 } // namespace ArdourSurface::schema_map

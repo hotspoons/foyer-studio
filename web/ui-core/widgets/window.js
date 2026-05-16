@@ -284,8 +284,27 @@ export class FoyerWindow extends LitElement {
       if (!path.includes(this)) return;
       const top = path[0];
       if (top?.classList?.contains?.("backdrop")) return;
+      // Skip the bump when we're already the topmost foyer-window —
+      // otherwise every click into an already-focused panel inflates
+      // the global stack counter (Rich, 2026-05-16).
+      if (this._isTopMostWindow()) return;
       this._bumpGlobalZIndex();
     };
+  }
+
+  /** True when no visible peer foyer-window currently sits at a
+   *  higher z than us. Read from inline `style.zIndex` (set by
+   *  `_bumpGlobalZIndex` whenever a window raises) with a fallback
+   *  to the CSS-default 1000 for windows that have never bumped. */
+  _isTopMostWindow() {
+    const myZ = parseInt(this.style.zIndex || "1000", 10);
+    for (const el of document.querySelectorAll("foyer-window")) {
+      if (el === this) continue;
+      if (el.hasAttribute("hidden-by-layer") || el.minimized) continue;
+      const z = parseInt(el.style.zIndex || "1000", 10);
+      if (z > myZ) return false;
+    }
+    return true;
   }
 
   _bumpGlobalZIndex() {
@@ -764,6 +783,16 @@ export function spawnWindowKind(kind, props = {}) {
   if (!fn) return false;
   try { fn(props); } catch (e) { console.warn("spawnWindowKind failed", kind, e); }
   return true;
+}
+
+/// Sorted list of every kind currently registered. Used by the
+/// `ui` agent tool's `query` action so the LLM learns the
+/// concrete vocabulary instead of guessing names. The set is
+/// populated by side-effect imports of each UI variant's
+/// `registerWindowKind` calls, so what's available here matches
+/// what's actually instantiable.
+export function listWindowKinds() {
+  return Array.from(FACTORIES.keys()).sort();
 }
 
 // Re-entry guard. Some factories are async (dynamic-import the heavy

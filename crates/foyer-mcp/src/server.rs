@@ -136,12 +136,14 @@ impl ServerHandler for FoyerMcpServer {
         };
         let fe_render = self.runtime.fe_renderer().await;
         let headless_render = self.runtime.headless_renderer().await;
+        let ui_director = self.runtime.ui_director().await;
         let prefer_headless = self.runtime.prefer_headless_render().await;
         let ctx_tool = ToolContext {
             backend: Arc::downgrade(&backend),
             fe_attached: fe_render.is_some(),
             fe_render,
             headless_render,
+            ui_director,
             prefer_headless_render: prefer_headless,
         };
         // Keep the strong ref alive across the tool call so the Weak

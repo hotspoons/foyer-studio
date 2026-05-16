@@ -19,10 +19,21 @@ use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 use crate::config::AgentConfig;
 use crate::conversation::Conversation;
 use crate::engine::{AgentEngine, EngineError, EngineSink};
-use crate::llm::OpenAiHttpClient;
+use crate::llm::{LlmClient, OpenAiHttpClient};
 use crate::store::AgentStore;
 use crate::tools::welcome::{WelcomeContext, WelcomeTool};
 use crate::tools::{ToolContext, ToolRegistry};
+
+/// What the OpenAI proxy needs to build a transient `AgentEngine`
+/// against a fresh conversation. Returned by
+/// [`AgentRuntime::external_engine_parts`].
+pub struct ExternalEngineParts {
+    pub llm: Arc<dyn LlmClient>,
+    pub model: String,
+    pub tools: ToolRegistry,
+    pub ctx: ToolContext,
+    pub system_prompt: String,
+}
 
 /// Events the runtime broadcasts. Subscribers translate these into
 /// `foyer_schema::Event` over their own transport (WS, stdio, etc.).
@@ -83,6 +94,16 @@ patterns use the sequencer tool below)\n\
   * sequencer — show, set_layout, set_cells, add_pattern, arrange, \
 clear, show_viz (Hydrogen / Fruity-Loops-style cell + pattern + \
 arrangement authoring — first-class in Foyer)\n\
+  * scripts — capabilities, list, get, save, delete, enable, run, \
+recover_disabled (host scripts — Lua under Ardour. Call `capabilities` \
+FIRST to learn what types/languages/hooks the shim advertises; DSP \
+scripts produce real audio plugins. Recovered scripts come back \
+with `disabled_on_upload=true` so the user can audit before enabling)\n\
+  * ui — query, open, close, focus, set_tile_tree (drive the user's \
+browser layout: spawn missing windows on their behalf, focus a \
+buried panel, swap the tile tree to a preset. Always `query` first \
+to learn what's open + the available window kinds. Pair with \
+`visualize.screen` to confirm the change visually)\n\
   * visualize — timeline / mixer / waveform / spectrogram / \
 automation_lane / event_heatmap / midi_roll\n\
 \n\
@@ -133,6 +154,7 @@ pub struct AgentRuntime {
     backend: tokio::sync::RwLock<Option<std::sync::Weak<dyn Backend>>>,
     fe_render: tokio::sync::RwLock<Option<Arc<dyn crate::tools::FeRenderer>>>,
     headless_render: tokio::sync::RwLock<Option<Arc<dyn crate::tools::HeadlessRenderer>>>,
+    ui_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::UiDirector>>>,
     /// Active session id. Every record produced by the conversation
     /// is queued for batched JSONL append against this session.
     active_session_id: tokio::sync::RwLock<String>,
@@ -232,6 +254,7 @@ impl AgentRuntime {
             backend: tokio::sync::RwLock::new(None),
             fe_render: tokio::sync::RwLock::new(None),
             headless_render: tokio::sync::RwLock::new(None),
+            ui_director: tokio::sync::RwLock::new(None),
             active_session_id: tokio::sync::RwLock::new(active_id),
             pending_writes: Arc::new(Mutex::new(Default::default())),
             current_cancel: tokio::sync::RwLock::new(None),
@@ -350,6 +373,20 @@ impl AgentRuntime {
         self.headless_render.read().await.clone()
     }
 
+    /// Install (or replace) the UI director — the broker the `ui`
+    /// tool uses to dispatch window-manager directives to an attached
+    /// FE. Wired in `attach_agent` on the server side.
+    pub async fn set_ui_director(&self, ui: Option<Arc<dyn crate::tools::UiDirector>>) {
+        *self.ui_director.write().await = ui;
+    }
+
+    /// Read the currently installed UI director (if any). Used by
+    /// the MCP server when building a `ToolContext` for an external
+    /// client.
+    pub async fn ui_director(&self) -> Option<Arc<dyn crate::tools::UiDirector>> {
+        self.ui_director.read().await.clone()
+    }
+
     /// Read the current "prefer headless renderer" flag — surfaced to
     /// MCP's `ToolContext` so external clients honor the same toggle
     /// the in-process agent does.
@@ -442,6 +479,90 @@ impl AgentRuntime {
         inner.config.prefer_headless_render = prefer;
     }
 
+    /// Apply boot-time overrides from CLI / env / config.yaml WITHOUT
+    /// writing them to the persisted store. Keeps the FAB's saved
+    /// config intact so a temporary env-var override doesn't quietly
+    /// rewrite the user's last "Save" in the settings modal — they'd
+    /// have no way to undo it once the env var vanishes. Each `Some`
+    /// replaces the live value (and rebuilds the LLM client when
+    /// transport-shape fields move); `None` leaves the post-store
+    /// value alone.
+    pub async fn apply_boot_overrides(
+        &self,
+        endpoint: Option<String>,
+        model: Option<String>,
+        api_key: Option<String>,
+    ) {
+        let mut transport_dirty = false;
+        {
+            let mut inner = self.inner.lock().await;
+            if let Some(e) = endpoint {
+                inner.config.endpoint = e;
+                transport_dirty = true;
+            }
+            if let Some(m) = model {
+                inner.config.model = m;
+            }
+            if let Some(k) = api_key {
+                inner.config.api_key = if k.is_empty() { None } else { Some(k) };
+                transport_dirty = true;
+            }
+            if transport_dirty {
+                inner.llm = Arc::new(OpenAiHttpClient::new(
+                    inner.config.endpoint.clone(),
+                    inner.config.api_key.clone(),
+                ));
+            }
+        }
+        let _ = self.events_tx.send(self.snapshot_state().await);
+    }
+
+    /// Public snapshot of the live LLM-transport config. The HTTP
+    /// proxy uses this to know which upstream model id to inject
+    /// when an incoming OpenAI request specifies `foyer-agent`.
+    pub async fn config_snapshot(&self) -> AgentConfigPublic {
+        let inner = self.inner.lock().await;
+        inner.config.public()
+    }
+
+    /// Borrow the welcome context for external surfaces (OpenAI
+    /// proxy, MCP) that want the same skills/memory snapshot the
+    /// in-process agent loads. Returns an `Arc` so the caller can
+    /// hold it across awaits without contesting the runtime lock.
+    pub fn welcome_context(&self) -> Arc<RwLock<WelcomeContext>> {
+        self.welcome_ctx.clone()
+    }
+
+    /// Pull the parts the OpenAI proxy needs to build a transient
+    /// `AgentEngine` without touching the persistent conversation.
+    /// Returns `None` when no backend is attached — caller surfaces a
+    /// 503 to the HTTP client.
+    pub async fn external_engine_parts(&self) -> Option<ExternalEngineParts> {
+        let inner = self.inner.lock().await;
+        let llm = inner.llm.clone();
+        let model = inner.config.model.clone();
+        let prefer_headless = inner.config.prefer_headless_render;
+        drop(inner);
+        let backend = self.backend.read().await.clone()?;
+        let fe_render = self.fe_render.read().await.clone();
+        let headless_render = self.headless_render.read().await.clone();
+        let ui_director = self.ui_director.read().await.clone();
+        Some(ExternalEngineParts {
+            llm,
+            model,
+            tools: self.tools.clone(),
+            ctx: ToolContext {
+                backend,
+                fe_attached: fe_render.is_some(),
+                fe_render,
+                headless_render,
+                ui_director,
+                prefer_headless_render: prefer_headless,
+            },
+            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+        })
+    }
+
     pub async fn confirm_tool(&self, call_id: &str, approve: bool) {
         let mut map = self.confirms.lock().await;
         if let Some(tx) = map.remove(call_id) {
@@ -517,6 +638,7 @@ impl AgentRuntime {
         let backend = self.backend.read().await.clone()?;
         let fe_render = self.fe_render.read().await.clone();
         let headless_render = self.headless_render.read().await.clone();
+        let ui_director = self.ui_director.read().await.clone();
         let prefer_headless = {
             let inner = self.inner.lock().await;
             inner.config.prefer_headless_render
@@ -526,6 +648,7 @@ impl AgentRuntime {
             fe_attached: fe_render.is_some(),
             fe_render,
             headless_render,
+            ui_director,
             prefer_headless_render: prefer_headless,
         };
         let engine = AgentEngine {

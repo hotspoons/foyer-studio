@@ -144,6 +144,7 @@ fn fake_session() -> Session {
         sample_rate: foyer_schema::DEFAULT_SAMPLE_RATE,
         ppqn: Some(960),
         meta: serde_json::Value::Null,
+        scripting: None,
     }
 }
 

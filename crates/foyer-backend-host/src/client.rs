@@ -137,6 +137,27 @@ struct Shared {
     pending_ports_list: Mutex<Vec<oneshot::Sender<Vec<EnginePort>>>>,
     /// In-flight `list_audio_pool` requests — shared answer like plugins/ports.
     pending_audio_pool_list: Mutex<Vec<oneshot::Sender<Vec<AudioPoolSource>>>>,
+    /// In-flight `list_scripts` requests. `Event::ScriptList` resolves
+    /// every waiter with the same snapshot (no correlation id, same
+    /// pattern as plugins/ports).
+    pending_scripts_list: Mutex<Vec<oneshot::Sender<Vec<foyer_schema::Script>>>>,
+    /// In-flight `save_script` requests. Resolved by the next
+    /// `Event::ScriptSaved` from the shim — the typical save flow
+    /// is serial (user clicks Save, waits for echo), and concurrent
+    /// saves are extremely rare. Two-script races resolve in send
+    /// order which is fine for the existing UI model.
+    pending_save_script: Mutex<Vec<oneshot::Sender<foyer_schema::Script>>>,
+    /// In-flight `enable_script` requests. Same pattern as save.
+    pending_enable_script: Mutex<Vec<oneshot::Sender<foyer_schema::Script>>>,
+    /// In-flight `run_script` requests keyed by script id so concurrent
+    /// runs of different scripts don't collide.
+    pending_run_script:
+        Mutex<HashMap<EntityId, Vec<oneshot::Sender<foyer_schema::ScriptRunResult>>>>,
+    /// Cached scripting capabilities — populated from every
+    /// `SessionSnapshot` and from `ScriptingCapabilitiesChanged` events
+    /// so the sync `scripting_capabilities()` call can answer without
+    /// a round-trip. `None` until the first snapshot lands.
+    cached_scripting_caps: Mutex<Option<foyer_schema::ScriptingCapabilities>>,
     /// Cache of known regions, keyed by region id. Populated from every
     /// `RegionsList` / `RegionUpdated` event; drained on `RegionRemoved`.
     /// Used to look up `source_path` when the sidecar needs to decode
@@ -194,6 +215,11 @@ impl HostClient {
             pending_plugins_list: Mutex::new(Vec::new()),
             pending_ports_list: Mutex::new(Vec::new()),
             pending_audio_pool_list: Mutex::new(Vec::new()),
+            pending_scripts_list: Mutex::new(Vec::new()),
+            pending_save_script: Mutex::new(Vec::new()),
+            pending_enable_script: Mutex::new(Vec::new()),
+            pending_run_script: Mutex::new(HashMap::new()),
+            cached_scripting_caps: Mutex::new(None),
             regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
             disconnected: AtomicBool::new(false),
@@ -820,6 +846,76 @@ impl HostClient {
             .await
     }
 
+    // ── Scripting ────────────────────────────────────────────────────
+    pub async fn list_scripts(&self) -> Result<Vec<foyer_schema::Script>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared.pending_scripts_list.lock().await.push(tx);
+        self.send_command(Command::ListScripts).await?;
+        timeout(rx, "list_scripts").await
+    }
+
+    pub async fn save_script(
+        &self,
+        script: foyer_schema::Script,
+    ) -> Result<foyer_schema::Script, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared.pending_save_script.lock().await.push(tx);
+        self.send_command(Command::SaveScript { script }).await?;
+        timeout(rx, "save_script").await
+    }
+
+    pub async fn delete_script(&self, id: EntityId) -> Result<(), ClientError> {
+        // Fire-and-forget; `ScriptRemoved` fans out separately.
+        self.send_command(Command::DeleteScript { id }).await
+    }
+
+    pub async fn enable_script(
+        &self,
+        id: EntityId,
+        enabled: bool,
+    ) -> Result<foyer_schema::Script, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared.pending_enable_script.lock().await.push(tx);
+        self.send_command(Command::EnableScript { id, enabled })
+            .await?;
+        timeout(rx, "enable_script").await
+    }
+
+    pub async fn run_script(
+        &self,
+        id: EntityId,
+        args_override: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<foyer_schema::ScriptRunResult, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_run_script
+            .lock()
+            .await
+            .entry(id.clone())
+            .or_default()
+            .push(tx);
+        self.send_command(Command::RunScript { id, args_override })
+            .await?;
+        timeout(rx, "run_script").await
+    }
+
+    pub async fn recover_disabled_scripts(&self) -> Result<Vec<foyer_schema::Script>, ClientError> {
+        // The shim emits `ScriptList` after recovery so the regular
+        // list waiter picks it up. Sequence: send Recover → wait for
+        // the fresh ScriptList → return.
+        let (tx, rx) = oneshot::channel();
+        self.shared.pending_scripts_list.lock().await.push(tx);
+        self.send_command(Command::RecoverDisabledScripts).await?;
+        let all = timeout(rx, "recover_disabled_scripts").await?;
+        Ok(all.into_iter().filter(|s| s.disabled_on_upload).collect())
+    }
+
+    /// Synchronous read from the cached caps. Populated by the snapshot
+    /// reader; the shim refreshes via `ScriptingCapabilitiesChanged`.
+    pub async fn scripting_capabilities(&self) -> Option<foyer_schema::ScriptingCapabilities> {
+        self.shared.cached_scripting_caps.lock().await.clone()
+    }
+
     pub async fn set_automation_mode(
         &self,
         lane_id: EntityId,
@@ -1095,6 +1191,10 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                                 .store(p as u64, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
+                    // Hydrate the cached scripting caps from the
+                    // snapshot so `scripting_capabilities()` answers
+                    // without a round-trip after the first snapshot.
+                    *shared.cached_scripting_caps.lock().await = session.scripting.clone();
                     let waiters = std::mem::take(&mut *shared.pending_snapshot.lock().await);
                     for w in waiters {
                         let _ = w.send((**session).clone());
@@ -1206,6 +1306,39 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     for w in waiters {
                         let _ = w.send(sources.clone());
                     }
+                }
+                Event::ScriptList { scripts } => {
+                    let waiters: Vec<_> =
+                        std::mem::take(&mut *shared.pending_scripts_list.lock().await);
+                    for w in waiters {
+                        let _ = w.send(scripts.clone());
+                    }
+                }
+                Event::ScriptSaved { script } => {
+                    let waiters: Vec<_> =
+                        std::mem::take(&mut *shared.pending_save_script.lock().await);
+                    for w in waiters {
+                        let _ = w.send(script.clone());
+                    }
+                    // The same event resolves enable_script too. The
+                    // caller distinguishes by which command they sent;
+                    // both flows just need to see the post-save shape.
+                    let waiters: Vec<_> =
+                        std::mem::take(&mut *shared.pending_enable_script.lock().await);
+                    for w in waiters {
+                        let _ = w.send(script.clone());
+                    }
+                }
+                Event::ScriptRunResult { result } => {
+                    if let Some(waiters) = shared.pending_run_script.lock().await.remove(&result.id)
+                    {
+                        for w in waiters {
+                            let _ = w.send(result.clone());
+                        }
+                    }
+                }
+                Event::ScriptingCapabilitiesChanged { capabilities } => {
+                    *shared.cached_scripting_caps.lock().await = capabilities.clone();
                 }
                 Event::PluginPresetsListed { plugin_id, presets } => {
                     if let Some(waiters) = shared.pending_presets.lock().await.remove(plugin_id) {

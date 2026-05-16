@@ -872,6 +872,66 @@ impl Backend for HostBackend {
             240,
         ))
     }
+
+    // ── DAW scripting ──────────────────────────────────────────────
+    async fn scripting_capabilities(
+        &self,
+    ) -> Result<Option<foyer_schema::ScriptingCapabilities>, BackendError> {
+        Ok(self.client.scripting_capabilities().await)
+    }
+
+    async fn list_scripts(&self) -> Result<Vec<foyer_schema::Script>, BackendError> {
+        self.client
+            .list_scripts()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn save_script(
+        &self,
+        script: foyer_schema::Script,
+    ) -> Result<foyer_schema::Script, BackendError> {
+        self.client
+            .save_script(script)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn delete_script(&self, id: EntityId) -> Result<(), BackendError> {
+        self.client
+            .delete_script(id)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn enable_script(
+        &self,
+        id: EntityId,
+        enabled: bool,
+    ) -> Result<foyer_schema::Script, BackendError> {
+        self.client
+            .enable_script(id, enabled)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn run_script(
+        &self,
+        id: EntityId,
+        args_override: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<foyer_schema::ScriptRunResult, BackendError> {
+        self.client
+            .run_script(id, args_override)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn recover_disabled_scripts(&self) -> Result<Vec<foyer_schema::Script>, BackendError> {
+        self.client
+            .recover_disabled_scripts()
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
 }
 
 pub use client::test_helpers;

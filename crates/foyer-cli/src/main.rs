@@ -130,6 +130,33 @@ enum Command {
         /// Ignored when `--backend stub`.
         #[arg(long, value_name = "BIN")]
         ardour_path: Option<PathBuf>,
+
+        /// Upstream OpenAI-compatible endpoint base for the agent
+        /// (no trailing `/chat/completions`). Wins over
+        /// `FOYER_AGENT_UPSTREAM_ENDPOINT`, `agent.upstream_endpoint`
+        /// in `config.yaml`, and the persisted store. Non-persisting —
+        /// the FAB-saved value is restored on the next boot when this
+        /// flag is dropped.
+        #[arg(long, value_name = "URL")]
+        agent_upstream_endpoint: Option<String>,
+
+        /// Upstream model id for the agent. Same precedence chain as
+        /// `--agent-upstream-endpoint`.
+        #[arg(long, value_name = "ID")]
+        agent_upstream_model: Option<String>,
+
+        /// API key for the agent's upstream endpoint. Prefer the
+        /// `FOYER_AGENT_UPSTREAM_API_KEY` env var so the secret
+        /// doesn't end up in shell history.
+        #[arg(long, value_name = "KEY")]
+        agent_upstream_api_key: Option<String>,
+
+        /// API key REQUIRED on Foyer's exposed OpenAI-compatible
+        /// endpoint at `/v1/*`. Leave unset (and unset the env /
+        /// config field) to leave the surface open. Same precedence
+        /// chain as the upstream fields.
+        #[arg(long, value_name = "KEY")]
+        agent_api_key: Option<String>,
     },
     /// Run Foyer Studio in a container. Wraps docker / podman /
     /// nerdctl behind a single command with audio-mode presets.
@@ -356,6 +383,10 @@ async fn main() -> Result<()> {
             stub_test_tone,
             sample_rate,
             ardour_path,
+            agent_upstream_endpoint,
+            agent_upstream_model,
+            agent_upstream_api_key,
+            agent_api_key,
         } => {
             if list_shims {
                 return list_available_shims();
@@ -401,6 +432,10 @@ async fn main() -> Result<()> {
                 stub_test_tone,
                 sample_rate,
                 ardour_path,
+                agent_upstream_endpoint,
+                agent_upstream_model,
+                agent_upstream_api_key,
+                agent_api_key,
             )
             .await
         }
@@ -568,6 +603,10 @@ async fn serve(
     stub_test_tone: bool,
     sample_rate_override: Option<u32>,
     ardour_path_override: Option<PathBuf>,
+    agent_upstream_endpoint_cli: Option<String>,
+    agent_upstream_model_cli: Option<String>,
+    agent_upstream_api_key_cli: Option<String>,
+    agent_api_key_cli: Option<String>,
 ) -> Result<()> {
     // Resolve backend: CLI override wins, then config default.
     let backend = match backend_override.as_deref() {
@@ -800,14 +839,49 @@ async fn serve(
     // `$XDG_DATA_HOME/foyer/agent/`; if that path is unwritable we
     // surface a warning but keep the server up — the rest of Foyer
     // works without the agent.
+    // Resolve agent config overrides: CLI > env > config.yaml. The
+    // FAB-saved store value (loaded inside `attach_agent`) is the
+    // baseline these layer ON TOP of via `apply_boot_overrides`, which
+    // does NOT write back — pulling a flag or env var the next boot
+    // restores the FAB-saved values.
+    let agent_upstream_endpoint = agent_upstream_endpoint_cli
+        .or_else(|| std::env::var("FOYER_AGENT_UPSTREAM_ENDPOINT").ok())
+        .or_else(|| config.agent.upstream_endpoint.clone());
+    let agent_upstream_model = agent_upstream_model_cli
+        .or_else(|| std::env::var("FOYER_AGENT_UPSTREAM_MODEL").ok())
+        .or_else(|| config.agent.upstream_model.clone());
+    let agent_upstream_api_key = agent_upstream_api_key_cli
+        .or_else(|| std::env::var("FOYER_AGENT_UPSTREAM_API_KEY").ok())
+        .or_else(|| config.agent.upstream_api_key.clone());
+    let agent_api_key = agent_api_key_cli
+        .or_else(|| std::env::var("FOYER_AGENT_API_KEY").ok())
+        .or_else(|| config.agent.api_key.clone());
+
+    // Gate the exposed `/v1/*` surface regardless of whether the
+    // agent runtime attached — the auth check needs to run even if
+    // we end up serving a 503 inside.
+    server.set_openai_proxy_api_key(agent_api_key.clone()).await;
+
     match server.attach_agent().await {
         Ok(runtime) => {
             runtime
                 .set_prefer_headless_render(config.agent.prefer_headless_render)
                 .await;
+            // Apply the CLI/env/config-yaml chain — non-persisting so
+            // a per-launch env-var override doesn't quietly rewrite
+            // what the FAB user saved last.
+            runtime
+                .apply_boot_overrides(
+                    agent_upstream_endpoint.clone(),
+                    agent_upstream_model.clone(),
+                    agent_upstream_api_key.clone(),
+                )
+                .await;
             tracing::info!(
-                "agent runtime attached (prefer_headless_render={})",
-                config.agent.prefer_headless_render
+                "agent runtime attached (prefer_headless_render={}, upstream={}, model={})",
+                config.agent.prefer_headless_render,
+                agent_upstream_endpoint.as_deref().unwrap_or("<from store>"),
+                agent_upstream_model.as_deref().unwrap_or("<from store>"),
             );
             // When the operator has opted into headless rendering as
             // the preferred path, probe the host for chromium NOW so

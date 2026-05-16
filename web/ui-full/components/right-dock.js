@@ -67,10 +67,25 @@ const _spawnSoftKeyboard = () => {
     viewProps: {},
   });
 };
+// Lazy-import the scripts view so the hljs + grammar bundle stays out
+// of the boot path. Users who never open the Scripts panel don't pay.
+const _spawnScripts = () => {
+  import("./scripts-view.js").then(() => {
+    const el = document.createElement("foyer-scripts-view");
+    openWindow({
+      title: "Scripts", icon: "document-text", storageKey: "scripts-widget",
+      content: el, width: 900, height: 600,
+      persist: { kind: "scripts", id: "scripts", props: {} },
+      viewKind: "scripts",
+      viewProps: {},
+    });
+  });
+};
 registerWindowKind("console", _spawnConsole);
 registerWindowKind("diagnostics", _spawnDiagnostics);
 registerWindowKind("midi-devices", _spawnMidiDevices);
 registerWindowKind("soft-keyboard", _spawnSoftKeyboard);
+registerWindowKind("scripts", _spawnScripts);
 
 // Track Editor / MIDI Editor / Beat Sequencer factories. The heavy
 // editor modules are lazy-imported at rehydrate time so we don't drag
@@ -213,6 +228,7 @@ const VIEW_ICON = {
   track_editor: "wrench-screwdriver",
   beat_sequencer: "musical-note",
   piano_roll: "musical-note",
+  scripts: "document-text",
 };
 
 // Spawnable widget types — surfaced through the dock's "+" menu so
@@ -225,6 +241,10 @@ const VIEW_ICON = {
 const SPAWNABLE_WIDGETS = [
   { view: "console",     label: "Console",     icon: "command-line" },
   { view: "diagnostics", label: "Diagnostics", icon: "check-circle" },
+  // Scripts entry is suppressed when the active backend has no
+  // scripting surface (see `_filteredSpawnableWidgets` below).
+  { view: "scripts",     label: "Scripts",     icon: "document-text",
+    requires: (state) => !!state?.session?.scripting },
 ];
 
 export class RightDock extends LitElement {
@@ -847,9 +867,10 @@ export class RightDock extends LitElement {
 
   _renderSpawnMenu() {
     const layout = window.__foyer?.layout;
+    const state = window.__foyer?.store?.state;
     return html`
       <div class="spawn-menu" @click=${(ev) => ev.stopPropagation()}>
-        ${SPAWNABLE_WIDGETS.map((s) => html`
+        ${SPAWNABLE_WIDGETS.filter((s) => !s.requires || s.requires(state)).map((s) => html`
           <button @click=${() => this._spawnWidget(s.view)}>
             ${icon(s.icon, 14)} ${s.label}
           </button>
@@ -860,8 +881,8 @@ export class RightDock extends LitElement {
 
   _spawnWidget(view) {
     this._spawnOpen = false;
-    // Console + Diagnostics go through openWindow so they get the
-    // SAME chrome as Track editor / MIDI editor / Beat sequencer
+    // Console + Diagnostics + Scripts go through openWindow so they get
+    // the SAME chrome as Track editor / MIDI editor / Beat sequencer
     // (foyer-window) instead of the floating-tiles tile-class chrome
     // (slot tag, dock-back button, double title). The shared
     // storageKey keeps the open-set idempotent — clicking "+ Console"
@@ -869,6 +890,7 @@ export class RightDock extends LitElement {
     // duplicates. (Rich, 2026-04-25.)
     if (view === "console")     { _spawnConsole();     return; }
     if (view === "diagnostics") { _spawnDiagnostics(); return; }
+    if (view === "scripts")     { _spawnScripts();     return; }
     // Fallback for any other future widget views — legacy openWidget.
     const layout = window.__foyer?.layout;
     if (!layout) return;

@@ -349,6 +349,74 @@ envelope_event (BodyFn write_body)
 	return buf;
 }
 
+/// Emit the `ScriptingCapabilities` struct inline. Lua-only; type
+/// taxonomy + hook list mirrors Ardour's `LuaScriptInfo::ScriptType`
+/// enum and the editor-hook taxonomy the in-tree script manager
+/// uses, so the FE's host-agnostic capability reader stays
+/// wire-compatible with the stub backend. Keep this in lock-step
+/// with the stub's `stub_scripting_capabilities()` in
+/// `foyer-backend-stub::fixtures` — the FE picks a list from
+/// whichever shim attaches, so divergence shows as different
+/// pickers across backends.
+static void
+emit_scripting_capabilities (Out& o)
+{
+	o.map (3);
+	o.str ("languages"); o.array (1);
+	{
+		o.map (3);
+		o.str ("id"); o.str ("lua");
+		o.str ("label"); o.str ("Lua 5.4");
+		o.str ("highlight"); o.str ("lua");
+	}
+	o.str ("script_types"); o.array (6);
+	auto type_row = [&] (const char* id, const char* label, const char* desc,
+	                     bool hookable, const std::vector<std::string>& hooks,
+	                     bool runnable, bool takes_args) {
+		o.map (7);
+		o.str ("id"); o.str (id);
+		o.str ("label"); o.str (label);
+		o.str ("description"); o.str (desc);
+		o.str ("hookable"); o.b (hookable);
+		o.str ("hooks"); o.array (static_cast<std::uint32_t> (hooks.size ()));
+		for (auto const& h : hooks) o.str (h);
+		o.str ("runnable"); o.b (runnable);
+		o.str ("takes_args"); o.b (takes_args);
+	};
+	type_row ("snippet", "Snippet",
+	          "One-shot script run from the Script Manager. Best for quick edits and experiments.",
+	          false, {}, true, false);
+	type_row ("editor_action", "Editor Action",
+	          "Reusable action invocable from the agent, FAB, or a key binding. Accepts a typed arg table.",
+	          false, {}, true, true);
+	// Ardour's editor-hook surface fires on these signals — full list
+	// lives in the engine's `LuaSignal::IsEditorScope` set; this is
+	// the subset the in-tree Script Manager exposes by default.
+	type_row ("editor_hook", "Editor Hook",
+	          "Runs in response to a host signal (transport / selection / region / session).",
+	          true,
+	          { "transport_state_changed", "selection_changed",
+	            "region_property_changed", "punch_changed", "session_loaded" },
+	          false, false);
+	type_row ("session", "Session Script",
+	          "Runs every N audio frames inside the engine. Use sparingly — this is the RT-safe slot.",
+	          false, {}, false, true);
+	type_row ("session_init", "Session Init",
+	          "Fires once when the session loads. Good for setting up macros and bindings.",
+	          false, {}, false, false);
+	type_row ("dsp", "DSP Plugin",
+	          "A Lua-authored audio plugin (luaproc). Once saved, instantiate it on a track like any other plugin.",
+	          false, {}, false, true);
+	o.str ("features");
+	o.map (3);
+	o.str ("can_disable"); o.b (true);
+	// Ardour's `<Script>` XML node stores the base64 payload of
+	// registered functions even after upload-disable; we expose the
+	// recovery action via `recover_disabled_scripts`.
+	o.str ("can_recover_disabled"); o.b (true);
+	o.str ("can_run_oneshot"); o.b (true);
+}
+
 } // namespace
 
 // ---------------- high-level encoders ----------------
@@ -671,13 +739,15 @@ encode_session_snapshot (Session& session,
 		o.str ("session");
 
 		// Session { schema_version, transport, tracks, groups, dirty,
-		// sample_rate, ppqn, meta }. `sample_rate` was promoted out
-		// of the `meta` JSON blob so consumers don't have to fish
-		// through untyped data — see `Session.sample_rate` in
-		// foyer-schema. `ppqn` carries Ardour's `ticks_per_beat`
+		// sample_rate, ppqn, meta, scripting }. `sample_rate` was
+		// promoted out of the `meta` JSON blob so consumers don't
+		// have to fish through untyped data — see `Session.sample_rate`
+		// in foyer-schema. `ppqn` carries Ardour's `ticks_per_beat`
 		// (1920) so clients render note ticks correctly without the
-		// stale 960 hardcode.
-		o.map (8);
+		// stale 960 hardcode. `scripting` advertises the Lua surface
+		// (types, hooks, languages) so the FE/agent renders against
+		// it without baking in shim-specific names.
+		o.map (9);
 		o.str ("schema_version"); o.array (2); o.u (0); o.u (1);
 
 		// Transport is a struct; map keys are Rust field names, values are Parameter structs.
@@ -1093,6 +1163,12 @@ encode_session_snapshot (Session& session,
 		// position because its tick→pixel conversion assumed 960.
 		o.str ("ppqn"); o.u (static_cast<std::uint32_t> (Temporal::ticks_per_beat));
 		o.str ("meta"); o.nil ();
+		// Scripting capabilities — Ardour's LuaScriptInfo::ScriptType
+		// taxonomy + hook list, advertised so the FE / agent can
+		// author scripts without hardcoding Ardour names. Mirrors
+		// `foyer-backend-stub::stub_scripting_capabilities()` so a
+		// Foyer FE iterating against the stub stays wire-compatible.
+		o.str ("scripting"); emit_scripting_capabilities (o);
 	});
 }
 
@@ -1903,6 +1979,101 @@ encode_audio_pool_listed (const std::vector<AudioPoolListRow>& rows)
 			o.str ("length_samples"); o.u (r.length_samples);
 			o.str ("sample_rate");    o.u (r.sample_rate);
 		}
+	});
+}
+
+// ---------------- scripts ----------------
+//
+// A single Script struct on the wire (matches
+// `foyer-schema::scripting::Script`). The shim cache (in schema_map)
+// owns the canonical body; we only stream the metadata + body when
+// encoding. `args` is a `BTreeMap<String, String>`; we emit it as a
+// msgpack map keyed by field name.
+
+namespace {
+void
+emit_script (Out& o, const schema_map::ScriptRecord& s)
+{
+	// Map size: id, name, description, script_type, language, enabled,
+	// body, args, hook, disabled_on_upload, updated_at. Hook is
+	// optional → emit nil; args may be empty but the map is always
+	// present (matches the FE expectation for `Object.entries`).
+	o.map (11);
+	o.str ("id"); o.str (s.id);
+	o.str ("name"); o.str (s.name);
+	o.str ("description"); o.str (s.description);
+	o.str ("script_type"); o.str (s.script_type);
+	o.str ("language"); o.str (s.language);
+	o.str ("enabled"); o.b (s.enabled);
+	o.str ("body"); o.str (s.body);
+	o.str ("args"); o.map (static_cast<std::uint32_t> (s.args.size ()));
+	for (auto const& kv : s.args) {
+		o.str (kv.first); o.str (kv.second);
+	}
+	if (s.hook.empty ()) {
+		o.str ("hook"); o.nil ();
+	} else {
+		o.str ("hook"); o.str (s.hook);
+	}
+	o.str ("disabled_on_upload"); o.b (s.disabled_on_upload);
+	o.str ("updated_at"); o.u (s.updated_at_ms);
+}
+} // namespace
+
+std::vector<std::uint8_t>
+encode_script_list (const std::vector<schema_map::ScriptRecord>& scripts)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");  o.str ("event");
+		o.str ("type"); o.str ("script_list");
+		o.str ("scripts");
+		o.array (static_cast<std::uint32_t> (scripts.size ()));
+		for (auto const& s : scripts) emit_script (o, s);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_script_saved (const schema_map::ScriptRecord& script)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");    o.str ("event");
+		o.str ("type");   o.str ("script_saved");
+		o.str ("script"); emit_script (o, script);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_script_removed (const std::string& id)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");  o.str ("event");
+		o.str ("type"); o.str ("script_removed");
+		o.str ("id");   o.str (id);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_script_run_result (const std::string& id, bool ok,
+                          const std::string& stdout_text,
+                          const std::string& error_text,
+                          std::uint32_t elapsed_ms)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");    o.str ("event");
+		o.str ("type");   o.str ("script_run_result");
+		o.str ("result");
+		// elapsed_ms is `Option<u32>` on the wire; always present here.
+		// error is `Option<String>`; emit nil when empty.
+		o.map (error_text.empty () ? 4 : 5);
+		o.str ("id"); o.str (id);
+		o.str ("ok"); o.b (ok);
+		o.str ("stdout"); o.str (stdout_text);
+		if (!error_text.empty ()) { o.str ("error"); o.str (error_text); }
+		o.str ("elapsed_ms"); o.u (elapsed_ms);
 	});
 }
 

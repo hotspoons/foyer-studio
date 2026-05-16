@@ -414,6 +414,23 @@ async fn handle(
         let _ = send_env(&mut tx_ws, &env).await;
     }
 
+    // Seed the new client with the current script list so the Scripts
+    // panel (and external MCP clients that call `scripts.list` right
+    // after attach) has data without an explicit refresh round-trip.
+    // The session snapshot already carries `scripting` capabilities;
+    // the persisted scripts are a separate stream.
+    if let Ok(scripts) = state.backend().await.list_scripts().await {
+        let env = Envelope {
+            schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            session_id: None,
+            body: Event::ScriptList { scripts },
+        };
+        let _ = send_env(&mut tx_ws, &env).await;
+    }
+
     // Register the connection-level row first so command dispatch
     // can resolve `connection_id → ConnectionRole` (audio gate) the
     // moment we yield to the reader task.
@@ -938,6 +955,13 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::AgentSessionLoad { .. } => "agent_session_load",
         Command::AgentSessionDelete { .. } => "agent_session_delete",
         Command::AgentSessionRename { .. } => "agent_session_rename",
+        Command::ListScripts => "list_scripts",
+        Command::SaveScript { .. } => "save_script",
+        Command::DeleteScript { .. } => "delete_script",
+        Command::EnableScript { .. } => "enable_script",
+        Command::RunScript { .. } => "run_script",
+        Command::RecoverDisabledScripts => "recover_disabled_scripts",
+        Command::UiActionResult { .. } => "ui_action_result",
     }
 }
 
@@ -3970,6 +3994,16 @@ async fn dispatch_command(
                 renderer.resolve(&request_id, png_b64, error).await;
             }
         }
+        Command::UiActionResult {
+            request_id,
+            ok,
+            state_json,
+            error,
+        } => {
+            if let Some(d) = state.ui_director.read().await.clone() {
+                d.resolve(&request_id, ok, state_json, error).await;
+            }
+        }
         Command::AgentSessionList => {
             if let Some(agent) = state.agent.read().await.clone() {
                 agent.broadcast_sessions().await;
@@ -4008,6 +4042,104 @@ async fn dispatch_command(
         Command::AgentSessionRename { id, title } => {
             if let Some(agent) = state.agent.read().await.clone() {
                 agent.rename_session(id, title).await;
+            }
+        }
+
+        // ── DAW scripting (shim-declared surface) ─────────────────────
+        Command::ListScripts => {
+            let scripts = state.backend().await.list_scripts().await?;
+            broadcast_event(state, Event::ScriptList { scripts }).await;
+        }
+        Command::SaveScript { script } => {
+            if let Err(e) = state.backend().await.save_script(script).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "save_script_failed".into(),
+                        message: e.to_string(),
+                        target_peer_id: Some(peer_id.into()),
+                    },
+                )
+                .await;
+            }
+            // Backend echoes `ScriptSaved` on success via its event stream.
+        }
+        Command::DeleteScript { id } => {
+            if let Err(e) = state.backend().await.delete_script(id).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "delete_script_failed".into(),
+                        message: e.to_string(),
+                        target_peer_id: Some(peer_id.into()),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::EnableScript { id, enabled } => {
+            if let Err(e) = state.backend().await.enable_script(id, enabled).await {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "enable_script_failed".into(),
+                        message: e.to_string(),
+                        target_peer_id: Some(peer_id.into()),
+                    },
+                )
+                .await;
+            }
+        }
+        Command::RunScript { id, args_override } => {
+            match state
+                .backend()
+                .await
+                .run_script(id.clone(), args_override)
+                .await
+            {
+                Ok(result) => {
+                    // Backend tx already fanned out; emit explicitly too
+                    // so callers that don't subscribe to the snapshot
+                    // stream (one-shot HTTP-ish clients) still get the
+                    // reply. Duplicates are harmless — the UI dedupes
+                    // on `result.id` + monotonic seq.
+                    broadcast_event(state, Event::ScriptRunResult { result }).await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "run_script_failed".into(),
+                            message: e.to_string(),
+                            target_peer_id: Some(peer_id.into()),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::RecoverDisabledScripts => {
+            match state.backend().await.recover_disabled_scripts().await {
+                Ok(recovered) => {
+                    // Re-emit the full list so clients pick up the
+                    // recovered entries with `disabled_on_upload=true`.
+                    if !recovered.is_empty() {
+                        if let Ok(scripts) = state.backend().await.list_scripts().await {
+                            broadcast_event(state, Event::ScriptList { scripts }).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "recover_disabled_scripts_failed".into(),
+                            message: e.to_string(),
+                            target_peer_id: Some(peer_id.into()),
+                        },
+                    )
+                    .await;
+                }
             }
         }
 

@@ -653,33 +653,60 @@ fn record_to_llm(rec: AgentMessageRecord) -> LlmMessage {
     };
     // Build the `content` field. With no media attachments we emit
     // the classic string shape every OpenAI-compatible endpoint
-    // expects. With image attachments we emit the multi-modal
-    // content-block array (`{type: "text"}` + `{type: "image_url"}`),
-    // which vision-capable models (Kimi-VL, GPT-4o, Claude, Gemini,
-    // Qwen-VL, etc.) all parse identically. Non-VLMs ignore the
-    // image blocks and see the text alone.
-    let has_images = rec.attachments.iter().any(|a| a.mime.starts_with("image/"));
-    let content = if has_images {
+    // expects. When at least one image or audio attachment rides
+    // along we switch to the multi-modal content-block array — every
+    // VLM / multi-modal provider (Kimi-VL, GPT-4o, GPT-4o-audio,
+    // Claude, Gemini, Qwen-VL, OpenRouter passthrough) parses this
+    // shape; models that don't support a given modality just drop
+    // the unrecognized block and see the text.
+    let image_count = rec
+        .attachments
+        .iter()
+        .filter(|a| a.mime.starts_with("image/"))
+        .count();
+    let audio_count = rec
+        .attachments
+        .iter()
+        .filter(|a| a.mime.starts_with("audio/"))
+        .count();
+    let content = if image_count > 0 || audio_count > 0 {
+        // The text block always carries an attachment announcement
+        // so non-multimodal models still know media was sent — they
+        // can acknowledge it ("I can't view images yet, can you
+        // describe what's in them?") instead of silently ignoring
+        // the user's upload, which reads as broken UX.
+        let announcement = attachment_announcement(image_count, audio_count);
+        let text = if rec.content.is_empty() {
+            announcement
+        } else {
+            format!("{}\n\n{announcement}", rec.content)
+        };
         let mut blocks: Vec<Value> = Vec::with_capacity(rec.attachments.len() + 1);
-        if !rec.content.is_empty() {
-            blocks.push(serde_json::json!({
-                "type": "text",
-                "text": rec.content,
-            }));
-        }
+        blocks.push(serde_json::json!({
+            "type": "text",
+            "text": text,
+        }));
         for a in &rec.attachments {
-            if !a.mime.starts_with("image/") {
-                continue;
+            if a.mime.starts_with("image/") {
+                // OpenAI image_url accepts data:<mime>;base64,<b64>
+                // URIs; every provider speaking the multi-modal
+                // shape honors the data: form.
+                let url = format!("data:{};base64,{}", a.mime, a.b64);
+                blocks.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": url },
+                }));
+            } else if a.mime.starts_with("audio/") {
+                // OpenAI gpt-4o-audio convention: `input_audio`
+                // block with raw base64 + format suffix (no data:
+                // wrapper). Format is the MIME subtype — `wav`,
+                // `mp3`, `flac`, `ogg`, `webm`, etc.
+                let format = a.mime.strip_prefix("audio/").unwrap_or("wav").to_string();
+                blocks.push(serde_json::json!({
+                    "type": "input_audio",
+                    "input_audio": { "data": a.b64, "format": format },
+                }));
             }
-            // OpenAI image_url accepts data:<mime>;base64,<b64> URIs;
-            // every provider that speaks the multi-modal shape
-            // (vLLM, Anthropic-via-proxy, Gemini, Moonshot's Kimi-VL,
-            // OpenRouter passthrough) honors the data: form.
-            let url = format!("data:{};base64,{}", a.mime, a.b64);
-            blocks.push(serde_json::json!({
-                "type": "image_url",
-                "image_url": { "url": url },
-            }));
         }
         Value::Array(blocks)
     } else if rec.content.is_empty() {
@@ -712,4 +739,39 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Build the text line that announces image/audio attachments to the
+/// model. Always emitted alongside the multi-modal content blocks so
+/// non-VLM / non-audio models still know media was sent and can ask
+/// the user to describe it instead of silently dropping the upload.
+fn attachment_announcement(image_count: usize, audio_count: usize) -> String {
+    fn pluralize(n: usize, singular: &str) -> String {
+        if n == 1 {
+            format!("1 {singular}")
+        } else {
+            format!("{n} {singular}s")
+        }
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(2);
+    if image_count > 0 {
+        parts.push(pluralize(image_count, "image"));
+    }
+    if audio_count > 0 {
+        parts.push(pluralize(audio_count, "audio clip"));
+    }
+    let list = parts.join(" and ");
+    format!(
+        "[Foyer attachments: {list} included with this message. \
+         If your model can't process the {} block(s), acknowledge \
+         that to the user and ask them to describe or transcribe \
+         the content so you can still help.]",
+        if image_count > 0 && audio_count > 0 {
+            "image/audio"
+        } else if image_count > 0 {
+            "image"
+        } else {
+            "audio"
+        }
+    )
 }

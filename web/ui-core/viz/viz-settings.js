@@ -152,6 +152,22 @@ export const DEFAULT_VIZ_PREFS = Object.freeze({
   /** Strip height in CSS px. User-resizable from its top edge; the
    *  height persists here so a refresh keeps it. */
   overviewStripHeight: 90,
+  /** Compiz-style wobbly windows. When on, dragging a foyer-window
+   *  pins the nearest mesh particle to the cursor; springs propagate
+   *  the motion through an 8×6 grid (4-neighbor, axis-aligned —
+   *  same force model as the original Compiz plugin); the four
+   *  corner particles drive a perspective `matrix3d` transform on
+   *  the window element. Off by default — pure eye candy. */
+  wobblyWindowsOn: false,
+  /** Particles across the window's width. Higher = stiffer behaviour
+   *  (more springs share the load). 8×6 is Compiz's classic shape. */
+  wobblyGridW: 8,
+  /** Particles down the window's height. */
+  wobblyGridH: 6,
+  /** Neighbor-spring stiffness. Higher = snappier, less jelly. */
+  wobblySpringK: 0.2,
+  /** Per-step velocity multiplier. <1.0 damps; 0.82 is Compiz-ish. */
+  wobblyFriction: 0.82,
 });
 
 /** Resolve the current MIDI note color, falling through to `trackColor`

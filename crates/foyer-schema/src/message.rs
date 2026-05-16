@@ -788,6 +788,21 @@ pub enum Event {
     ScriptingCapabilitiesChanged {
         capabilities: Option<crate::scripting::ScriptingCapabilities>,
     },
+
+    /// Server → attached browser: dispatch a UI directive (open a
+    /// window, focus a leaf, swap the tile tree, …). The first FE to
+    /// reply with `Command::UiActionResult` wins; other peers ignore.
+    /// Mirrors the AgentRenderRequest correlation shape — `request_id`
+    /// uniquely correlates the reply to the awaiting oneshot.
+    UiAction {
+        request_id: String,
+        /// JSON-encoded `UiAction` so the schema stays additive: a
+        /// newer shim/agent can ship an action shape the FE on the
+        /// other end of the wire doesn't understand yet, and the FE
+        /// can reply with an error rather than rejecting the whole
+        /// envelope at the decoder.
+        action_json: String,
+    },
 }
 
 /// One chat message as stored in the server's in-memory ring.
@@ -2085,6 +2100,21 @@ pub enum Command {
     /// No-op when the backend's caps don't set
     /// `features.can_recover_disabled`.
     RecoverDisabledScripts,
+
+    /// FE → server: reply to an `Event::UiAction` dispatch. `state_json`
+    /// is a structured snapshot of the FE's current UI (open windows,
+    /// tile tree, available window kinds) when the action included a
+    /// query; otherwise empty. `ok` flags whether the FE applied the
+    /// action successfully. `error` carries a human-readable message
+    /// the agent can surface to the user when something failed.
+    UiActionResult {
+        request_id: String,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        state_json: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 #[cfg(test)]

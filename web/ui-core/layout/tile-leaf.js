@@ -392,6 +392,18 @@ export class TileLeaf extends LitElement {
    * surface browser chrome.
    */
   _onContextMenu(ev) {
+    // Skip our tile context menu when the user right-clicked an
+    // editable text surface — the browser's native cut/copy/paste
+    // menu is much more useful there than "Change view…". The
+    // composedPath walk crosses shadow boundaries so an input
+    // nested deep in a view's shadow root is still detected.
+    const path = ev.composedPath?.() || [];
+    for (const node of path) {
+      if (!node || node === window) continue;
+      const tag = node.tagName?.toLowerCase?.();
+      if (tag === "input" || tag === "textarea") return;
+      if (node.isContentEditable) return;
+    }
     ev.preventDefault();
     ev.stopPropagation();
     this.store?.focus(this.leaf.id);

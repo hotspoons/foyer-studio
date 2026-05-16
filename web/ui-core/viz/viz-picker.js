@@ -291,6 +291,49 @@ export class VizPicker extends LitElement {
           </div>
 
           <div class="row" style="border-top:1px solid var(--color-border);padding-top:10px;margin-top:4px">
+            <div class="label">Window effects</div>
+            <label class="slider-row"
+                   title="Compiz-style wobbly windows: dragging a window deforms it as a spring-mass mesh"
+                   style="cursor:pointer">
+              <input type="checkbox"
+                     .checked=${!!this._prefs.wobblyWindowsOn}
+                     @change=${(e) => this._set("wobblyWindowsOn", e.currentTarget.checked)}>
+              <span style="flex:1">Wobbly windows</span>
+            </label>
+            <details style="margin-top:6px; font-size:11px">
+              <summary style="cursor:pointer;color:var(--color-text-muted)">Advanced</summary>
+              <div class="slider-row" title="Particles across the window's width">
+                <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Grid W</span>
+                <input type="range" min="3" max="16" step="1" style="flex:1"
+                       .value=${String(this._prefs.wobblyGridW ?? 8)}
+                       @input=${(e) => this._set("wobblyGridW", Number(e.currentTarget.value))}>
+                <span class="num">${this._prefs.wobblyGridW ?? 8}</span>
+              </div>
+              <div class="slider-row" title="Particles down the window's height">
+                <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Grid H</span>
+                <input type="range" min="3" max="12" step="1" style="flex:1"
+                       .value=${String(this._prefs.wobblyGridH ?? 6)}
+                       @input=${(e) => this._set("wobblyGridH", Number(e.currentTarget.value))}>
+                <span class="num">${this._prefs.wobblyGridH ?? 6}</span>
+              </div>
+              <div class="slider-row" title="Neighbor-spring stiffness — higher = snappier, less jelly">
+                <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Spring</span>
+                <input type="range" min="0.05" max="0.5" step="0.01" style="flex:1"
+                       .value=${String(this._prefs.wobblySpringK ?? 0.2)}
+                       @input=${(e) => this._set("wobblySpringK", Number(e.currentTarget.value))}>
+                <span class="num">${(this._prefs.wobblySpringK ?? 0.2).toFixed(2)}</span>
+              </div>
+              <div class="slider-row" title="Per-step velocity multiplier — lower = quicker settle, less oscillation">
+                <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Friction</span>
+                <input type="range" min="0.5" max="0.95" step="0.01" style="flex:1"
+                       .value=${String(this._prefs.wobblyFriction ?? 0.82)}
+                       @input=${(e) => this._set("wobblyFriction", Number(e.currentTarget.value))}>
+                <span class="num">${(this._prefs.wobblyFriction ?? 0.82).toFixed(2)}</span>
+              </div>
+            </details>
+          </div>
+
+          <div class="row" style="border-top:1px solid var(--color-border);padding-top:10px;margin-top:4px">
             <div class="label">Automation overlay</div>
             <div class="slider-row" title="Opacity of automation polylines drawn over the regions">
               <span style="flex:0;width:60px;color:var(--color-text-muted);font-size:10px">Opacity</span>

@@ -120,10 +120,14 @@ pub struct Script {
     /// dormant until `EnableScript` flips this.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled_on_upload: bool,
-    /// Backend-stamped last-modified — opaque RFC3339 string. Empty
+    /// Backend-stamped last-modified — Unix epoch milliseconds. `0`
     /// when never persisted.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub updated_at: u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Result of a manual `RunScript` call. The shim captures the script's

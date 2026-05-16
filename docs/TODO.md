@@ -320,9 +320,16 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     for tile layer, make sure z-indexes for pop-outs make sense, remove nonsense or
     old controls
 - [x] Drop original "share" dialog and share button from main menu
-- [ ] Sequencer - clicking on an arrangement cell navigates the timeline to
+- [x] Sequencer - clicking on an arrangement cell navigates the timeline to
   that cell. Add arrangement-relative looping functionality so you can select
   part of the arrangement and loop it as if it were arbitrary on the timeline
+  - Plain click on a cell now toggles the slot AND emits `locate` to the
+    bar's timeline-absolute sample position
+    ([beat-sequencer.js](../web/ui-full/components/beat-sequencer.js)
+    `_onArrCellClick` + `_barToTimelineSamples` + `_samplesPerBar`). Shift-
+    click sets the loop range from the last-clicked bar to the current bar;
+    alt-click loops just that bar. The arrangement header gets a "Loop arr"
+    button that loops the full populated arrangement (`_loopArrangement`).
 - [ ] Sequencer view writes a fresh starter layout back to the backend on
   mount, clobbering whatever was just persisted. Reproduces by setting a
   layout via `sequencer.set_layout` (MCP) and then opening the beat-sequencer
@@ -425,27 +432,71 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   - [ ] Fuck ton of `.unwrap()` with dubious error handling - lock this down so we
     have a minimally panicky app, use `.unwrap_or_else()`, `.expect()` with a value,
     or more robust pattern matching
-  - [ ] Scripting editor - support DAW scripting in a generic fashion, look at Ardour's
+  - [/] Scripting editor - support DAW scripting in a generic fashion, look at Ardour's
         lua support, expose tools for all layers bidning to what Ardour exposes, query
         the active shim on start up so we can limit the the available scripting to what
         is in the DAW, but make this binding work.
-
-        We'll need a way to view and edit these scripts in the front end too - I made a 
-        lightweight text-highlighting editor view in the app jig under ext using the 
-        same UI stack that can be used for reference - we'll want to support Lua 
-        hightlighting for starters. We can add a script manager panel using the same
-        launcher as conole and diagnostics, and the script mananager should show the
-        script types and allow adding and removing.
-
-        We should also query the ardour file for disabled scripts in case it was 
-        uploaded (disabled on upload because they can run abitrary commands) - 
-        they are base64 encoded and recoverable, we should allow listing and recoving 
-        scripts in this UI. 
-
-        So three things - the script manager, the script editor with the ability to 
-        parse and run the script against the project, and then the agent's ability
-        to manage the script manager, edit the script, and run it. And the recovery
-        path.
+        - Shim-declared surface landed
+          ([scripting.rs](../crates/foyer-schema/src/scripting.rs)): `Session.scripting`
+          carries `ScriptingCapabilities { languages, script_types, hooks, features }`.
+          The Backend trait grew `scripting_capabilities` / `list_scripts` / `save_script`
+          / `delete_script` / `enable_script` / `run_script` /
+          `recover_disabled_scripts` with default-empty impls; the stub advertises an
+          Ardour-shaped surface (DSP / EditorAction / EditorHook / SessionScript /
+          SessionInit / Snippet × Lua) so the FE iterates against it today. WS dispatch
+          + on-attach `Event::ScriptList` push are wired in
+          [foyer-server/src/ws.rs](../crates/foyer-server/src/ws.rs); host backend +
+          IPC bridge is wired in
+          [foyer-backend-host/src/client.rs](../crates/foyer-backend-host/src/client.rs)
+          and [foyer-backend-host/src/lib.rs](../crates/foyer-backend-host/src/lib.rs).
+        - FE primitive
+          ([code-editor.js](../web/ui-core/widgets/code-editor.js)): `<foyer-code-editor>`
+          is a contenteditable highlighted editor; hljs + the requested grammar are
+          lazy-loaded (vendor at
+          [web/vendor/highlight/hljs-lua.min.js](../web/vendor/highlight/hljs-lua.min.js)).
+          Adding a future grammar is one entry in `LANG_URLS`.
+        - FE manager
+          ([scripts-view.js](../web/ui-full/components/scripts-view.js)):
+          two-pane list + editor, hook picker for hookable types, args grid for
+          `takes_args` types, disabled-on-upload banner, run-output log. Right-dock
+          launcher gets a `Scripts` entry; suppressed when the active backend doesn't
+          advertise a scripting surface
+          ([right-dock.js](../web/ui-full/components/right-dock.js)).
+        - Agent surface
+          ([scripts.rs](../crates/foyer-agent/src/tools/scripts.rs)):
+          new `scripts` polymorphic MCP tool with subcommands `capabilities`, `list`,
+          `get`, `save`, `delete`, `enable`, `run`, `recover_disabled`. Validates
+          script_type / language / hook against the live caps so a typo errors
+          instead of silently saving a broken record.
+        - Playwright spec
+          ([scripts-panel.spec.js](../tests-ui/specs/scripts-panel.spec.js))
+          covers cap surface + save/list/run round-trip + custom-element mount.
+        - Ardour C++ shim landed: the snapshot's `scripting` field is emitted by
+          [msgpack_out.cc](../shims/ardour/src/msgpack_out.cc)
+          (`emit_scripting_capabilities`); the bridge to Ardour's Lua VM lives in
+          [schema_map.cc](../shims/ardour/src/schema_map.cc). `save_script` calls
+          `Session::register_lua_function(name, body, params)`, `delete_script`
+          calls `unregister_lua_function`, `run_script` validates with
+          `LuaScripting::try_compile`. A process-wide `ScriptStore` caches the
+          metadata (body, args, hook, type, language) that Ardour's bookkeeping
+          loses. Dispatch arms for all six commands are wired in
+          [dispatch.cc](../shims/ardour/src/dispatch.cc).
+        - Outstanding (follow-ups):
+          - One-shot script invocation: `run_script` compiles cleanly via
+            `LuaScripting::try_compile` but doesn't actually call the factory
+            yet. Wiring the real execution path means walking through
+            `LuaInstance` (gtk2_ardour) or duplicating enough of its dispatch
+            into the shim to fire the factory in the same Lua state.
+          - DSP-type instantiation: a `script_type=dsp` save caches the body but
+            doesn't yet register a luaproc plugin source — a follow-up
+            `plugins.insert` referencing the cached id should translate to one.
+          - `<Script>` base64 recovery: `Session::state()` / `get_state()` are
+            private in libardour, so the recovery path needs to read the .ardour
+            file off disk (via `session.path()`) and parse the XML directly. The
+            shim returns a placeholder entry that explains this to the user
+            until that lands.
+          - Script-manager FAB: surface scripts in the chat agent's quick
+            actions so the agent can show what's installed without a separate panel.
 
         
 
@@ -455,3 +506,64 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
       hop) and exposed verbatim through `foyer-mcp` for external consumers
 - [x] Back end vs front end split mapped — everything except live DOM-rendered
       visualizations lives in Rust and is reachable via MCP for external agents
+- [ ] Expose the in-process agent as an OpenAI-compatible upstream
+  - Add an HTTP surface at `/v1/*` so external apps (Cursor, OpenWebUI,
+    custom Python clients, etc.) can treat Foyer as a regular OpenAI
+    endpoint and inherit the full agent — tool registry, system prompt,
+    skills/memory, autonomy gate. Each request runs in a transient
+    conversation so the FAB's persistent transcript isn't polluted.
+    - `POST /v1/chat/completions` — accepts an OpenAI chat request,
+      replays the prior `messages[]` as a transient `Conversation`
+      (importing user/assistant turns + any image/audio content blocks
+      as `AgentAttachment`s), then runs the agent loop. Streaming (SSE)
+      AND non-streaming both supported. Forwards content tokens to the
+      caller as standard `delta.content` chunks; tool calls + tool
+      results execute INSIDE Foyer and are invisible to the caller
+      (they want a smart chatbot, not raw tool plumbing). On stream
+      the caller sees Foyer's content stream from every internal round
+      concatenated, then `[DONE]`.
+    - `GET /v1/models` — advertises a single `foyer-agent` model so
+      clients that probe the model list before connecting see exactly
+      one entry and don't have to guess at a model id.
+    - Multi-modal in: parse OpenAI content arrays (`{type: "text"}` +
+      `{type: "image_url"}` + `{type: "input_audio"}`) → text body +
+      `Vec<AgentAttachment>`. Both images and audio get forwarded to
+      the upstream LLM via the multi-modal path in `record_to_llm`
+      (audio as `input_audio` blocks matching the gpt-4o-audio
+      convention). Models that don't speak a modality drop the block
+      silently — no client-side gating on provider capabilities.
+    - Multi-modal out: tools that produce media (e.g. `visualize`'s
+      PNG renders) surface their output as outbound attachments on
+      the assistant response. Convention: a tool returns the bytes
+      via `ToolResult.image_png_b64` OR via a
+      `data.attachments: [{name, mime, b64}]` array — both shapes
+      are scraped by the proxy's sink and emitted as
+      `ExternalChatStreamEvent::Attachment`. The HTTP layer renders
+      each attachment two ways simultaneously: a markdown reference
+      (`![…](data:…)` for images, `<audio controls src="data:…">`
+      for audio) inlined into `delta.content` so plain-text clients
+      see something, and a structured block (`image_url`,
+      `input_audio`, or a fallback `file` shape) in either
+      `message.content` (non-streaming) or
+      `delta.foyer_attachments` (streaming) so multi-modal-aware
+      clients can pull the raw bytes without re-decoding the data URL.
+    - Auth: optional Bearer token on the exposed endpoint. When
+      `agent.api_key` is unset everywhere, the endpoint is open
+      (loopback-only is the operator's responsibility). When set, every
+      `/v1/*` request requires `Authorization: Bearer <key>`.
+    - Config sources (priority CLI > env > config.yaml > store >
+      default), applied at boot via a non-persisting `apply_boot_overrides`
+      on `AgentRuntime` so an env var doesn't quietly rewrite what the
+      FAB user saved last:
+      · upstream endpoint — `--agent-upstream-endpoint`,
+        `FOYER_AGENT_UPSTREAM_ENDPOINT`, `agent.upstream_endpoint`
+      · upstream model — `--agent-upstream-model`,
+        `FOYER_AGENT_UPSTREAM_MODEL`, `agent.upstream_model`
+      · upstream API key — `--agent-upstream-api-key`,
+        `FOYER_AGENT_UPSTREAM_API_KEY`, `agent.upstream_api_key`
+      · exposed (our) API key — `--agent-api-key`,
+        `FOYER_AGENT_API_KEY`, `agent.api_key`
+    - Lives in `crates/foyer-agent/src/openai_proxy.rs` (transient
+      conversation + engine wiring) with the axum routes in
+      `crates/foyer-server/src/openai_proxy.rs` (router, auth layer,
+      SSE plumbing) — matches the split used for the WebLLM bridge.

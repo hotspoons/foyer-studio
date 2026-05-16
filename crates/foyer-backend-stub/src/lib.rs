@@ -1078,6 +1078,60 @@ impl Backend for StubBackend {
         }
         Ok(())
     }
+
+    // ── Scripting ──────────────────────────────────────────────────
+    async fn scripting_capabilities(
+        &self,
+    ) -> Result<Option<foyer_schema::ScriptingCapabilities>, BackendError> {
+        Ok(Some(fixtures::stub_scripting_capabilities()))
+    }
+
+    async fn list_scripts(&self) -> Result<Vec<foyer_schema::Script>, BackendError> {
+        Ok(self.state.lock().await.list_scripts())
+    }
+
+    async fn save_script(
+        &self,
+        script: foyer_schema::Script,
+    ) -> Result<foyer_schema::Script, BackendError> {
+        let saved = self.state.lock().await.save_script(script)?;
+        let _ = self.tx.send(Event::ScriptSaved {
+            script: saved.clone(),
+        });
+        Ok(saved)
+    }
+
+    async fn delete_script(&self, id: foyer_schema::EntityId) -> Result<(), BackendError> {
+        let removed = self.state.lock().await.delete_script(&id);
+        if removed {
+            let _ = self.tx.send(Event::ScriptRemoved { id });
+        }
+        Ok(())
+    }
+
+    async fn enable_script(
+        &self,
+        id: foyer_schema::EntityId,
+        enabled: bool,
+    ) -> Result<foyer_schema::Script, BackendError> {
+        let saved = self.state.lock().await.enable_script(&id, enabled)?;
+        let _ = self.tx.send(Event::ScriptSaved {
+            script: saved.clone(),
+        });
+        Ok(saved)
+    }
+
+    async fn run_script(
+        &self,
+        id: foyer_schema::EntityId,
+        args_override: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<foyer_schema::ScriptRunResult, BackendError> {
+        let result = self.state.lock().await.run_script_stub(&id, args_override);
+        let _ = self.tx.send(Event::ScriptRunResult {
+            result: result.clone(),
+        });
+        Ok(result)
+    }
 }
 
 #[cfg(test)]

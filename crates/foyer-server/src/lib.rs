@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod agent_render;
+mod ui_director;
 
 /// Public re-export so the CLI can fire the chromium boot probe.
 /// Keeps the rest of `agent_render` private (its `pub fn`s take
@@ -80,6 +81,7 @@ mod ingress_latency;
 mod ingress_ws;
 mod jail;
 mod midi_latency;
+mod openai_proxy;
 pub mod orphans;
 mod plugin_gui_ws;
 mod recents;
@@ -610,6 +612,18 @@ pub(crate) struct AppState {
     /// FE-attached renderer for the `visualize` agent tool.
     /// `None` until `attach_agent()` runs.
     pub(crate) fe_renderer: RwLock<Option<std::sync::Arc<agent_render::FeRendererImpl>>>,
+
+    /// FE-attached UI director for the `ui` agent tool. Round-trips
+    /// `Event::UiAction` / `Command::UiActionResult` against any
+    /// attached browser tab.
+    pub(crate) ui_director: RwLock<Option<std::sync::Arc<ui_director::UiDirectorImpl>>>,
+
+    /// API key required on the OpenAI-compatible endpoint exposed at
+    /// `/v1/*`. `None` = open (no auth). When set, every `/v1/*`
+    /// request must carry `Authorization: Bearer <key>` or it's
+    /// rejected with `401`. Seeded by `foyer-cli` from the CLI flag
+    /// / env var / `config.yaml` chain.
+    pub(crate) openai_proxy_api_key: RwLock<Option<String>>,
 }
 
 /// Tracking state for the sequencer SetSequencerLayout coalescer.
@@ -931,6 +945,8 @@ impl Server {
             mcp: RwLock::new(None),
             webllm_bridge: std::sync::Arc::new(webllm_bridge::WebLlmBridge::new()),
             fe_renderer: RwLock::new(None),
+            ui_director: RwLock::new(None),
+            openai_proxy_api_key: RwLock::new(None),
         });
         Self { state }
     }
@@ -1002,6 +1018,17 @@ impl Server {
             headless_renderer as std::sync::Arc<dyn foyer_agent::tools::HeadlessRenderer>,
         )
         .await;
+
+        // Same shape for the UI director: build it once, stash on
+        // AppState (so the WS dispatcher can resolve UiActionResult
+        // replies), and hand it to the agent runtime.
+        let ui_director = ui_director::UiDirectorImpl::new(std::sync::Arc::downgrade(&self.state));
+        *self.state.ui_director.write().await = Some(ui_director.clone());
+        agent
+            .set_ui_director(Some(
+                ui_director as std::sync::Arc<dyn foyer_agent::tools::UiDirector>,
+            ))
+            .await;
     }
 
     /// Load tunnel configuration from the parsed config.yaml so WS handlers
@@ -1017,6 +1044,22 @@ impl Server {
                 "no"
             }
         );
+    }
+
+    /// Seed the API key gating the OpenAI-compatible endpoint at
+    /// `/v1/*`. `None` (or an empty string) leaves the endpoint open;
+    /// any non-empty value requires `Authorization: Bearer <key>` on
+    /// every `/v1/*` request. Called by `foyer-cli` once it has
+    /// resolved the CLI/env/config precedence chain.
+    pub async fn set_openai_proxy_api_key(&self, key: Option<String>) {
+        let normalized = key.filter(|k| !k.is_empty());
+        let was_set = normalized.is_some();
+        *self.state.openai_proxy_api_key.write().await = normalized;
+        if was_set {
+            tracing::info!("/v1/* OpenAI proxy: API key required");
+        } else {
+            tracing::info!("/v1/* OpenAI proxy: open (no API key)");
+        }
     }
 
     /// Install the RBAC policy. CLI calls this at startup with the
@@ -1224,6 +1267,17 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
             "/llm/v1/responses",
             axum::routing::post(webllm_bridge::responses_unsupported),
         )
+        // OpenAI-compatible surface for the in-process agent. Lets
+        // external apps (Cursor, OpenWebUI, ad-hoc Python clients,
+        // …) point at Foyer like any other OpenAI endpoint and
+        // inherit the full agent — tool registry, system prompt,
+        // skills/memory. Auth is `Authorization: Bearer <key>` when
+        // `openai_proxy_api_key` is set on AppState; open otherwise.
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(openai_proxy::chat_completions),
+        )
+        .route("/v1/models", get(openai_proxy::list_models))
         .route("/files/*path", get(files::serve_file))
         // Project archive surface: upload accepts a zip or tar.gz body
         // and extracts under the jail; export tar.gz's a project

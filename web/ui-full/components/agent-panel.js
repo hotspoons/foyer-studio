@@ -162,6 +162,13 @@ export class AgentPanel extends LitElement {
     _pendingDeleteId: { state: true, type: String },
     _attachments: { state: true, type: Array },
     _dropHover: { state: true, type: Boolean },
+    /// Click-to-raise z-index for the panel + FAB pair. Both elements
+    /// position:fixed in the document stacking context and need to
+    /// raise together over peer floating layers (foyer-window stack,
+    /// plugin panels). Bumped via the global stack counter on each
+    /// pointerdown into either element so they win against the most
+    /// recent foyer-window raise.
+    _zOverride: { state: true, type: Number },
     /// Text composer's current pixel height; persisted between
     /// reloads via `_persist()`. Updated on `mouseup`/`blur` of the
     /// textarea (after the user drags the SE resize grip).
@@ -1006,6 +1013,7 @@ export class AgentPanel extends LitElement {
     this._pendingDeleteId = "";
     this._attachments = [];
     this._dropHover = false;
+    this._zOverride = 0;
     this._dragState = null;
     this._resizeState = null;
     this._pinnedToBottom = true;
@@ -1066,6 +1074,12 @@ export class AgentPanel extends LitElement {
     // assistant messages that rendered in <pre>-fallback mode pick
     // up the real markdown output.
     ensureMarkdownReady().then(() => this.requestUpdate()).catch(() => {});
+    // Wobbly windows: same opt-in pattern QuadrantFab uses.
+    this._wobbleEnable = () => this._installWobbles();
+    this._wobbleDisable = () => this._uninstallWobbles();
+    window.addEventListener("foyer:wobbly-enabled", this._wobbleEnable);
+    window.addEventListener("foyer:wobbly-disabled", this._wobbleDisable);
+    requestAnimationFrame(() => this._installWobbles());
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._onEnvelope);
@@ -1075,7 +1089,52 @@ export class AgentPanel extends LitElement {
     window.removeEventListener("resize", this._onWindowResize);
     window.__foyer?.layout?.removeEventListener("change", this._onLayoutChange);
     window.__foyer?.layout?.unregisterFab(this.storageKey);
+    window.removeEventListener("foyer:wobbly-enabled", this._wobbleEnable);
+    window.removeEventListener("foyer:wobbly-disabled", this._wobbleDisable);
+    this._uninstallWobbles();
     super.disconnectedCallback();
+  }
+
+  async _installWobbles() {
+    const mod = await import("foyer-core/wobbly-windows.js");
+    if (!mod.wobblyEnabled()) return;
+    const fab = this.renderRoot?.querySelector?.(".fab");
+    const panel = this.renderRoot?.querySelector?.(".panel");
+    // Same right/bottom-anchored translation rule QuadrantFab uses.
+    const commit = ({ dx, dy }) => {
+      this._fabRight = (this._fabRight || 0) - dx;
+      this._fabBottom = (this._fabBottom || 0) - dy;
+      this._clampToViewport?.();
+      this._persist?.();
+      this.requestUpdate();
+    };
+    if (fab) {
+      // FAB tap toggles the chat panel open; defer wobble takeover
+      // until motion > threshold so taps pass through. Panel
+      // follows the FAB so they move as a unit.
+      mod.attachWobble(fab, undefined, {
+        commit,
+        followers: panel ? [panel] : [],
+        passthroughClick: true,
+      });
+    }
+    if (panel) {
+      const header = panel.querySelector?.("header") || panel;
+      mod.attachWobble(panel, header, {
+        commit,
+        followers: fab ? [fab] : [],
+      });
+    }
+    this._wobbleAttached = { fab, panel };
+  }
+
+  async _uninstallWobbles() {
+    if (!this._wobbleAttached) return;
+    const mod = await import("foyer-core/wobbly-windows.js");
+    const { fab, panel } = this._wobbleAttached;
+    if (fab) mod.detachWobble(fab);
+    if (panel) mod.detachWobble(panel);
+    this._wobbleAttached = null;
   }
 
   firstUpdated() {
@@ -1097,6 +1156,14 @@ export class AgentPanel extends LitElement {
   }
 
   updated(changed) {
+    // Reattach wobble after a Lit re-render: the `.panel` only
+    // exists when `_open` is true, so a fresh open needs a fresh
+    // attach. The wobble module's attach is idempotent — it bails
+    // when the element already has a wobble — so calling on every
+    // updated() is cheap.
+    if (this._wobbleAttached || this._open) {
+      this._installWobbles();
+    }
     // Mirror the `console-view.js` pattern: attach a scroll listener
     // ONCE per transcript element, sync-apply `scrollTop=scrollHeight`
     // when the user is currently "following" (within slack of the
@@ -1252,7 +1319,29 @@ export class AgentPanel extends LitElement {
 
   // ─── FAB drag / toggle ─────────────────────────────────────────────────
 
+  /// Bump our z-index above peer floating layers (foyer-window stack,
+  /// plugin float layer) using the layout store's global stack counter.
+  /// Idempotent — skips the bump when no visible foyer-window outranks
+  /// us already, so a click into a focused agent panel doesn't inflate
+  /// the global stack counter on every interaction (Rich, 2026-05-16).
+  _raise() {
+    const layout = window.__foyer?.layout;
+    if (!layout?.bumpGlobalStackZ) return;
+    // Highest z among visible foyer-windows. We want to outrank that
+    // value; if we already do, leave the counter alone.
+    let peerMax = 0;
+    for (const el of document.querySelectorAll("foyer-window")) {
+      if (el.hasAttribute("hidden-by-layer") || el.minimized) continue;
+      const z = parseInt(el.style.zIndex || "1000", 10);
+      if (z > peerMax) peerMax = z;
+    }
+    if (this._zOverride > peerMax) return;
+    const z = layout.bumpGlobalStackZ();
+    if (Number.isFinite(z)) this._zOverride = z;
+  }
+
   _onFabDown(ev) {
+    this._raise();
     ev.preventDefault();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -2231,7 +2320,8 @@ export class AgentPanel extends LitElement {
       `;
     }
 
-    const fabStyle = `right: ${this._fabRight}px; bottom: ${this._fabBottom}px`;
+    const zSuffix = this._zOverride > 0 ? `; z-index: ${this._zOverride + 1}` : "";
+    const fabStyle = `right: ${this._fabRight}px; bottom: ${this._fabBottom}px${zSuffix}`;
     const fabClasses = [
       "fab",
       this._open ? "open" : "",
@@ -2347,8 +2437,10 @@ export class AgentPanel extends LitElement {
     const { style, isTop, isLeft } = this._panelStyle();
     // The resize corner is the one pointing AWAY from the FAB.
     const corner = `${isTop ? "s" : "n"}${isLeft ? "e" : "w"}`;
+    const styleZ = this._zOverride > 0 ? `${style}; z-index: ${this._zOverride}` : style;
     return html`
-      <div class="panel" role="dialog" aria-label="Foyer agent" style=${style}>
+      <div class="panel" role="dialog" aria-label="Foyer agent" style=${styleZ}
+           @pointerdown=${() => this._raise()}>
         <div class="resize ${corner}" @pointerdown=${(e) => this._onResizeDown(e, corner)}></div>
         <header @pointerdown=${this._onPanelHeaderDown}>
           <div class="title">Agent</div>

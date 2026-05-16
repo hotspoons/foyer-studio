@@ -77,11 +77,17 @@ applyTheme();
 // context menu listen for `contextmenu` themselves and `preventDefault` to
 // call `showContextMenu(event, items)`.
 document.addEventListener("contextmenu", (ev) => {
-  const t = ev.target;
-  // Text-bearing surfaces keep the native menu so users can copy/paste.
-  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
-      || (t && t.isContentEditable)) {
-    return;
+  // Text-bearing surfaces keep the native cut/copy/paste menu. Walk
+  // the composed path because inputs inside a shadow root surface
+  // here as their host element (e.g. <foyer-scripts-view>), and the
+  // direct `ev.target` check then fails — every right-click on a
+  // shadowed input or our contenteditable code editor was getting
+  // its native menu suppressed.
+  const path = ev.composedPath?.() || [ev.target];
+  for (const node of path) {
+    if (!node || node === window) continue;
+    if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) return;
+    if (node.isContentEditable) return;
   }
   ev.preventDefault();
 });
