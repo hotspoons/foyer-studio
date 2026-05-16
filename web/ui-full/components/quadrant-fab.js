@@ -17,6 +17,7 @@
 // position + panel size survive reloads.
 
 import { LitElement, html, css } from "lit";
+import { icon } from "foyer-ui-core/icons.js";
 
 const FAB_SIZE = 48;
 const GAP = 8;
@@ -166,14 +167,14 @@ export class QuadrantFab extends LitElement {
     }
 
     .panel header.grip {
-      padding: 10px 12px;
+      padding: 4px 6px;
       border-bottom: 1px solid var(--color-border);
       cursor: grab;
-      background: linear-gradient(180deg, var(--color-surface-muted), var(--color-surface-elevated));
+      background: var(--color-surface-elevated);
       font-family: var(--font-sans);
-      font-size: 11px; font-weight: 600;
-      letter-spacing: 0.1em; text-transform: uppercase;
-      color: var(--color-text-muted);
+      font-size: 10px; font-weight: 600;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--color-text);
       user-select: none;
     }
     .panel header.grip.dragging { cursor: grabbing; }
@@ -320,8 +321,15 @@ export class QuadrantFab extends LitElement {
               <header
                 class="grip ${this._dragState?.kind === "panel" ? "dragging" : ""}"
                 @pointerdown=${(e) => this._onGripDown(e)}
+                style="display:flex;align-items:center;gap:8px"
               >
-                ${this._fabTitle}
+                <span style="flex:1">${this._fabTitle}</span>
+                <button
+                  title="Close"
+                  @pointerdown=${(e) => e.stopPropagation()}
+                  @click=${() => { this._open = false; this._persist?.(); this.requestUpdate(); }}
+                  style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--color-text-muted);padding:2px 6px;cursor:pointer;line-height:1"
+                >${icon("x-mark", 14)}</button>
               </header>
               <div class="body">${this._renderPanelContent()}</div>
               ${this._renderResizeHandles(quadrant)}
@@ -345,15 +353,15 @@ export class QuadrantFab extends LitElement {
         <header class="grip" style="cursor:default;display:flex;align-items:center;gap:8px">
           <span style="flex:1">${this._fabTitle}</span>
           <button
-            title="Undock — return to floating FAB"
+            title="Tear out — return to floating FAB"
             @click=${() => this._undock()}
-            style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:10px;padding:2px 8px;cursor:pointer;font-family:var(--font-sans);letter-spacing:0.06em;text-transform:uppercase"
-          >Undock</button>
+            style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--color-text-muted);padding:2px 6px;cursor:pointer;line-height:1"
+          >${icon("arrow-top-right-on-square", 14)}</button>
           <button
             title="Close"
             @click=${() => this.closeFromDock()}
-            style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--color-text-muted);padding:2px 6px;cursor:pointer;font-size:14px;line-height:1"
-          >×</button>
+            style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--color-text-muted);padding:2px 6px;cursor:pointer;line-height:1"
+          >${icon("x-mark", 14)}</button>
         </header>
         <div class="body">${this._renderPanelContent()}</div>
       </div>
@@ -370,12 +378,12 @@ export class QuadrantFab extends LitElement {
       <div class="panel slide" @click=${(e) => e.stopPropagation()}>
         <header class="grip" style="cursor:default;display:flex;align-items:center;gap:8px">
           <span style="flex:1">${this._fabTitle}</span>
-          <button title="Undock — return to floating FAB"
+          <button title="Tear out — return to floating FAB"
                   @click=${() => this._undock()}
-                  style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:10px;padding:2px 8px;cursor:pointer;font-family:var(--font-sans);letter-spacing:0.06em;text-transform:uppercase">Undock</button>
+                  style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--color-text-muted);padding:2px 6px;cursor:pointer;line-height:1">${icon("arrow-top-right-on-square", 14)}</button>
           <button title="Close"
                   @click=${() => this.closeFromDock()}
-                  style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--color-text-muted);padding:2px 6px;cursor:pointer;font-size:14px;line-height:1">×</button>
+                  style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--color-text-muted);padding:2px 6px;cursor:pointer;line-height:1">${icon("x-mark", 14)}</button>
         </header>
         <div class="body">${this._renderPanelContent()}</div>
       </div>
@@ -399,7 +407,9 @@ export class QuadrantFab extends LitElement {
   exitSlideMode() {
     if (!this._slideMode) return;
     this._slideMode = false;
-    this._open = false;
+    // `_open` is left alone — the tear-out path wants it true so
+    // the floating panel pops open after undock; the X-close path
+    // sets it false via `closeFromDock`.
     this.removeAttribute("slide-mode");
     this.removeAttribute("slot");
     if (this.parentElement && this.parentElement !== document.body) {
@@ -408,30 +418,29 @@ export class QuadrantFab extends LitElement {
     this.requestUpdate();
   }
 
-  /** Pop this FAB out of the rail and restore it to its last floating
-   *  position. Used by the Undock button in the docked-panel header.
-   *
-   *  When the FAB is currently mounted inside the right-dock's
-   *  slide-out slot, `undockFab()` alone wasn't enough — the rail
-   *  remembers the fab as floating, but the dock kept rendering the
-   *  slide-out (with _slideOpen = true and us still slotted into
-   *  it), so the panel stayed on screen and the floating FAB
-   *  appeared underneath it (Rich's screenshot). Exit slide mode +
-   *  notify the dock so it collapses its slide column too. */
+  /** Tear-out: rip this FAB out of the rail and pop its floating
+   *  panel open at a non-colliding position. Delegates to the
+   *  right-dock so the dock can stagger positions across all
+   *  simultaneously-floating FABs. Falls back to the old undock
+   *  path if the right-dock isn't reachable. */
   _undock() {
+    const rd = window.__foyer?.rightDock;
+    if (rd && typeof rd.tearFabToFloating === "function") {
+      rd.tearFabToFloating(this.storageKey);
+      return;
+    }
     const layout = window.__foyer?.layout;
     if (!layout) return;
-    const wasSlide = this._slideMode;
-    if (wasSlide) {
+    if (this._slideMode) {
       try { this.exitSlideMode(); } catch {}
       window.dispatchEvent(new CustomEvent("foyer:fab-slide-close", {
         detail: { id: this.storageKey },
       }));
     }
-    layout.undockFab(this.storageKey);
-    this._open = false;
+    this._open = true;
     this._persist();
     this.requestUpdate();
+    layout.undockFab(this.storageKey);
   }
 
   /** Called by the right-dock when the user clicks this FAB's rail icon. */

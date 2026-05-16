@@ -28,6 +28,7 @@ import "./console-view.js";
 import "./diagnostics.js";
 import "./midi-devices-panel.js";
 import "./soft-keyboard.js";
+import "./automation-modal.js";
 
 /// Float-out helper: pop a widget tile back into a foyer-window
 /// using the existing window-kind factory registered in right-dock /
@@ -95,6 +96,38 @@ registerView({
     if (!rid || !tid) return { ok: false, title: "No region", body: "This piano-roll tile is missing its region reference." };
     const track = findTrack(session, tid);
     if (!track) return { ok: false, title: "Track is gone", body: `Track ${tid} is no longer in this session.` };
+    return { ok: true };
+  },
+});
+
+// The full automation editor (track selector + control list + lane
+// editors). Same element as the floating "Automation editor" window —
+// `:host` is set to `width:100%; height:100%`, so dropping it into a
+// tile renders the full surface without the window chrome. Headless
+// `visualize.automation_lane` mounts this view with `trackId` +
+// `focusControlId` for a focused screenshot.
+registerView({
+  id: "automation-editor",
+  label: "Automation",
+  icon: "sparkles",
+  elementTag: "foyer-automation-modal",
+  order: 45,
+  floatSpawn: floatSpawnFor("automation-editor"),
+  checkAvailable: (props, session) => {
+    const tid = props?.trackId;
+    if (!tid)
+      return {
+        ok: false,
+        title: "No track",
+        body: "This automation tile is missing its track reference.",
+      };
+    const track = findTrack(session, tid);
+    if (!track)
+      return {
+        ok: false,
+        title: "Track is gone",
+        body: `Track ${tid} is no longer in this session.`,
+      };
     return { ok: true };
   },
 });

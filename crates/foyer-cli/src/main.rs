@@ -796,6 +796,30 @@ async fn serve(
 
     let server = Server::with_spawner(initial_backend, Some(spawner.clone()));
     server.load_tunnel_config(&config.tunnel).await;
+    // Attach the AI agent runtime. The store opens against
+    // `$XDG_DATA_HOME/foyer/agent/`; if that path is unwritable we
+    // surface a warning but keep the server up — the rest of Foyer
+    // works without the agent.
+    match server.attach_agent().await {
+        Ok(runtime) => {
+            runtime
+                .set_prefer_headless_render(config.agent.prefer_headless_render)
+                .await;
+            tracing::info!(
+                "agent runtime attached (prefer_headless_render={})",
+                config.agent.prefer_headless_render
+            );
+            // When the operator has opted into headless rendering as
+            // the preferred path, probe the host for chromium NOW so
+            // a missing binary fires a loud, instructions-included
+            // warning in the boot log instead of being a mystery the
+            // user only discovers the first time the agent renders.
+            if config.agent.prefer_headless_render {
+                foyer_server::probe_headless_chromium_at_boot();
+            }
+        }
+        Err(e) => tracing::warn!("agent attach failed ({e}) — FAB will be inert"),
+    }
     // Load RBAC policy — seeded from the bundled default on first run.
     // Any IO error falls back to the bundled default so an ACL misfire
     // can't take the server down.

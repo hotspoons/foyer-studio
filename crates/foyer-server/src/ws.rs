@@ -917,6 +917,27 @@ fn command_tag(cmd: &Command) -> &'static str {
         Command::PttStop => "ptt_stop",
         Command::SetTrackBrowserSource { .. } => "set_track_browser_source",
         Command::ListTrackBrowserSources => "list_track_browser_sources",
+        Command::AgentSend { .. } => "agent_send",
+        Command::AgentStop => "agent_stop",
+        Command::AgentClearHistory => "agent_clear_history",
+        Command::AgentSetAutonomy { .. } => "agent_set_autonomy",
+        Command::AgentSetConfig { .. } => "agent_set_config",
+        Command::AgentConfirmTool { .. } => "agent_confirm_tool",
+        Command::AgentHistoryRequest => "agent_history_request",
+        Command::AgentListSkills => "agent_list_skills",
+        Command::AgentUploadSkill { .. } => "agent_upload_skill",
+        Command::AgentEnableSkill { .. } => "agent_enable_skill",
+        Command::AgentDisableSkill { .. } => "agent_disable_skill",
+        Command::AgentListMemories => "agent_list_memories",
+        Command::AgentSaveMemory { .. } => "agent_save_memory",
+        Command::AgentForgetMemory { .. } => "agent_forget_memory",
+        Command::AgentListTemplates => "agent_list_templates",
+        Command::AgentRenderResult { .. } => "agent_render_result",
+        Command::AgentSessionList => "agent_session_list",
+        Command::AgentSessionNew { .. } => "agent_session_new",
+        Command::AgentSessionLoad { .. } => "agent_session_load",
+        Command::AgentSessionDelete { .. } => "agent_session_delete",
+        Command::AgentSessionRename { .. } => "agent_session_rename",
     }
 }
 
@@ -1849,7 +1870,7 @@ async fn dispatch_command(
                             Ok(snap) => {
                                 // Healthy existing session: focus it.
                                 *state.focus_session_id.write().await = Some(existing_id.clone());
-                                *state.backend.write().await = be;
+                                state.install_active_backend(be).await;
 
                                 // Promote in recents — re-clicking an
                                 // open project is still a "use" event
@@ -3347,7 +3368,7 @@ async fn dispatch_command(
             // `state.backend()` still resolves to A's backend until a
             // new launch / swap touches it.
             if let Some(be) = state.sessions.backend(&session_id).await {
-                *state.backend.write().await = be;
+                state.install_active_backend(be).await;
             }
             // Audio streams opened against the prior session's
             // backend are now stale — their `pcm_rx` reads from a
@@ -3415,7 +3436,7 @@ async fn dispatch_command(
                     let mut new_focus: Option<EntityId> = None;
                     if let Some(fallback_id) = state.sessions.most_recent_id().await {
                         if let Some(be) = state.sessions.backend(&fallback_id).await {
-                            *state.backend.write().await = be;
+                            state.install_active_backend(be).await;
                             *state.focus_session_id.write().await = Some(fallback_id.clone());
                             new_focus = Some(fallback_id);
                         }
@@ -3849,6 +3870,145 @@ async fn dispatch_command(
         }
         Command::ListTrackBrowserSources => {
             broadcast_track_browser_sources(state).await;
+        }
+
+        // ─── AI agent commands ───────────────────────────────────
+        Command::AgentSend { body, attachments } => {
+            crate::agent_ws::handle_agent_send(state, body, attachments).await;
+        }
+        Command::AgentStop => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.stop_current_turn().await;
+            }
+        }
+        Command::AgentClearHistory => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.clear_history().await;
+            }
+        }
+        Command::AgentSetAutonomy { autonomy } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.set_autonomy(autonomy).await;
+            }
+        }
+        Command::AgentSetConfig {
+            endpoint,
+            model,
+            api_key,
+        } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.set_config(endpoint, model, api_key).await;
+            }
+        }
+        Command::AgentConfirmTool { call_id, approve } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.confirm_tool(&call_id, approve).await;
+            }
+        }
+        Command::AgentHistoryRequest => {
+            crate::agent_ws::send_history_to(state).await;
+        }
+        Command::AgentListSkills => {
+            crate::agent_ws::list_skills(state).await;
+        }
+        Command::AgentUploadSkill { name, body } => {
+            // Admin-gated on tunneled connections; LAN is trusted
+            // per DECISION 38. Reject silently on remote viewers
+            // rather than echoing back, since the FE hides the
+            // upload UI for them already.
+            let allowed = match auth {
+                ConnectionAuth::Lan => true,
+                ConnectionAuth::Authenticated { role_id, .. } => role_id == "admin",
+                ConnectionAuth::Unauthenticated => false,
+            };
+            if !allowed {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "forbidden_for_role".into(),
+                        message: "uploading skills requires admin".into(),
+                        target_peer_id: Some(peer_id.into()),
+                    },
+                )
+                .await;
+            } else if let Some(agent) = state.agent.read().await.clone() {
+                agent.upload_skill(&name, &body).await;
+            }
+        }
+        Command::AgentEnableSkill { name } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.set_skill_enabled(&name, true).await;
+            }
+        }
+        Command::AgentDisableSkill { name } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.set_skill_enabled(&name, false).await;
+            }
+        }
+        Command::AgentListMemories => {
+            crate::agent_ws::list_memories(state).await;
+        }
+        Command::AgentSaveMemory { name, body } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.save_memory(&name, &body).await;
+            }
+        }
+        Command::AgentForgetMemory { name } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.forget_memory(&name).await;
+            }
+        }
+        Command::AgentListTemplates => {
+            crate::agent_ws::list_templates(state).await;
+        }
+        Command::AgentRenderResult {
+            request_id,
+            png_b64,
+            error,
+        } => {
+            if let Some(renderer) = state.fe_renderer.read().await.clone() {
+                renderer.resolve(&request_id, png_b64, error).await;
+            }
+        }
+        Command::AgentSessionList => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.broadcast_sessions().await;
+            }
+        }
+        Command::AgentSessionNew { title } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.new_session(title).await;
+            }
+        }
+        Command::AgentSessionLoad { id } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.load_session(id).await;
+            }
+        }
+        Command::AgentSessionDelete { id } => {
+            let allowed = match auth {
+                ConnectionAuth::Lan => true,
+                ConnectionAuth::Authenticated { role_id, .. } => role_id == "admin",
+                ConnectionAuth::Unauthenticated => false,
+            };
+            if !allowed {
+                broadcast_event(
+                    state,
+                    Event::Error {
+                        code: "forbidden_for_role".into(),
+                        message: "deleting sessions requires admin".into(),
+                        target_peer_id: Some(peer_id.into()),
+                    },
+                )
+                .await;
+            } else if let Some(agent) = state.agent.read().await.clone() {
+                agent.delete_session(id).await;
+            }
+        }
+        Command::AgentSessionRename { id, title } => {
+            if let Some(agent) = state.agent.read().await.clone() {
+                agent.rename_session(id, title).await;
+            }
         }
 
         Command::MovePlugin {

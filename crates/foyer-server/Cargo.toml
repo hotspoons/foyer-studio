@@ -10,6 +10,8 @@ description = "WebSocket server + client fan-out. Library entrypoint is Server::
 foyer-schema.workspace = true
 foyer-capabilities.workspace = true
 foyer-backend.workspace = true
+foyer-agent.workspace = true
+foyer-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "process", "io-util"] }
@@ -81,13 +83,25 @@ urlencoding = "2"
 # Explicit rustls with ring crypto provider to avoid runtime panic when
 # multiple providers (ring + aws-lc-rs) are present in the dependency tree.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Headless renderer (gated). chromiumoxide drives a chromium subprocess
+# via CDP. Optional so a build that disables `headless-render` doesn't
+# pull this large dep tree in.
+chromiumoxide = { version = "0.9", optional = true, default-features = false }
+serde_urlencoded = { version = "0.7", optional = true }
+# Cross-platform binary probe for headless chromium fallback paths.
+# Gated behind `headless-render` so a slim build doesn't pull it in.
+which = { version = "6", optional = true }
 
 [features]
-# Default is cloudflare-only. See the note on the `ngrok` dep above —
-# the ngrok path is notional and off by default until someone verifies
-# it end to end.
-default = []
+# Default ships with the headless-render path enabled — the
+# `visualize` agent tool can spawn a chromium subprocess when no
+# Foyer browser tab is attached. When chromium isn't installed the
+# runtime call surfaces a clear install-hint instead of panicking,
+# so the default-on choice is safe; disabling the feature is for
+# slim builds (no chromiumoxide / tokio-tungstenite-ws dep tree).
+default = ["headless-render"]
 ngrok = ["dep:ngrok"]
+headless-render = ["dep:chromiumoxide", "dep:serde_urlencoded", "dep:which"]
 
 [dev-dependencies]
 foyer-backend-stub.workspace = true

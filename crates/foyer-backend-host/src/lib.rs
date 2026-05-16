@@ -70,6 +70,10 @@ impl Backend for HostBackend {
         self.client.cached_position_samples()
     }
 
+    fn is_alive(&self) -> bool {
+        !self.client.is_disconnected()
+    }
+
     async fn snapshot(&self) -> Result<Session, BackendError> {
         self.client
             .request_snapshot()

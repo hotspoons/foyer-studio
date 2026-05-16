@@ -245,6 +245,17 @@ impl HostClient {
     /// without locking so it's safe to call from any thread.
     /// Defaults to the schema constant until the first snapshot
     /// arrives.
+    /// Has the underlying shim connection dropped? Set when either
+    /// reader or writer task exits. Useful so callers (the foyer
+    /// server's tool dispatch) can fail fast with "backend went away"
+    /// instead of letting every subsequent send_command bubble up
+    /// `WriterClosed` strings.
+    pub fn is_disconnected(&self) -> bool {
+        self.shared
+            .disconnected
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn cached_sample_rate(&self) -> u32 {
         self.shared
             .sample_rate

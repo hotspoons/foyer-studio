@@ -83,11 +83,12 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
     let pan_ctl = pan(&format!("track.{slug}.pan"));
     let mute = toggle(&format!("track.{slug}.mute"), "Mute");
     let solo = toggle(&format!("track.{slug}.solo"), "Solo");
-    let mut automation_lanes: Vec<AutomationLane> = Vec::new();
-    automation_lanes.push(empty_lane(&gain.id));
-    automation_lanes.push(empty_lane(&pan_ctl.id));
-    automation_lanes.push(empty_lane(&mute.id));
-    automation_lanes.push(empty_lane(&solo.id));
+    let mut automation_lanes: Vec<AutomationLane> = vec![
+        empty_lane(&gain.id),
+        empty_lane(&pan_ctl.id),
+        empty_lane(&mute.id),
+        empty_lane(&solo.id),
+    ];
     for plugin in &plugins {
         for param in &plugin.params {
             automation_lanes.push(empty_lane(&param.id));
