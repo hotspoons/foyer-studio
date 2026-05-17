@@ -3644,7 +3644,8 @@ async fn dispatch_command(
             endpoint,
             model,
             api_key,
-        } => cmd_agent::set_config(state, endpoint, model, api_key).await,
+            ui_locale,
+        } => cmd_agent::set_config(state, endpoint, model, api_key, ui_locale).await,
         Command::AgentConfirmTool { call_id, approve } => {
             cmd_agent::confirm_tool(state, call_id, approve).await
         }

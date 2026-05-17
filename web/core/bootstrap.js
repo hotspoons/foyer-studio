@@ -86,6 +86,22 @@ export function bootFoyerCore(opts = {}) {
   // translated yet. The `foyer:locale-changed` event re-renders
   // components once the catalog arrives.
   installI18n().catch((e) => console.warn("[bootstrap] i18n install failed:", e));
+  // Push the active UI locale to the server-side agent so it can
+  // bias its replies (system-prompt directive) toward the user's
+  // chosen language. Sent on initial connect AND on every locale
+  // flip — the runtime persists the value so a server restart
+  // doesn't lose it.
+  const pushLocaleToAgent = () => {
+    try {
+      ws?.send({ type: "agent_set_config", ui_locale: currentLocale() });
+    } catch {}
+  };
+  // Fire once the WS is open (the greeting handshake guarantees the
+  // agent runtime is attached by then).
+  store.addEventListener("connection", (ev) => {
+    if (ev?.detail?.status === "open") pushLocaleToAgent();
+  });
+  onLocaleChange(() => pushLocaleToAgent());
   // Compiz-style wobbly windows — viz-pref gated, defaults off.
   // When enabled, auto-attaches a spring-mass mesh to every
   // foyer-window and any component that opts in via attachWobble().

@@ -505,6 +505,92 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn create_track(
+        &self,
+        name: String,
+        kind: foyer_schema::TrackKind,
+        color: Option<String>,
+        _after_id: Option<EntityId>,
+    ) -> Result<Track, BackendError> {
+        // The Ardour shim doesn't have a single CreateTrack command;
+        // it expects `invoke_action` with `track.add_audio` /
+        // `track.add_midi` / `track.add_bus`. After invocation we
+        // poll the snapshot for the newly added track id (the one
+        // that wasn't there before), then patch name + color in one
+        // follow-up update_track call.
+        let action_id: EntityId = match kind {
+            foyer_schema::TrackKind::Audio => "track.add_audio".into(),
+            foyer_schema::TrackKind::Midi => "track.add_midi".into(),
+            foyer_schema::TrackKind::Bus => "track.add_bus".into(),
+            foyer_schema::TrackKind::Master | foyer_schema::TrackKind::Monitor => {
+                return Err(BackendError::Other(format!(
+                    "cannot create a {kind:?} track — master/monitor are immutable on the engine"
+                )));
+            }
+        };
+        // Snapshot the pre-create track ids so we can diff after.
+        let before: std::collections::HashSet<EntityId> = self
+            .snapshot()
+            .await?
+            .tracks
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        self.client
+            .send_command(Command::InvokeAction { id: action_id })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))?;
+        // Poll for the new track. The shim creates the route on its
+        // session thread and emits a SessionPatch::Reload + per-track
+        // update; rather than wire a new dedicated event channel we
+        // poll the snapshot. 30 attempts × 50 ms = 1.5 s budget,
+        // which comfortably covers a healthy session-thread tick.
+        let mut new_track: Option<Track> = None;
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let snap = match self.snapshot().await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Some(t) = snap.tracks.into_iter().find(|t| !before.contains(&t.id)) {
+                new_track = Some(t);
+                break;
+            }
+        }
+        let mut track = new_track.ok_or_else(|| {
+            BackendError::Other(
+                "shim accepted invoke_action but the new track never appeared in the snapshot \
+                 within 1.5s — Ardour may have rejected the request"
+                    .into(),
+            )
+        })?;
+        // Apply the user-chosen name / color if either differs from
+        // Ardour's default. Empty string clears nothing — we only
+        // patch when the user actually supplied a value.
+        let needs_name = !name.is_empty() && name != track.name;
+        let needs_color = color.is_some();
+        if needs_name || needs_color {
+            let patch = TrackPatch {
+                name: needs_name.then(|| name.clone()),
+                color: color.clone(),
+                ..Default::default()
+            };
+            match self.client.update_track(track.id.clone(), patch).await {
+                Ok(updated) => track = updated,
+                Err(e) => {
+                    // The track exists; we just couldn't rename it.
+                    // Surface a warning but return the created track so
+                    // the caller can keep going.
+                    tracing::warn!(
+                        "create_track: track {} created but rename/recolor failed: {e}",
+                        track.id
+                    );
+                }
+            }
+        }
+        Ok(track)
+    }
+
     async fn update_track(&self, id: EntityId, patch: TrackPatch) -> Result<Track, BackendError> {
         self.client
             .update_track(id, patch)

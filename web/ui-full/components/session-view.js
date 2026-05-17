@@ -6,6 +6,7 @@ import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { showPreview } from "foyer-ui-core/widgets/preview-modal.js";
 import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
+import { t, tn, onLocaleChange } from "/core/i18n.js";
 
 /** Parent of a jail-relative path. `""` and `"/"` return `""`. */
 function parentPath(p) {
@@ -275,11 +276,14 @@ export class SessionView extends LitElement {
     // Focus once the element is in the DOM so keyboard shortcuts
     // fire without an explicit click first.
     requestAnimationFrame(() => { try { this.focus?.(); } catch {} });
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     this.removeEventListener("keydown", this._keyHandler);
     this.removeEventListener("mousedown", this._mouseHandler);
+    this._i18nDispose?.();
+    this._i18nDispose = null;
     super.disconnectedCallback();
   }
 
@@ -515,7 +519,7 @@ export class SessionView extends LitElement {
     if (backends.length <= 1) return null;
     return html`
       <div class="picker">
-        <span class="label">Open with</span>
+        <span class="label">${t("Open with")}</span>
         ${backends.map((b) => {
           const selected = this._selectedBackendId === b.id
             || (!this._selectedBackendId && this._activeBackend === b.id);
@@ -523,13 +527,13 @@ export class SessionView extends LitElement {
             <button
               class=${`chip ${selected ? "selected" : ""}`}
               title=${b.requires_project
-                ? `${b.label} — needs a project`
-                : `${b.label} — demo / no DAW`}
+                ? t("%{label} — needs a project", { label: b.label })
+                : t("%{label} — demo / no DAW", { label: b.label })}
               @click=${() => this._selectBackend(b.id)}
             >
               ${b.label}
               ${this._activeBackend === b.id
-                ? html`<span class="live-dot" title="currently active"></span>`
+                ? html`<span class="live-dot" title=${t("currently active")}></span>`
                 : null}
             </button>
           `;
@@ -550,12 +554,12 @@ export class SessionView extends LitElement {
       return html`
         <div class="error">${this._error}</div>
         <div class="hint">
-          Start foyer-cli with <code>--jail &lt;dir&gt;</code> to enable the session picker.
+          ${t("Start foyer-cli with --jail <dir> to enable the session picker.")}
         </div>
       `;
     }
     if (!this._listing) {
-      return html`<div class="hint">Loading…</div>`;
+      return html`<div class="hint">${t("Loading…")}</div>`;
     }
     const crumbs = this._listing.path
       ? this._listing.path.split("/").filter(Boolean)
@@ -565,18 +569,18 @@ export class SessionView extends LitElement {
       <div class="toolbar">
         <button class="navbtn"
                 ?disabled=${this._histCursor <= 0}
-                title="Back (Alt+← or mouse back button)"
+                title=${t("Back (Alt+← or mouse back button)")}
                 @click=${() => this._navBack()}>
           ${icon("chevron-left", 12)}
         </button>
         <button class="navbtn"
                 ?disabled=${this._histCursor >= this._history.length - 1}
-                title="Forward (Alt+→ or mouse forward button)"
+                title=${t("Forward (Alt+→ or mouse forward button)")}
                 @click=${() => this._navForward()}>
           ${icon("chevron-right", 12)}
         </button>
         <div class="crumbs">
-          <button @click=${() => this._browse("")}>${icon("folder-open", 12)} jail</button>
+          <button @click=${() => this._browse("")}>${icon("folder-open", 12)} ${t("jail")}</button>
           ${crumbs.map((c, i) => {
             const path = crumbs.slice(0, i + 1).join("/");
             return html`<span class="sep">/</span><button @click=${() => this._browse(path)}>${c}</button>`;
@@ -585,12 +589,12 @@ export class SessionView extends LitElement {
         <span style="flex:1"></span>
         <button
           class=${`toggle-hidden ${this._showHidden ? "on" : ""}`}
-          title=${this._showHidden ? "Hide dotfiles" : "Show dotfiles"}
+          title=${this._showHidden ? t("Hide dotfiles") : t("Show dotfiles")}
           @click=${() => this._toggleHidden()}
         >
           ${icon(this._showHidden ? "eye" : "eye-slash", 12)}
           <span class="tog-label">
-            ${this._showHidden ? "Hidden" : "Hidden"}
+            ${t("Hidden")}
             ${this._listing.hidden_count > 0 && !this._showHidden
               ? html`<span class="tog-count">${this._listing.hidden_count}</span>`
               : null}
@@ -609,28 +613,29 @@ export class SessionView extends LitElement {
 
   _renderEmpty() {
     const hidden = this._listing?.hidden_count || 0;
-    const path = this._listing?.path || "(jail root)";
+    const path = this._listing?.path || t("(jail root)");
     if (hidden > 0) {
       return html`
         <div class="empty">
-          <div class="empty-title">Nothing visible in ${path || "the jail"}</div>
+          <div class="empty-title">${t("Nothing visible in %{path}", { path: path || t("the jail") })}</div>
           <div class="empty-sub">
-            ${hidden} hidden ${hidden === 1 ? "entry is" : "entries are"} being
-            filtered. Toggle the <em>Hidden</em> button in the toolbar, or edit
-            <code>launcher.jail</code> in <code>config.yaml</code> to point
-            at a directory with projects.
+            ${tn(
+              "%{count} hidden entry is being filtered.",
+              "%{count} hidden entries are being filtered.",
+              hidden,
+              { count: hidden },
+            )}
+            ${t("Toggle the Hidden button in the toolbar, or edit launcher.jail in config.yaml to point at a directory with projects.")}
           </div>
         </div>
       `;
     }
     return html`
       <div class="empty">
-        <div class="empty-title">This jail is empty</div>
+        <div class="empty-title">${t("This jail is empty")}</div>
         <div class="empty-sub">
-          No files or folders at <code>${path || "jail root"}</code>.
-          Drop an Ardour session here, or edit
-          <code>launcher.jail</code> in <code>config.yaml</code> to browse
-          somewhere else. Run <code>foyer config-path</code> to find the file.
+          ${t("No files or folders at %{path}.", { path: path || t("jail root") })}
+          ${t("Drop an Ardour session here, or edit launcher.jail in config.yaml to browse somewhere else. Run foyer config-path to find the file.")}
         </div>
       </div>
     `;
@@ -642,17 +647,17 @@ export class SessionView extends LitElement {
       : "document";
     const meta = e.kind === "file" && e.size_bytes != null
       ? fmtBytes(e.size_bytes)
-      : e.kind === "session_dir" ? "session" : "";
+      : e.kind === "session_dir" ? t("session") : "";
     // `atomic` MUST be declared before `rowTitle` reads it — used to
     // sit at the bottom of this function, which TDZ-crashed render
     // ("Cannot access 'atomic' before initialization") whenever a
     // session-dir row appeared in save-as mode.
     const atomic = e.kind === "session_dir" && this.mode === "save_as";
     const rowTitle = atomic
-      ? "Open this session from Session → Open"
+      ? t("Open this session from Session → Open")
       : e.kind === "session_dir"
         ? (e.session_name && e.session_name !== e.name
-          ? `${e.path}\nAlso: ${e.session_name}.ardour in this folder`
+          ? t("%{path}\nAlso: %{name}.ardour in this folder", { path: e.path, name: e.session_name })
           : e.path)
         : "";
     let click = () => this._preview(e);

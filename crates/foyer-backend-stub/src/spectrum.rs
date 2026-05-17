@@ -172,13 +172,16 @@ async fn producer_task(
     state: Arc<Mutex<StubState>>,
     sample_rate: u32,
 ) {
-    // 50 Hz default — fast enough for a smooth waterfall, slow enough
-    // to keep the WS quiet. Subscription's `fft_size / hop_size`
-    // ratio drives the perceived rate; we just tick at 20 ms here.
-    let mut ticker = tokio::time::interval(Duration::from_millis(20));
+    // 25 Hz default — a smooth-enough waterfall (≈ Ardour's own
+    // refresh rate) at half the CPU cost of the original 50 Hz tick.
+    // The previous 20 ms tick combined with default 2048-bin frames
+    // and per-tick allocation showed up as a clear sidecar CPU spike
+    // when a subscription was open. 40 ms also matches the human
+    // perception threshold for waterfall scrolling — faster than this
+    // is wasted work.
+    let mut ticker = tokio::time::interval(Duration::from_millis(40));
     loop {
         ticker.tick().await;
-        let tracks = collect_track_seeds(&state).await;
         let subs: Vec<Subscription> = {
             let guard = hub.inner.lock().await;
             if guard.subs.is_empty() {
@@ -196,6 +199,10 @@ async fn producer_task(
                 })
                 .collect()
         };
+        // Lock state ONCE after we know there's work — the prior
+        // version locked + cloned the session even when subs was
+        // about to be empty.
+        let tracks = collect_track_seeds(&state).await;
         for sub in &subs {
             let elapsed_secs = sub.started.elapsed().as_secs_f32();
             let frame =
@@ -223,6 +230,13 @@ fn clamp_opts(opts: &SpectrumOpts) -> SpectrumOpts {
     }
     if let Some(b) = clamped.max_bins {
         clamped.max_bins = Some(b.clamp(16, clamped.fft_size / 2));
+    } else {
+        // A typical waterfall renders at ≤ 512 px tall, so synthesising
+        // 2048 bins (fft_size/2 at the default 4096 FFT) is mostly
+        // wasted CPU — the FE downsamples them anyway. Cap to 512 by
+        // default unless the subscriber explicitly asks for more.
+        let cap = 512u32.min(clamped.fft_size / 2);
+        clamped.max_bins = Some(cap.max(16));
     }
     clamped
 }

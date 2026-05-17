@@ -141,7 +141,12 @@ impl ServerHandler for FoyerMcpServer {
         let prefer_headless = self.runtime.prefer_headless_render().await;
         let spectrum_director = self.runtime.spectrum_director().await;
         let ctx_tool = ToolContext {
-            backend: Arc::downgrade(&backend),
+            // MCP builds a fresh ToolContext per call, so a stable
+            // single-Weak in a fresh RwLock is fine — the same shape
+            // the in-process agent uses, just without the
+            // session-swap mid-call concern (each MCP call is its
+            // own request).
+            backend: foyer_agent::tools::make_backend_ref(Arc::downgrade(&backend)),
             fe_attached: fe_render.is_some(),
             fe_render,
             headless_render,

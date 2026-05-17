@@ -194,6 +194,12 @@ pub struct AgentRuntime {
     welcome_ctx: Arc<RwLock<WelcomeContext>>,
     store: Arc<AgentStore>,
     backend: tokio::sync::RwLock<Option<std::sync::Weak<dyn Backend>>>,
+    /// Live, shareable mirror of `backend`. Cloned into every
+    /// `ToolContext` so tools read the *current* Weak — fixes the
+    /// "session swap mid-turn → subsequent tools hit the previous
+    /// shim" bug where `ToolContext.backend` used to be a one-shot
+    /// snapshot captured at engine-build time.
+    backend_ref: crate::tools::BackendRef,
     fe_render: tokio::sync::RwLock<Option<Arc<dyn crate::tools::FeRenderer>>>,
     headless_render: tokio::sync::RwLock<Option<Arc<dyn crate::tools::HeadlessRenderer>>>,
     ui_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::UiDirector>>>,
@@ -308,6 +314,7 @@ impl AgentRuntime {
             welcome_ctx: welcome_ctx.clone(),
             store: store.clone(),
             backend: tokio::sync::RwLock::new(None),
+            backend_ref: crate::tools::BackendRef::default(),
             fe_render: tokio::sync::RwLock::new(None),
             headless_render: tokio::sync::RwLock::new(None),
             ui_director: tokio::sync::RwLock::new(None),
@@ -404,7 +411,16 @@ impl AgentRuntime {
     }
 
     pub async fn attach_backend(&self, backend: std::sync::Weak<dyn Backend>) {
-        *self.backend.write().await = Some(backend);
+        // Keep the tokio-locked field around for the
+        // `external_engine_parts` early-bail check; the shared
+        // `backend_ref` is what every in-flight ToolContext actually
+        // reads, so update it too. The shared write is sync (std
+        // RwLock); the contention window is microsecond-scale.
+        *self.backend.write().await = Some(backend.clone());
+        *self
+            .backend_ref
+            .write()
+            .expect("agent backend_ref poisoned") = Some(backend);
     }
 
     /// Install (or replace) the visualize renderers. The runtime
@@ -631,7 +647,13 @@ impl AgentRuntime {
         let model = inner.config.model.clone();
         let prefer_headless = inner.config.prefer_headless_render;
         drop(inner);
-        let backend = self.backend.read().await.clone()?;
+        // Gate on "is a backend currently attached?" via the existing
+        // tokio field, but pass the shared `backend_ref` so swaps
+        // mid-turn (HTTP requests typically don't trigger them, but
+        // the same fix shape applies) are picked up by every tool
+        // call.
+        self.backend.read().await.clone()?;
+        let backend = self.backend_ref.clone();
         let fe_render = self.fe_render.read().await.clone();
         let headless_render = self.headless_render.read().await.clone();
         let ui_director = self.ui_director.read().await.clone();
@@ -743,8 +765,17 @@ impl AgentRuntime {
         let model = inner.config.model.clone();
         let autonomy = inner.config.autonomy;
         let conversation = inner.conversation.clone();
+        let ui_locale = inner.config.ui_locale.clone();
         drop(inner);
-        let backend = self.backend.read().await.clone()?;
+        // Gate engine construction on "a backend is currently
+        // attached" but pass the SHARED `backend_ref` into ToolContext
+        // so every tool call inside the turn reads the LIVE Weak —
+        // this is what lets a mid-turn `session.new` flow into
+        // subsequent `tracks.list` against the NEW shim. Without this
+        // the ctx held a one-shot snapshot and the agent kept hitting
+        // the previously-active session even after a swap.
+        self.backend.read().await.clone()?;
+        let backend = self.backend_ref.clone();
         let fe_render = self.fe_render.read().await.clone();
         let headless_render = self.headless_render.read().await.clone();
         let ui_director = self.ui_director.read().await.clone();
@@ -764,15 +795,47 @@ impl AgentRuntime {
             spectrum_director,
             prefer_headless_render: prefer_headless,
         };
+        // The locale directive is short and goes at the *end* of the
+        // system prompt so it overrides any baseline assumption about
+        // English-default output. We deliberately don't translate the
+        // directive itself — the model will recognize the language
+        // name and respond in kind. `en` (or unset) skips the
+        // directive entirely so English deployments stay identical.
+        let mut system_prompt = DEFAULT_SYSTEM_PROMPT.to_string();
+        if let Some(code) = ui_locale.as_deref() {
+            let normalized = code.trim().to_ascii_lowercase();
+            if !normalized.is_empty() && !normalized.starts_with("en") {
+                let language_name = language_name_for(&normalized).unwrap_or(&normalized);
+                system_prompt.push_str(&format!(
+                    "\n\nUI LOCALE: the user's Foyer interface is set to {language_name} ({normalized}). \
+                     Respond to the user in {language_name} unless they explicitly write in a different \
+                     language; tool arguments and identifiers stay in their canonical form (English / \
+                     code) regardless of conversation language."
+                ));
+            }
+        }
         let engine = AgentEngine {
             conversation,
             tools: self.tools.clone(),
             llm: llm as Arc<dyn crate::llm::LlmClient>,
             model,
             autonomy,
-            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            system_prompt,
         };
         Some((engine, ctx))
+    }
+
+    /// Update the live UI locale (BCP-47 code: `en`, `es`, `ja-JP`, …).
+    /// Called from the WS handler when a client sends
+    /// `Command::AgentSetConfig` with `ui_locale`. Persists alongside
+    /// the rest of the agent config so a server restart keeps the
+    /// last-set value.
+    pub async fn set_ui_locale(&self, code: Option<String>) {
+        {
+            let mut inner = self.inner.lock().await;
+            inner.config.ui_locale = code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+        }
+        self.persist_config().await;
     }
 
     // ─── Filesystem stores ─────────────────────────────────────────
@@ -1006,5 +1069,25 @@ impl EngineSink for RuntimeSink {
         if let Err(e) = rt.store.append_trace(&sid, &line).await {
             tracing::debug!("agent trace append failed: {e}");
         }
+    }
+}
+
+/// Map a BCP-47 code (or its language root) to the English display
+/// name of the language. Used by the locale-aware system-prompt
+/// directive — every supported locale gets a hand-curated mapping so
+/// the model sees an unambiguous language name instead of a code it
+/// might mis-parse. Falls back to None when we don't ship a catalog
+/// for the locale (the caller then uses the raw code).
+fn language_name_for(code: &str) -> Option<&'static str> {
+    let root = code.split('-').next().unwrap_or(code);
+    match root {
+        "en" => Some("English"),
+        "de" => Some("German"),
+        "es" => Some("Spanish"),
+        "it" => Some("Italian"),
+        "ja" => Some("Japanese"),
+        "ko" => Some("Korean"),
+        "zh" => Some("Chinese"),
+        _ => None,
     }
 }

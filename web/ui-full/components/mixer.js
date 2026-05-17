@@ -13,6 +13,7 @@ import {
 } from "foyer-core/metronome-strip-pref.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { icon } from "foyer-ui-core/icons.js";
+import { multiWindow } from "foyer-core/multi-window.js";
 import { t, tn, onLocaleChange } from "/core/i18n.js";
 
 // Register density labels (sourced from foyer-core/mixer-density.js
@@ -464,7 +465,7 @@ export class Mixer extends LitElement {
               title=${t("Clear every per-channel width override")}
             >${t("Reset widths")}</button>`
           : null}
-        ${window.__foyer?.store?.state?.rbac?.isTunnel
+        ${window.__foyer?.store?.state?.rbac?.isTunnel || multiWindow.isSecondary
           ? null
           : html`<button class="listen-chip ${this._listening ? "on" : ""}"
                     data-foyer-listen-toggle="1"

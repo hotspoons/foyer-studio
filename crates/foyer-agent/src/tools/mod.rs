@@ -71,9 +71,27 @@ impl ToolResult {
     }
 }
 
+/// Live, shared handle to the *current* backend Weak ref. Wrapped in
+/// a `std::sync::RwLock<Option<Weak>>` so the in-process agent's
+/// `ToolContext` reads the LIVE value on every `backend()` call —
+/// without this indirection, a session swap mid-turn (e.g. `session.new`
+/// followed by `tracks.list` in the same turn) would leave subsequent
+/// tool calls pointing at the previous session's shim. The runtime
+/// owns one of these Arcs and clones it into every ToolContext it
+/// builds; `attach_backend` updates the inner Weak so every active
+/// ctx sees the new ref immediately.
+pub type BackendRef = std::sync::Arc<std::sync::RwLock<Option<std::sync::Weak<dyn Backend>>>>;
+
+/// Convenience constructor — builds a `BackendRef` seeded with the
+/// given Weak. External call sites (MCP per-call, tests) can also
+/// pass `BackendRef::default()` and update it post-construction.
+pub fn make_backend_ref(weak: std::sync::Weak<dyn Backend>) -> BackendRef {
+    std::sync::Arc::new(std::sync::RwLock::new(Some(weak)))
+}
+
 /// Per-invocation context the tools receive.
 pub struct ToolContext {
-    pub backend: std::sync::Weak<dyn Backend>,
+    pub backend: BackendRef,
     pub fe_attached: bool,
     pub fe_render: Option<Arc<dyn FeRenderer>>,
     pub headless_render: Option<Arc<dyn HeadlessRenderer>>,
@@ -102,7 +120,18 @@ pub struct ToolContext {
 
 impl ToolContext {
     pub fn backend(&self) -> Result<Arc<dyn Backend>, ToolError> {
-        let backend = self.backend.upgrade().ok_or(ToolError::BackendGone)?;
+        // Read the LIVE Weak each call so a session swap mid-turn is
+        // picked up by every subsequent tool call. `expect`: the lock
+        // only poisons if a panic occurred while it was held; we hold
+        // it for a single clone so that's effectively impossible.
+        let weak = {
+            let guard = self
+                .backend
+                .read()
+                .expect("ToolContext backend ref poisoned");
+            guard.as_ref().ok_or(ToolError::BackendGone)?.clone()
+        };
+        let backend = weak.upgrade().ok_or(ToolError::BackendGone)?;
         // The Weak upgraded, but the underlying IPC may have died
         // since (Ardour crash, shim killed, network blip). Probe
         // before handing back the Arc so callers get a clean

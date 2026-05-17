@@ -648,7 +648,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
 
 ## i18n / runtime translation
 
-- [/] Drupal-style runtime i18n landed (en, de, es, it, ja, ko, zh).
+- [x] Drupal-style runtime i18n landed (en, de, es, it, ja, ko, zh).
   Shared catalogs at `web/locales/<lang>.json` baked into Rust binaries
   via `include_dir!` AND served statically to the browser; `tr!()` /
   `tn!()` / `loc!()` macros in [foyer-i18n](../crates/foyer-i18n/);
@@ -658,7 +658,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   an additive `localized: Option<LocalizedString>` so new emit sites
   use `Event::error_localized(code, loc!(…), target_peer_id)`. Legacy
   English-only `message` stays populated for back-compat.
-- [ ] Shim-side migration of `encode_error` to a structured payload.
+- [x] Shim-side migration of `encode_error` to a structured payload.
   Today the Ardour shim ships plain `(code, message)` strings to the
   sidecar via msgpack — see `shims/ardour/src/msgpack_out.{h,cc}`'s
   `encode_error()` and the call sites at `shims/ardour/src/dispatch.cc`
@@ -682,7 +682,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   - Shim builds in seconds against `/usr/lib/ardour9/libardourcp.so`
     from `shims/ardour/build` (already pre-warmed in the devcontainer),
     so iteration is fast — just touch + `make -j2`.
-- [ ] Wrap the long-tail FE surfaces (mixer, timeline, agent panel,
+- [x] Wrap the long-tail FE surfaces (mixer, timeline, agent panel,
   file / audio modals, …). Infrastructure is solid; remaining work is
   mechanical and parallelizable per-component. Pattern: add
   `import { t, onLocaleChange } from "/core/i18n.js"`, wire `onLocaleChange`
@@ -698,3 +698,160 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   DAW vocabulary (Cubase / Logic / Studio One localizations) but the
   longer descriptive strings haven't been audited for idiomatic phrasing
   or formality register.
+
+- [x] Browser-ingress UI gating
+  - `Record stop delay` AND `Recording alignment` sections in Preferences now
+    grey out + show an explanatory banner when no track currently has its Take
+    chip on. Wired via `globalThis.__foyerTrackMics.size > 0` + `onTrackMicChange`
+    so the controls re-enable live as soon as ingress starts.
+    ([settings-modal.js](../web/ui-full/components/settings-modal.js)
+    `_renderRecordStopSection`, `_ingressActive`.)
+- [x] Listen button hidden on secondary windows
+  - The Listen chip in the mixer toolbar now also gates on
+    `multiWindow.isSecondary` alongside the existing tunnel-guest gate.
+    Secondary windows are control-plane-only by server-side policy so opening
+    a listener stream from one would be rejected by `dispatch_command`; hiding
+    avoids the dead-button UX.
+    ([mixer.js:467](../web/ui-full/components/mixer.js#L467).)
+- [x] Agent regression — `tracks.create` against Ardour
+  - HostBackend was inheriting `Backend::create_track`'s default ("not
+    supported") because the Ardour shim doesn't expose a single
+    `Command::CreateTrack`. Wired through `invoke_action` with
+    `track.add_audio` / `track.add_midi` / `track.add_bus`, then poll the
+    snapshot for the new track id (the one that wasn't there before),
+    then patch name/color via `update_track`. 1.5 s polling budget covers
+    a healthy session-thread tick.
+    ([foyer-backend-host/src/lib.rs](../crates/foyer-backend-host/src/lib.rs)
+    `create_track`.) The default `Backend::create_track_full` then layers
+    on the optional plugin/instrument/copy_from_track chain for free.
+- [x] Agent mid-turn session swap — tools were hitting the previous shim
+  - `ToolContext.backend` used to be a `Weak<dyn Backend>` snapshotted at
+    `build_engine_and_ctx`. When the agent ran `session.new` mid-turn,
+    `install_active_backend` correctly updated `AgentRuntime.backend`,
+    but the ctx in the current turn held a stale Weak — subsequent
+    calls (`plugins.catalog`, `tracks.list`, …) kept hitting the
+    previously-focused session. Symptom: UI correctly showed the new
+    project (Master-only), Ardour still held the old project, and the
+    agent's `tracks.list` returned the old project's tracks.
+  - Fix: `ToolContext.backend` is now a `BackendRef =
+    Arc<std::sync::RwLock<Option<Weak<dyn Backend>>>>` shared with the
+    runtime. `ctx.backend()` reads the LIVE Weak on every call.
+    `attach_backend` updates both the legacy tokio-locked field
+    (kept for the "is a backend attached at all?" gate in
+    `build_engine_and_ctx` / `external_engine_parts`) AND the shared
+    sync ref. ([tools/mod.rs](../crates/foyer-agent/src/tools/mod.rs)
+    `BackendRef`, [runtime.rs](../crates/foyer-agent/src/runtime.rs)
+    `backend_ref`, `attach_backend`,
+    [foyer-mcp/src/server.rs](../crates/foyer-mcp/src/server.rs)
+    constructs its own per-call `BackendRef` via `make_backend_ref`.)
+- [/] Spectrum analyser — wire surface ships, real FFT pipeline is shim-side TBD
+  - **Why CPU was high on the stub backend:** the stub producer was
+    ticking at 50 Hz over default 2048-bin frames with a per-tick
+    allocation + sin/log per bin. Dropped to 25 Hz (matches Ardour's own
+    meter refresh) AND clamped default `max_bins` to 512 when callers
+    don't request more — that's enough resolution for the waterfall the
+    FE actually renders. Stub also now locks state only AFTER confirming
+    subs are non-empty (was locking even on the empty-subs early return).
+    ([foyer-backend-stub/src/spectrum.rs](../crates/foyer-backend-stub/src/spectrum.rs).)
+  - **What's still synthesised:** the stub fabricates plausible-looking
+    pink-noise + one tone per track — it's not a real FFT, just
+    demo-grade data so the waterfall has motion. The Ardour shim's
+    `subscribe_spectrum` / `unsubscribe_spectrum` arms still emit
+    `spectrum_not_supported` and the session snapshot advertises
+    `spectrum.available = false` so the FE hides the analyser surfaces
+    against a real DAW.
+    ([shims/ardour/src/dispatch.cc:3958-3979](../shims/ardour/src/dispatch.cc).)
+  - **What's left for real audio:** in the C++ shim, tap each
+    destination Route's outputs through a per-subscription disk-thread
+    analyser (Ardour has `ARDOUR::DSP::FFTSpectrum` already), run a
+    Hann-windowed FFT every hop, emit `encode_spectrum_frame` from a
+    low-priority idle slot, and flip `spectrum.available = true` in the
+    session-snapshot emit
+    ([msgpack_out.cc:1169](../shims/ardour/src/msgpack_out.cc)). The
+    schema (`SpectrumFrame { target, bins, sample_rate, window, min_db,
+    channels[], server_mono_ns }`) and the FE renderer are ready —
+    this is purely a shim-side wire-up, no client work needed once it
+    lands.
+- [x] i18n long-tail wrap + translations
+  - Wrapped mixer strip + track-strip (~17 keys via the existing `tr`
+    alias), agent-panel chrome (~40+ keys), session-view (~15 keys),
+    project-picker-modal. `just i18n-extract` now reports **207 keys
+    total with 0 missing / 0 orphaned across all 6 locales**
+    (de/es/it/ja/ko/zh).
+- [x] Browser auto-detect locale (already shipped — verified)
+  - [i18n.js](../web/core/i18n.js) `installI18n` already resolves
+    localStorage > `navigator.language` > English at boot. Gated against
+    the catalog manifest so we never request a locale the server
+    doesn't ship.
+- [x] Agent system-prompt language directive
+  - `AgentConfig.ui_locale` (new, `Option<String>`) + new
+    `Command::AgentSetConfig.ui_locale` field (additive, serde
+    `skip_if_none` so older clients keep parsing). When set and
+    non-English, `build_engine_and_ctx` appends a `UI LOCALE: …
+    Respond to the user in <Language Name> …` directive to the system
+    prompt. The FE bootstraps the value via `agent_set_config` on
+    connection-open AND on every `onLocaleChange`.
+    ([runtime.rs](../crates/foyer-agent/src/runtime.rs) `set_ui_locale` +
+    `language_name_for`, [bootstrap.js:88](../web/core/bootstrap.js#L88)
+    `pushLocaleToAgent`.)
+- [x] Agent stops responding after auto-compaction
+  - Two stacked bugs. (1) Every `visualize` / screenshot tool result
+    carried a fat `image_png_b64` field that re-rode the LLM context on
+    every subsequent round — after 3-4 visualize calls the conversation
+    blew the 256k window. (2) When compaction kicked in, it serialised
+    those same fat base64 blobs INTO the summariser request, which
+    itself hit overflow.
+    - New `redact_records_for_llm` strips >24kB base64 from every Tool
+      role record except the most recent one, AND strips attachments
+      from records older than the last User message. Runs on every
+      `build_request_with_nudge` so the working set is small by default.
+    - Compaction now redacts before serialising AND falls back to a
+      binary-split chunked summarisation (`summarise_records` recurses
+      when `payload_chars > 600kB`).
+    - Post-compaction the live tail is redacted/truncated too, so the
+      retry doesn't immediately re-overflow.
+    - `visualize.spectrogram`'s `track_id` is now optional (was required
+      → "missing field track_id" on the unprompted agent path).
+    ([engine.rs](../crates/foyer-agent/src/engine.rs)
+    `redact_records_for_llm`, `compact_conversation_inline`,
+    `summarise_records`; [visualize.rs:34](../crates/foyer-agent/src/tools/visualize.rs#L34).)
+  - Note: `visualize.screen` was NOT actually broken — the FAB
+    screenshot showed `visualize.screen rendered 4719 bytes`. And
+    `spectrum.capabilities returns an error` was a misread — against an
+    Ardour shim it returns `available: false` (correct, given the shim
+    FFT pipeline isn't shipped), not an error.
+- [x] Docked-agent toggle no longer opens the agent-settings modal
+  - The agent-settings-modal close / cancel / backdrop-click paths set
+    `this.open = false` but never dispatched a "close" event, so the
+    agent-panel's `_settingsOpen` stayed `true`; any subsequent re-render
+    of the agent-panel re-applied `?open=true` to the modal and it
+    popped back. Those three paths now also dispatch a composed `close`
+    event; agent-panel listens with `@close=` on all three modal mount
+    points and resets `_settingsOpen` accordingly.
+    ([agent-settings-modal.js](../web/ui-full/components/agent-settings-modal.js),
+    [agent-panel.js](../web/ui-full/components/agent-panel.js).)
+- [x] Contextual command palette
+  - Cmd+K now prepends selection-aware entries before the static
+    `list_actions` catalog:
+    · time-range selection → **Loop selection** / **Zoom to selection**;
+    · single-track selection → **Mute/Unmute**, **Solo/Unsolo**, **Add
+      plugin** (or **Add instrument or effect** on MIDI tracks),
+      **Open piano roll** on MIDI;
+    · region selection → the full edit-menu list pulled live from
+      `_regionEditMenuActions()` (Quantize / Crop / Snap fades / Clear
+      fades / Reset gain / Glue / Reverse / Strip silence / Pitch shift)
+      with disabled entries elided so the palette only shows what'll
+      actually run;
+    · single MIDI region → **Open piano roll** AND **Open beat sequencer**
+      where applicable.
+    Selection state is read live via a `deepFindTag` walk for
+    `foyer-timeline-view`. ([command-palette.js](../web/ui-full/components/command-palette.js).)
+- [ ] Full-app keyboard navigation (timeline / mixer / midi-roll /
+  sequencer / track-editor gain+pan / plugin parameter panel).
+  Multi-day scope — not started in this session. Notes from Rich:
+  tab stops per region, region select via Enter (not Space),
+  Ctrl+Enter for multi-select; arrow keys navigate channels in the
+  timeline (up/down) and mixer (left/right); unbind global left/right
+  capture for region nudge — only capture when focused in the
+  timeline.
+- [ ] Implement spectrography in shim, complete the task

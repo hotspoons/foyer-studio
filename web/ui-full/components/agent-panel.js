@@ -16,6 +16,10 @@ import { icon } from "foyer-ui-core/icons.js";
 import "./agent-settings-modal.js";
 import { renderMarkdown, ensureMarkdownReady } from "foyer-core/markdown.js";
 import { panelStyles, FAB_SIZE } from "./agent-panel.styles.js";
+// `t` is shadowed in this file by transcript-row variables (e.g. the
+// `_renderMsg(t)` lambdas), so alias the i18n function as `tr` to
+// dodge the collision.
+import { t as tr, tn, onLocaleChange } from "/core/i18n.js";
 const GAP = 8;
 const LS_KEY = "foyer.agent.panel.v1";
 const DEFAULT_STATE = {
@@ -291,7 +295,7 @@ export class AgentPanel extends LitElement {
     window.__foyer?.layout?.registerFab(
       this.storageKey,
       {
-        label: "Agent",
+        label: tr("Agent"),
         icon: "chat-bubble-left-right",
         accent: "accent",
         expandsRail: true,
@@ -318,6 +322,7 @@ export class AgentPanel extends LitElement {
     window.addEventListener("foyer:wobbly-enabled", this._wobbleEnable);
     window.addEventListener("foyer:wobbly-disabled", this._wobbleDisable);
     requestAnimationFrame(() => this._installWobbles());
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._onEnvelope);
@@ -330,6 +335,8 @@ export class AgentPanel extends LitElement {
     window.removeEventListener("foyer:wobbly-enabled", this._wobbleEnable);
     window.removeEventListener("foyer:wobbly-disabled", this._wobbleDisable);
     this._uninstallWobbles();
+    this._i18nDispose?.();
+    this._i18nDispose = null;
     super.disconnectedCallback();
   }
 
@@ -482,22 +489,22 @@ export class AgentPanel extends LitElement {
     return html`
       <div style="display:flex;flex-direction:column;height:100%;min-height:0;gap:6px;padding:4px 6px">
         <div style="display:flex;align-items:center;gap:6px;padding:4px 2px">
-          <div style="font-weight:600;font-size:12px;color:var(--color-text)">Agent</div>
+          <div style="font-weight:600;font-size:12px;color:var(--color-text)">${tr("Agent")}</div>
           <div style="flex:1"></div>
           <button style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);padding:3px 6px;color:var(--color-text-muted);cursor:pointer;line-height:1"
                   @click=${() => { this._settingsOpen = true; }}
-                  title="Settings">
+                  title=${tr("Settings")}>
             ${icon("cog", 14)}
           </button>
         </div>
         <div style="flex:1;overflow-y:auto;padding:6px;background:var(--color-surface-elevated);border:1px solid var(--color-border);border-radius:var(--radius-sm);min-height:0">
           ${this._transcript.length === 0
-            ? html`<div style="color:var(--color-text-muted);font-size:11px;text-align:center;padding:20px 10px"><strong>Foyer Agent</strong><br>Ask to move faders, arm tracks, or explain the mix.</div>`
+            ? html`<div style="color:var(--color-text-muted);font-size:11px;text-align:center;padding:20px 10px"><strong>${tr("Foyer Agent")}</strong><br>${tr("Ask to move faders, arm tracks, or explain the mix.")}</div>`
             : this._transcript.map((m) => this._renderMsg(m))}
         </div>
         <div style="display:flex;gap:4px">
           <textarea
-            placeholder="Ask the agent…"
+            placeholder=${tr("Ask the agent…")}
             style="flex:1;background:var(--color-surface-elevated);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text);font:inherit;font-size:12px;padding:6px 8px;resize:none;min-height:60px"
             .value=${this._input}
             @input=${(e) => { this._input = e.target.value; }}
@@ -826,7 +833,7 @@ export class AgentPanel extends LitElement {
     if (!text && this._attachments.length === 0) return;
     const ws = window.__foyer?.ws;
     if (!ws) {
-      this._appendLocal("system", "control WS not ready");
+      this._appendLocal("system", tr("control WS not ready"));
       return;
     }
     // Encode any attached files to base64 — only image/* travels to
@@ -901,23 +908,23 @@ export class AgentPanel extends LitElement {
         ${queued ? html`
           <div class="queued-banner">
             <div class="queued-banner-body">
-              <strong>Queued:</strong>
+              <strong>${tr("Queued:")}</strong>
               <span class="queued-text" title=${queued.body}>${queued.body}</span>
             </div>
             <div class="queued-banner-actions">
               <button class="queued-stop"
                       @click=${this._stopAndSendQueued}
-                      title="Interrupt the agent and send this message now">
-                Stop & send
+                      title=${tr("Interrupt the agent and send this message now")}>
+                ${tr("Stop & send")}
               </button>
               <button class="queued-restore"
                       @click=${this._restoreQueuedToInput}
-                      title="Pull the queued message back into the composer">
-                Edit
+                      title=${tr("Pull the queued message back into the composer")}>
+                ${tr("Edit")}
               </button>
               <button class="queued-cancel"
                       @click=${() => { this._queuedMessage = null; }}
-                      title="Discard the queued message">
+                      title=${tr("Discard the queued message")}>
                 ${icon("x-mark", 12)}
               </button>
             </div>
@@ -925,7 +932,7 @@ export class AgentPanel extends LitElement {
         ` : nothing}
         ${this._renderAttachments()}
         <textarea
-          placeholder=${busy ? "Type to queue while the agent works…" : "Ask the agent…"}
+          placeholder=${busy ? tr("Type to queue while the agent works…") : tr("Ask the agent…")}
           style=${`height: ${this._composerHeight}px`}
           .value=${this._input}
           @input=${(e) => { this._input = e.target.value; }}
@@ -939,8 +946,8 @@ export class AgentPanel extends LitElement {
           @click=${busy && this._input.trim().length > 0 ? this._sendInterrupting : this._send}
           ?disabled=${!busy && !this._input.trim() && this._attachments.length === 0}
           title=${busy && this._input.trim().length > 0
-            ? "Stop the agent and send this message"
-            : "Send"}>
+            ? tr("Stop the agent and send this message")
+            : tr("Send")}>
           ${busy && this._input.trim().length > 0
             ? icon("x-circle", 14)
             : icon("paper-airplane", 14)}
@@ -1002,7 +1009,7 @@ export class AgentPanel extends LitElement {
     this._sessionsOpen = false;
   }
   _renameSession(id, currentTitle) {
-    const next = prompt("Rename session", currentTitle || "");
+    const next = prompt(tr("Rename session"), currentTitle || "");
     if (next == null) return;
     const title = next.trim();
     if (!title || title === currentTitle) return;
@@ -1034,33 +1041,33 @@ export class AgentPanel extends LitElement {
       <div class="sessions-backdrop" @click=${(e) => { if (e.target === e.currentTarget) this._closeSessions(); }}>
         <div class="sessions-modal" @click=${(e) => e.stopPropagation()}>
           <header>
-            <div class="title">Chat Sessions</div>
+            <div class="title">${tr("Chat Sessions")}</div>
             <div class="spacer"></div>
-            <button @click=${this._newSession} title="New session">
-              ${icon("plus", 14)} New
+            <button @click=${this._newSession} title=${tr("New session")}>
+              ${icon("plus", 14)} ${tr("New")}
             </button>
             <button
               class="danger"
               ?disabled=${this._sessions.length === 0}
               @click=${this._askDeleteAllSessions}
-              title="Delete every saved session">
-              ${icon("trash", 14)} Delete all
+              title=${tr("Delete every saved session")}>
+              ${icon("trash", 14)} ${tr("Delete all")}
             </button>
-            <button @click=${this._closeSessions} title="Close">
+            <button @click=${this._closeSessions} title=${tr("Close")}>
               ${icon("x-mark", 14)}
             </button>
           </header>
           <div class="sessions-body">
             ${this._sessions.length === 0
-              ? html`<div class="sessions-empty">No saved sessions yet.</div>`
+              ? html`<div class="sessions-empty">${tr("No saved sessions yet.")}</div>`
               : this._sessions.map((s) => this._renderSessionRow(s))}
           </div>
           ${confirmingAll ? html`
             <div class="sessions-confirm">
-              <span>Delete ALL ${this._sessions.length} session(s)? This can't be undone.</span>
+              <span>${tr("Delete ALL %{count} session(s)? This can't be undone.", { count: this._sessions.length })}</span>
               <div style="display:flex; gap:6px;">
-                <button @click=${this._cancelDeleteSession}>Cancel</button>
-                <button class="danger" @click=${this._confirmDeleteAllSessions}>Delete all</button>
+                <button @click=${this._cancelDeleteSession}>${tr("Cancel")}</button>
+                <button class="danger" @click=${this._confirmDeleteAllSessions}>${tr("Delete all")}</button>
               </div>
             </div>
           ` : nothing}
@@ -1076,14 +1083,14 @@ export class AgentPanel extends LitElement {
         <button class="session-pick" @click=${() => this._loadSession(s.id)}>
           <div class="session-title">${s.title}${active ? " ·" : ""}</div>
           <div class="session-meta">
-            ${s.message_count} msg · ${new Date(s.updated_ms).toLocaleString()}
+            ${tn("%{count} msg", "%{count} msg", s.message_count, { count: s.message_count })} · ${new Date(s.updated_ms).toLocaleString()}
           </div>
         </button>
-        <button class="session-action" title="Rename"
+        <button class="session-action" title=${tr("Rename")}
                 @click=${() => this._renameSession(s.id, s.title)}>
           ${icon("cog", 12)}
         </button>
-        <button class="session-action danger" title="Delete"
+        <button class="session-action danger" title=${tr("Delete")}
                 @click=${() => this._deleteSession(s.id)}>
           ${icon("trash", 12)}
         </button>
@@ -1117,7 +1124,7 @@ export class AgentPanel extends LitElement {
         ${visible ? html`<div class="msg assistant"><div class="md">${md}</div></div>` : nothing}
         ${calls}
         ${stillThinking && thinkingSegments.length === 0
-          ? this._renderThinking("Thinking…", true, `${m.id}-live`)
+          ? this._renderThinking(tr("Thinking…"), true, `${m.id}-live`)
           : nothing}
       `;
     }
@@ -1135,8 +1142,8 @@ export class AgentPanel extends LitElement {
       <details class=${cls} ?open=${live} data-key=${key || ""}>
         <summary>
           ${live
-            ? html`<span class="spinner"></span><span>Thinking…</span>`
-            : html`<span class="caret">▶</span><span>Thinking</span>`}
+            ? html`<span class="spinner"></span><span>${tr("Thinking…")}</span>`
+            : html`<span class="caret">▶</span><span>${tr("Thinking")}</span>`}
         </summary>
         <div class="body">${text}</div>
       </details>
@@ -1155,17 +1162,17 @@ export class AgentPanel extends LitElement {
             ? `data:${a.kind};base64,${a.bytes_b64}`
             : null;
           return html`
-            <div class="chip" title=${`${a.kind} · ${formatBytes(a.bytes)} · forwarded to the model on send`}>
+            <div class="chip" title=${tr("%{kind} · %{size} · forwarded to the model on send", { kind: a.kind, size: formatBytes(a.bytes) })}>
               ${src ? html`
                 <button
                   class="thumb"
-                  title="Click to expand"
+                  title=${tr("Click to expand")}
                   @click=${(e) => { e.preventDefault(); this._zoomImage = { src, alt: a.name }; }}>
                   <img src=${src} alt=${a.name} />
                 </button>
               ` : nothing}
               <span class="name">${a.name}</span>
-              <button @click=${() => this._removeAttachment(i)} title="Remove">${icon("x-mark", 10)}</button>
+              <button @click=${() => this._removeAttachment(i)} title=${tr("Remove")}>${icon("x-mark", 10)}</button>
             </div>
           `;
         })}
@@ -1277,27 +1284,27 @@ export class AgentPanel extends LitElement {
               <button
                 class=${showRaw ? "" : "active"}
                 @click=${(e) => { e.preventDefault(); this._setToolCardRaw(c.call_id, false); }}
-              >Pretty</button>
+              >${tr("Pretty")}</button>
               <button
                 class=${showRaw ? "active" : ""}
                 @click=${(e) => { e.preventDefault(); this._setToolCardRaw(c.call_id, true); }}
-              >Raw</button>
+              >${tr("Raw")}</button>
             </div>
             ${showRaw
               ? html`
-                ${argsText ? html`<div class="tool-section-label">Input</div>
+                ${argsText ? html`<div class="tool-section-label">${tr("Input")}</div>
                                    ${this._renderToolBlock(c.call_id, "input", argsText)}` : nothing}
-                ${resultText ? html`<div class="tool-section-label">Output</div>
+                ${resultText ? html`<div class="tool-section-label">${tr("Output")}</div>
                                      ${this._renderToolBlock(c.call_id, "output", resultText)}` : nothing}
-                ${media ? html`<div class="tool-section-label">Media</div>
+                ${media ? html`<div class="tool-section-label">${tr("Media")}</div>
                                 ${this._renderToolMedia(media, inlineLabel)}` : nothing}
               `
               : html`
                 ${parsedArgs && Object.keys(parsedArgs).length
-                  ? html`<div class="tool-section-label">Input</div>
+                  ? html`<div class="tool-section-label">${tr("Input")}</div>
                           ${this._renderKvBlock(parsedArgs)}` : nothing}
                 ${parsedResult !== null
-                  ? html`<div class="tool-section-label">Output</div>
+                  ? html`<div class="tool-section-label">${tr("Output")}</div>
                           ${this._renderKvBlock(stripMedia(parsedResult))}` : nothing}
                 ${media ? this._renderToolMedia(media, inlineLabel) : nothing}
               `}
@@ -1305,8 +1312,8 @@ export class AgentPanel extends LitElement {
         ` : nothing}
         ${isAwaiting ? html`
           <div class="tool-confirm-row">
-            <button @click=${() => this._confirmTool(c.call_id, true)}>Approve</button>
-            <button @click=${() => this._confirmTool(c.call_id, false)}>Reject</button>
+            <button @click=${() => this._confirmTool(c.call_id, true)}>${tr("Approve")}</button>
+            <button @click=${() => this._confirmTool(c.call_id, false)}>${tr("Reject")}</button>
           </div>
         ` : nothing}
       </details>
@@ -1342,8 +1349,8 @@ export class AgentPanel extends LitElement {
               this._expandedToolBlocks = next;
             }}
           >${expanded
-            ? html`Collapse`
-            : html`See full · ${text.length.toLocaleString()} chars`}
+            ? html`${tr("Collapse")}`
+            : html`${tr("See full · %{count} chars", { count: text.length.toLocaleString() })}`}
           </button>
         `
         : nothing}
@@ -1356,14 +1363,14 @@ export class AgentPanel extends LitElement {
   /// typically deep, but `session.full` would otherwise sprawl).
   _renderKvBlock(value, depth = 0) {
     if (value === null || value === undefined) {
-      return html`<div class="tool-block muted">(empty)</div>`;
+      return html`<div class="tool-block muted">${tr("(empty)")}</div>`;
     }
     if (typeof value !== "object") {
       return html`<div class="tool-kv-scalar">${String(value)}</div>`;
     }
     if (Array.isArray(value)) {
       if (value.length === 0) {
-        return html`<div class="tool-block muted">(empty list)</div>`;
+        return html`<div class="tool-block muted">${tr("(empty list)")}</div>`;
       }
       return html`
         <ol class="tool-kv-list">
@@ -1373,7 +1380,7 @@ export class AgentPanel extends LitElement {
     }
     const entries = Object.entries(value);
     if (entries.length === 0) {
-      return html`<div class="tool-block muted">(empty)</div>`;
+      return html`<div class="tool-block muted">${tr("(empty)")}</div>`;
     }
     return html`
       <dl class="tool-kv">
@@ -1404,7 +1411,7 @@ export class AgentPanel extends LitElement {
   /// src. Clicking opens the modal lightbox bound to `_zoomImage`.
   _renderToolMedia(media, label) {
     const src = `data:${media.mime};base64,${media.b64}`;
-    const alt = label || "tool output image";
+    const alt = label || tr("tool output image");
     return html`
       <button
         class="tool-media-thumb"
@@ -1412,7 +1419,7 @@ export class AgentPanel extends LitElement {
           e.preventDefault();
           this._zoomImage = { src, alt };
         }}
-        title="Click to expand"
+        title=${tr("Click to expand")}
       >
         <img src=${src} alt=${alt} />
       </button>
@@ -1435,7 +1442,7 @@ export class AgentPanel extends LitElement {
           alt=${this._zoomImage.alt}
           @click=${(e) => e.stopPropagation()}
         />
-        <button class="media-zoom-close" @click=${close} title="Close">
+        <button class="media-zoom-close" @click=${close} title=${tr("Close")}>
           ${icon("x-mark", 18)}
         </button>
       </div>
@@ -1568,6 +1575,7 @@ export class AgentPanel extends LitElement {
         <foyer-agent-settings-modal
           ?open=${this._settingsOpen}
           @save=${() => { this._settingsOpen = false; }}
+          @close=${() => { this._settingsOpen = false; }}
         ></foyer-agent-settings-modal>
         ${this._renderZoomModal()}
       `;
@@ -1581,6 +1589,7 @@ export class AgentPanel extends LitElement {
         <foyer-agent-settings-modal
           ?open=${this._settingsOpen}
           @save=${() => { this._settingsOpen = false; }}
+          @close=${() => { this._settingsOpen = false; }}
         ></foyer-agent-settings-modal>
         ${this._renderZoomModal()}
       `;
@@ -1599,8 +1608,8 @@ export class AgentPanel extends LitElement {
         class=${fabClasses}
         style=${fabStyle}
         @pointerdown=${this._onFabDown}
-        aria-label=${this._open ? "Close agent" : "Open agent"}
-        title=${this._open ? "Close agent" : "Open agent"}
+        aria-label=${this._open ? tr("Close agent") : tr("Open agent")}
+        title=${this._open ? tr("Close agent") : tr("Open agent")}
       >
         ${icon("chat-bubble-left-right", 22)}
       </button>
@@ -1609,6 +1618,7 @@ export class AgentPanel extends LitElement {
       <foyer-agent-settings-modal
         ?open=${this._settingsOpen}
         @save=${() => { this._settingsOpen = false; }}
+        @close=${() => { this._settingsOpen = false; }}
       ></foyer-agent-settings-modal>
       ${this._renderZoomModal()}
     `;
@@ -1623,34 +1633,32 @@ export class AgentPanel extends LitElement {
   _renderSlidePanel() {
     return html`
       <div class="panel" style="position:relative;width:100%;height:100%;border-radius:0;box-shadow:none;border:0"
-           role="dialog" aria-label="Foyer agent">
+           role="dialog" aria-label=${tr("Foyer agent")}>
         <header style="cursor:default">
-          <div class="title">Agent</div>
+          <div class="title">${tr("Agent")}</div>
           <div class="spacer"></div>
-          <button @click=${this._newSession} title="New session">
+          <button @click=${this._newSession} title=${tr("New session")}>
             ${icon("plus", 14)}
           </button>
-          <button @click=${this._openSessions} title="Chat history">
+          <button @click=${this._openSessions} title=${tr("Chat history")}>
             ${icon("clock", 14)}
           </button>
-          <button @click=${() => { this._settingsOpen = true; }} title="Settings">
+          <button @click=${() => { this._settingsOpen = true; }} title=${tr("Settings")}>
             ${icon("cog", 14)}
           </button>
           <button @click=${() => this._tearOutToFloating()}
-                  title="Tear out — return to floating FAB">
+                  title=${tr("Tear out — return to floating FAB")}>
             ${icon("arrow-top-right-on-square", 14)}
           </button>
-          <button @click=${this.closeFromDock} title="Close">
+          <button @click=${this.closeFromDock} title=${tr("Close")}>
             ${icon("x-mark", 14)}
           </button>
         </header>
         <div class="transcript">
           ${this._transcript.length === 0
             ? html`<div class="empty">
-                <strong>Foyer Agent</strong>
-                Ask the agent to move faders, arm tracks, or explain
-                the mix. Configure the LLM endpoint in settings;
-                WebLLM runs locally in this tab.
+                <strong>${tr("Foyer Agent")}</strong>
+                ${tr("Ask the agent to move faders, arm tracks, or explain the mix. Configure the LLM endpoint in settings; WebLLM runs locally in this tab.")}
               </div>`
             : this._transcript.map((m) => this._renderMsg(m))}
         </div>
@@ -1673,24 +1681,24 @@ export class AgentPanel extends LitElement {
     // The resize corner has no meaningful direction in docked mode, so we
     // just omit it — docked width is controlled by the rail.
     return html`
-      <div class="panel" role="dialog" aria-label="Foyer agent" style=${style}>
+      <div class="panel" role="dialog" aria-label=${tr("Foyer agent")} style=${style}>
         <header>
-          <div class="title">Agent</div>
+          <div class="title">${tr("Agent")}</div>
           <div class="spacer"></div>
-          <button @click=${() => { this._settingsOpen = true; }} title="Settings">
+          <button @click=${() => { this._settingsOpen = true; }} title=${tr("Settings")}>
             ${icon("cog", 14)}
           </button>
           <button @click=${() => this._tearOutToFloating()}
-                  title="Undock">
+                  title=${tr("Undock")}>
             ${icon("arrow-top-right-on-square", 14)}
           </button>
-          <button @click=${this.closeFromDock} title="Close">
+          <button @click=${this.closeFromDock} title=${tr("Close")}>
             ${icon("x-mark", 14)}
           </button>
         </header>
         <div class="transcript">
           ${this._transcript.length === 0
-            ? html`<div class="empty">Docked agent — conversation will appear here.</div>`
+            ? html`<div class="empty">${tr("Docked agent — conversation will appear here.")}</div>`
             : this._transcript.map((t) => this._renderMsg(t))}
         </div>
         ${this._renderComposer()}
@@ -1705,36 +1713,36 @@ export class AgentPanel extends LitElement {
     const corner = `${isTop ? "s" : "n"}${isLeft ? "e" : "w"}`;
     const styleZ = this._zOverride > 0 ? `${style}; z-index: ${this._zOverride}` : style;
     return html`
-      <div class="panel" role="dialog" aria-label="Foyer agent" style=${styleZ}
+      <div class="panel" role="dialog" aria-label=${tr("Foyer agent")} style=${styleZ}
            @pointerdown=${() => this._raise()}>
         <div class="resize ${corner}" @pointerdown=${(e) => this._onResizeDown(e, corner)}></div>
         <header @pointerdown=${this._onPanelHeaderDown}>
-          <div class="title">Agent</div>
+          <div class="title">${tr("Agent")}</div>
           <div class="spacer"></div>
           <button @pointerdown=${(e) => e.stopPropagation()}
                   @click=${this._newSession}
-                  title="New session">
+                  title=${tr("New session")}>
             ${icon("plus", 14)}
           </button>
           <button @pointerdown=${(e) => e.stopPropagation()}
                   @click=${this._openSessions}
-                  title="Chat history">
+                  title=${tr("Chat history")}>
             ${icon("clock", 14)}
           </button>
           <button @pointerdown=${(e) => e.stopPropagation()}
                   @click=${() => { this._settingsOpen = true; }}
-                  title="Settings">
+                  title=${tr("Settings")}>
             ${icon("cog", 14)}
           </button>
           <button @pointerdown=${(e) => e.stopPropagation()}
                   @click=${() => { this._open = false; this._persist(); this.requestUpdate(); }}
-                  title="Close">
+                  title=${tr("Close")}>
             ${icon("x-mark", 14)}
           </button>
         </header>
         <div class="transcript">
           ${this._transcript.length === 0
-            ? html`<div class="welcome"><strong>Foyer Agent</strong>Ask the agent to move faders, arm tracks, or explain the mix. Configure the LLM endpoint in settings; WebLLM runs locally in this tab.</div>`
+            ? html`<div class="welcome"><strong>${tr("Foyer Agent")}</strong>${tr("Ask the agent to move faders, arm tracks, or explain the mix. Configure the LLM endpoint in settings; WebLLM runs locally in this tab.")}</div>`
             : this._transcript.map((m) => this._renderMsg(m))}
         </div>
         <div class="input-area ${this._dropHover ? "drop-hover" : ""}"
@@ -1743,7 +1751,7 @@ export class AgentPanel extends LitElement {
              @drop=${this._onComposerDrop}>
           ${this._renderAttachments()}
           <textarea
-            placeholder="Ask the agent…"
+            placeholder=${tr("Ask the agent…")}
             style=${`height: ${this._composerHeight}px`}
             .value=${this._input}
             @input=${(e) => { this._input = e.target.value; }}
@@ -1752,7 +1760,7 @@ export class AgentPanel extends LitElement {
             @mouseup=${this._onComposerResize}
             @blur=${this._onComposerResize}
           ></textarea>
-          <button @click=${this._send} ?disabled=${!this._input.trim() && this._attachments.length === 0} title="Send">
+          <button @click=${this._send} ?disabled=${!this._input.trim() && this._attachments.length === 0} title=${tr("Send")}>
             <svg viewBox="0 0 24 24"><path d="M4 12l16-8-8 16-2-7-6-1z"/></svg>
           </button>
         </div>

@@ -539,34 +539,172 @@ impl AgentEngine {
         &self,
         sink: &Arc<dyn EngineSink>,
     ) -> Result<(), EngineError> {
+        // Split point: keep ONE final assistant/tool round and the
+        // last user message intact as the "live" tail. Everything
+        // earlier is fair game for summarisation. We use the last
+        // user message as the anchor; if there's no user message,
+        // the second-to-last record. The tail still gets its own
+        // redaction pass before re-entry into the conversation so a
+        // single huge tool result can't keep the live tail in the
+        // overflow zone.
         let (older_records, anchor_idx, conv_len) = {
             let conv = self.conversation.lock().await;
             let snap = conv.snapshot();
             let len = snap.len();
-            // Find the last user record — anything before it is fair
-            // game for summarisation; the last user message + anything
-            // after it is the "live" tail we must preserve.
             let anchor = snap
                 .iter()
                 .rposition(|r| matches!(r.role, AgentRole::User))
-                .unwrap_or(len);
+                .unwrap_or_else(|| len.saturating_sub(1));
             let older: Vec<_> = snap.iter().take(anchor).cloned().collect();
             (older, anchor, len)
         };
-        if older_records.len() < 4 {
-            // Not enough to summarise — the overflow is from the live
-            // tail itself (huge tool output, giant attachment). Bail
-            // so the caller propagates the original error.
-            return Err(EngineError::Llm(crate::llm::LlmError::Server {
-                status: 400,
-                body: "context overflow with <4 messages to summarise — \
-                       reduce the live message or attach less content"
-                    .into(),
-            }));
+        // Even if we have <4 older records, we still attempt
+        // compaction when the live tail itself is the bloat — the
+        // tail-redact path below shrinks it via base64 elision so the
+        // next round has a fighting chance. The summary call is only
+        // needed if there's enough history to lose info on.
+        let mut summary_banner: Option<String> = None;
+        if older_records.len() >= 4 {
+            let summary = self.summarise_records(sink, &older_records).await?;
+            summary_banner = Some(format!(
+                "[Earlier conversation ({} messages of {}) was compacted to keep within the \
+                 context window. Summary follows.]\n\n{}",
+                older_records.len(),
+                conv_len,
+                summary.trim(),
+            ));
         }
-        // Build a compaction request. Use the same model but explicit
-        // tool-less, no-streaming complete() to keep this self-contained
-        // and avoid recursing into another stream loop.
+        // Now rebuild the conversation: optional summary, then the
+        // tail with any base64 / attachments redacted. The tail
+        // redaction handles the case where the live tool result was
+        // the actual cause of the overflow (huge visualize PNG, etc.).
+        let mut tail_redacted = {
+            let conv = self.conversation.lock().await;
+            let tail: Vec<_> = conv.snapshot().into_iter().skip(anchor_idx).collect();
+            tail
+        };
+        redact_records_for_llm(&mut tail_redacted);
+        // If after redaction the tail STILL holds a single record
+        // with > 200kB of content (e.g. a custom tool that dumped
+        // structured JSON), truncate it in place so the next round
+        // can run. The model loses fidelity but the conversation
+        // keeps moving — better than a hard stall.
+        const TAIL_TRUNCATE_CHARS: usize = 200 * 1024;
+        for rec in tail_redacted.iter_mut() {
+            if rec.content.len() > TAIL_TRUNCATE_CHARS {
+                let original = rec.content.len();
+                rec.content.truncate(TAIL_TRUNCATE_CHARS);
+                rec.content.push_str(&format!(
+                    "\n\n[truncated: {} chars elided to fit context]",
+                    original - TAIL_TRUNCATE_CHARS
+                ));
+            }
+        }
+        // No-op guard: if there's nothing to summarise AND no tail
+        // bytes were stripped, the overflow is structural (system
+        // prompt + tools schema + tiny live tail > model window).
+        // Propagate the original 400 so the user sees the real error.
+        if summary_banner.is_none() {
+            let any_redaction = tail_redacted
+                .iter()
+                .any(|r| r.content.contains("[base64 elided") || r.content.contains("[truncated"));
+            if !any_redaction {
+                return Err(EngineError::Llm(crate::llm::LlmError::Server {
+                    status: 400,
+                    body: "context overflow with no summarisable prefix and no large blobs to \
+                           strip — reduce the system prompt / live message"
+                        .into(),
+                }));
+            }
+        }
+        {
+            let mut conv = self.conversation.lock().await;
+            conv.clear();
+            if let Some(ref banner) = summary_banner {
+                conv.push_system(banner.clone());
+            }
+            for rec in tail_redacted {
+                conv.import_record(rec);
+            }
+        }
+        sink.on_trace(serde_json::json!({
+            "ts_ms": now_ms(),
+            "kind": "compaction_applied",
+            "older_messages": older_records.len(),
+            "summary_emitted": summary_banner.is_some(),
+        }))
+        .await;
+        // Surface a visible notice in the transcript so the user can
+        // see what happened. Append as a system record (the FE already
+        // renders system rows distinctly).
+        let banner_record = {
+            let mut conv = self.conversation.lock().await;
+            let msg = match (summary_banner.is_some(), older_records.len()) {
+                (true, n) => format!(
+                    "(Compacted {n} earlier messages to fit the context window; \
+                     continuing with summary as preamble.)"
+                ),
+                (false, _) => "(Tightened context by stripping large attachments / tool blobs \
+                     from earlier messages; continuing.)"
+                    .to_string(),
+            };
+            conv.push_system(msg)
+        };
+        sink.on_record(banner_record).await;
+        Ok(())
+    }
+
+    /// Ask the LLM to summarise a slice of records. Wraps the
+    /// compaction prompt; when the slice itself is too big for the
+    /// model's window, recursively chunks it (binary split) so we
+    /// can compact arbitrarily long histories without a single
+    /// monster request.
+    async fn summarise_records(
+        &self,
+        sink: &Arc<dyn EngineSink>,
+        records: &[AgentMessageRecord],
+    ) -> Result<String, EngineError> {
+        // Redact base64 / attachments out of the slice before
+        // serializing — without this a 1 MB screenshot would ride
+        // INTO the summariser and re-trigger the overflow we're
+        // trying to escape.
+        let mut redacted: Vec<AgentMessageRecord> = records.to_vec();
+        redact_records_for_llm(&mut redacted);
+        let payload = serde_json::to_string(&redacted).unwrap_or_default();
+        // Cap on chars we'll hand to the summariser in one shot.
+        // 600kB ≈ 150k tokens for English text, well clear of the
+        // 256k window we're typically running into. If the payload
+        // exceeds this we recurse: summarise each half, concatenate
+        // the two summaries.
+        const ONE_SHOT_CHAR_CAP: usize = 600 * 1024;
+        if payload.len() > ONE_SHOT_CHAR_CAP && redacted.len() > 1 {
+            let mid = redacted.len() / 2;
+            let (left, right) = redacted.split_at(mid);
+            sink.on_trace(serde_json::json!({
+                "ts_ms": now_ms(),
+                "kind": "compaction_chunked",
+                "total_records": redacted.len(),
+                "left_records": left.len(),
+                "right_records": right.len(),
+            }))
+            .await;
+            // Recurse with the raw slices (not the already-redacted
+            // copies) so we don't double-redact identical fields.
+            let left_summary = Box::pin(self.summarise_records(sink, left)).await?;
+            let right_summary = Box::pin(self.summarise_records(sink, right)).await?;
+            return Ok(format!(
+                "Earlier half:\n{}\n\nLater half:\n{}",
+                left_summary.trim(),
+                right_summary.trim()
+            ));
+        }
+        sink.on_trace(serde_json::json!({
+            "ts_ms": now_ms(),
+            "kind": "compaction_request",
+            "older_messages": redacted.len(),
+            "payload_chars": payload.len(),
+        }))
+        .await;
         let summary_messages: Vec<LlmMessage> = vec![
             LlmMessage {
                 role: "system".into(),
@@ -589,7 +727,7 @@ impl AgentEngine {
             },
             LlmMessage {
                 role: "user".into(),
-                content: Value::String(serde_json::to_string(&older_records).unwrap_or_default()),
+                content: Value::String(payload),
                 tool_calls: vec![],
                 tool_call_id: None,
             },
@@ -601,12 +739,6 @@ impl AgentEngine {
             temperature: Some(0.2),
             stream: false,
         };
-        sink.on_trace(serde_json::json!({
-            "ts_ms": now_ms(),
-            "kind": "compaction_request",
-            "older_messages": older_records.len(),
-        }))
-        .await;
         let summary = match self.llm.complete(compact_req).await {
             Ok(r) => r
                 .choices
@@ -615,9 +747,7 @@ impl AgentEngine {
                 .map(|c| c.message.content)
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default(),
-            Err(e) => {
-                return Err(EngineError::Llm(e));
-            }
+            Err(e) => return Err(EngineError::Llm(e)),
         };
         if summary.trim().is_empty() {
             return Err(EngineError::Llm(crate::llm::LlmError::Server {
@@ -625,44 +755,7 @@ impl AgentEngine {
                 body: "compaction returned empty summary".into(),
             }));
         }
-        // Replace the [0..anchor) prefix with a single system record
-        // carrying the summary. Anything from `anchor` onward stays.
-        {
-            let mut conv = self.conversation.lock().await;
-            let tail: Vec<_> = conv.snapshot().into_iter().skip(anchor_idx).collect();
-            conv.clear();
-            let banner = format!(
-                "[Earlier conversation ({} messages of {}) was compacted to keep within the \
-                 context window. Summary follows.]\n\n{}",
-                older_records.len(),
-                conv_len,
-                summary.trim(),
-            );
-            conv.push_system(banner);
-            for rec in tail {
-                conv.import_record(rec);
-            }
-        }
-        sink.on_trace(serde_json::json!({
-            "ts_ms": now_ms(),
-            "kind": "compaction_applied",
-            "older_messages": older_records.len(),
-            "summary_chars": summary.len(),
-        }))
-        .await;
-        // Surface a visible notice in the transcript so the user can
-        // see what happened. Append as a system record (the FE already
-        // renders system rows distinctly).
-        let banner_record = {
-            let mut conv = self.conversation.lock().await;
-            conv.push_system(format!(
-                "(Compacted {} earlier messages to fit the context window; \
-                 continuing with summary as preamble.)",
-                older_records.len(),
-            ))
-        };
-        sink.on_record(banner_record).await;
-        Ok(())
+        Ok(summary)
     }
 
     /// Build the chat-completions payload for the current turn.
@@ -677,7 +770,7 @@ impl AgentEngine {
         // SAFETY: this is sync access on a Mutex inside an async fn,
         // so we use try_lock + a blocking wait. The conversation
         // lock is held only briefly elsewhere.
-        let records = match self.conversation.try_lock() {
+        let mut records = match self.conversation.try_lock() {
             Ok(g) => g.snapshot(),
             Err(_) => {
                 // Fall back: build with an empty conversation. This
@@ -686,6 +779,13 @@ impl AgentEngine {
                 Vec::new()
             }
         };
+        // Strip giant base64 from older records before serializing.
+        // Without this, every visualize.* / screenshot tool result
+        // re-rides on every subsequent round and the context window
+        // fills up in a handful of turns. The canonical conversation
+        // ring (rendered in the FAB transcript) keeps the originals;
+        // only the wire payload is slimmed.
+        redact_records_for_llm(&mut records);
         let mut messages = Vec::with_capacity(records.len() + 2);
         if !self.system_prompt.is_empty() {
             messages.push(LlmMessage {
@@ -999,6 +1099,167 @@ fn is_context_overflow(body: &str) -> bool {
         || lower.contains("too long")
         || lower.contains("input_tokens") && (lower.contains("exceed") || lower.contains("maximum"))
         || lower.contains("reduce the length")
+}
+
+/// Replace large base64-like string values inside a JSON tree with a
+/// short placeholder. Used to keep older tool results in the
+/// conversation (so the model sees they happened + what their summary
+/// was) without re-sending megabytes of image bytes every round.
+///
+/// We match on string values longer than `max_chars` that look like
+/// base64 (only ASCII letters / digits / `+ / =`). The placeholder
+/// preserves the original byte count so the model can reason about
+/// "the screenshot was 142kB" without seeing the bytes.
+fn redact_large_b64_in_value(v: &mut Value, max_chars: usize) {
+    match v {
+        Value::String(s) => {
+            if s.len() > max_chars && looks_like_b64(s) {
+                let n = s.len();
+                *s = format!("[base64 elided: {n} chars]");
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                redact_large_b64_in_value(item, max_chars);
+            }
+        }
+        Value::Object(map) => {
+            for (_, val) in map.iter_mut() {
+                redact_large_b64_in_value(val, max_chars);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Cheap heuristic for "this string is base64-encoded payload, not
+/// natural text." Skips the cost of a real decoder; we only need a
+/// good-enough match to spot embedded images / audio.
+fn looks_like_b64(s: &str) -> bool {
+    // Require a minimum length so we don't trigger on short ascii
+    // identifiers.
+    if s.len() < 64 {
+        return false;
+    }
+    // Inspect the first 256 bytes — base64 payloads are uniform from
+    // any window, but ad-hoc text usually fails within the first ~64
+    // chars.
+    let sample = &s[..s.len().min(256)];
+    sample.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b'\n' || b == b'\r'
+    })
+}
+
+/// Redact a tool-result content blob (assumed to be a serialized
+/// `ToolResult` JSON). On parse failure we just leave it alone — the
+/// content could be a plain string from an older record format, in
+/// which case the only way to bloat is via a giant single string and
+/// the raw-content check at the call site already handles that.
+fn redact_tool_result_content(content: &str, max_chars: usize) -> String {
+    let mut v: Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(_) => return content.to_string(),
+    };
+    redact_large_b64_in_value(&mut v, max_chars);
+    serde_json::to_string(&v).unwrap_or_else(|_| content.to_string())
+}
+
+/// Strip inline attachments from a record clone, leaving a stub line
+/// in the content so the model still sees "an image was here" but
+/// without the bytes. Used on records older than the most recent
+/// user message — by then the model has already responded to the
+/// attachment and doesn't need the bytes again.
+fn strip_record_attachments(rec: &mut AgentMessageRecord) {
+    if rec.attachments.is_empty() {
+        return;
+    }
+    let mut images = 0usize;
+    let mut audio = 0usize;
+    let mut other = 0usize;
+    for a in &rec.attachments {
+        if a.mime.starts_with("image/") {
+            images += 1;
+        } else if a.mime.starts_with("audio/") {
+            audio += 1;
+        } else {
+            other += 1;
+        }
+    }
+    let mut bits: Vec<String> = Vec::new();
+    if images > 0 {
+        bits.push(format!("{images} image(s)"));
+    }
+    if audio > 0 {
+        bits.push(format!("{audio} audio clip(s)"));
+    }
+    if other > 0 {
+        bits.push(format!("{other} attachment(s)"));
+    }
+    let note = format!(
+        "[earlier attachments elided: {} — bytes discarded]",
+        bits.join(", ")
+    );
+    if rec.content.is_empty() {
+        rec.content = note;
+    } else {
+        rec.content = format!("{}\n\n{note}", rec.content);
+    }
+    rec.attachments.clear();
+}
+
+/// Apply redaction to a snapshot of records before they're handed to
+/// `record_to_llm`. The rule: the LAST `Tool` role record stays
+/// intact (the most recent tool output that the model is about to
+/// reason over); every older Tool record gets its large base64 fields
+/// elided. The LAST user record's attachments stay intact; everything
+/// older has its attachments stripped to a stub line.
+///
+/// Applied OUTSIDE `compact_conversation_inline` — this keeps the
+/// happy-path request small without changing the canonical
+/// conversation that the FAB renders. The transcript ring keeps the
+/// originals; only the wire-format payload is slimmed down.
+fn redact_records_for_llm(records: &mut [AgentMessageRecord]) {
+    // 24kB threshold matches the 'one screen of base64' break-even —
+    // smaller payloads cost almost nothing to keep; larger ones blow
+    // the budget after a handful of round trips.
+    const B64_MAX_CHARS: usize = 24 * 1024;
+    // Find indices we should NOT redact.
+    let last_tool_idx = records
+        .iter()
+        .rposition(|r| matches!(r.role, AgentRole::Tool));
+    let last_user_idx = records
+        .iter()
+        .rposition(|r| matches!(r.role, AgentRole::User));
+    for (idx, rec) in records.iter_mut().enumerate() {
+        match rec.role {
+            AgentRole::Tool => {
+                if Some(idx) == last_tool_idx {
+                    continue;
+                }
+                rec.content = redact_tool_result_content(&rec.content, B64_MAX_CHARS);
+            }
+            AgentRole::User | AgentRole::Assistant | AgentRole::System => {
+                // Old attachments are no longer needed after the next
+                // user turn — strip from anything older than the most
+                // recent user record.
+                if let Some(last) = last_user_idx {
+                    if idx < last {
+                        strip_record_attachments(rec);
+                    }
+                } else {
+                    strip_record_attachments(rec);
+                }
+                // Also redact embedded base64 inside assistant
+                // content (rare, but tools sometimes echo the data
+                // URL in their preview text).
+                if rec.content.len() > B64_MAX_CHARS {
+                    let mut v = Value::String(std::mem::take(&mut rec.content));
+                    redact_large_b64_in_value(&mut v, B64_MAX_CHARS);
+                    rec.content = v.as_str().map(|s| s.to_string()).unwrap_or_default();
+                }
+            }
+        }
+    }
 }
 
 /// Build the text line that announces image/audio attachments to the

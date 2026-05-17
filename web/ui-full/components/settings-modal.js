@@ -16,6 +16,7 @@ import { icon } from "foyer-ui-core/icons.js";
 import { readAudioPrefs, writeAudioPrefs } from "foyer-core/audio/audio-listener.js";
 import { multiWindow } from "foyer-core/multi-window.js";
 import { identifyAllWindows } from "foyer-core/multi-window-identify.js";
+import { onTrackMicChange } from "foyer-core/audio/track-mic.js";
 import {
   listProfiles, getActiveProfileId, setActiveProfile,
 } from "foyer-core/keymap/index.js";
@@ -208,6 +209,10 @@ export class SettingsModal extends LitElement {
     // Re-render when the locale flips so picker + every t()-wrapped
     // label refresh in place. Disposed below to avoid leaks.
     this._i18nDispose = onLocaleChange(() => this._refresh());
+    // Browser ingress drives whether record-stop / recording-alignment
+    // settings are even relevant — repaint when a track mic flips on
+    // or off so those rows enable/disable in step.
+    this._micDispose = onTrackMicChange(() => this._refresh());
   }
   disconnectedCallback() {
     document.removeEventListener("keydown", this._keyHandler);
@@ -217,7 +222,19 @@ export class SettingsModal extends LitElement {
     multiWindow.removeEventListener("sibling-bye", this._onMw);
     multiWindow.removeEventListener("ready", this._onMw);
     this._i18nDispose?.();
+    this._micDispose?.();
     super.disconnectedCallback();
+  }
+
+  /// True iff at least one track is currently using browser ingress
+  /// (this client's mic is open against a track via the Take chip).
+  /// The record-stop / capture-offset settings only apply when audio
+  /// is actually flowing IN — without it they have no observable
+  /// effect on engine behavior, so they grey out to avoid suggesting
+  /// they're load-bearing.
+  _ingressActive() {
+    const mics = globalThis.__foyerTrackMics;
+    return !!(mics && mics.size > 0);
   }
 
   _onEnvelope(env) {
@@ -437,6 +454,17 @@ export class SettingsModal extends LitElement {
     const backendMs = Number(a.recordStopBackendMs) || 0;
     const ringMs    = Number(a.shimIngressRingPrimeMs) || 0;
     const offsetMs  = Number(a.ingressManualOffsetMs) || 0;
+    const ingressOn = this._ingressActive();
+    // When ingress is off, these settings are inert — the engine
+    // doesn't see capture audio at all and the record-stop delay /
+    // capture offset have nothing to apply against. Grey the
+    // controls + a small banner explains why so the user isn't
+    // hunting for "the right value" while their mic is idle.
+    const disabledNote = !ingressOn
+      ? html`<div style="font-size:10px;color:var(--color-text-muted);padding:2px 0">
+               ${t("Browser ingress is idle — these settings only take effect once a track has its Take chip on (mic routed via the browser).")}
+             </div>`
+      : null;
     // Long tooltip strings — declared via t() so the extractor
     // sees them as catalog keys. Translators get the full sentence
     // in context rather than a fragmented per-clause set.
@@ -453,14 +481,17 @@ export class SettingsModal extends LitElement {
       "Signed millisecond offset added on top of the empirical browser↔server round-trip the server measures from your ingress packets. Use this to dial in any residual the echo math can't observe — typically the mic-to-browser-stack hop and any platform output-latency that's under-reported by the browser. Positive shifts recordings earlier (longer _capture_offset); negative shifts later. Sing along to an existing track, eyeball the offset in the timeline, and dial this until the new take lines up. Live — applies on the next packet without restarting the stream."
     );
     const fmtSigned = (n) => (n > 0 ? `+${n} ms` : `${n} ms`);
+    const dim = ingressOn ? "" : "opacity:0.55;pointer-events:none";
     return html`
       <div class="section">
         <h3 title=${SECTION_TIP}>${t("Record stop delay")}</h3>
-        <div class="row">
+        ${disabledNote}
+        <div class="row" style=${dim}>
           <label title=${BACKEND_TIP}>${t("Backend (IPC + Ardour cycle)")}</label>
           <div class="slider-row" title=${BACKEND_TIP}>
             <input type="range" min="60" max="300" step="10"
                    .value=${String(backendMs)}
+                   ?disabled=${!ingressOn}
                    @input=${(e) => {
                      const ms = Math.round(Number(e.target.value));
                      writeAudioPrefs({ recordStopBackendMs: ms });
@@ -474,11 +505,13 @@ export class SettingsModal extends LitElement {
         <h3 title=${t("Tuning for the browser→shim audio path. Drives both the ingress buffer depth (Ardour shim) and the empirical capture-offset stack.")}>
           ${t("Recording alignment")}
         </h3>
-        <div class="row">
+        ${disabledNote}
+        <div class="row" style=${dim}>
           <label title=${t(BUFFER_TIP)}>${t("Ingress jitter buffer")}</label>
           <div class="slider-row" title=${t(BUFFER_TIP)}>
             <input type="range" min="20" max="200" step="10"
                    .value=${String(ringMs)}
+                   ?disabled=${!ingressOn}
                    @input=${(e) => {
                      const ms = Math.round(Number(e.target.value));
                      writeAudioPrefs({ shimIngressRingPrimeMs: ms });
@@ -487,17 +520,19 @@ export class SettingsModal extends LitElement {
             <span class="val">${ringMs} ms</span>
           </div>
         </div>
-        <div class="row">
+        <div class="row" style=${dim}>
           <label title=${t(OFFSET_TIP)}>${t("Manual capture offset")}</label>
           <div class="slider-row" title=${t(OFFSET_TIP)}>
             <input type="range" min="0" max="350" step="20"
                    .value=${String(Math.max(0, Math.min(350, offsetMs)))}
+                   ?disabled=${!ingressOn}
                    @input=${(e) => {
                      const ms = Math.round(Number(e.target.value) / 20) * 20;
                      this._setManualOffset(ms);
                    }}>
             <input type="number" class="num" step="1"
                    .value=${String(offsetMs)}
+                   ?disabled=${!ingressOn}
                    @change=${(e) => {
                      const raw = Number(e.target.value);
                      if (!Number.isFinite(raw)) return;

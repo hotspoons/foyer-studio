@@ -42,9 +42,23 @@ pub(super) async fn set_config(
     endpoint: Option<String>,
     model: Option<String>,
     api_key: Option<String>,
+    ui_locale: Option<String>,
 ) {
     if let Some(agent) = state.agent.read().await.clone() {
         agent.set_config(endpoint, model, api_key).await;
+        if let Some(loc) = ui_locale {
+            let normalised = loc.trim().to_string();
+            // Empty string is the FE's way of clearing the override
+            // back to English-default — match that intent rather than
+            // treating it as a no-op set.
+            agent
+                .set_ui_locale(if normalised.is_empty() {
+                    None
+                } else {
+                    Some(normalised)
+                })
+                .await;
+        }
     }
 }
 

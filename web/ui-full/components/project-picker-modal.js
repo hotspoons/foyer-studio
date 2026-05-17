@@ -19,6 +19,7 @@ import { LitElement, html, css } from "lit";
 import "./session-view.js";
 import { icon } from "foyer-ui-core/icons.js";
 import { launchProjectGuarded } from "foyer-ui-core/session-launch.js";
+import { t, onLocaleChange } from "/core/i18n.js";
 
 export class ProjectPickerModal extends LitElement {
   static properties = {
@@ -188,10 +189,13 @@ export class ProjectPickerModal extends LitElement {
     };
     window.addEventListener("keydown", this._onKey, true);
     window.__foyer?.ws?.addEventListener("envelope", this._envelopeHandler);
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     window.removeEventListener("keydown", this._onKey, true);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
+    this._i18nDispose?.();
+    this._i18nDispose = null;
     super.disconnectedCallback();
   }
 
@@ -213,7 +217,7 @@ export class ProjectPickerModal extends LitElement {
   }
 
   _titleFor() {
-    return this.mode === "new" ? "New session" : "Open session";
+    return this.mode === "new" ? t("New session") : t("Open session");
   }
 
   _onPick(ev) {
@@ -258,14 +262,14 @@ export class ProjectPickerModal extends LitElement {
       <div class="modal" @click=${(e) => e.stopPropagation()}>
         <header>
           <span class="title">${this._titleFor()}</span>
-          <button title="Close (Esc)" @click=${this._close}>${icon("x-mark", 14)}</button>
+          <button title=${t("Close (Esc)")} @click=${this._close}>${icon("x-mark", 14)}</button>
         </header>
         <div class="body">
           <foyer-session-view .mode=${this.mode} @click=${this._onPick}></foyer-session-view>
         </div>
         ${this.mode === "new" ? html`
           <div class="create-row">
-            <span class="label">Sample rate</span>
+            <span class="label">${t("Sample rate")}</span>
             <select
               style="background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;padding:4px 8px;font-size:11px"
               @change=${(e) => {
@@ -280,13 +284,13 @@ export class ProjectPickerModal extends LitElement {
             </select>
           </div>
           <div class="create-row">
-            <span class="label">Create in</span>
-            <span class="parent" title=${this._currentPath || "(jail root)"}>
-              ${this._currentPath || "(jail root)"}
+            <span class="label">${t("Create in")}</span>
+            <span class="parent" title=${this._currentPath || t("(jail root)")}>
+              ${this._currentPath || t("(jail root)")}
             </span>
             <input
               type="text"
-              placeholder="new session name…"
+              placeholder=${t("new session name…")}
               .value=${this._newName}
               @input=${(e) => { this._newName = e.target.value; }}
               @keydown=${(e) => { if (e.key === "Enter") { e.preventDefault(); this._createHere(); } }}
@@ -295,7 +299,7 @@ export class ProjectPickerModal extends LitElement {
               class="primary"
               ?disabled=${!this._newName.trim()}
               @click=${this._createHere}
-            >Create here</button>
+            >${t("Create here")}</button>
           </div>
         ` : null}
         ${this._error ? html`<div class="err">${this._error}</div>` : null}

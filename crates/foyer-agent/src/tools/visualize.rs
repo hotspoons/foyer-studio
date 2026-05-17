@@ -32,7 +32,12 @@ pub enum VisualizeRequest {
         region_id: String,
     },
     Spectrogram {
-        track_id: String,
+        /// Optional — defaults to the master bus when omitted. The
+        /// shim's FFT pipeline accepts master/monitor/per-track and
+        /// the FE renderer also defaults to master if no target prop
+        /// is passed.
+        #[serde(default)]
+        track_id: Option<String>,
         #[serde(default)]
         duration_ms: Option<u32>,
     },

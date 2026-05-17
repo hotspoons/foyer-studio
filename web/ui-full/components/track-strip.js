@@ -9,6 +9,10 @@ import "./plugin-strip.js";
 import { ControlController } from "foyer-core/store.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { openTrackEditor } from "./track-editor-modal.js";
+// `t` is already used throughout this file as the local `track`
+// variable in render bodies, so alias the i18n function as `tr` to
+// dodge the shadow.
+import { t as tr, onLocaleChange } from "/core/i18n.js";
 import { openPanEditor } from "./pan-editor-modal.js";
 import { isAllowed } from "foyer-core/rbac.js";
 import {
@@ -314,6 +318,7 @@ export class TrackStrip extends LitElement {
     // explicit nudge to invalidate render.
     this._unsubTrackMic = onTrackMicChange(() => this.requestUpdate());
     this._unsubTrackMidi = onTrackMidiChange(() => this.requestUpdate());
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
     this._syncSelected();
     this.addEventListener("click", this._onStripClick);
     this.addEventListener("dblclick", this._onStripDblClick);
@@ -326,6 +331,8 @@ export class TrackStrip extends LitElement {
     this._unsubTrackMic = null;
     this._unsubTrackMidi?.();
     this._unsubTrackMidi = null;
+    this._i18nDispose?.();
+    this._i18nDispose = null;
     this.removeEventListener("click", this._onStripClick);
     this.removeEventListener("dblclick", this._onStripDblClick);
     super.disconnectedCallback();
@@ -477,19 +484,21 @@ export class TrackStrip extends LitElement {
         `
             : html`
           <div class="name" style=${nameStyle}
-               title="${t.name} — click to select · right-click for options"
+               title=${tr("%{name} — click to select · right-click for options", { name: t.name })}
                @click=${(e) => this._onNameClick(e)}
                @contextmenu=${(e) => this._onContextMenu(e)}>${t.name}</div>
         `}
           ${group && groupBandStyle ? html`
             <div class="group-band ${groupActive ? "linked-on" : ""}"
                  style=${groupBandStyle}
-                 title="Group: ${group.name}${groupActive ? "" : " (inactive)"}"></div>
+                 title=${groupActive
+                   ? tr("Group: %{name}", { name: group.name })
+                   : tr("Group: %{name} (inactive)", { name: group.name })}></div>
           ` : null}
         </div>
         ${d.showKind ? html`
           <div class="kind">
-            ${t.kind}${this._isSequencer() ? html`<span class="seq-chip" title="This track has an active beat-sequencer region">SEQ</span>` : null}
+            ${t.kind}${this._isSequencer() ? html`<span class="seq-chip" title=${tr("This track has an active beat-sequencer region")}>${tr("SEQ")}</span>` : null}
           </div>
         ` : null}
       </div>
@@ -504,11 +513,11 @@ export class TrackStrip extends LitElement {
             const isMidi = t.kind === "midi";
             const active = isMidi ? isTrackMidiActive(t.id) : isTrackMicActive(t.id);
             const onTitle = isMidi
-              ? "Stop sending browser MIDI to this track"
-              : "Stop my mic and release this track";
+              ? tr("Stop sending browser MIDI to this track")
+              : tr("Stop my mic and release this track");
             const offTitle = isMidi
-              ? "Claim this track for my browser MIDI — devices + on-screen keyboard route here"
-              : "Claim this track for my mic — assigns source user + opens browser ingress";
+              ? tr("Claim this track for my browser MIDI — devices + on-screen keyboard route here")
+              : tr("Claim this track for my mic — assigns source user + opens browser ingress");
             return html`
               <foyer-toggle class="take-toggle ${this._takeBusy ? "busy" : ""}"
                             label="I"
@@ -521,11 +530,11 @@ export class TrackStrip extends LitElement {
         ${t.monitoring !== undefined && t.monitoring !== null ? html`
           <div class="divider"></div>
           ${this._hasBrowserSource(t.id) ? html`
-            <div class="mon-row" title="Live monitoring is off for browser-sourced tracks — the round-trip latency would make it unusable.">
-              <span style="font-size:10px;color:var(--color-text-muted);padding:2px 4px">MON OFF</span>
+            <div class="mon-row" title=${tr("Live monitoring is off for browser-sourced tracks — the round-trip latency would make it unusable.")}>
+              <span style="font-size:10px;color:var(--color-text-muted);padding:2px 4px">${tr("MON OFF")}</span>
             </div>
           ` : html`
-            <div class="mon-row" title="Monitoring: auto, input (live), disk (playback) — Ardour MonitorChoice">
+            <div class="mon-row" title=${tr("Monitoring: auto, input (live), disk (playback) — Ardour MonitorChoice")}>
               ${["auto", "in", "disk"].map((mode) => {
                 const full = mode === "in" ? "input" : mode;
                 const effective = this._monitoringPending || t.monitoring || "auto";
@@ -533,9 +542,9 @@ export class TrackStrip extends LitElement {
                 return html`
                   <button class="mon-btn ${active ? "on" : ""}"
                           title=${
-                            full === "input" ? "Input — always monitor the live input (rehearsing)"
-                            : full === "disk" ? "Disk — always play back from disk (no live input)"
-                            : "Auto — switch based on transport state"
+                            full === "input" ? tr("Input — always monitor the live input (rehearsing)")
+                            : full === "disk" ? tr("Disk — always play back from disk (no live input)")
+                            : tr("Auto — switch based on transport state")
                           }
                           @click=${() => this._setMonitoring(full)}>${mode.toUpperCase()}</button>
                 `;
@@ -563,7 +572,7 @@ export class TrackStrip extends LitElement {
         <foyer-meter .value=${meterDb} height="140"></foyer-meter>
       </div>
       <div class="channel-resize"
-           title="Drag to resize this channel · double-click to clear override"
+           title=${tr("Drag to resize this channel · double-click to clear override")}
            @pointerdown=${(e) => this._startChannelResize(e)}
            @dblclick=${() => this._clearChannelOverride()}></div>
     `;
@@ -671,22 +680,22 @@ export class TrackStrip extends LitElement {
       <div style="flex:0 0 auto;display:flex;flex-direction:column;gap:4px;">
         <button style="background:transparent;border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:9px;cursor:pointer;padding:2px 0;"
                 @click=${() => this._panOpen = !this._panOpen}>
-          Pan ${this._panOpen ? "▲" : "▼"}
+          ${tr("Pan")} ${this._panOpen ? "▲" : "▼"}
         </button>
         ${this._panOpen ? html`
           <div style="display:flex;gap:4px;justify-content:center;">
             <button style="background:${this._panMode === "stereo" ? "var(--color-accent)" : "transparent"};border:1px solid var(--color-border);border-radius:var(--radius-sm);color:${this._panMode === "stereo" ? "#fff" : "var(--color-text-muted)"};font-size:8px;cursor:pointer;padding:1px 4px;"
-                    @click=${() => this._panMode = "stereo"}>Stereo</button>
+                    @click=${() => this._panMode = "stereo"}>${tr("Stereo")}</button>
             <button style="background:${this._panMode === "surround" ? "var(--color-accent)" : "transparent"};border:1px solid var(--color-border);border-radius:var(--radius-sm);color:${this._panMode === "surround" ? "#fff" : "var(--color-text-muted)"};font-size:8px;cursor:pointer;padding:1px 4px;"
-                    @click=${() => this._panMode = "surround"}>Surround</button>
+                    @click=${() => this._panMode = "surround"}>${tr("Surround")}</button>
           </div>
           ${this._panMode === "stereo" ? html`
             <div style="display:flex;align-items:center;gap:4px;">
-              <span style="font-size:8px;color:var(--color-text-muted)">L</span>
+              <span style="font-size:8px;color:var(--color-text-muted)">${tr("L")}</span>
               <input type="range" min="-1" max="1" step="0.01" style="flex:1;min-width:0"
                      .value=${String(panVal)}
                      @input=${(e) => this._setPan(e.currentTarget.value)}>
-              <span style="font-size:8px;color:var(--color-text-muted)">R</span>
+              <span style="font-size:8px;color:var(--color-text-muted)">${tr("R")}</span>
             </div>
             <div style="text-align:center;font-size:9px;color:var(--color-text)">${panVal.toFixed(2)}</div>
           ` : html`
@@ -696,7 +705,7 @@ export class TrackStrip extends LitElement {
               <div style="position:absolute;left:50%;top:50%;width:6px;height:6px;border-radius:50%;background:var(--color-accent);border:1px solid #fff;transform:translate(-50%,-50%);pointer-events:none;"
                    id="pan-dot"></div>
             </div>
-            <div style="text-align:center;font-size:8px;color:var(--color-text-muted)">X writes pan · Y preview</div>
+            <div style="text-align:center;font-size:8px;color:var(--color-text-muted)">${tr("X writes pan · Y preview")}</div>
           `}
         ` : null}
       </div>
@@ -734,27 +743,27 @@ export class TrackStrip extends LitElement {
     ev.stopPropagation();
     const t = this.track;
     showContextMenu(ev, [
-      { label: "Rename", icon: "pencil-square", action: () => this._startRename() },
+      { label: tr("Rename"), icon: "pencil-square", action: () => this._startRename() },
       {
-        label: "Set color",
+        label: tr("Set color"),
         icon: "swatch",
         submenu: [
           ...COLOR_PALETTE.map((c) => ({
-            label: c.label,
+            label: tr(c.label),
             icon: "square-3-stack-3d",
             action: () => this._updatePatch({ color: c.hex }),
           })),
           { separator: true },
-          { label: "Clear", icon: "x-mark", action: () => this._updatePatch({ color: "" }) },
+          { label: tr("Clear"), icon: "x-mark", action: () => this._updatePatch({ color: "" }) },
         ],
       },
       {
-        label: "Track editor…",
+        label: tr("Track editor…"),
         icon: "cog-6-tooth",
         action: () => openTrackEditor(t.id),
       },
       { separator: true },
-      { label: `ID: ${t.id}`, disabled: true },
+      { label: tr("ID: %{id}", { id: t.id }), disabled: true },
     ]);
   }
 

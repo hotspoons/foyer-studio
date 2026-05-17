@@ -2080,6 +2080,12 @@ pub enum Command {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_key: Option<String>,
+        /// BCP-47 code of the UI's current locale (`en`, `es`, `ja`).
+        /// The agent uses this to bias its replies toward the user's
+        /// chosen language (system-prompt directive). `None` leaves
+        /// the current value alone; an explicit `Some("")` clears it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ui_locale: Option<String>,
     },
     /// Approve or reject a tool call that's parked in
     /// `AwaitingConfirm`. Ignored when the call's status is
