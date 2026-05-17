@@ -19,6 +19,9 @@ import { identifyAllWindows } from "foyer-core/multi-window-identify.js";
 import {
   listProfiles, getActiveProfileId, setActiveProfile,
 } from "foyer-core/keymap/index.js";
+import {
+  t, setLocale, currentLocale, localeMeta, availableLocales, onLocaleChange,
+} from "/core/i18n.js";
 
 export class SettingsModal extends LitElement {
   static properties = {
@@ -202,6 +205,9 @@ export class SettingsModal extends LitElement {
     multiWindow.addEventListener("sibling-hello", this._onMw);
     multiWindow.addEventListener("sibling-bye", this._onMw);
     multiWindow.addEventListener("ready", this._onMw);
+    // Re-render when the locale flips so picker + every t()-wrapped
+    // label refresh in place. Disposed below to avoid leaks.
+    this._i18nDispose = onLocaleChange(() => this._refresh());
   }
   disconnectedCallback() {
     document.removeEventListener("keydown", this._keyHandler);
@@ -210,6 +216,7 @@ export class SettingsModal extends LitElement {
     multiWindow.removeEventListener("sibling-hello", this._onMw);
     multiWindow.removeEventListener("sibling-bye", this._onMw);
     multiWindow.removeEventListener("ready", this._onMw);
+    this._i18nDispose?.();
     super.disconnectedCallback();
   }
 
@@ -369,35 +376,33 @@ export class SettingsModal extends LitElement {
     const rates = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
     const hint = a.codec === "opus" && a.sampleRate > 48_000
       ? html`<div style="font-size:10px;color:var(--color-warning,#f59e0b);padding:4px 0">
-               Opus tops out at 48 kHz — the stream will automatically fall back to raw when you
-               start a higher-rate listen. Switch codec to raw for predictable behavior.
+               ${t("Opus tops out at 48 kHz — the stream will automatically fall back to raw when you start a higher-rate listen. Switch codec to raw for predictable behavior.")}
              </div>`
       : null;
     const hint2 = (a.sampleRate > 48_000)
       ? html`<div style="font-size:10px;color:var(--color-text-muted);padding:4px 0">
-               Higher-rate streaming uses lossless raw PCM (Opus is capped at 48 kHz). The sidecar
-               resamples engine PCM to the rate you pick when it differs from the project.
+               ${t("Higher-rate streaming uses lossless raw PCM (Opus is capped at 48 kHz). The sidecar resamples engine PCM to the rate you pick when it differs from the project.")}
              </div>`
       : null;
     const driftMs = Number(a.sentinelDriftMs) || 0;
     return html`
       <div class="section">
-        <h3>Browser audio stream</h3>
+        <h3>${t("Browser audio stream")}</h3>
         <div class="row">
-          <label>Codec</label>
+          <label>${t("Codec")}</label>
           <div class="chip-row">
             <button class="chip ${a.codec === "opus" ? "active" : ""}"
                     @click=${() => { writeAudioPrefs({ codec: "opus" }); this._refresh(); }}>
-              Opus (compressed)
+              ${t("Opus (compressed)")}
             </button>
             <button class="chip ${a.codec === "raw_f32_le" ? "active" : ""}"
                     @click=${() => { writeAudioPrefs({ codec: "raw_f32_le" }); this._refresh(); }}>
-              Raw PCM (lossless)
+              ${t("Raw PCM (lossless)")}
             </button>
           </div>
         </div>
         <div class="row">
-          <label>Sample rate</label>
+          <label>${t("Sample rate")}</label>
           <select @change=${(e) => { writeAudioPrefs({ sampleRate: Number(e.currentTarget.value) }); this._refresh(); }}
                   style="background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;padding:2px 6px">
             ${rates.map((r) => html`
@@ -406,17 +411,17 @@ export class SettingsModal extends LitElement {
           </select>
         </div>
         <div class="row">
-          <label title="Reopen the audio stream when sentinel events arrive more than this many ms after their matching audio frame. 0 = never auto-restart.">
-            Auto-restart on drift
+          <label title=${t("Reopen the audio stream when sentinel events arrive more than this many ms after their matching audio frame. 0 = never auto-restart.")}>
+            ${t("Auto-restart on drift")}
           </label>
           <div class="chip-row">
             ${[0, 200, 300, 500, 800].map((ms) => html`
               <button class="chip ${driftMs === ms ? "active" : ""}"
                       title=${ms === 0
-                        ? "Disable auto-restart — Foyer will never tear down the stream on drift, only on a network drop."
-                        : `Reopen when sentinel drift exceeds ${ms} ms while transport is paused.`}
+                        ? t("Disable auto-restart — Foyer will never tear down the stream on drift, only on a network drop.")
+                        : t("Reopen when sentinel drift exceeds %{ms} ms while transport is paused.", { ms })}
                       @click=${() => { writeAudioPrefs({ sentinelDriftMs: ms }); this._refresh(); }}>
-                ${ms === 0 ? "Off" : `${ms} ms`}
+                ${ms === 0 ? t("Off") : `${ms} ms`}
               </button>
             `)}
           </div>
@@ -432,44 +437,27 @@ export class SettingsModal extends LitElement {
     const backendMs = Number(a.recordStopBackendMs) || 0;
     const ringMs    = Number(a.shimIngressRingPrimeMs) || 0;
     const offsetMs  = Number(a.ingressManualOffsetMs) || 0;
-    const BUFFER_TIP =
-      "How much audio the shim's per-stream ingress buffer holds before draining " +
-      "into Ardour's record source. Bigger absorbs more browser GC + WS reorder " +
-      "jitter at the cost of higher live-monitoring latency. Recordings are auto-" +
-      "shifted for this depth, so only the foreground mix you hear through the " +
-      "engine is delayed. 80 ms suits a tunnel; loopback / LAN setups commonly " +
-      "drop to 20–30 ms. This value also doubles as the record-stop cushion — " +
-      "anything still in flight when you press stop has at most this much time " +
-      "to land before the engine halts. Takes effect on the next Listen / record " +
-      "stream you open.";
-    const SECTION_TIP =
-      "When you hit stop while recording browser audio, Foyer waits before the engine " +
-      "actually halts so the last in-flight bytes reach Ardour's record source. " +
-      "Total delay = capture + network + backend + ingress buffer depth; the first " +
-      "two are measured live (browser baseLatency + ingress one-way median), the " +
-      "last two are tunable in this section and the next. Last computed breakdown " +
-      "shows in Diagnostics → Timing.";
-    const BACKEND_TIP =
-      "IPC + one engine process cycle + record-write. The ingress buffer (next " +
-      "section) is added on top, so this number doesn't need to include it. " +
-      "Defaults to 100 ms which suits both the in-process dummy backend and a " +
-      "small-buffer JACK setup. Drop to ~90 ms on a tight buffer (JACK 64 samples); " +
-      "raise to 150+ on a loaded tunnel.";
-    const OFFSET_TIP =
-      "Signed millisecond offset added on top of the empirical browser↔server " +
-      "round-trip the server measures from your ingress packets. Use this to " +
-      "dial in any residual the echo math can't observe — typically the mic-to-" +
-      "browser-stack hop and any platform output-latency that's under-reported by " +
-      "the browser. Positive shifts recordings earlier (longer _capture_offset); " +
-      "negative shifts later. Sing along to an existing track, eyeball the offset " +
-      "in the timeline, and dial this until the new take lines up. Live — applies " +
-      "on the next packet without restarting the stream.";
+    // Long tooltip strings — declared via t() so the extractor
+    // sees them as catalog keys. Translators get the full sentence
+    // in context rather than a fragmented per-clause set.
+    const BUFFER_TIP = t(
+      "How much audio the shim's per-stream ingress buffer holds before draining into Ardour's record source. Bigger absorbs more browser GC + WS reorder jitter at the cost of higher live-monitoring latency. Recordings are auto-shifted for this depth, so only the foreground mix you hear through the engine is delayed. 80 ms suits a tunnel; loopback / LAN setups commonly drop to 20–30 ms. This value also doubles as the record-stop cushion — anything still in flight when you press stop has at most this much time to land before the engine halts. Takes effect on the next Listen / record stream you open."
+    );
+    const SECTION_TIP = t(
+      "When you hit stop while recording browser audio, Foyer waits before the engine actually halts so the last in-flight bytes reach Ardour's record source. Total delay = capture + network + backend + ingress buffer depth; the first two are measured live (browser baseLatency + ingress one-way median), the last two are tunable in this section and the next. Last computed breakdown shows in Diagnostics → Timing."
+    );
+    const BACKEND_TIP = t(
+      "IPC + one engine process cycle + record-write. The ingress buffer (next section) is added on top, so this number doesn't need to include it. Defaults to 100 ms which suits both the in-process dummy backend and a small-buffer JACK setup. Drop to ~90 ms on a tight buffer (JACK 64 samples); raise to 150+ on a loaded tunnel."
+    );
+    const OFFSET_TIP = t(
+      "Signed millisecond offset added on top of the empirical browser↔server round-trip the server measures from your ingress packets. Use this to dial in any residual the echo math can't observe — typically the mic-to-browser-stack hop and any platform output-latency that's under-reported by the browser. Positive shifts recordings earlier (longer _capture_offset); negative shifts later. Sing along to an existing track, eyeball the offset in the timeline, and dial this until the new take lines up. Live — applies on the next packet without restarting the stream."
+    );
     const fmtSigned = (n) => (n > 0 ? `+${n} ms` : `${n} ms`);
     return html`
       <div class="section">
-        <h3 title=${SECTION_TIP}>Record stop delay</h3>
+        <h3 title=${SECTION_TIP}>${t("Record stop delay")}</h3>
         <div class="row">
-          <label title=${BACKEND_TIP}>Backend (IPC + Ardour cycle)</label>
+          <label title=${BACKEND_TIP}>${t("Backend (IPC + Ardour cycle)")}</label>
           <div class="slider-row" title=${BACKEND_TIP}>
             <input type="range" min="60" max="300" step="10"
                    .value=${String(backendMs)}
@@ -483,12 +471,12 @@ export class SettingsModal extends LitElement {
         </div>
       </div>
       <div class="section">
-        <h3 title="Tuning for the browser→shim audio path. Drives both the ingress buffer depth (Ardour shim) and the empirical capture-offset stack.">
-          Recording alignment
+        <h3 title=${t("Tuning for the browser→shim audio path. Drives both the ingress buffer depth (Ardour shim) and the empirical capture-offset stack.")}>
+          ${t("Recording alignment")}
         </h3>
         <div class="row">
-          <label title=${BUFFER_TIP}>Ingress jitter buffer</label>
-          <div class="slider-row" title=${BUFFER_TIP}>
+          <label title=${t(BUFFER_TIP)}>${t("Ingress jitter buffer")}</label>
+          <div class="slider-row" title=${t(BUFFER_TIP)}>
             <input type="range" min="20" max="200" step="10"
                    .value=${String(ringMs)}
                    @input=${(e) => {
@@ -500,8 +488,8 @@ export class SettingsModal extends LitElement {
           </div>
         </div>
         <div class="row">
-          <label title=${OFFSET_TIP}>Manual capture offset</label>
-          <div class="slider-row" title=${OFFSET_TIP}>
+          <label title=${t(OFFSET_TIP)}>${t("Manual capture offset")}</label>
+          <div class="slider-row" title=${t(OFFSET_TIP)}>
             <input type="range" min="0" max="350" step="20"
                    .value=${String(Math.max(0, Math.min(350, offsetMs)))}
                    @input=${(e) => {
@@ -515,7 +503,7 @@ export class SettingsModal extends LitElement {
                      if (!Number.isFinite(raw)) return;
                      this._setManualOffset(Math.round(raw));
                    }}>
-            <span class="unit">ms</span>
+            <span class="unit">${t("ms")}</span>
           </div>
         </div>
         ${this._renderCalibrationRow()}
@@ -524,20 +512,16 @@ export class SettingsModal extends LitElement {
   }
 
   _renderCalibrationRow() {
-    const CAL_TIP =
-      "Plays a sequence of brief 4 kHz clicks out the egress audio (your speakers) " +
-      "and listens for the reflection on the ingress (your mic). The measured speaker→" +
-      "mic round-trip is the GROUND-TRUTH capture latency that the empirical echo " +
-      "math can't see directly. The result becomes the suggested Manual capture offset. " +
-      "Auto-starts Listen and opens a temporary mic stream if neither is already on, " +
-      "then restores their previous state. ~3 s total.";
+    const CAL_TIP = t(
+      "Plays a sequence of brief 4 kHz clicks out the egress audio (your speakers) and listens for the reflection on the ingress (your mic). The measured speaker→mic round-trip is the GROUND-TRUTH capture latency that the empirical echo math can't see directly. The result becomes the suggested Manual capture offset. Auto-starts Listen and opens a temporary mic stream if neither is already on, then restores their previous state. ~3 s total."
+    );
     const c = this._calibration;
     const status = c?.status;
     const stage = c?.stage;
     const result = c?.result;
     let line;
     if (status === "running" && stage === "setup") {
-      line = html`<span class="val" style="min-width:9em">Setting up…</span>`;
+      line = html`<span class="val" style="min-width:9em">${t("Setting up…")}</span>`;
     } else if (status === "running") {
       const n = c?.n ?? 0, total = c?.total ?? 5;
       const recent = (c?.recent ?? []).slice(-3).map((m) => `${Math.round(m)}`).join(", ");
@@ -545,12 +529,15 @@ export class SettingsModal extends LitElement {
     } else if (status === "done" && result) {
       line = html`
         <span class="val" style="min-width:11em">
-          median ${result.median_ms.toFixed(0)} ms · suggest +${result.suggested_offset_ms} ms
+          ${t("median %{median} ms · suggest +%{offset} ms", {
+            median: result.median_ms.toFixed(0),
+            offset: result.suggested_offset_ms,
+          })}
         </span>
-        <button class="chip active" @click=${() => this._applyCalibration()}>Apply</button>
+        <button class="chip active" @click=${() => this._applyCalibration()}>${t("Apply")}</button>
       `;
     } else if (status === "applied") {
-      line = html`<span class="val" style="min-width:11em;color:var(--color-accent)">Applied</span>`;
+      line = html`<span class="val" style="min-width:11em;color:var(--color-accent)">${t("Applied")}</span>`;
     } else if (status === "failed") {
       line = html`<span class="val" style="min-width:11em;color:var(--color-warning,#f59e0b);font-size:10px">${c.error}</span>`;
     } else {
@@ -558,12 +545,12 @@ export class SettingsModal extends LitElement {
     }
     return html`
       <div class="row">
-        <label title=${CAL_TIP}>Auto-calibrate</label>
+        <label title=${CAL_TIP}>${t("Auto-calibrate")}</label>
         <div class="slider-row" title=${CAL_TIP} style="justify-content:flex-end">
           ${line}
           <button class="chip" ?disabled=${status === "running"}
                   @click=${() => this._startCalibration()}>
-            ${status === "running" ? "Running…" : "Calibrate"}
+            ${status === "running" ? t("Running…") : t("Calibrate")}
           </button>
         </div>
       </div>
@@ -581,17 +568,60 @@ export class SettingsModal extends LitElement {
     return html`
       <div class="card" @click=${(e) => e.stopPropagation()}>
         <header>
-          <h2>Preferences</h2>
-          <button class="close" title="Close" @click=${this._close}>${icon("x-mark", 16)}</button>
+          <h2>${t("Preferences")}</h2>
+          <button class="close" title=${t("Close")} @click=${this._close}>${icon("x-mark", 16)}</button>
         </header>
         <div class="body">
+          ${this._renderLanguageSection()}
           ${this._renderEditorConventionsSection()}
           ${this._renderAudioSection()}
           ${this._renderWindowsSection()}
         </div>
         <footer>
-          <button class="primary" @click=${this._close}>Done</button>
+          <button class="primary" @click=${this._close}>${t("Done")}</button>
         </footer>
+      </div>
+    `;
+  }
+
+  /**
+   * Locale picker. Lists every catalog the server advertised at
+   * /locales/index.json (with English always included as the
+   * identity fallback). Picking one flips `setLocale` which
+   * persists to localStorage AND broadcasts `foyer:locale-changed`
+   * so other components re-render in place.
+   *
+   * This is the only section that's intentionally NOT wrapped in
+   * `t()` for its OWN label — the user picking a language might
+   * not be able to read the language they're currently on yet.
+   * Showing the language name in its native script (`Español`,
+   * `English`, …) is the universal language of language pickers.
+   */
+  _renderLanguageSection() {
+    const active = currentLocale();
+    const codes = availableLocales();
+    return html`
+      <div class="section">
+        <h3>${t("Language")} / Language / Idioma</h3>
+        <div class="row">
+          <label title=${t("UI language for this browser. Each connected client picks its own; multi-client sessions can run in mixed languages.")}>
+            ${t("Display language")}
+          </label>
+          <select
+            style="background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;padding:2px 6px"
+            @change=${(e) => { setLocale(e.currentTarget.value); }}>
+            ${codes.map((code) => {
+              const meta = localeMeta(code);
+              const label = meta?.native_name || meta?.name || code;
+              return html`
+                <option value=${code} ?selected=${code === active}>${label}</option>
+              `;
+            })}
+          </select>
+        </div>
+        <div style="font-size:10px;color:var(--color-text-muted);padding:4px 0 0 2px;line-height:1.5">
+          ${t("Missing translations fall back to English.")}
+        </div>
       </div>
     `;
   }
@@ -610,10 +640,10 @@ export class SettingsModal extends LitElement {
     const current = profiles.find((p) => p.id === active) || profiles[0];
     return html`
       <div class="section">
-        <h3>Editor conventions</h3>
+        <h3>${t("Editor conventions")}</h3>
         <div class="row">
-          <label title="DAW-style keyboard shortcuts and mouse-wheel behaviour. Affects the timeline body, ruler, overview strip, and transport keys.">
-            Profile
+          <label title=${t("DAW-style keyboard shortcuts and mouse-wheel behaviour. Affects the timeline body, ruler, overview strip, and transport keys.")}>
+            ${t("Profile")}
           </label>
           <select
             style="background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;padding:2px 6px"
@@ -652,46 +682,47 @@ export class SettingsModal extends LitElement {
     const isSecondary = multiWindow.isSecondary;
     return html`
       <div class="section">
-        <h3>Windows</h3>
+        <h3>${t("Windows")}</h3>
         <div class="row">
-          <label title="This browser tab/window's place in the multi-window family. All windows share session state; audio I/O is owned by the spawning (Primary) window.">
-            This window
+          <label title=${t("This browser tab/window's place in the multi-window family. All windows share session state; audio I/O is owned by the spawning (Primary) window.")}>
+            ${t("This window")}
           </label>
           <div class="slider-row" style="justify-content:flex-end">
             <span class="val" style="min-width:11em">
-              Window ${myNum ?? "•"} ·
-              ${myRole === "primary" ? "Primary" : "Secondary"}
+              ${myRole === "primary"
+                ? t("Window %{n} · Primary", { n: myNum ?? "•" })
+                : t("Window %{n} · Secondary", { n: myNum ?? "•" })}
             </span>
-            <button class="chip" title="Flash 'Window N' on every open window so you can match labels to physical screens"
+            <button class="chip" title=${t("Flash 'Window N' on every open window so you can match labels to physical screens")}
                     @click=${this._identifyWindows}>
-              Identify
+              ${t("Identify")}
             </button>
           </div>
         </div>
         <div class="row">
           <label title=${isSecondary
-            ? "Secondary windows ask their Primary to spawn the new window — same family, fresh slot."
-            : "Spawn a new browser window attached to this Foyer session. Audio stays on this (Primary) window."}>
-            Open new window
+            ? t("Secondary windows ask their Primary to spawn the new window — same family, fresh slot.")
+            : t("Spawn a new browser window attached to this Foyer session. Audio stays on this (Primary) window.")}>
+            ${t("Open new window")}
           </label>
           <div class="slider-row" style="justify-content:flex-end">
             <span class="val" style="font-size:10px;color:var(--color-text-muted)">
               Ctrl+Alt+W
             </span>
             <button class="chip" @click=${this._openNewWindow}>
-              + New window
+              ${t("+ New window")}
             </button>
           </div>
         </div>
         ${siblings.length > 0 ? html`
           <div class="row" style="align-items:flex-start">
-            <label>Other windows</label>
+            <label>${t("Other windows")}</label>
             <div class="slider-row" style="justify-content:flex-end;flex-wrap:wrap;gap:6px">
               ${siblings.map((s) => {
                 const n = multiWindow.siblingWindowNumber(s.slot);
                 return html`
                   <span class="val" style="border:1px solid var(--color-border);border-radius:4px;padding:2px 8px">
-                    Window ${n ?? "•"} · ${s.role}
+                    ${t("Window %{n} · %{role}", { n: n ?? "•", role: s.role })}
                   </span>
                 `;
               })}
@@ -699,12 +730,12 @@ export class SettingsModal extends LitElement {
           </div>
         ` : null}
         <div class="row">
-          <label title="Drop every saved window for the current monitor layout. Use this if you see weird slot numbers (Window 7 with no Window 2-6) — stale entries from dev sessions get wiped and the next + New window starts from Window 2 again.">
-            Reset saved layout
+          <label title=${t("Drop every saved window for the current monitor layout. Use this if you see weird slot numbers (Window 7 with no Window 2-6) — stale entries from dev sessions get wiped and the next + New window starts from Window 2 again.")}>
+            ${t("Reset saved layout")}
           </label>
           <div class="slider-row" style="justify-content:flex-end">
             <button class="chip" @click=${this._forgetWindows}>
-              Forget saved windows
+              ${t("Forget saved windows")}
             </button>
           </div>
         </div>

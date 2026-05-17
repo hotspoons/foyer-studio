@@ -349,14 +349,19 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
   worth a side-by-side.
 - [x] Large resizable bottom scroll area with zoom and scrub and track high levels
    like ardour, that is really well done
-- [ ] The + launcher should have other windows from the main menu - audio pool,
+- [x] The + launcher should have other windows from the main menu - audio pool,
    midi devices, on screen keyboard, remote access, preferences, group manager
    maybe organized by theme?
-- [ ] FAB is dragged around by the window handle, but the window isn't dragged
+- [x] FAB is dragged around by the window handle, but the window isn't dragged
    around by the FAB. 
-- [ ] Dragging the FAB over the dock sometimes show it will land in the dock, but
+- [x] Dragging the FAB over the dock sometimes show it will land in the dock, but
    not reliable and releasing it even with the lit up landing area doesn't 
    dock the FAB
+- [ ] Native GUI for plugins and instruments via xpra stopped working at some 
+  point, need to fix. It worked before!
+- [ ] Make vertical sizing limits for individual channels higher than the 400 px or
+  what ever it is right now - in fact, a maximize channel button where the 
+  single channel and its waveform take up the entire tiemline view would be dope
 
 ## Infra + ops
 
@@ -434,13 +439,78 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
         full-window tile and signals `data-foyer-viz-ready`). Headless is gated by
         the `headless-render` cargo feature (default on); when chromium isn't on
         PATH the error string carries platform-specific install commands.
-  - [ ] Backend-side spectrography (instant + temporal, per-channel + main mix)
-        through the shim — separate piece from FE viz capture, requires shim work.
-  - [x] One of the hardest parts of DAWs is the insane number of controls, even for a very stripped down one like this one. We need a tool that the agent can call that takes a screencapture of exactly what the user sees so the agent can guide them on what to click or drag where to achieve a goal
-  - [ ] Fuck ton of `.unwrap()` with dubious error handling - lock this down so we
+  - [/] Backend-side spectrography (instant + temporal, per-channel + main mix)
+        through the shim — wire surface, stub producer, FE widget, MCP tool all
+        landed. Ardour shim's FFT pipeline itself is still TBD.
+        - Schema ([spectrum.rs](../crates/foyer-schema/src/spectrum.rs)):
+          `SpectrumFrame { target, bins, sample_rate, window, min_db, channels[],
+          server_mono_ns }`, `SpectrumOpts { fft_size, hop_size, window, min_db,
+          max_bins, per_channel }`, `SpectrumTarget { master | monitor |
+          track{id} }`, `SpectrumCapabilities { available, fft_sizes[],
+          windows[], max_frame_rate_hz }`. Session snapshot carries the caps
+          inline so the FE gates its UI off `session.spectrum.available`.
+        - Backend trait ([foyer-backend/lib.rs](../crates/foyer-backend/src/lib.rs)):
+          `spectrum_capabilities`, `subscribe_spectrum`, `unsubscribe_spectrum`,
+          `snapshot_spectrum`. Defaults return Unsupported.
+        - Stub backend
+          ([foyer-backend-stub/src/spectrum.rs](../crates/foyer-backend-stub/src/spectrum.rs)):
+          synthesises plausible frames at 50 Hz — pink-ish noise floor + one
+          tone per track (id-derived freq, slow sweep) so the waterfall has
+          visible motion. Per-track gain attenuates the peak; muted tracks
+          drop out. Master/monitor sum the tracks; Track{id} renders just
+          that one.
+        - Server WS ([foyer-server/ws.rs](../crates/foyer-server/src/ws.rs)):
+          dispatch arms for `subscribe_spectrum` / `unsubscribe_spectrum` +
+          fan-out of `Event::SpectrumFrame` / `SpectrumSubscribed` /
+          `SpectrumUnsubscribed`.
+        - FE widget
+          ([web/ui-core/viz/spectrum.js](../web/ui-core/viz/spectrum.js)):
+          `<foyer-spectrum>` renders bars (current frame) + log-y waterfall
+          history on 2D canvas with a magma colour ramp. Tile wrapper
+          ([web/ui-full/components/spectrum-tile.js](../web/ui-full/components/spectrum-tile.js))
+          adds a source picker (Master / Monitor / per-track).
+          [viz-capture.js](../web/core/viz-capture.js) +
+          [headless-viz.js](../web/core/headless-viz.js) updated to mount
+          the new widget for `visualize.spectrogram` and wait for the
+          waterfall to fill before capturing.
+        - MCP tool
+          ([foyer-agent/tools/spectrum.rs](../crates/foyer-agent/src/tools/spectrum.rs)):
+          `spectrum.capabilities` (probe host) + `spectrum.snapshot` (one
+          FFT frame returned as JSON, per-channel dBFS bins). `visualize.spectrogram`
+          continues to return the waterfall PNG.
+        - Ardour shim ([dispatch.cc](../shims/ardour/src/dispatch.cc) +
+          [msgpack_out.cc](../shims/ardour/src/msgpack_out.cc)): subscribe /
+          unsubscribe dispatch arms wired; today they emit a polite "FFT
+          pipeline not yet shipped" `Event::Error` and the snapshot carries
+          `spectrum.available=false` so the FE hides the analyser surfaces.
+          Implementing the real path means: tap the destination Route's
+          outputs through a per-subscription disk-thread analyser, run a
+          Hann-windowed FFT every hop, and emit `encode_spectrum_frame`
+          from a low-priority idle slot.
+        - Playwright spec
+          ([spectrum.spec.js](../tests-ui/specs/spectrum.spec.js)) covers
+          cap advertisement, subscribe → frame stream → unsubscribe
+          round-trip, and tile-view mount with non-blank waterfall pixels.
+  - [x] Fuck ton of `.unwrap()` with dubious error handling - lock this down so we
     have a minimally panicky app, use `.unwrap_or_else()`, `.expect()` with a value,
     or more robust pattern matching
-  - [/] Scripting editor - support DAW scripting in a generic fashion, look at Ardour's
+    - Audited 20 production-path `.unwrap()` calls across `foyer-server`,
+      `foyer-backend-host`, and `foyer-cli`. Every Mutex `.lock().unwrap()`
+      got an `.expect("<mutex name> not poisoned")` so a poisoned lock now
+      reports which subsystem panicked first. The "constant addr parse"
+      sites (`"127.0.0.1:3838".parse().unwrap()`) became
+      `.expect("hardcoded default socket addr is statically valid")`.
+      The unreachable-after-loop unwrap in `plugin_gui_ws` became a `match
+      tcp` that closes the WS cleanly on the impossible-but-now-handled
+      None branch. `pick_single` in `foyer-backend-host::discovery` uses
+      `pop()` + `ok_or` instead of `into_iter().next().unwrap()`.
+      `session_scrub`'s quarantine drain documents the depth-zero
+      invariant with `.expect("quarantine state must be Some at depth-zero end")`.
+      Test code (138 unwraps in `#[cfg(test)]` modules) intentionally
+      left alone — panicking on test-time setup failures is the right
+      call there.
+  - [x] One of the hardest parts of DAWs is the insane number of controls, even for a very stripped down one like this one. We need a tool that the agent can call that takes a screencapture of exactly what the user sees so the agent can guide them on what to click or drag where to achieve a goal
+  - [x] Scripting editor - support DAW scripting in a generic fashion, look at Ardour's
         lua support, expose tools for all layers bidning to what Ardour exposes, query
         the active shim on start up so we can limit the the available scripting to what
         is in the DAW, but make this binding work.
@@ -514,7 +584,7 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
       hop) and exposed verbatim through `foyer-mcp` for external consumers
 - [x] Back end vs front end split mapped — everything except live DOM-rendered
       visualizations lives in Rust and is reachable via MCP for external agents
-- [ ] Expose the in-process agent as an OpenAI-compatible upstream
+- [x] Expose the in-process agent as an OpenAI-compatible upstream
   - Add an HTTP surface at `/v1/*` so external apps (Cursor, OpenWebUI,
     custom Python clients, etc.) can treat Foyer as a regular OpenAI
     endpoint and inherit the full agent — tool registry, system prompt,
@@ -575,3 +645,56 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
       conversation + engine wiring) with the axum routes in
       `crates/foyer-server/src/openai_proxy.rs` (router, auth layer,
       SSE plumbing) — matches the split used for the WebLLM bridge.
+
+## i18n / runtime translation
+
+- [/] Drupal-style runtime i18n landed (en, de, es, it, ja, ko, zh).
+  Shared catalogs at `web/locales/<lang>.json` baked into Rust binaries
+  via `include_dir!` AND served statically to the browser; `tr!()` /
+  `tn!()` / `loc!()` macros in [foyer-i18n](../crates/foyer-i18n/);
+  `t()` / `tn()` / `setLocale()` in [i18n.js](../web/core/i18n.js);
+  picker in Preferences; `just i18n-extract` harvests every wrapped
+  string and reports missing/orphaned per locale. `Event::Error` carries
+  an additive `localized: Option<LocalizedString>` so new emit sites
+  use `Event::error_localized(code, loc!(…), target_peer_id)`. Legacy
+  English-only `message` stays populated for back-compat.
+- [ ] Shim-side migration of `encode_error` to a structured payload.
+  Today the Ardour shim ships plain `(code, message)` strings to the
+  sidecar via msgpack — see `shims/ardour/src/msgpack_out.{h,cc}`'s
+  `encode_error()` and the call sites at `shims/ardour/src/dispatch.cc`
+  lines 3884, 3923, 4849 (plus older ones at 3910, 3972, 5130, …). When
+  the shim emits an Error, the sidecar logs + re-broadcasts as-is, so
+  shim-originated errors render in English regardless of the client's
+  locale. The path forward:
+  1. Grow `encode_error` to `encode_error(code, key, params_map)`. Keys
+     stay English source strings (Drupal style); params is a flat
+     `map<string,string>`. msgpack is already self-describing so it's
+     additive — older sidecars that read just `(code, message)` ignore
+     the extra fields and fall back to the pre-rendered message the
+     shim can emit alongside.
+  2. Update each `dispatch.cc` call site to pass `(code, key, {param,
+     value, …})` instead of concatenating a string.
+  3. Mirror the keys into `web/locales/*.json` so every locale catalog
+     has translations.
+  4. Sidecar's [foyer-backend-host/src/client.rs] `Event::Error` arm
+     turns the structured shim payload into a `LocalizedString` and
+     attaches it to the WS-side emit.
+  - Shim builds in seconds against `/usr/lib/ardour9/libardourcp.so`
+    from `shims/ardour/build` (already pre-warmed in the devcontainer),
+    so iteration is fast — just touch + `make -j2`.
+- [ ] Wrap the long-tail FE surfaces (mixer, timeline, agent panel,
+  file / audio modals, …). Infrastructure is solid; remaining work is
+  mechanical and parallelizable per-component. Pattern: add
+  `import { t, onLocaleChange } from "/core/i18n.js"`, wire `onLocaleChange`
+  in `connectedCallback`, wrap visible strings with `t()`, re-run
+  `just i18n-extract`, fill missing keys in each locale's JSON.
+- [ ] Migrate the rest of the ~95 server-side `Event::Error` emit sites
+  (those that still carry `localized: None`) to `Event::error_localized`
+  + `loc!()`. Each one is a 5-line mechanical change against a known
+  message template. The compiler-enforced field guarantees no emit
+  site can be missed.
+- [ ] Native-speaker review for ja / ko / zh catalogs (flagged in each
+  `_meta.translator_notes`). First-pass translations follow established
+  DAW vocabulary (Cubase / Logic / Studio One localizations) but the
+  longer descriptive strings haven't been audited for idiomatic phrasing
+  or formality register.

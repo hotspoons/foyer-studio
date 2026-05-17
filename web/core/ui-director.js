@@ -12,7 +12,12 @@
 // Rust enum if a new subcommand lands. Unknown subcommands return a
 // clear error so the agent sees the gap rather than a hang.
 
-import { spawnWindowKind, listWindowKinds } from "/ui-core/widgets/window.js";
+import {
+  spawnWindowKind,
+  listWindowKinds,
+  listWindowKindsWithMeta,
+  canonicalWindowKinds,
+} from "/ui-core/widgets/window.js";
 
 function snapshotState() {
   // List every currently-mounted foyer-window with the metadata the
@@ -37,10 +42,27 @@ function snapshotState() {
   // Tile tree — pass through whatever the layout store has.
   let tile_tree = null;
   try { tile_tree = window.__foyer?.layout?.state?.tree ?? null; } catch {}
+  // Compute the gap-aware kind manifest. `available_kinds` is the
+  // bare id list for back-compat with older agents; `kinds` is the
+  // enriched form with label/description/viz_fallback; `missing_kinds`
+  // tells the agent which canonical Foyer features are absent in this
+  // variant so it knows to reach for the viz fallback (e.g. on a
+  // phone the piano roll isn't registered but `visualize.midi_roll`
+  // still works).
+  const available = listWindowKinds();
+  const kinds = listWindowKindsWithMeta();
+  const canonical = canonicalWindowKinds();
+  const availableSet = new Set(available);
+  const missing_kinds = canonical
+    .filter((k) => !availableSet.has(k.id))
+    .map((k) => ({ ...k }));
   return {
     windows,
     tile_tree,
-    available_kinds: listWindowKinds(),
+    available_kinds: available,
+    kinds,
+    canonical_kinds: canonical,
+    missing_kinds,
     viewport: { w: window.innerWidth, h: window.innerHeight },
   };
 }

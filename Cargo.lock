@@ -1361,6 +1361,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "foyer-i18n"
+version = "0.0.0"
+dependencies = [
+ "foyer-schema",
+ "include_dir",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "foyer-ipc"
 version = "0.0.0"
 dependencies = [
@@ -1417,6 +1429,7 @@ dependencies = [
  "foyer-backend-stub",
  "foyer-capabilities",
  "foyer-config",
+ "foyer-i18n",
  "foyer-mcp",
  "foyer-schema",
  "futures",

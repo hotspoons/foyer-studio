@@ -664,6 +664,7 @@ pub(crate) fn initial_session() -> Session {
         ppqn: Some(1920),
         meta: serde_json::json!({ "project": "demo" }),
         scripting: Some(stub_scripting_capabilities()),
+        spectrum: Some(foyer_schema::SpectrumCapabilities::stub()),
     }
 }
 

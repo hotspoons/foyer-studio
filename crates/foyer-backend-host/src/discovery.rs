@@ -109,10 +109,13 @@ fn is_alive(ad: &Advertisement) -> bool {
 /// ambiguity. Useful for CLI paths that want "auto-pick when unambiguous,
 /// yell when not".
 pub fn pick_single() -> Result<Advertisement, DiscoveryError> {
-    let found = scan();
+    let mut found = scan();
     match found.len() {
         0 => Err(DiscoveryError::NoShim),
-        1 => Ok(found.into_iter().next().unwrap()),
+        // Use `pop()` rather than `into_iter().next().unwrap()` so the
+        // exactly-one branch has zero panic surface — match exhausted
+        // the other cases, so found has a single element.
+        1 => found.pop().ok_or(DiscoveryError::NoShim),
         _ => Err(DiscoveryError::Ambiguous(found)),
     }
 }

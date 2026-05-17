@@ -11,6 +11,7 @@ pub mod action;
 pub mod agent;
 pub mod audio;
 pub mod fs;
+pub mod i18n;
 pub mod id;
 pub mod io;
 pub mod message;
@@ -18,6 +19,7 @@ pub mod midi;
 pub mod plugin;
 pub mod scripting;
 pub mod session;
+pub mod spectrum;
 pub mod timeline;
 pub mod tunnel;
 pub mod value;
@@ -32,6 +34,7 @@ pub use audio::{
     LatencyReport, SampleFormat, SdpPayload,
 };
 pub use fs::{FsEntry, FsEntryKind, PathListing};
+pub use i18n::LocalizedString;
 pub use id::EntityId;
 pub use io::{EnginePort, IoDirection, IoPort};
 pub use message::{
@@ -52,6 +55,10 @@ pub use scripting::{
 pub use session::{
     Bus, Group, GroupPatch, MidiPatchState, PluginInstance, Send, Session, Track, TrackKind,
     TrackPatch, Transport, DEFAULT_SAMPLE_RATE,
+};
+pub use spectrum::{
+    SpectrumCapabilities, SpectrumChannel, SpectrumFrame, SpectrumOpts, SpectrumTarget,
+    SpectrumWindow,
 };
 pub use timeline::{
     AudioSourceSegment, FadeShape, Region, RegionPatch, TimelineMeta, WaveformPeaks,

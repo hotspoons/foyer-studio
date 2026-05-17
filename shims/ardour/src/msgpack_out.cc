@@ -739,15 +739,12 @@ encode_session_snapshot (Session& session,
 		o.str ("session");
 
 		// Session { schema_version, transport, tracks, groups, dirty,
-		// sample_rate, ppqn, meta, scripting }. `sample_rate` was
-		// promoted out of the `meta` JSON blob so consumers don't
-		// have to fish through untyped data — see `Session.sample_rate`
-		// in foyer-schema. `ppqn` carries Ardour's `ticks_per_beat`
-		// (1920) so clients render note ticks correctly without the
-		// stale 960 hardcode. `scripting` advertises the Lua surface
-		// (types, hooks, languages) so the FE/agent renders against
-		// it without baking in shim-specific names.
-		o.map (9);
+		// sample_rate, ppqn, meta, scripting, spectrum }. The spectrum
+		// capability advertisement gets sent unconditionally — set to
+		// `available=false` here until the shim's FFT pipeline ships
+		// so FEs gate the spectrum tile-view + visualize.spectrum
+		// MCP path without us silently rendering a placeholder.
+		o.map (10);
 		o.str ("schema_version"); o.array (2); o.u (0); o.u (1);
 
 		// Transport is a struct; map keys are Rust field names, values are Parameter structs.
@@ -1169,6 +1166,19 @@ encode_session_snapshot (Session& session,
 		// `foyer-backend-stub::stub_scripting_capabilities()` so a
 		// Foyer FE iterating against the stub stays wire-compatible.
 		o.str ("scripting"); emit_scripting_capabilities (o);
+		// Spectrum capabilities. Today: stubbed unavailable because the
+		// Ardour shim hasn't shipped an FFT pipeline yet — see TODO.md
+		// follow-up. The FE keys off this map so the spectrogram tile
+		// + visualize.spectrum tool fall back to "switch to stub backend
+		// for demo" messaging instead of failing silently.
+		o.str ("spectrum");
+		{
+			o.map (4);
+			o.str ("available");        o.b (false);
+			o.str ("fft_sizes");        o.array (0);
+			o.str ("windows");          o.array (0);
+			o.str ("max_frame_rate_hz"); o.u (0u);
+		}
 	});
 }
 

@@ -158,6 +158,10 @@ struct Shared {
     /// so the sync `scripting_capabilities()` call can answer without
     /// a round-trip. `None` until the first snapshot lands.
     cached_scripting_caps: Mutex<Option<foyer_schema::ScriptingCapabilities>>,
+    /// Cached spectrum capabilities. Same pattern as scripting: pulled
+    /// off `SessionSnapshot.spectrum` so the host's
+    /// `spectrum_capabilities()` impl can answer synchronously.
+    cached_spectrum_caps: std::sync::Mutex<Option<foyer_schema::SpectrumCapabilities>>,
     /// Cache of known regions, keyed by region id. Populated from every
     /// `RegionsList` / `RegionUpdated` event; drained on `RegionRemoved`.
     /// Used to look up `source_path` when the sidecar needs to decode
@@ -220,6 +224,7 @@ impl HostClient {
             pending_enable_script: Mutex::new(Vec::new()),
             pending_run_script: Mutex::new(HashMap::new()),
             cached_scripting_caps: Mutex::new(None),
+            cached_spectrum_caps: std::sync::Mutex::new(None),
             regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
             disconnected: AtomicBool::new(false),
@@ -916,6 +921,17 @@ impl HostClient {
         self.shared.cached_scripting_caps.lock().await.clone()
     }
 
+    /// Latest spectrum caps from the most recent session snapshot.
+    /// Sync — uses a std Mutex so the trait's
+    /// `spectrum_capabilities` impl doesn't have to be async-only.
+    pub fn cached_spectrum_caps(&self) -> Option<foyer_schema::SpectrumCapabilities> {
+        self.shared
+            .cached_spectrum_caps
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+    }
+
     pub async fn set_automation_mode(
         &self,
         lane_id: EntityId,
@@ -1195,6 +1211,9 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     // snapshot so `scripting_capabilities()` answers
                     // without a round-trip after the first snapshot.
                     *shared.cached_scripting_caps.lock().await = session.scripting.clone();
+                    if let Ok(mut g) = shared.cached_spectrum_caps.lock() {
+                        *g = session.spectrum.clone();
+                    }
                     let waiters = std::mem::take(&mut *shared.pending_snapshot.lock().await);
                     for w in waiters {
                         let _ = w.send((**session).clone());

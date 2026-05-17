@@ -43,7 +43,10 @@ impl MidiLatencyTracker {
 
     /// Record one roundtrip observation for a track.
     pub fn record(&self, track_id: &EntityId, latency_ns: i64) {
-        let mut g = self.tracks.lock().unwrap();
+        let mut g = self
+            .tracks
+            .lock()
+            .expect("midi latency tracks mutex not poisoned");
         let r = g.entry(track_id.clone()).or_default();
         if r.samples_ns.len() < RING_CAP {
             r.samples_ns.push(latency_ns);
@@ -59,7 +62,10 @@ impl MidiLatencyTracker {
     /// until at least 4 samples have accumulated (MIDI streams in
     /// less data than audio so we converge with fewer samples).
     pub fn median_ms(&self, track_id: &EntityId) -> Option<f32> {
-        let g = self.tracks.lock().unwrap();
+        let g = self
+            .tracks
+            .lock()
+            .expect("midi latency tracks mutex not poisoned");
         let r = g.get(track_id)?;
         if r.filled < 4 {
             return None;
@@ -75,7 +81,10 @@ impl MidiLatencyTracker {
     /// starts fresh.
     #[allow(dead_code)]
     pub fn drop_track(&self, track_id: &EntityId) {
-        let mut g = self.tracks.lock().unwrap();
+        let mut g = self
+            .tracks
+            .lock()
+            .expect("midi latency tracks mutex not poisoned");
         g.remove(track_id);
     }
 }

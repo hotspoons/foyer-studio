@@ -30,6 +30,7 @@ use tokio::io::AsyncWriteExt;
 /// breaking existing user data — only filenames that aren't
 /// already on disk get written.
 const DEFAULT_SKILL_SEEDS: &[(&str, &str)] = &[
+    // Lua-authoring playbooks (already on disk for early adopters).
     (
         "ardour-lua-dsp.md",
         include_str!("skills_seed/ardour-lua-dsp.md"),
@@ -45,6 +46,61 @@ const DEFAULT_SKILL_SEEDS: &[(&str, &str)] = &[
     (
         "ardour-lua-snippet.md",
         include_str!("skills_seed/ardour-lua-snippet.md"),
+    ),
+    // Task-oriented playbooks. Each one walks a smaller model through
+    // the common gotchas for a single domain. Loaded on demand via
+    // `scripts.skill { name }` so they don't bloat every welcome.
+    (
+        "adding-plugins.md",
+        include_str!("skills_seed/adding-plugins.md"),
+    ),
+    (
+        "midi-track-setup.md",
+        include_str!("skills_seed/midi-track-setup.md"),
+    ),
+    (
+        "drum-pattern-authoring.md",
+        include_str!("skills_seed/drum-pattern-authoring.md"),
+    ),
+    (
+        "melodic-region-authoring.md",
+        include_str!("skills_seed/melodic-region-authoring.md"),
+    ),
+    (
+        "regions-operations.md",
+        include_str!("skills_seed/regions-operations.md"),
+    ),
+    (
+        "mixer-balancing.md",
+        include_str!("skills_seed/mixer-balancing.md"),
+    ),
+    (
+        "automation-curves.md",
+        include_str!("skills_seed/automation-curves.md"),
+    ),
+    (
+        "ui-automation.md",
+        include_str!("skills_seed/ui-automation.md"),
+    ),
+    (
+        "visualization-cheatsheet.md",
+        include_str!("skills_seed/visualization-cheatsheet.md"),
+    ),
+    (
+        "session-lifecycle.md",
+        include_str!("skills_seed/session-lifecycle.md"),
+    ),
+    (
+        "solo-and-mute-hygiene.md",
+        include_str!("skills_seed/solo-and-mute-hygiene.md"),
+    ),
+    (
+        "spectrum-analysis.md",
+        include_str!("skills_seed/spectrum-analysis.md"),
+    ),
+    (
+        "groups-and-busses.md",
+        include_str!("skills_seed/groups-and-busses.md"),
     ),
 ];
 
@@ -226,6 +282,14 @@ impl AgentStore {
         let new_body = rewrite_enabled(&body, enabled);
         fs::write(&path, new_body).await?;
         Ok(())
+    }
+
+    /// Read one skill's full body by name. Used by the `scripts.skill`
+    /// tool to load a playbook on demand. Returns an error if the name
+    /// is invalid or the file doesn't exist.
+    pub async fn read_skill_body(&self, name: &str) -> Result<String, StoreError> {
+        let path = self.skills_dir().join(format!("{}.md", safe_name(name)?));
+        Ok(fs::read_to_string(&path).await?)
     }
 
     /// Write a new skill file (or overwrite an existing one). The

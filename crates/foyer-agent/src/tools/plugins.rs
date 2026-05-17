@@ -14,6 +14,20 @@ use crate::tools::{Tool, ToolContext, ToolError, ToolResult};
 
 pub struct PluginsTool;
 
+/// One entry in a `set_params` batch — control id + the target value
+/// in the parameter's natural scale.
+#[derive(Debug, Deserialize)]
+pub struct ParamChange {
+    pub control_id: String,
+    pub value: f64,
+}
+
+/// Server-side cap on a single `set_params` batch. 256 is generous
+/// enough for any realistic synth patch (synthv1 / amsynth top out
+/// around 80) while still bounded enough that a runaway model can't
+/// flood the WS with one tool call.
+const MAX_SET_PARAMS_BATCH: usize = 256;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "subcommand", rename_all = "snake_case")]
 enum Op {
@@ -58,6 +72,21 @@ enum Op {
     SetParam {
         control_id: String,
         value: f64,
+    },
+    /// Bulk parameter set against ONE plugin. Equivalent to N
+    /// `set_param` calls but with a single tool round-trip + a single
+    /// validation snapshot lookup. Hit this when programming a synth
+    /// patch by hand — Rich's session log showed an agent firing
+    /// ~30 set_param calls in a row to dial in a synthv1 sound.
+    /// Capped at 256 params per call (the same backend can only push
+    /// so many ControlSet messages per WS frame before back-pressure
+    /// kicks in; chunk further client-side if you need more).
+    /// All params must belong to `plugin_id` — the validator rejects
+    /// the whole batch if any control_id doesn't resolve to a
+    /// parameter on that plugin instance.
+    SetParams {
+        plugin_id: String,
+        params: Vec<ParamChange>,
     },
     /// Enumerate factory + user presets available for a plugin
     /// INSTANCE. The agent supplies the plugin's instance id (from
@@ -106,7 +135,10 @@ impl Tool for PluginsTool {
          remove(plugin_id), \
          move(plugin_id, new_index), \
          set_bypass(plugin_id, bypassed), \
-         set_param(control_id, value), \
+         set_param(control_id, value) — for a SINGLE change, \
+         set_params(plugin_id, params:[{control_id,value}…]) — \
+         BATCHED, prefer this when programming a synth patch (one tool \
+         call applies the whole 30-knob preset; capped at 256 params), \
          list_presets(plugin_id), \
          load_preset(plugin_id, preset_uri), \
          duplicate(source_plugin_id, target_track_id, index?) — \
@@ -121,7 +153,20 @@ impl Tool for PluginsTool {
                 "subcommand": { "type": "string",
                     "enum": ["catalog", "on_track", "describe", "insert",
                              "remove", "move", "set_bypass", "set_param",
+                             "set_params",
                              "list_presets", "load_preset", "duplicate"] },
+                "params": {
+                    "type": "array",
+                    "description": "set_params: list of {control_id, value} pairs to apply against one plugin in a single round-trip.",
+                    "items": {
+                        "type": "object",
+                        "required": ["control_id", "value"],
+                        "properties": {
+                            "control_id": { "type": "string" },
+                            "value": { "type": "number" }
+                        }
+                    }
+                },
                 "track_id": { "type": "string" },
                 "plugin_id": { "type": "string" },
                 "plugin_uri": { "type": "string" },
@@ -429,6 +474,101 @@ impl Tool for PluginsTool {
                     "{} ({}) ← {value}",
                     param.label, control_id
                 )))
+            }
+            Op::SetParams { plugin_id, params } => {
+                if params.is_empty() {
+                    return Err(ToolError::InvalidArgs(
+                        "set_params requires at least one entry in `params`".into(),
+                    ));
+                }
+                if params.len() > MAX_SET_PARAMS_BATCH {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "set_params batch size {} exceeds cap of {}",
+                        params.len(),
+                        MAX_SET_PARAMS_BATCH,
+                    )));
+                }
+                // One snapshot for the whole batch — saves the
+                // N round-trips through `set_param` (which each
+                // re-fetched the snapshot for its own validation).
+                let snap = backend
+                    .snapshot()
+                    .await
+                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                let plugin = snap
+                    .tracks
+                    .iter()
+                    .flat_map(|t| t.plugins.iter())
+                    .find(|p| p.id.as_str() == plugin_id)
+                    .ok_or_else(|| {
+                        ToolError::InvalidArgs(format!(
+                            "unknown plugin_id '{plugin_id}' — call plugins.on_track to list \
+                             plugins on each track"
+                        ))
+                    })?;
+                // Pre-validate everything BEFORE issuing any
+                // set_controls. Half-applying a patch leaves the
+                // plugin in a worse state than not touching it,
+                // which is the opposite of what Stop-and-retry
+                // expects.
+                let mut resolved = Vec::with_capacity(params.len());
+                for change in &params {
+                    let Some(param) = plugin
+                        .params
+                        .iter()
+                        .find(|p| p.id.as_str() == change.control_id)
+                    else {
+                        return Err(ToolError::InvalidArgs(format!(
+                            "control_id '{}' is not a parameter of plugin '{}' \
+                             (call plugins.describe to list valid control_ids)",
+                            change.control_id, plugin_id,
+                        )));
+                    };
+                    if let Some([lo, hi]) = param.range {
+                        if change.value < lo || change.value > hi {
+                            return Err(ToolError::InvalidArgs(format!(
+                                "value {} out of range for '{}' [{lo}, {hi}]",
+                                change.value, param.label,
+                            )));
+                        }
+                    }
+                    resolved.push((change.control_id.clone(), change.value, param.label.clone()));
+                }
+                // Apply. We could parallelise with `join_all` here,
+                // but most backends serialise set_control on the
+                // shim's event loop anyway — concurrent dispatch
+                // wouldn't reduce wall time. Sequential keeps the
+                // error reporting tractable too (we know which one
+                // failed).
+                let mut applied = Vec::with_capacity(resolved.len());
+                for (control_id, value, label) in &resolved {
+                    backend
+                        .set_control(
+                            EntityId::new(control_id.clone()),
+                            ControlValue::Float(*value),
+                        )
+                        .await
+                        .map_err(|e| {
+                            ToolError::Execution(format!(
+                                "set_control failed for '{control_id}' (after {} of {} \
+                                 already applied): {e}",
+                                applied.len(),
+                                resolved.len(),
+                            ))
+                        })?;
+                    applied.push(json!({
+                        "control_id": control_id,
+                        "label": label,
+                        "value": value,
+                    }));
+                }
+                Ok(
+                    ToolResult::ok(format!("{} ← {} params", plugin.name, applied.len()))
+                        .with_data(json!({
+                            "plugin_id": plugin_id,
+                            "applied": applied,
+                        })),
+                )
             }
             Op::ListPresets { plugin_id } => {
                 let presets = backend

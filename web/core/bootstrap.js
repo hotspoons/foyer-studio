@@ -36,6 +36,7 @@ import { getWebMidiService } from "./midi/web-midi.js";
 import { pickUiVariant, sniffEnv, getUiVariant } from "./registry/ui-variants.js";
 import { setFeatures } from "./registry/features.js";
 import { setActiveVariant } from "./registry/widgets.js";
+import { installI18n, currentLocale, onLocaleChange } from "./i18n.js";
 
 /** @typedef {import("./registry/ui-variants.js").VariantBootResult} VariantBootResult */
 
@@ -78,6 +79,13 @@ export function bootFoyerCore(opts = {}) {
   import("./ui-director.js")
     .then(({ installUiDirector }) => installUiDirector())
     .catch((e) => console.warn("[bootstrap] ui-director install failed:", e));
+  // i18n: pick up the user's preferred locale (localStorage > browser
+  // language > English) and prefetch its catalog. Fire-and-forget —
+  // English is the identity path so any component that runs before
+  // the catalog lands still sees the source strings, just not
+  // translated yet. The `foyer:locale-changed` event re-renders
+  // components once the catalog arrives.
+  installI18n().catch((e) => console.warn("[bootstrap] i18n install failed:", e));
   // Compiz-style wobbly windows — viz-pref gated, defaults off.
   // When enabled, auto-attaches a spring-mass mesh to every
   // foyer-window and any component that opts in via attachWobble().

@@ -103,8 +103,22 @@ impl Tool for VisualizeTool {
         // Validate via the typed request shape but pass the original
         // args to whichever renderer ends up handling it — both speak
         // the same protocol.
-        let _validated: VisualizeRequest = serde_json::from_value(args.clone())
+        let validated: VisualizeRequest = serde_json::from_value(args.clone())
             .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+        // `screen` only makes sense against an actual attached browser.
+        // Falling through to the headless renderer screenshots a fresh
+        // throwaway tab with no live state, which produces a blank
+        // image and silently confuses the agent. Refuse early with a
+        // clear actionable error instead.
+        if matches!(validated, VisualizeRequest::Screen) && !ctx.fe_attached {
+            return Err(ToolError::Execution(
+                "visualize.screen requires an attached browser session — no FE \
+                 is currently connected. Use the more specific subcommands \
+                 (timeline, mixer, midi_roll, …) which work through the \
+                 headless renderer."
+                    .into(),
+            ));
+        }
         // Default order: FE first (faster — already has live data
         // and cached peaks), headless as fallback when no tab is
         // attached. The `prefer_headless_render` config flip is for

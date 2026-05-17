@@ -25,6 +25,18 @@
 //!   secondaries. Invalid parent (gone, auth mismatch) → falls back to a
 //!   fresh `Primary` connection with a freshly-minted `peer_id`.
 
+mod cmd_actions;
+mod cmd_agent;
+mod cmd_automation;
+mod cmd_chat;
+mod cmd_groups;
+mod cmd_scripts;
+mod cmd_sends;
+mod cmd_tunnel;
+mod cmd_undo;
+mod command_tag;
+use command_tag::command_tag;
+
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
@@ -32,8 +44,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Extension, Query, State};
 use axum::response::IntoResponse;
 use foyer_schema::{
-    AudioFormat, Command, ControlUpdate, EntityId, Envelope, Event, TunnelProviderConfig,
-    TunnelProviderKind, SCHEMA_VERSION,
+    AudioFormat, Command, ControlUpdate, EntityId, Envelope, Event, SCHEMA_VERSION,
 };
 use futures::{SinkExt, StreamExt};
 use std::net::{IpAddr, SocketAddr};
@@ -808,163 +819,6 @@ where
     sink.send(Message::Text(text)).await
 }
 
-/// Pull the wire-format "type" tag off a `Command`. This is the snake-
-/// case name serde emits (`Command` is `#[serde(tag = "type",
-/// rename_all = "snake_case")]`) — the same string the RBAC policy
-/// matches against. Falls back to `"unknown"` if serialization fails,
-/// which only happens for non-serializable inner state — effectively
-/// never in practice.
-fn command_tag(cmd: &Command) -> &'static str {
-    // Small match against the discriminant — the set of variants is
-    // closed and stable, so handwriting this keeps the hot path free
-    // of per-dispatch JSON allocation. Any new `Command` variant must
-    // be added here or it'll fall through to "unknown" and be denied
-    // for every non-admin role (safer than accidentally allowing).
-    match cmd {
-        Command::Subscribe => "subscribe",
-        Command::RequestSnapshot => "request_snapshot",
-        Command::ClockProbe { .. } => "clock_probe",
-        Command::ProbeSessionRecovery { .. } => "probe_session_recovery",
-        Command::AudioBufferReport { .. } => "audio_buffer_report",
-        Command::RequestIngressLatency { .. } => "request_ingress_latency",
-        Command::SetIngressCaptureLatency { .. } => "set_ingress_capture_latency",
-        Command::SetIngressRingPrimeMs { .. } => "set_ingress_ring_prime_ms",
-        Command::SetMidiCaptureLatency { .. } => "set_midi_capture_latency",
-        Command::SetFakeLatency { .. } => "set_fake_latency",
-        Command::SetIngressManualOffsetMs { .. } => "set_ingress_manual_offset_ms",
-        Command::StartIngressCalibration { .. } => "start_ingress_calibration",
-        Command::StopIngressCalibration { .. } => "stop_ingress_calibration",
-        Command::UndoGroupBegin { .. } => "undo_group_begin",
-        Command::UndoGroupEnd => "undo_group_end",
-        Command::ControlSet { .. } => "control_set",
-        Command::AudioEgressStart { .. } => "audio_egress_start",
-        Command::AudioEgressStop { .. } => "audio_egress_stop",
-        Command::AudioIngressOpen { .. } => "audio_ingress_open",
-        Command::AudioIngressClose { .. } => "audio_ingress_close",
-        Command::LatencyProbe { .. } => "latency_probe",
-        Command::ListActions => "list_actions",
-        Command::InvokeAction { .. } => "invoke_action",
-        Command::ListRegions { .. } => "list_regions",
-        Command::ListAudioPool => "list_audio_pool",
-        Command::ImportAudio { .. } => "import_audio",
-        Command::ListPlugins => "list_plugins",
-        Command::BrowsePath { .. } => "browse_path",
-        Command::OpenSession { .. } => "open_session",
-        Command::SaveSession { .. } => "save_session",
-        Command::UpdateRegion { .. } => "update_region",
-        Command::DeleteRegion { .. } => "delete_region",
-        Command::CreateRegion { .. } => "create_region",
-        Command::DuplicateRegion { .. } => "duplicate_region",
-        Command::DuplicateRegionRange { .. } => "duplicate_region_range",
-        Command::StretchRegion { .. } => "stretch_region",
-        Command::SplitRegion { .. } => "split_region",
-        Command::ReverseRegion { .. } => "reverse_region",
-        Command::CombineRegions { .. } => "combine_regions",
-        Command::StripSilenceRegion { .. } => "strip_silence_region",
-        Command::PitchShiftRegion { .. } => "pitch_shift_region",
-        Command::ListWaveform { .. } => "list_waveform",
-        Command::ClearWaveformCache { .. } => "clear_waveform_cache",
-        Command::ListBackends => "list_backends",
-        Command::LaunchProject { .. } => "launch_project",
-        Command::ListSessions => "list_sessions",
-        Command::SelectSession { .. } => "select_session",
-        Command::CloseSession { .. } => "close_session",
-        Command::ShimQuit => "shim_quit",
-        Command::ReattachOrphan { .. } => "reattach_orphan",
-        Command::DismissOrphan { .. } => "dismiss_orphan",
-        Command::ListRecents => "list_recents",
-        Command::ForgetRecent { .. } => "forget_recent",
-        Command::ClearRecents => "clear_recents",
-        Command::UpdateTrack { .. } => "update_track",
-        Command::DeleteTrack { .. } => "delete_track",
-        Command::ReorderTracks { .. } => "reorder_tracks",
-        Command::SetTrackMidiChannelMode { .. } => "set_track_midi_channel_mode",
-        Command::CreateGroup { .. } => "create_group",
-        Command::UpdateGroup { .. } => "update_group",
-        Command::DeleteGroup { .. } => "delete_group",
-        Command::AddPlugin { .. } => "add_plugin",
-        Command::RemovePlugin { .. } => "remove_plugin",
-        Command::MovePlugin { .. } => "move_plugin",
-        Command::ListPluginPresets { .. } => "list_plugin_presets",
-        Command::ListMidiPatchNames { .. } => "list_midi_patch_names",
-        Command::LoadPluginPreset { .. } => "load_plugin_preset",
-        Command::SavePluginPreset { .. } => "save_plugin_preset",
-        Command::OpenPluginGui { .. } => "open_plugin_gui",
-        Command::ClosePluginGui { .. } => "close_plugin_gui",
-        Command::AddNote { .. } => "add_note",
-        Command::UpdateNote { .. } => "update_note",
-        Command::DeleteNote { .. } => "delete_note",
-        Command::ReplaceRegionNotes { .. } => "replace_region_notes",
-        Command::AddPatchChange { .. } => "add_patch_change",
-        Command::UpdatePatchChange { .. } => "update_patch_change",
-        Command::DeletePatchChange { .. } => "delete_patch_change",
-        Command::SetTrackMidiPatch { .. } => "set_track_midi_patch",
-        Command::SetSequencerLayout { .. } => "set_sequencer_layout",
-        Command::ClearSequencerLayout { .. } => "clear_sequencer_layout",
-        Command::MidiInput { .. } => "midi_input",
-        Command::SetTrackInput { .. } => "set_track_input",
-        Command::ListPorts { .. } => "list_ports",
-        Command::AddSend { .. } => "add_send",
-        Command::RemoveSend { .. } => "remove_send",
-        Command::SetSendLevel { .. } => "set_send_level",
-        Command::Undo => "undo",
-        Command::Redo => "redo",
-        Command::SetAutomationMode { .. } => "set_automation_mode",
-        Command::AddAutomationPoint { .. } => "add_automation_point",
-        Command::UpdateAutomationPoint { .. } => "update_automation_point",
-        Command::DeleteAutomationPoint { .. } => "delete_automation_point",
-        Command::ReplaceAutomationLane { .. } => "replace_automation_lane",
-        Command::Locate { .. } => "locate",
-        Command::SetLoopRange { .. } => "set_loop_range",
-        Command::AudioStreamOpen { .. } => "audio_stream_open",
-        Command::AudioStreamClose { .. } => "audio_stream_close",
-        Command::AudioSdpAnswer { .. } => "audio_sdp_answer",
-        Command::AudioIceCandidate { .. } => "audio_ice_candidate",
-        Command::TunnelCreateToken { .. } => "tunnel_create_token",
-        Command::TunnelRevokeToken { .. } => "tunnel_revoke_token",
-        Command::TunnelSetEnabled { .. } => "tunnel_set_enabled",
-        Command::TunnelStart { .. } => "tunnel_start",
-        Command::TunnelStop => "tunnel_stop",
-        Command::TunnelRequestState => "tunnel_request_state",
-        Command::ChatSend { .. } => "chat_send",
-        Command::ChatClear => "chat_clear",
-        Command::ChatHistoryRequest => "chat_history_request",
-        Command::ChatSnapshot { .. } => "chat_snapshot",
-        Command::PttStart => "ptt_start",
-        Command::PttStop => "ptt_stop",
-        Command::SetTrackBrowserSource { .. } => "set_track_browser_source",
-        Command::ListTrackBrowserSources => "list_track_browser_sources",
-        Command::AgentSend { .. } => "agent_send",
-        Command::AgentStop => "agent_stop",
-        Command::AgentClearHistory => "agent_clear_history",
-        Command::AgentSetAutonomy { .. } => "agent_set_autonomy",
-        Command::AgentSetConfig { .. } => "agent_set_config",
-        Command::AgentConfirmTool { .. } => "agent_confirm_tool",
-        Command::AgentHistoryRequest => "agent_history_request",
-        Command::AgentListSkills => "agent_list_skills",
-        Command::AgentUploadSkill { .. } => "agent_upload_skill",
-        Command::AgentEnableSkill { .. } => "agent_enable_skill",
-        Command::AgentDisableSkill { .. } => "agent_disable_skill",
-        Command::AgentListMemories => "agent_list_memories",
-        Command::AgentSaveMemory { .. } => "agent_save_memory",
-        Command::AgentForgetMemory { .. } => "agent_forget_memory",
-        Command::AgentListTemplates => "agent_list_templates",
-        Command::AgentRenderResult { .. } => "agent_render_result",
-        Command::AgentSessionList => "agent_session_list",
-        Command::AgentSessionNew { .. } => "agent_session_new",
-        Command::AgentSessionLoad { .. } => "agent_session_load",
-        Command::AgentSessionDelete { .. } => "agent_session_delete",
-        Command::AgentSessionRename { .. } => "agent_session_rename",
-        Command::ListScripts => "list_scripts",
-        Command::SaveScript { .. } => "save_script",
-        Command::DeleteScript { .. } => "delete_script",
-        Command::EnableScript { .. } => "enable_script",
-        Command::RunScript { .. } => "run_script",
-        Command::RecoverDisabledScripts => "recover_disabled_scripts",
-        Command::UiActionResult { .. } => "ui_action_result",
-    }
-}
-
 /// Sanitize optional save-as target, reject overwrite of existing session dirs
 /// / files inside the jail, and return the path to pass to the backend: an
 /// **absolute** filesystem path to the new session folder when a jail is
@@ -1039,13 +893,14 @@ async fn dispatch_command(
             let tag = command_tag(&env.body);
             broadcast_event(
                 state,
-                Event::Error {
-                    code: "secondary_window_audio".into(),
-                    message: format!(
-                        "audio command '{tag}' rejected: this is a secondary window — open it on the spawning window instead"
+                Event::error_localized(
+                    "secondary_window_audio",
+                    foyer_i18n::loc!(
+                        "Audio command '%{tag}' rejected: this is a secondary window — open it on the spawning window instead.",
+                        tag = tag
                     ),
-                    target_peer_id: Some(peer_id.to_string()),
-                },
+                    Some(peer_id.to_string()),
+                ),
             )
             .await;
             return Ok(());
@@ -1063,13 +918,14 @@ async fn dispatch_command(
             ConnectionAuth::Unauthenticated => {
                 broadcast_event(
                     state,
-                    Event::Error {
-                        code: "auth_required".into(),
-                        message: format!(
-                            "unauthenticated guest attempted '{tag}' — must sign in first"
+                    Event::error_localized(
+                        "auth_required",
+                        foyer_i18n::loc!(
+                            "Unauthenticated guest attempted '%{tag}' — you must sign in first.",
+                            tag = tag
                         ),
-                        target_peer_id: Some(peer_id.to_string()),
-                    },
+                        Some(peer_id.to_string()),
+                    ),
                 )
                 .await;
                 return Ok(());
@@ -1087,13 +943,16 @@ async fn dispatch_command(
                     // another guest's denial banner flash by.
                     broadcast_event(
                         state,
-                        Event::Error {
-                            code: "forbidden_for_role".into(),
-                            message: format!(
-                                "{recipient} (role '{role_id}') is not permitted to invoke '{tag}'"
+                        Event::error_localized(
+                            "forbidden_for_role",
+                            foyer_i18n::loc!(
+                                "%{recipient} (role '%{role_id}') is not permitted to invoke '%{tag}'.",
+                                recipient = recipient,
+                                role_id = role_id,
+                                tag = tag
                             ),
-                            target_peer_id: Some(peer_id.to_string()),
-                        },
+                            Some(peer_id.to_string()),
+                        ),
                     )
                     .await;
                     return Ok(());
@@ -1104,32 +963,8 @@ async fn dispatch_command(
     }
 
     match env.body {
-        Command::UndoGroupBegin { name } => {
-            if let Err(e) = state.backend().await.undo_group_begin(name).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "undo_group_begin_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
-        Command::UndoGroupEnd => {
-            if let Err(e) = state.backend().await.undo_group_end().await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "undo_group_end_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
+        Command::UndoGroupBegin { name } => cmd_undo::undo_group_begin(state, name).await,
+        Command::UndoGroupEnd => cmd_undo::undo_group_end(state).await,
         Command::ClockProbe { client_ts_ms } => {
             // NTP-style single bounce. Sample server's monotonic clock
             // ASAP, echo the client timestamp back so the requester
@@ -1398,37 +1233,8 @@ async fn dispatch_command(
             state.ring.write().await.push(out.clone());
             let _ = state.tx.send(out);
         }
-        Command::ListActions => {
-            let actions = state.backend().await.list_actions().await?;
-            broadcast_event(state, Event::ActionsList { actions }).await;
-        }
-        Command::InvokeAction { id } => {
-            // Route to the backend. If the action is unknown (shim hasn't
-            // wired it up yet) we translate the error into a user-visible
-            // `Event::Error` so the startup-errors modal / console view
-            // pick it up — silently WARN-logging meant the UI had no idea
-            // the click did nothing. Transport actions land via the
-            // trait-default translation to set_control so they keep
-            // working even against a shim that doesn't know about them.
-            let id_str = id.as_str().to_string();
-            match state.backend().await.invoke_action(id).await {
-                Ok(()) => {}
-                Err(foyer_backend::BackendError::UnknownAction(_)) => {
-                    broadcast_event(
-                        state,
-                        Event::Error {
-                            code: "action_unimplemented".into(),
-                            message: format!(
-                                "Action `{id_str}` isn't wired up in the current backend yet."
-                            ),
-                            target_peer_id: None,
-                        },
-                    )
-                    .await;
-                }
-                Err(e) => return Err(DispatchError::Backend(e)),
-            }
-        }
+        Command::ListActions => cmd_actions::list_actions(state).await?,
+        Command::InvokeAction { id } => cmd_actions::invoke_action(state, id).await?,
         Command::ListRegions { track_id } => {
             let (timeline, regions) = state.backend().await.list_regions(track_id.clone()).await?;
             broadcast_event(
@@ -1502,6 +1308,7 @@ async fn dispatch_command(
                             code: "browse_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -1510,11 +1317,11 @@ async fn dispatch_command(
             None => {
                 broadcast_event(
                     state,
-                    Event::Error {
-                        code: "no_jail".into(),
-                        message: "filesystem browsing is disabled (no --jail configured)".into(),
-                        target_peer_id: None,
-                    },
+                    Event::error_localized(
+                        "no_jail",
+                        foyer_i18n::loc!("Filesystem browsing is disabled (no --jail configured)."),
+                        None,
+                    ),
                 )
                 .await;
             }
@@ -1545,6 +1352,7 @@ async fn dispatch_command(
                         code: "open_session_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -1560,6 +1368,7 @@ async fn dispatch_command(
                             code: "save_session_failed".into(),
                             message,
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -1578,6 +1387,7 @@ async fn dispatch_command(
                         code: "save_session_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -1679,6 +1489,7 @@ async fn dispatch_command(
                             code: "update_region_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -1705,6 +1516,7 @@ async fn dispatch_command(
                             code: "delete_region_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -1729,6 +1541,7 @@ async fn dispatch_command(
                             code: "waveform_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -1747,6 +1560,7 @@ async fn dispatch_command(
                             code: "clear_cache_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -1808,6 +1622,7 @@ async fn dispatch_command(
                             code: "ingress_open_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -1835,13 +1650,95 @@ async fn dispatch_command(
             // the tester UI sees it. Ingress above is now wired.
             broadcast_event(
                 state,
-                Event::Error {
-                    code: "not_implemented".into(),
-                    message: "audio command not yet wired".into(),
-                    target_peer_id: None,
-                },
+                Event::error_localized(
+                    "not_implemented",
+                    foyer_i18n::loc!("Audio command not yet wired."),
+                    None,
+                ),
             )
             .await;
+        }
+        Command::SubscribeSpectrum { target, opts } => {
+            // Route preference: native (in-shim) FFT if the backend
+            // advertises it; otherwise the server-side fallback
+            // analyser that taps the same audio egress the audio hub
+            // already streams from. The fallback means the spectrum
+            // tile WORKS on the Ardour shim today even though its C++
+            // FFT pipeline isn't shipped yet.
+            let backend = state.backend().await;
+            let native_supported = backend
+                .spectrum_capabilities()
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.available)
+                .unwrap_or(false);
+            if native_supported {
+                match backend.subscribe_spectrum(target.clone(), opts).await {
+                    Ok(_applied) => {
+                        // Backend emits SpectrumSubscribed itself.
+                    }
+                    Err(e) => {
+                        broadcast_event(
+                            state,
+                            Event::Error {
+                                code: "subscribe_spectrum_failed".into(),
+                                message: e.to_string(),
+                                target_peer_id: None,
+                                localized: None,
+                            },
+                        )
+                        .await;
+                    }
+                }
+            } else {
+                // Server-side fallback: open an egress tap, run FFTs
+                // in Rust, broadcast SpectrumFrame events through the
+                // same channel native subscriptions use.
+                let sample_rate = backend.sample_rate();
+                if let Err(e) = state
+                    .spectrum_svc
+                    .subscribe(
+                        state.clone(),
+                        backend.clone(),
+                        target.clone(),
+                        opts,
+                        sample_rate,
+                    )
+                    .await
+                {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "subscribe_spectrum_failed".into(),
+                            message: e,
+                            target_peer_id: None,
+                            localized: None,
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        Command::UnsubscribeSpectrum { target } => {
+            let backend = state.backend().await;
+            let native_supported = backend
+                .spectrum_capabilities()
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.available)
+                .unwrap_or(false);
+            if native_supported {
+                if let Err(e) = backend.unsubscribe_spectrum(target.clone()).await {
+                    tracing::warn!("unsubscribe_spectrum failed: {e}");
+                }
+            } else {
+                state
+                    .spectrum_svc
+                    .unsubscribe(state.clone(), backend.clone(), target.clone())
+                    .await;
+            }
         }
         Command::ListBackends => {
             let backends = state.spawner.as_ref().map(|s| s.list()).unwrap_or_default();
@@ -1857,11 +1754,11 @@ async fn dispatch_command(
             let Some(spawner) = state.spawner.clone() else {
                 broadcast_event(
                     state,
-                    Event::Error {
-                        code: "no_spawner".into(),
-                        message: "this sidecar has no backend spawner configured".into(),
-                        target_peer_id: None,
-                    },
+                    Event::error_localized(
+                        "no_spawner",
+                        foyer_i18n::loc!("This sidecar has no backend spawner configured."),
+                        None,
+                    ),
                 )
                 .await;
                 return Ok(());
@@ -2048,6 +1945,7 @@ async fn dispatch_command(
                             code: "launch_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -2060,6 +1958,61 @@ async fn dispatch_command(
         // match arm as it gets integrated. Until then the sidecar tells
         // the client "we know about this but haven't hooked it up yet"
         // instead of silently dropping it.
+        Command::CreateTrack {
+            name,
+            kind,
+            color,
+            after_id,
+            instrument_uri,
+            plugins,
+            copy_from_track_id,
+        } => {
+            match state
+                .backend()
+                .await
+                .create_track_full(
+                    name,
+                    kind,
+                    color,
+                    after_id,
+                    instrument_uri,
+                    plugins,
+                    copy_from_track_id,
+                )
+                .await
+            {
+                Ok(track) => {
+                    // Force a snapshot reload so every connected client
+                    // gets the new track id + its automation lanes;
+                    // mirrors the stub backend's GroupUpdated path.
+                    broadcast_event(
+                        state,
+                        Event::SessionPatch {
+                            patch: foyer_schema::Patch::Reload,
+                        },
+                    )
+                    .await;
+                    broadcast_event(
+                        state,
+                        Event::TrackUpdated {
+                            track: Box::new(track),
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::error_localized(
+                            "create_track_failed",
+                            foyer_i18n::loc!("Couldn't create track: %{reason}", reason = e),
+                            None,
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
         Command::UpdateTrack { id, patch } => {
             match state.backend().await.update_track(id, patch).await {
                 Ok(track) => {
@@ -2078,6 +2031,7 @@ async fn dispatch_command(
                             code: "update_track_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -2092,6 +2046,7 @@ async fn dispatch_command(
                         code: "delete_track_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2105,6 +2060,7 @@ async fn dispatch_command(
                         code: "reorder_tracks_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2138,6 +2094,7 @@ async fn dispatch_command(
                             code: "set_midi_channel_mode_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -2190,6 +2147,7 @@ async fn dispatch_command(
                         code: "set_track_input_mismatch".into(),
                         message,
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2233,6 +2191,7 @@ async fn dispatch_command(
                             code: "set_track_input_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -2251,6 +2210,7 @@ async fn dispatch_command(
                             code: "list_ports_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -2261,49 +2221,10 @@ async fn dispatch_command(
             track_id,
             target_track_id,
             pre_fader,
-        } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .add_send(track_id, target_track_id, pre_fader)
-                .await
-            {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "add_send_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
-        Command::RemoveSend { send_id } => {
-            if let Err(e) = state.backend().await.remove_send(send_id).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "remove_send_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
+        } => cmd_sends::add_send(state, track_id, target_track_id, pre_fader).await,
+        Command::RemoveSend { send_id } => cmd_sends::remove_send(state, send_id).await,
         Command::SetSendLevel { send_id, level } => {
-            if let Err(e) = state.backend().await.set_send_level(send_id, level).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "set_send_level_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
+            cmd_sends::set_send_level(state, send_id, level).await
         }
         // Plugin lifecycle — HostBackend forwards the Command::AddPlugin /
         // RemovePlugin to the shim which runs it against `Route::add_processor`
@@ -2326,6 +2247,7 @@ async fn dispatch_command(
                         code: "add_plugin_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2339,6 +2261,7 @@ async fn dispatch_command(
                         code: "remove_plugin_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2397,11 +2320,13 @@ async fn dispatch_command(
                     );
                     broadcast_event(
                         state,
-                        Event::Error {
-                            code: "audio_egress_unavailable".into(),
-                            message: "backend has no audio source — connect a DAW to listen".into(),
-                            target_peer_id: None,
-                        },
+                        Event::error_localized(
+                            "audio_egress_unavailable",
+                            foyer_i18n::loc!(
+                                "Backend has no audio source — connect a DAW to listen."
+                            ),
+                            None,
+                        ),
                     )
                     .await;
                     return Ok(());
@@ -2425,6 +2350,7 @@ async fn dispatch_command(
                             code: "audio_egress_unavailable".into(),
                             message: format!("audio source unavailable: {e}"),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -2475,6 +2401,7 @@ async fn dispatch_command(
                             code: "audio_stream_open_failed".into(),
                             message: e,
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -2498,6 +2425,7 @@ async fn dispatch_command(
                         code: "set_loop_range_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2516,14 +2444,21 @@ async fn dispatch_command(
         // Ardour's MidiModel and emits a RegionUpdated event. The web
         // UI does optimistic updates and reconciles on RegionUpdated.
         Command::AddNote { region_id, note } => {
-            if let Err(e) = state.backend().await.add_midi_note(region_id, note).await {
+            let backend = state.backend().await;
+            ensure_region_fits_notes(&*backend, &region_id, std::slice::from_ref(&note)).await;
+            let region_for_err = region_id.clone();
+            if let Err(e) = backend.add_midi_note(region_id, note).await {
                 broadcast_event(
                     state,
-                    Event::Error {
-                        code: "add_note_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
+                    Event::error_localized(
+                        "add_note_failed",
+                        foyer_i18n::loc!(
+                            "Couldn't add note to region %{region_id}: %{reason}",
+                            region_id = region_for_err,
+                            reason = e
+                        ),
+                        None,
+                    ),
                 )
                 .await;
             }
@@ -2545,6 +2480,7 @@ async fn dispatch_command(
                         code: "update_note_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2563,6 +2499,7 @@ async fn dispatch_command(
                         code: "delete_note_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2585,6 +2522,7 @@ async fn dispatch_command(
                         code: "add_patch_change_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2607,6 +2545,7 @@ async fn dispatch_command(
                         code: "update_patch_change_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2628,6 +2567,7 @@ async fn dispatch_command(
                         code: "delete_patch_change_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2651,6 +2591,7 @@ async fn dispatch_command(
                         code: "set_track_midi_patch_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2680,6 +2621,7 @@ async fn dispatch_command(
                         code: "duplicate_region_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2710,6 +2652,7 @@ async fn dispatch_command(
                         code: "duplicate_region_range_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2741,6 +2684,7 @@ async fn dispatch_command(
                         code: "stretch_region_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2755,6 +2699,7 @@ async fn dispatch_command(
                         code: "split_region_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2769,6 +2714,7 @@ async fn dispatch_command(
                         code: "reverse_region_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2783,6 +2729,7 @@ async fn dispatch_command(
                         code: "combine_regions_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2812,6 +2759,7 @@ async fn dispatch_command(
                         code: "strip_silence_region_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2831,6 +2779,7 @@ async fn dispatch_command(
                         code: "pitch_shift_region_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2864,6 +2813,7 @@ async fn dispatch_command(
                         code: "create_region_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -2945,6 +2895,41 @@ async fn dispatch_command(
                 );
 
                 let backend = state_for_task.backend().await;
+
+                // Drum-mode auto-routing: when a layout flips to drum
+                // mode (or is created in drum mode), force the track's
+                // playback channel mask to ch9 (GM drum channel). This
+                // is what made the test case land on piano — the
+                // gmsynth track defaulted to channel 0/program 0
+                // (Acoustic Grand) and per-cell `channel: 9` wasn't
+                // honoured downstream. Setting `playback_channel_mode:
+                // force, playback_channel_mask: 1 << 9` ensures every
+                // note the expander emits is forced to GM channel 9
+                // regardless of the per-row channel field.
+                if is_active && layout_for_task.mode == "drum" {
+                    if let Some((track_id, existing_mask)) =
+                        find_region_track(&*backend, &region_id_for_task).await
+                    {
+                        let drum_mask: u16 = 1 << 9;
+                        if existing_mask != Some(drum_mask) {
+                            if let Err(e) = backend
+                                .set_track_midi_channel_mode(
+                                    track_id.clone(),
+                                    "playback".into(),
+                                    "force".into(),
+                                    drum_mask,
+                                )
+                                .await
+                            {
+                                tracing::debug!(
+                                    "drum auto-routing: set_track_midi_channel_mode \
+                                     failed on {track_id}: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 if let Err(e) = backend
                     .set_sequencer_layout(region_id_for_task.clone(), layout_for_task.clone())
                     .await
@@ -2955,23 +2940,29 @@ async fn dispatch_command(
                             code: "set_sequencer_layout_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
                     return;
                 }
                 if is_active {
+                    let region_for_err = region_id_for_task.clone();
                     if let Err(e) = backend
                         .replace_region_notes(region_id_for_task.clone(), notes)
                         .await
                     {
                         broadcast_event(
                             &state_for_task,
-                            Event::Error {
-                                code: "replace_region_notes_failed".into(),
-                                message: e.to_string(),
-                                target_peer_id: None,
-                            },
+                            Event::error_localized(
+                                "replace_region_notes_failed",
+                                foyer_i18n::loc!(
+                                    "Couldn't replace notes on region %{region_id}: %{reason}",
+                                    region_id = region_for_err,
+                                    reason = e
+                                ),
+                                None,
+                            ),
                         )
                         .await;
                         return;
@@ -2991,19 +2982,26 @@ async fn dispatch_command(
             });
         }
         Command::ReplaceRegionNotes { region_id, notes } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .replace_region_notes(region_id, notes)
-                .await
-            {
+            // Auto-extend: if any note extends past the region's current
+            // length, grow the region first so the note isn't clipped.
+            // Cheap WHEN we can find the owning track; silent no-op if
+            // the lookup fails (we'd rather let the backend clip than
+            // surface a confusing "couldn't auto-extend" error).
+            let backend = state.backend().await;
+            ensure_region_fits_notes(&*backend, &region_id, &notes).await;
+            let region_for_err = region_id.clone();
+            if let Err(e) = backend.replace_region_notes(region_id, notes).await {
                 broadcast_event(
                     state,
-                    Event::Error {
-                        code: "replace_region_notes_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
+                    Event::error_localized(
+                        "replace_region_notes_failed",
+                        foyer_i18n::loc!(
+                            "Couldn't replace notes on region %{region_id}: %{reason}",
+                            region_id = region_for_err,
+                            reason = e
+                        ),
+                        None,
+                    ),
                 )
                 .await;
             }
@@ -3027,6 +3025,7 @@ async fn dispatch_command(
                         code: "clear_sequencer_layout_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -3142,69 +3141,15 @@ async fn dispatch_command(
             }
         }
 
-        Command::Undo => {
-            if let Err(e) = state.backend().await.undo().await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "undo_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
-        Command::Redo => {
-            if let Err(e) = state.backend().await.redo().await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "redo_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
+        Command::Undo => cmd_undo::undo(state).await,
+        Command::Redo => cmd_undo::redo(state).await,
 
         // ─── automation lane edit (Phase B) ─────────────────────────
         Command::SetAutomationMode { lane_id, mode } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .set_automation_mode(lane_id, mode)
-                .await
-            {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "set_automation_mode_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
+            cmd_automation::set_mode(state, lane_id, mode).await
         }
         Command::AddAutomationPoint { lane_id, point } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .add_automation_point(lane_id, point)
-                .await
-            {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "add_automation_point_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
+            cmd_automation::add_point(state, lane_id, point).await
         }
         Command::UpdateAutomationPoint {
             lane_id,
@@ -3212,61 +3157,21 @@ async fn dispatch_command(
             new_time_samples,
             value,
         } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .update_automation_point(lane_id, original_time_samples, new_time_samples, value)
-                .await
-            {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "update_automation_point_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
+            cmd_automation::update_point(
+                state,
+                lane_id,
+                original_time_samples,
+                new_time_samples,
+                value,
+            )
+            .await
         }
         Command::DeleteAutomationPoint {
             lane_id,
             time_samples,
-        } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .delete_automation_point(lane_id, time_samples)
-                .await
-            {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "delete_automation_point_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
+        } => cmd_automation::delete_point(state, lane_id, time_samples).await,
         Command::ReplaceAutomationLane { lane_id, points } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .replace_automation_lane(lane_id, points)
-                .await
-            {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "replace_automation_lane_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
+            cmd_automation::replace_lane(state, lane_id, points).await
         }
 
         Command::ListPluginPresets { plugin_id } => {
@@ -3286,6 +3191,7 @@ async fn dispatch_command(
                             code: "list_plugin_presets_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -3309,6 +3215,7 @@ async fn dispatch_command(
                             code: "list_midi_patch_names_failed".into(),
                             message: e.to_string(),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -3331,6 +3238,7 @@ async fn dispatch_command(
                         code: "load_plugin_preset_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -3361,6 +3269,7 @@ async fn dispatch_command(
                         code: "locate_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -3499,6 +3408,7 @@ async fn dispatch_command(
                             code: "session_not_found".into(),
                             message: format!("no open session with id {session_id:?}"),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -3524,6 +3434,7 @@ async fn dispatch_command(
                         code: "orphan_not_found".into(),
                         message: format!("no orphan with id {orphan_id:?}"),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -3540,6 +3451,7 @@ async fn dispatch_command(
                         code: "no_spawner".into(),
                         message: "this sidecar has no spawner; cannot reattach".into(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -3557,6 +3469,7 @@ async fn dispatch_command(
                             info.name,
                         ),
                                             target_peer_id: None,
+                                                                localized: None,
                     },
                 )
                 .await;
@@ -3660,6 +3573,7 @@ async fn dispatch_command(
                             code: "reattach_failed".into(),
                             message: format!("reattach to {} failed: {e}", info.name,),
                             target_peer_id: None,
+                            localized: None,
                         },
                     )
                     .await;
@@ -3681,466 +3595,106 @@ async fn dispatch_command(
             }
         }
 
-        Command::ListRecents => {
-            let recents = crate::recents::load().await;
-            broadcast_event(state, Event::RecentsList { recents }).await;
-        }
-        Command::ForgetRecent { path } => {
-            // Normalize the inbound path the same way `touch` does so
-            // a Forget click from the UI lands on the canonical key
-            // even if the client cached an absolute or differently-
-            // resolved string. (Old recents files written before
-            // normalization may still hold non-canonical entries —
-            // the Forget click sees the displayed path, which IS
-            // canonical now, so this also matches new entries.)
-            let jail_root = state.sessions.jail_root.read().await.clone();
-            let normalized = crate::recents::normalize_path(&path, jail_root.as_deref());
-            let mut recents = crate::recents::forget(&normalized).await;
-            // Defensive: if the click came in pre-normalization shape
-            // (e.g. an old client tab that still has the absolute
-            // path cached), retry with the raw input so the user
-            // can actually evict the entry they're looking at.
-            if normalized != path {
-                recents = crate::recents::forget(&path).await;
-            }
-            broadcast_event(state, Event::RecentsList { recents }).await;
-        }
-        Command::ClearRecents => {
-            let recents = crate::recents::clear().await;
-            broadcast_event(state, Event::RecentsList { recents }).await;
-        }
+        Command::ListRecents => cmd_actions::list_recents(state).await,
+        Command::ForgetRecent { path } => cmd_actions::forget_recent(state, path).await,
+        Command::ClearRecents => cmd_actions::clear_recents(state).await,
 
         Command::CreateGroup {
             name,
             color,
             members,
-        } => {
-            if let Err(e) = state
-                .backend()
-                .await
-                .create_group(name, color, members)
-                .await
-            {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "create_group_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
-        Command::UpdateGroup { id, patch } => {
-            if let Err(e) = state.backend().await.update_group(id, patch).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "update_group_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
-        Command::DeleteGroup { id } => {
-            if let Err(e) = state.backend().await.delete_group(id).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "delete_group_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
+        } => cmd_groups::create_group(state, name, color, members).await,
+        Command::UpdateGroup { id, patch } => cmd_groups::update_group(state, id, patch).await,
+        Command::DeleteGroup { id } => cmd_groups::delete_group(state, id).await,
 
         // ─── Tunnel / remote access ─────────────────────────────────────
+        // ── Tunneling (token mint / revoke / start / stop) ────────────
         Command::TunnelCreateToken { recipient, role } => {
-            match crate::tunnel::create_token(state, recipient.clone(), role).await {
-                Ok((conn, token, password)) => {
-                    let url = conn
-                        .tunnel_url
-                        .clone()
-                        .unwrap_or_else(|| format!("http://localhost:3838/?token={token}"));
-                    tracing::info!("tunnel token created for {recipient}: {url}");
-                    broadcast_event(
-                        state,
-                        Event::TunnelTokenCreated {
-                            connection: conn,
-                            token,
-                            password,
-                            url,
-                        },
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    broadcast_event(
-                        state,
-                        Event::Error {
-                            code: "tunnel_create_failed".into(),
-                            message: e.to_string(),
-                            target_peer_id: None,
-                        },
-                    )
-                    .await;
-                }
-            }
+            cmd_tunnel::create_token(state, recipient, role).await
         }
-        Command::TunnelRevokeToken { id } => {
-            if let Err(e) = crate::tunnel::revoke_token(state, &id).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "tunnel_revoke_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
-        Command::TunnelSetEnabled { enabled } => {
-            {
-                let mut m = state.tunnel_manifest.write().await;
-                m.enabled = enabled;
-                let _ = crate::tunnel::save_manifest(&m).await;
-            }
-            crate::tunnel::broadcast_tunnel_state(state).await;
-        }
-        Command::TunnelStart { provider } => {
-            let tunnel_cfg = state.tunnel_cfg.read().await.clone();
-            let config = match provider {
-                TunnelProviderKind::Ngrok => TunnelProviderConfig::Ngrok {
-                    auth_token: tunnel_cfg.ngrok.as_ref().and_then(|c| c.auth_token.clone()),
-                    region: tunnel_cfg.ngrok.as_ref().and_then(|c| c.region.clone()),
-                    subdomain: tunnel_cfg.ngrok.as_ref().and_then(|c| c.subdomain.clone()),
-                    domain: tunnel_cfg.ngrok.as_ref().and_then(|c| c.domain.clone()),
-                },
-                TunnelProviderKind::Cloudflare => TunnelProviderConfig::Cloudflare {
-                    api_token: tunnel_cfg
-                        .cloudflare
-                        .as_ref()
-                        .and_then(|c| c.api_token.clone()),
-                    account_id: tunnel_cfg
-                        .cloudflare
-                        .as_ref()
-                        .and_then(|c| c.account_id.clone()),
-                    zone_id: tunnel_cfg
-                        .cloudflare
-                        .as_ref()
-                        .and_then(|c| c.zone_id.clone()),
-                    tunnel_name: tunnel_cfg
-                        .cloudflare
-                        .as_ref()
-                        .and_then(|c| c.tunnel_name.clone()),
-                    hostname: tunnel_cfg
-                        .cloudflare
-                        .as_ref()
-                        .and_then(|c| c.hostname.clone()),
-                    tunnel_token: tunnel_cfg
-                        .cloudflare
-                        .as_ref()
-                        .and_then(|c| c.tunnel_token.clone()),
-                },
-            };
-            if let Err(e) = crate::tunnel::start_tunnel(state.clone(), provider, &config).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "tunnel_start_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: None,
-                    },
-                )
-                .await;
-            }
-        }
-        Command::TunnelStop => {
-            crate::tunnel::stop_tunnel(state).await;
-        }
-        Command::TunnelRequestState => {
-            crate::tunnel::broadcast_tunnel_state(state).await;
-        }
+        Command::TunnelRevokeToken { id } => cmd_tunnel::revoke_token(state, id).await,
+        Command::TunnelSetEnabled { enabled } => cmd_tunnel::set_enabled(state, enabled).await,
+        Command::TunnelStart { provider } => cmd_tunnel::start(state, provider).await,
+        Command::TunnelStop => cmd_tunnel::stop(state).await,
+        Command::TunnelRequestState => cmd_tunnel::request_state(state).await,
 
-        Command::ChatSend { body } => {
-            crate::chat::handle_send(state, peer_id, peer_label, body).await;
-        }
-        Command::ChatClear => {
-            crate::chat::handle_clear(state, peer_id, peer_label, auth).await;
-        }
-        Command::ChatHistoryRequest => {
-            crate::chat::handle_history_request(state).await;
-        }
-        Command::ChatSnapshot { filename } => {
-            crate::chat::handle_snapshot(state, auth, filename).await;
-        }
-        Command::PttStart => {
-            crate::chat::handle_ptt_start(state, peer_id, peer_label).await;
-        }
-        Command::PttStop => {
-            crate::chat::handle_ptt_stop(state, peer_id).await;
-        }
+        // ── Chat + PTT + track-browser-source assignment ──────────────
+        Command::ChatSend { body } => cmd_chat::send(state, peer_id, peer_label, body).await,
+        Command::ChatClear => cmd_chat::clear(state, peer_id, peer_label, auth).await,
+        Command::ChatHistoryRequest => cmd_chat::history_request(state).await,
+        Command::ChatSnapshot { filename } => cmd_chat::snapshot(state, auth, filename).await,
+        Command::PttStart => cmd_chat::ptt_start(state, peer_id, peer_label).await,
+        Command::PttStop => cmd_chat::ptt_stop(state, peer_id).await,
         Command::SetTrackBrowserSource {
             track_id,
             peer_id: assigned_peer,
-        } => {
-            set_track_browser_source(state, track_id, assigned_peer).await;
-        }
-        Command::ListTrackBrowserSources => {
-            broadcast_track_browser_sources(state).await;
-        }
+        } => cmd_chat::set_track_source(state, track_id, assigned_peer).await,
+        Command::ListTrackBrowserSources => cmd_chat::list_track_sources(state).await,
 
         // ─── AI agent commands ───────────────────────────────────
-        Command::AgentSend { body, attachments } => {
-            crate::agent_ws::handle_agent_send(state, body, attachments).await;
-        }
-        Command::AgentStop => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.stop_current_turn().await;
-            }
-        }
-        Command::AgentClearHistory => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.clear_history().await;
-            }
-        }
-        Command::AgentSetAutonomy { autonomy } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.set_autonomy(autonomy).await;
-            }
-        }
+        // ── AI agent surface (FAB + tools + skills + sessions) ───────
+        // Bodies live in `cmd_agent.rs`. Two arms (UploadSkill,
+        // SessionDelete) are RBAC-gated server-side so they thread
+        // `auth` + `peer_id`; the rest just route fields through.
+        Command::AgentSend { body, attachments } => cmd_agent::send(state, body, attachments).await,
+        Command::AgentStop => cmd_agent::stop(state).await,
+        Command::AgentClearHistory => cmd_agent::clear_history(state).await,
+        Command::AgentSetAutonomy { autonomy } => cmd_agent::set_autonomy(state, autonomy).await,
         Command::AgentSetConfig {
             endpoint,
             model,
             api_key,
-        } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.set_config(endpoint, model, api_key).await;
-            }
-        }
+        } => cmd_agent::set_config(state, endpoint, model, api_key).await,
         Command::AgentConfirmTool { call_id, approve } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.confirm_tool(&call_id, approve).await;
-            }
+            cmd_agent::confirm_tool(state, call_id, approve).await
         }
-        Command::AgentHistoryRequest => {
-            crate::agent_ws::send_history_to(state).await;
-        }
-        Command::AgentListSkills => {
-            crate::agent_ws::list_skills(state).await;
-        }
+        Command::AgentHistoryRequest => cmd_agent::history_request(state).await,
+        Command::AgentListSkills => cmd_agent::list_skills(state).await,
         Command::AgentUploadSkill { name, body } => {
-            // Admin-gated on tunneled connections; LAN is trusted
-            // per DECISION 38. Reject silently on remote viewers
-            // rather than echoing back, since the FE hides the
-            // upload UI for them already.
-            let allowed = match auth {
-                ConnectionAuth::Lan => true,
-                ConnectionAuth::Authenticated { role_id, .. } => role_id == "admin",
-                ConnectionAuth::Unauthenticated => false,
-            };
-            if !allowed {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "forbidden_for_role".into(),
-                        message: "uploading skills requires admin".into(),
-                        target_peer_id: Some(peer_id.into()),
-                    },
-                )
-                .await;
-            } else if let Some(agent) = state.agent.read().await.clone() {
-                agent.upload_skill(&name, &body).await;
-            }
+            cmd_agent::upload_skill(state, auth, peer_id, name, body).await
         }
-        Command::AgentEnableSkill { name } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.set_skill_enabled(&name, true).await;
-            }
-        }
+        Command::AgentEnableSkill { name } => cmd_agent::set_skill_enabled(state, name, true).await,
         Command::AgentDisableSkill { name } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.set_skill_enabled(&name, false).await;
-            }
+            cmd_agent::set_skill_enabled(state, name, false).await
         }
-        Command::AgentListMemories => {
-            crate::agent_ws::list_memories(state).await;
-        }
-        Command::AgentSaveMemory { name, body } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.save_memory(&name, &body).await;
-            }
-        }
-        Command::AgentForgetMemory { name } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.forget_memory(&name).await;
-            }
-        }
-        Command::AgentListTemplates => {
-            crate::agent_ws::list_templates(state).await;
-        }
+        Command::AgentListMemories => cmd_agent::list_memories(state).await,
+        Command::AgentSaveMemory { name, body } => cmd_agent::save_memory(state, name, body).await,
+        Command::AgentForgetMemory { name } => cmd_agent::forget_memory(state, name).await,
+        Command::AgentListTemplates => cmd_agent::list_templates(state).await,
         Command::AgentRenderResult {
             request_id,
             png_b64,
             error,
-        } => {
-            if let Some(renderer) = state.fe_renderer.read().await.clone() {
-                renderer.resolve(&request_id, png_b64, error).await;
-            }
-        }
+        } => cmd_agent::render_result(state, request_id, png_b64, error).await,
         Command::UiActionResult {
             request_id,
             ok,
             state_json,
             error,
-        } => {
-            if let Some(d) = state.ui_director.read().await.clone() {
-                d.resolve(&request_id, ok, state_json, error).await;
-            }
-        }
-        Command::AgentSessionList => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.broadcast_sessions().await;
-            }
-        }
-        Command::AgentSessionNew { title } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.new_session(title).await;
-            }
-        }
-        Command::AgentSessionLoad { id } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.load_session(id).await;
-            }
-        }
+        } => cmd_agent::ui_action_result(state, request_id, ok, state_json, error).await,
+        Command::AgentSessionList => cmd_agent::session_list(state).await,
+        Command::AgentSessionNew { title } => cmd_agent::session_new(state, title).await,
+        Command::AgentSessionLoad { id } => cmd_agent::session_load(state, id).await,
         Command::AgentSessionDelete { id } => {
-            let allowed = match auth {
-                ConnectionAuth::Lan => true,
-                ConnectionAuth::Authenticated { role_id, .. } => role_id == "admin",
-                ConnectionAuth::Unauthenticated => false,
-            };
-            if !allowed {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "forbidden_for_role".into(),
-                        message: "deleting sessions requires admin".into(),
-                        target_peer_id: Some(peer_id.into()),
-                    },
-                )
-                .await;
-            } else if let Some(agent) = state.agent.read().await.clone() {
-                agent.delete_session(id).await;
-            }
+            cmd_agent::session_delete(state, auth, peer_id, id).await
         }
         Command::AgentSessionRename { id, title } => {
-            if let Some(agent) = state.agent.read().await.clone() {
-                agent.rename_session(id, title).await;
-            }
+            cmd_agent::session_rename(state, id, title).await
         }
 
         // ── DAW scripting (shim-declared surface) ─────────────────────
-        Command::ListScripts => {
-            let scripts = state.backend().await.list_scripts().await?;
-            broadcast_event(state, Event::ScriptList { scripts }).await;
-        }
-        Command::SaveScript { script } => {
-            if let Err(e) = state.backend().await.save_script(script).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "save_script_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: Some(peer_id.into()),
-                    },
-                )
-                .await;
-            }
-            // Backend echoes `ScriptSaved` on success via its event stream.
-        }
-        Command::DeleteScript { id } => {
-            if let Err(e) = state.backend().await.delete_script(id).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "delete_script_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: Some(peer_id.into()),
-                    },
-                )
-                .await;
-            }
-        }
+        // Bodies live in `cmd_scripts.rs`; the arms route fields through.
+        Command::ListScripts => cmd_scripts::list_scripts(state).await?,
+        Command::SaveScript { script } => cmd_scripts::save_script(state, peer_id, script).await,
+        Command::DeleteScript { id } => cmd_scripts::delete_script(state, peer_id, id).await,
         Command::EnableScript { id, enabled } => {
-            if let Err(e) = state.backend().await.enable_script(id, enabled).await {
-                broadcast_event(
-                    state,
-                    Event::Error {
-                        code: "enable_script_failed".into(),
-                        message: e.to_string(),
-                        target_peer_id: Some(peer_id.into()),
-                    },
-                )
-                .await;
-            }
+            cmd_scripts::enable_script(state, peer_id, id, enabled).await
         }
         Command::RunScript { id, args_override } => {
-            match state
-                .backend()
-                .await
-                .run_script(id.clone(), args_override)
-                .await
-            {
-                Ok(result) => {
-                    // Backend tx already fanned out; emit explicitly too
-                    // so callers that don't subscribe to the snapshot
-                    // stream (one-shot HTTP-ish clients) still get the
-                    // reply. Duplicates are harmless — the UI dedupes
-                    // on `result.id` + monotonic seq.
-                    broadcast_event(state, Event::ScriptRunResult { result }).await;
-                }
-                Err(e) => {
-                    broadcast_event(
-                        state,
-                        Event::Error {
-                            code: "run_script_failed".into(),
-                            message: e.to_string(),
-                            target_peer_id: Some(peer_id.into()),
-                        },
-                    )
-                    .await;
-                }
-            }
+            cmd_scripts::run_script(state, peer_id, id, args_override).await
         }
         Command::RecoverDisabledScripts => {
-            match state.backend().await.recover_disabled_scripts().await {
-                Ok(recovered) => {
-                    // Re-emit the full list so clients pick up the
-                    // recovered entries with `disabled_on_upload=true`.
-                    if !recovered.is_empty() {
-                        if let Ok(scripts) = state.backend().await.list_scripts().await {
-                            broadcast_event(state, Event::ScriptList { scripts }).await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    broadcast_event(
-                        state,
-                        Event::Error {
-                            code: "recover_disabled_scripts_failed".into(),
-                            message: e.to_string(),
-                            target_peer_id: Some(peer_id.into()),
-                        },
-                    )
-                    .await;
-                }
-            }
+            cmd_scripts::recover_disabled_scripts(state, peer_id).await
         }
 
         Command::MovePlugin {
@@ -4159,6 +3713,7 @@ async fn dispatch_command(
                         code: "move_plugin_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -4179,6 +3734,7 @@ async fn dispatch_command(
                         code: "show_plugin_gui_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -4193,6 +3749,7 @@ async fn dispatch_command(
                         code: "hide_plugin_gui_failed".into(),
                         message: e.to_string(),
                         target_peer_id: None,
+                        localized: None,
                     },
                 )
                 .await;
@@ -4221,6 +3778,7 @@ async fn dispatch_command(
                         std::mem::discriminant(&env.body)
                     ),
                     target_peer_id: None,
+                    localized: None,
                 },
             )
             .await;
@@ -4358,6 +3916,128 @@ async fn broadcast_track_browser_sources(state: &std::sync::Arc<AppState>) {
         })
         .collect();
     broadcast_event(state, Event::TrackBrowserSourcesSnapshot { entries }).await;
+}
+
+/// Auto-extend a region so it can hold every note in `notes`. The
+/// shim's `replace_region_notes` / `add_midi_note` will silently clip
+/// notes that fall past `region.length_samples`, which is a confusing
+/// "I wrote 40 notes but only 30 came back" failure for the agent.
+/// We convert the largest `start_ticks + length_ticks` to samples
+/// using the session's tempo + ppqn, and if it exceeds the current
+/// region length we `update_region { length_samples }` first.
+///
+/// Best-effort: if any of the lookups (track owner, current region
+/// length, tempo) fail we let the backend take its normal path. The
+/// backend's own clip-or-extend behaviour is then the fallback.
+async fn ensure_region_fits_notes(
+    backend: &dyn foyer_backend::Backend,
+    region_id: &foyer_schema::EntityId,
+    notes: &[foyer_schema::MidiNote],
+) {
+    if notes.is_empty() {
+        return;
+    }
+    let max_end_ticks: u64 = notes
+        .iter()
+        .map(|n| n.start_ticks.saturating_add(n.length_ticks))
+        .max()
+        .unwrap_or(0);
+    if max_end_ticks == 0 {
+        return;
+    }
+    let snap = match backend.snapshot().await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let ppqn = snap.ppqn.unwrap_or(1920).max(1) as f64;
+    let sample_rate = snap.sample_rate.max(1) as f64;
+    let tempo_bpm = snap
+        .transport
+        .tempo
+        .value
+        .as_f64()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(120.0);
+    // ticks → seconds → samples.
+    let seconds_per_tick = 60.0 / (tempo_bpm * ppqn);
+    let needed_samples = (max_end_ticks as f64 * seconds_per_tick * sample_rate).ceil() as u64;
+
+    // Find current region by walking the snapshot's tracks; saves a
+    // tracks×list_regions roundtrip for backends that already carry
+    // regions on snapshot. Fall back to list_regions if not.
+    let (current_len, _track_id) = match find_region_in_snapshot(&snap, region_id) {
+        Some(hit) => hit,
+        None => match find_region_track(backend, region_id).await {
+            Some((track_id, _)) => match backend.list_regions(track_id.clone()).await {
+                Ok((_, regions)) => match regions.iter().find(|r| &r.id == region_id) {
+                    Some(r) => (r.length_samples, track_id),
+                    None => return,
+                },
+                Err(_) => return,
+            },
+            None => return,
+        },
+    };
+    if needed_samples <= current_len {
+        return;
+    }
+    // Pad by one beat at current tempo so subsequent appends have
+    // headroom without us extending again. Kept modest so the user
+    // doesn't see surprise "this region is huge" output.
+    let beat_samples = (60.0 / tempo_bpm * sample_rate).ceil() as u64;
+    let new_len = needed_samples.saturating_add(beat_samples);
+    let patch = foyer_schema::RegionPatch {
+        length_samples: Some(new_len),
+        ..Default::default()
+    };
+    if let Err(e) = backend.update_region(region_id.clone(), patch).await {
+        tracing::debug!(
+            "ensure_region_fits_notes: update_region {region_id} → {new_len} failed: {e}"
+        );
+    }
+}
+
+/// Look for `region_id` among the regions implicitly carried in the
+/// snapshot. Most backends don't ship regions in the snapshot
+/// (`list_regions` is the canonical fetch path), so this returns
+/// `None` for them and callers fall back to a list_regions scan.
+fn find_region_in_snapshot(
+    _snap: &foyer_schema::Session,
+    _region_id: &foyer_schema::EntityId,
+) -> Option<(u64, foyer_schema::EntityId)> {
+    // Session.tracks doesn't currently carry per-track regions in the
+    // wire schema; this helper is a forward-compat hook so when we
+    // add `Track.regions` (or the agent's recent session.full
+    // started including them) the fast path is one snapshot instead
+    // of tracks × list_regions. Today it always returns None.
+    None
+}
+
+/// Walk MIDI tracks looking for the one that owns `region_id`. Used
+/// by the drum-mode auto-routing path on `SetSequencerLayout`. The
+/// session snapshot doesn't carry regions, and `list_regions` is
+/// per-track, so this is a tracks×ListRegions scan. Typical sessions
+/// have <20 MIDI tracks so it's bounded; ran once per drum layout
+/// flip (not per cell click thanks to the coalescer).
+///
+/// Returns `(track_id, current_playback_channel_mask)` so the caller
+/// can skip the set if the mask already matches.
+async fn find_region_track(
+    backend: &dyn foyer_backend::Backend,
+    region_id: &foyer_schema::EntityId,
+) -> Option<(foyer_schema::EntityId, Option<u16>)> {
+    let snap = backend.snapshot().await.ok()?;
+    for t in &snap.tracks {
+        if t.kind != foyer_schema::TrackKind::Midi {
+            continue;
+        }
+        if let Ok((_, regions)) = backend.list_regions(t.id.clone()).await {
+            if regions.iter().any(|r| &r.id == region_id) {
+                return Some((t.id.clone(), t.playback_channel_mask));
+            }
+        }
+    }
+    None
 }
 
 /// Called from the WS disconnect path so a peer leaving clears any

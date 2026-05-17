@@ -105,7 +105,15 @@ impl Tool for SequencerTool {
          set_cells(region_id, pattern_id, cells=[{row,step,velocity,length_steps?}]), \
          add_pattern(region_id, name, cells?, id?, color?), \
          arrange(region_id, slots=[{pattern_id,bar,arrangement_row?}]), \
-         clear(region_id), show_viz(track_id, region_id)."
+         clear(region_id), show_viz(track_id, region_id). \
+         INSTRUMENT CONTEXT MATTERS: a sequencer layout doesn't choose \
+         the sound — the track's instrument plugin does. Before writing \
+         drum cells, call `tracks.describe { track_id }` and inspect \
+         `instrument_summary.instrument` + `active_patches`. On gmsynth \
+         (GM-compatible synths) drums require channel 9 cells AND a \
+         drum-kit program; on melodic synths your kicks/snares will \
+         sound pitched. Read the `drum-pattern-authoring` skill for \
+         the full pre-flight."
     }
 
     fn schema(&self) -> Value {

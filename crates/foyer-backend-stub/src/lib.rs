@@ -18,6 +18,7 @@ mod actions;
 mod fixtures;
 mod jail;
 mod regions;
+mod spectrum;
 mod state;
 mod stub_media_pool;
 mod waveform;
@@ -54,6 +55,9 @@ pub struct StubBackend {
     jail: Option<Arc<Jail>>,
     regions: Arc<Mutex<regions::RegionStore>>,
     waveforms: Arc<Mutex<waveform::WaveformCache>>,
+    /// Active spectrum-subscription pump. Spawns a per-hub task only
+    /// while subscriptions exist; idle sessions pay nothing.
+    spectrum: spectrum::SpectrumHub,
     /// Monotonic seed for `regions::fresh_region_id` — bumped on every
     /// duplicate so concurrent paste batches don't collide.
     dup_seed: std::sync::atomic::AtomicU64,
@@ -100,6 +104,7 @@ impl StubBackend {
             sample_rate: std::sync::atomic::AtomicU32::new(sr),
             meter_handle: None,
             test_tone: false,
+            spectrum: spectrum::SpectrumHub::new(),
         };
         backend.meter_handle = Some(backend.spawn_meter_tick());
         backend
@@ -125,6 +130,7 @@ impl StubBackend {
             sample_rate: std::sync::atomic::AtomicU32::new(foyer_schema::DEFAULT_SAMPLE_RATE),
             meter_handle: None,
             test_tone: false,
+            spectrum: spectrum::SpectrumHub::new(),
         }
     }
 
@@ -730,6 +736,26 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    async fn create_track(
+        &self,
+        name: String,
+        kind: foyer_schema::TrackKind,
+        color: Option<String>,
+        after_id: Option<EntityId>,
+    ) -> Result<Track, BackendError> {
+        let track = self
+            .state
+            .lock()
+            .await
+            .create_track(name, kind, color, after_id.as_ref())?;
+        // Stub doesn't currently emit per-track Created events; force a
+        // snapshot reload so every client repaints with the new track.
+        let _ = self.tx.send(Event::SessionPatch {
+            patch: foyer_schema::Patch::Reload,
+        });
+        Ok(track)
+    }
+
     async fn update_track(&self, id: EntityId, patch: TrackPatch) -> Result<Track, BackendError> {
         let updated = self
             .state
@@ -1077,6 +1103,50 @@ impl Backend for StubBackend {
             });
         }
         Ok(())
+    }
+
+    // ── Spectrum ───────────────────────────────────────────────────
+    async fn spectrum_capabilities(
+        &self,
+    ) -> Result<Option<foyer_schema::SpectrumCapabilities>, BackendError> {
+        Ok(Some(foyer_schema::SpectrumCapabilities::stub()))
+    }
+
+    async fn subscribe_spectrum(
+        &self,
+        target: foyer_schema::SpectrumTarget,
+        opts: foyer_schema::SpectrumOpts,
+    ) -> Result<foyer_schema::SpectrumOpts, BackendError> {
+        let applied = self
+            .spectrum
+            .subscribe(
+                target,
+                opts,
+                self.tx.clone(),
+                self.state.clone(),
+                self.sample_rate(),
+            )
+            .await;
+        Ok(applied)
+    }
+
+    async fn unsubscribe_spectrum(
+        &self,
+        target: foyer_schema::SpectrumTarget,
+    ) -> Result<(), BackendError> {
+        self.spectrum.unsubscribe(target, self.tx.clone()).await;
+        Ok(())
+    }
+
+    async fn snapshot_spectrum(
+        &self,
+        target: foyer_schema::SpectrumTarget,
+        opts: foyer_schema::SpectrumOpts,
+    ) -> Result<foyer_schema::SpectrumFrame, BackendError> {
+        Ok(self
+            .spectrum
+            .snapshot(target, opts, &self.state, self.sample_rate())
+            .await)
     }
 
     // ── Scripting ──────────────────────────────────────────────────

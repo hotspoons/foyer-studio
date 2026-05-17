@@ -536,6 +536,66 @@ impl StubState {
     /// name/color changes update immediately; `group_id` is stored
     /// verbatim; `bus_assign` is a no-op in the stub until we model
     /// routing.
+    /// Create a new audio / MIDI / bus track. Refuses to create master
+    /// or monitor (those are seeded once at session boot). The new
+    /// track lands after `after_id` if given, otherwise at the end.
+    /// Returns the freshly-minted `Track` so callers can broadcast.
+    pub(crate) fn create_track(
+        &mut self,
+        name: String,
+        kind: TrackKind,
+        color: Option<String>,
+        after_id: Option<&EntityId>,
+    ) -> Result<Track, foyer_backend::BackendError> {
+        match kind {
+            TrackKind::Audio | TrackKind::Midi | TrackKind::Bus => {}
+            other => {
+                return Err(foyer_backend::BackendError::Other(format!(
+                    "cannot create track of kind {other:?} (master/monitor are immutable)"
+                )));
+            }
+        }
+        // Slug from name + uniqueness counter (mirrors create_group).
+        let mut slug: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if slug.is_empty() {
+            slug.push_str("track");
+        }
+        let mut id_str = format!("track.{slug}");
+        let mut suffix = 2;
+        while self.session.tracks.iter().any(|t| t.id.as_str() == id_str) {
+            id_str = format!("track.{slug}_{suffix}");
+            suffix += 1;
+        }
+        let track = crate::fixtures::track(&slug, &name, kind, color.as_deref());
+        // Override the id from the fixtures helper so deduped suffixes
+        // win — fixtures::track makes its own id from `slug`.
+        let track = Track {
+            id: EntityId::new(id_str),
+            ..track
+        };
+        let insert_at = match after_id {
+            Some(after) => self
+                .session
+                .tracks
+                .iter()
+                .position(|t| &t.id == after)
+                .map(|i| i + 1)
+                .unwrap_or(self.session.tracks.len()),
+            None => self.session.tracks.len(),
+        };
+        self.session.tracks.insert(insert_at, track.clone());
+        Ok(track)
+    }
+
     pub(crate) fn update_track(&mut self, id: &EntityId, patch: &TrackPatch) -> Option<Track> {
         let t = self.session.tracks.iter_mut().find(|t| &t.id == id)?;
         if let Some(name) = patch.name.as_ref() {
@@ -556,9 +616,29 @@ impl StubState {
                 Some(group_id.clone())
             };
         }
-        // bus_assign is intentionally not modeled in the stub — the real
-        // shim does the routing; this backend is only about making the
-        // UI repaint.
+        // Routing fields. The stub now models these as state (the
+        // shim has its own audio routing on top, which has to match
+        // these values when both are present). Empty string clears
+        // back to the default (master output / auto input / auto
+        // monitoring).
+        if let Some(bus) = patch.bus_assign.as_ref() {
+            t.bus_assign = if bus.as_str().is_empty() {
+                None
+            } else {
+                Some(bus.clone())
+            };
+        }
+        if let Some(monitor) = patch.monitoring.as_ref() {
+            t.monitoring = if monitor.is_empty() {
+                None
+            } else {
+                Some(monitor.clone())
+            };
+        }
+        // input_port routing is shim-managed; the stub's track has no
+        // dedicated field for it (input_port flows through `inputs[]`
+        // which is read-only here). Leaving the live shim to act on
+        // input_port is correct.
         Some(t.clone())
     }
 

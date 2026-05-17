@@ -151,6 +151,45 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    async fn spectrum_capabilities(
+        &self,
+    ) -> Result<Option<foyer_schema::SpectrumCapabilities>, BackendError> {
+        // Reuse whatever the most-recent snapshot carried — the shim
+        // emits the caps inline with the session, and the client
+        // caches the latest under `cached_spectrum_caps`.
+        Ok(self.client.cached_spectrum_caps())
+    }
+
+    async fn subscribe_spectrum(
+        &self,
+        target: foyer_schema::SpectrumTarget,
+        opts: foyer_schema::SpectrumOpts,
+    ) -> Result<foyer_schema::SpectrumOpts, BackendError> {
+        // Fire-and-forget command + return the requested opts as-is;
+        // the shim echoes the actually-applied opts via
+        // `Event::SpectrumSubscribed` which the WS layer fans out to
+        // clients. Mirrors the AddPlugin pattern (command goes out,
+        // event comes back, no synchronous reply).
+        self.client
+            .send_command(Command::SubscribeSpectrum {
+                target,
+                opts: opts.clone(),
+            })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))?;
+        Ok(opts)
+    }
+
+    async fn unsubscribe_spectrum(
+        &self,
+        target: foyer_schema::SpectrumTarget,
+    ) -> Result<(), BackendError> {
+        self.client
+            .send_command(Command::UnsubscribeSpectrum { target })
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn add_plugin(
         &self,
         track_id: EntityId,

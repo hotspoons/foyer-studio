@@ -6,10 +6,12 @@
 // delete).
 
 import { html, css } from "lit";
+import { ref } from "lit/directives/ref.js";
 
 import { icon } from "foyer-ui-core/icons.js";
 import { QuadrantFab } from "./quadrant-fab.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
+import { confirmAction } from "foyer-ui-core/widgets/confirm-modal.js";
 import {
   listBindings,
   setBinding,
@@ -56,41 +58,40 @@ function saveConfig(cfg) {
   try { localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg)); } catch {}
 }
 
-const HELP_KEYS = [
-  ["Ctrl+Alt H/J/K/L", "Focus left / down / up / right"],
-  ["Ctrl+Alt |",       "Split focused tile to the right"],
-  ["Ctrl+Alt -",       "Split focused tile below"],
-  ["Ctrl+Alt W",       "Close focused tile"],
-  ["Ctrl+Alt [ / ]",   "Shrink / grow focused tile"],
-  ["Ctrl+Alt A",       "Toggle automation panel"],
-  ["Ctrl/Cmd K",       "Command palette"],
-];
-
 export class LayoutFab extends QuadrantFab {
   static properties = {
     ...QuadrantFab.properties,
     store: { type: Object },
-    _tab:  { state: true, type: String },
     _saveName: { state: true, type: String },
     _cfg:  { state: true, type: Object },
     _captureFor: { state: true, type: Object }, // {kind, name, label} when capturing
     _bindings: { state: true, type: Object },
+    // Active inline rename: { name: <current saved name>, draft: <new text> }.
+    // Null when no row is being renamed. Inline (vs a separate modal) keeps
+    // the panel feeling like an editable list — the rename input replaces
+    // the row's label in place, with save / cancel controls flush right.
+    _renaming: { state: true, type: Object },
   };
 
   static styles = [
     QuadrantFab.styles,
     css`
-      .tabs { display: flex; padding: 0 8px; border-bottom: 1px solid var(--color-border); }
-      .tabs button {
-        background: transparent; border: 0; border-bottom: 2px solid transparent;
-        color: var(--color-text-muted); padding: 6px 10px;
-        font-size: 11px; font-weight: 500;
-        cursor: pointer;
-      }
-      .tabs button:hover { color: var(--color-text); }
-      .tabs button.active { color: var(--color-text); border-bottom-color: var(--color-accent); }
-
       .content { padding: 8px; }
+      /* Section header. Mirrors the tabs' typography (uppercase, small,
+         accent-tinted on the active one) so the redesign feels like a
+         continuation of the old shell rather than a brand-new look. */
+      .section-header {
+        display: flex; align-items: center; gap: 8px;
+        padding: 10px 4px 6px;
+        font-size: 10px; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.08em;
+        color: var(--color-text-muted);
+      }
+      .section-header.first { padding-top: 4px; }
+      .section-header .rule {
+        flex: 1; height: 1px;
+        background: var(--color-border);
+      }
       .row {
         display: flex; align-items: center; gap: 6px;
         padding: 6px 8px;
@@ -102,6 +103,38 @@ export class LayoutFab extends QuadrantFab {
       .row:hover { background: color-mix(in oklab, var(--color-accent) 12%, transparent); }
       .row.hidden { opacity: 0.45; }
       .row .label { flex: 1; font-family: var(--font-sans); }
+      /* Per-row action buttons (rename / delete on user-preset rows).
+         Hidden until row hover so resting state is a clean list. */
+      .row .row-actions {
+        display: flex; gap: 2px;
+        opacity: 0;
+        transition: opacity 0.1s ease;
+      }
+      .row:hover .row-actions,
+      .row:focus-within .row-actions {
+        opacity: 1;
+      }
+      .row .row-actions button {
+        background: transparent;
+        border: 0;
+        padding: 3px 5px;
+        color: var(--color-text-muted);
+        cursor: pointer;
+        border-radius: var(--radius-sm);
+        display: inline-flex; align-items: center;
+      }
+      .row .row-actions button:hover { color: var(--color-text); background: var(--color-surface); }
+      .row .row-actions button.danger:hover { color: var(--color-danger, #f87171); }
+      .row .rename-input {
+        flex: 1;
+        background: var(--color-surface);
+        border: 1px solid var(--color-accent);
+        border-radius: var(--radius-sm);
+        color: var(--color-text);
+        padding: 2px 6px;
+        font-size: 12px;
+        font-family: var(--font-sans);
+      }
       .row .tag {
         font-size: 9px; font-weight: 600;
         letter-spacing: 0.08em; text-transform: uppercase;
@@ -192,11 +225,11 @@ export class LayoutFab extends QuadrantFab {
     this.storageKey = "foyer.layout-fab.v1";
     this._fabAccent = "accent-2";
     this._fabTitle = "Layouts";
-    this._tab = "presets";
     this._saveName = "";
     this._cfg = loadConfig();
     this._captureFor = null;
     this._bindings = listBindings();
+    this._renaming = null;
     this._onBindingsChange = () => {
       this._bindings = listBindings();
       this.requestUpdate();
@@ -236,46 +269,42 @@ export class LayoutFab extends QuadrantFab {
   }
 
   _renderPanelContent() {
+    // Single scrolling body with two sectional dividers — no tabs.
+    // Built-in presets at the top, user-saved presets below, and the
+    // "save current as…" row sits flush against the user-presets list
+    // so it reads as "add a new one." The legacy Keys help tab is
+    // gone; keybind capture still lives behind the row-level context
+    // menu (right-click) since that's where it's discoverable.
     return html`
       ${this._captureFor ? this._renderCaptureOverlay() : null}
-      <div class="tabs">
-        <button class=${this._tab === "presets" ? "active" : ""}
-                @click=${() => { this._tab = "presets"; }}>Presets</button>
-        <button class=${this._tab === "saved" ? "active" : ""}
-                @click=${() => { this._tab = "saved"; }}>Saved</button>
-        <button class=${this._tab === "keys" ? "active" : ""}
-                @click=${() => { this._tab = "keys"; }}>Keys</button>
-      </div>
       <div class="content">
-        ${this._tab === "presets"
-          ? this._renderPresets()
-          : this._tab === "saved"
-          ? this._renderSaved()
-          : this._renderKeys()}
+        <div class="section-header first">
+          <span>Presets</span>
+          <span class="rule"></span>
+        </div>
+        ${this._renderPresets()}
+        <div class="toggle-row" style="border-top:0;padding:6px 4px 0">
+          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox"
+                   .checked=${!!this._cfg.showHidden}
+                   @change=${(e) => this._toggleShowHidden(e.target.checked)}>
+            Show hidden presets
+          </label>
+        </div>
+
+        <div class="section-header">
+          <span>User presets</span>
+          <span class="rule"></span>
+        </div>
+        ${this._renderSaved()}
       </div>
-      ${this._tab === "presets"
-        ? html`
-            <div class="toggle-row">
-              <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                <input type="checkbox"
-                       .checked=${!!this._cfg.showHidden}
-                       @change=${(e) => this._toggleShowHidden(e.target.checked)}>
-                Show hidden presets
-              </label>
-            </div>
-          `
-        : null}
-      ${this._tab === "saved"
-        ? html`
-            <div class="save-row">
-              <input placeholder="layout name…"
-                     .value=${this._saveName}
-                     @input=${(e) => { this._saveName = e.currentTarget.value; }}
-                     @keydown=${(e) => { if (e.key === "Enter") this._save(); }}>
-              <button @click=${this._save}>Save current</button>
-            </div>
-          `
-        : null}
+      <div class="save-row">
+        <input placeholder="Name this layout…"
+               .value=${this._saveName}
+               @input=${(e) => { this._saveName = e.currentTarget.value; }}
+               @keydown=${(e) => { if (e.key === "Enter") this._save(); }}>
+        <button @click=${this._save}>Save current</button>
+      </div>
     `;
   }
 
@@ -310,33 +339,67 @@ export class LayoutFab extends QuadrantFab {
   _renderSaved() {
     const names = this.store?.listNamed?.() || [];
     if (!names.length) {
-      return html`<div style="padding:14px;color:var(--color-text-muted);font-size:12px">
-        No saved layouts yet. Arrange panes the way you like, then save below.
+      return html`<div style="padding:10px 4px;color:var(--color-text-muted);font-size:12px">
+        No user presets yet. Arrange panes the way you like, then name and save below.
       </div>`;
     }
     return html`
       ${names.map((n) => {
         const chord = bindingFor("named", n);
+        const renaming = this._renaming && this._renaming.name === n;
+        if (renaming) {
+          // Inline rename: replace the label + chord with an input
+          // and Save / Cancel controls. Click anywhere outside resets
+          // via the `_cancelRename` path (the keydown handlers cover
+          // Enter / Esc).
+          return html`
+            <div class="row" @click=${(e) => e.stopPropagation()}>
+              <input
+                class="rename-input"
+                .value=${this._renaming.draft}
+                @click=${(e) => e.stopPropagation()}
+                @input=${(e) => { this._renaming = { ...this._renaming, draft: e.currentTarget.value }; }}
+                @keydown=${(e) => this._onRenameKey(e)}
+                @blur=${() => this._commitRename()}
+                ${ref((el) => { if (el && this._renaming && document.activeElement !== el) {
+                  // Auto-focus the input the first frame the row flips
+                  // into rename mode — without this the user has to
+                  // click into the field after pressing rename.
+                  queueMicrotask(() => { try { el.focus(); el.select(); } catch {} });
+                } })}
+              />
+              <div class="row-actions" style="opacity:1">
+                <button title="Save"
+                        @click=${(e) => { e.stopPropagation(); this._commitRename(); }}>
+                  ${icon("check", 13)}
+                </button>
+                <button title="Cancel"
+                        @click=${(e) => { e.stopPropagation(); this._cancelRename(); }}>
+                  ${icon("x-mark", 13)}
+                </button>
+              </div>
+            </div>
+          `;
+        }
         return html`
           <div class="row"
                @click=${() => this.store.loadNamed(n)}
                @contextmenu=${(ev) => this._onSavedContext(ev, n)}>
             <span class="label">${n}</span>
             ${chord ? html`<span class="kbd">${chord}</span>` : null}
+            <div class="row-actions">
+              <button title="Rename"
+                      @click=${(e) => { e.stopPropagation(); this._beginRename(n); }}>
+                ${icon("pencil-square", 13)}
+              </button>
+              <button class="danger" title="Delete"
+                      @click=${(e) => { e.stopPropagation(); this._confirmDelete(n); }}>
+                ${icon("trash", 13)}
+              </button>
+            </div>
           </div>
         `;
       })}
-    `;
-  }
-
-  _renderKeys() {
-    return html`
-      ${HELP_KEYS.map(([k, desc]) => html`
-        <div class="row">
-          <span class="kbd">${k}</span>
-          <span class="label" style="margin-left:8px">${desc}</span>
-        </div>
-      `)}
     `;
   }
 
@@ -363,6 +426,52 @@ export class LayoutFab extends QuadrantFab {
     if (!n) return;
     this.store?.saveNamed(n);
     this._saveName = "";
+  }
+
+  // ── rename + delete on saved layouts ─────────────────────────────
+
+  _beginRename(name) {
+    this._renaming = { name, draft: name };
+  }
+  _cancelRename() {
+    this._renaming = null;
+  }
+  _onRenameKey(ev) {
+    if (ev.key === "Enter") { ev.preventDefault(); this._commitRename(); }
+    else if (ev.key === "Escape") { ev.preventDefault(); this._cancelRename(); }
+  }
+  _commitRename() {
+    if (!this._renaming) return;
+    const oldName = this._renaming.name;
+    const newName = (this._renaming.draft || "").trim();
+    this._renaming = null;
+    if (!newName || newName === oldName) return;
+    const ok = this.store?.renameNamed?.(oldName, newName);
+    if (!ok) return;
+    // Carry any existing keybinding over to the new name so the user
+    // doesn't have to re-assign their chord after a typo fix.
+    const existingCombo = bindingFor("named", oldName);
+    if (existingCombo) {
+      clearBinding(existingCombo);
+      setBinding(existingCombo, "named", newName);
+    }
+  }
+
+  /// Styled delete confirmation. Resolves on confirm → drops the
+  /// saved layout AND any keybinding tied to its name; resolves on
+  /// cancel → no-op.
+  async _confirmDelete(name) {
+    const ok = await confirmAction({
+      title: "Delete user preset?",
+      message: `"${name}" will be removed from your saved layouts. The current workspace stays as-is.`,
+      confirmLabel: "Delete",
+      cancelLabel: "Keep",
+      tone: "danger",
+    });
+    if (!ok) return;
+    const existingCombo = bindingFor("named", name);
+    this.store?.deleteNamed?.(name);
+    if (existingCombo) clearBinding(existingCombo);
   }
 
   _toggleShowHidden(on) {
@@ -410,6 +519,7 @@ export class LayoutFab extends QuadrantFab {
     const items = [
       { heading: name },
       { label: "Load", icon: "play", action: () => this.store.loadNamed(name) },
+      { label: "Rename…", icon: "pencil-square", action: () => this._beginRename(name) },
       { separator: true },
       {
         label: existing ? `Assign new keybind (current: ${existing})` : "Assign keybind…",
@@ -421,14 +531,12 @@ export class LayoutFab extends QuadrantFab {
         : null,
       { separator: true },
       {
-        label: "Delete",
+        label: "Delete…",
         icon: "trash",
         tone: "danger",
-        action: () => {
-          this.store.deleteNamed(name);
-          // Also clear any keybind tied to the deleted name.
-          if (existing) clearBinding(existing);
-        },
+        // Routes through the styled confirm dialog so the user gets a
+        // proper "are you sure" instead of an immediate drop.
+        action: () => this._confirmDelete(name),
       },
     ].filter(Boolean);
     showContextMenu(ev, items);

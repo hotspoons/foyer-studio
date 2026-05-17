@@ -59,7 +59,7 @@ function dsp_run (ins, outs, n_samples)
 end
 ```
 
-## Sharp edges (these are the ones that silently fail to instantiate)
+## Sharp edges
 
 1. **Don't pre-allocate huge buffers in `dsp_init`**. A 2-second delay line at 96 kHz is 192 000 entries — Lua's array constructor and the GC pressure during init can stall instantiation. Allocate lazily on first `dsp_run` OR use a ring buffer that grows only as the write head wraps.
 
@@ -73,13 +73,23 @@ end
 
 6. **`dsp_ioconfig` is queried during plugin scan**, not after. Return a table that's STATIC — don't compute it based on session state that won't exist at scan time.
 
-7. **Test on small N**. If `dsp_init` or `dsp_run` raises any error, Ardour silently drops the instantiation and `plugins.insert` reports success but the plugin doesn't appear on the track. Watch the Console window for `Lua:` lines on failure.
+## Errors during save
+
+The shim no longer swallows Lua exceptions during `scripts.save`. If
+your body has a syntax error or the DSP fails to register, you'll
+receive BOTH the `script_saved` echo (so your body isn't lost) AND a
+typed `save_script_failed` Event::Error carrying the Lua VM's
+message. Fix the body and re-save.
 
 ## Hand-off check
 
 After `scripts.save { script_type: "dsp" }`:
 
-1. `plugins.catalog { query: "<your name>" }` — confirm the plugin appears.
-2. `plugins.insert { track_id: …, plugin_uri: <unique_id from catalog> }` — adds to the track.
-3. `transport.play` + verify audibly that the effect is doing what you intended.
-4. If insert silently fails, the script body is the problem — usually a bad `dsp_init` allocation or a typo in the `ardour { … }` table. Rewrite with a tighter init.
+1. Watch for a `save_script_failed` error event — if one fires,
+   read the message and patch the body before continuing.
+2. `plugins.catalog { query: "<your name>" }` — confirm the plugin appears.
+3. `plugins.insert { track_id: …, plugin_uri: <unique_id from catalog> }` — adds to the track.
+   The shim emits a typed `add_plugin_unknown` error if the URI
+   isn't registered (common when `lua_refresh` hasn't caught up
+   from a just-saved DSP — wait a beat and retry).
+4. `transport.play` + verify audibly that the effect is doing what you intended.

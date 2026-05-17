@@ -13,6 +13,12 @@ import {
 } from "foyer-core/metronome-strip-pref.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { icon } from "foyer-ui-core/icons.js";
+import { t, tn, onLocaleChange } from "/core/i18n.js";
+
+// Register density labels (sourced from foyer-core/mixer-density.js
+// as plain strings) so the extractor harvests them for catalogs.
+// eslint-disable-next-line no-unused-vars
+const _i18nDensityLabels = () => [t("Wide"), t("Normal"), t("Compact"), t("Narrow")];
 // AudioListener is owned by foyer-core/audio/master-controller.js now;
 // the mixer just observes via window.__foyer.audio. Import removed.
 
@@ -284,11 +290,13 @@ export class Mixer extends LitElement {
     // transport-bar metronome icon (localStorage). Repaint when the
     // pref flips so the strip mounts/unmounts without a reload.
     this._offMetronomePref = onMetronomeStripPrefChange(() => this.requestUpdate());
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
     window.__foyer?.audio?.removeEventListener?.("change", this._onAudioChange);
     this._offMetronomePref?.();
+    this._i18nDispose?.();
     super.disconnectedCallback();
   }
 
@@ -394,56 +402,56 @@ export class Mixer extends LitElement {
   render() {
     const tracks = this.session?.tracks ?? [];
     const density = DENSITIES[this._density] || DENSITIES.normal;
-    const widthLabel = this._widthMode === "fill" ? "Fill" : "Fixed";
+    const widthLabel = this._widthMode === "fill" ? t("Fill") : t("Fixed");
     return html`
       <div class="toolbar">
         <details class="mx-menu" @click=${(e) => e.stopPropagation()}>
           <summary>
             ${icon("adjustments-horizontal", 12)}
-            <span>Mixer</span>
-            <span class="mx-menu-pill">${density.label} · ${widthLabel}</span>
+            <span>${t("Mixer")}</span>
+            <span class="mx-menu-pill">${t(density.label)} · ${widthLabel}</span>
           </summary>
           <div class="mx-panel" @click=${(e) => e.stopPropagation()}>
-            <div class="mx-section-label">Density</div>
+            <div class="mx-section-label">${t("Density")}</div>
             <div class="group">
               ${Object.entries(DENSITIES).map(([k, v]) => html`
                 <button
                   type="button"
                   class=${this._density === k ? "active" : ""}
                   @click=${() => this._setDensity(k)}
-                >${v.label}</button>
+                >${t(v.label)}</button>
               `)}
             </div>
-            <div class="mx-section-label">Width</div>
+            <div class="mx-section-label">${t("Width")}</div>
             <div class="group">
               <button
                 type="button"
                 class=${this._widthMode === "fill" ? "active" : ""}
-                title="Strips flex to fill the container"
+                title=${t("Strips flex to fill the container")}
                 @click=${() => this._setMode("fill")}
-              >Fill</button>
+              >${t("Fill")}</button>
               <button
                 type="button"
                 class=${this._widthMode === "fixed" ? "active" : ""}
-                title="Strips stay at the density's pixel width; mixer scrolls horizontally if needed"
+                title=${t("Strips stay at the density's pixel width; mixer scrolls horizontally if needed")}
                 @click=${() => this._setMode("fixed")}
-              >Fixed</button>
+              >${t("Fixed")}</button>
             </div>
             ${this._hasMetronomeShape() ? html`
-              <div class="mx-section-label">Metronome strip</div>
+              <div class="mx-section-label">${t("Metronome strip")}</div>
               <div class="group">
                 <button
                   type="button"
                   class=${isMetronomeStripShown() ? "active" : ""}
-                  title="Show the dedicated click strip docked to the master bus"
+                  title=${t("Show the dedicated click strip docked to the master bus")}
                   @click=${() => this._setMetronomeShown(true)}
-                >Show</button>
+                >${t("Show")}</button>
                 <button
                   type="button"
                   class=${!isMetronomeStripShown() ? "active" : ""}
-                  title="Hide the metronome strip (click engine state is unaffected)"
+                  title=${t("Hide the metronome strip (click engine state is unaffected)")}
                   @click=${() => this._setMetronomeShown(false)}
-                >Hide</button>
+                >${t("Hide")}</button>
               </div>
             ` : null}
           </div>
@@ -453,22 +461,22 @@ export class Mixer extends LitElement {
           ? html`<button
               class="toolbar-aux"
               @click=${this._resetAllOverrides}
-              title="Clear every per-channel width override"
-            >Reset widths</button>`
+              title=${t("Clear every per-channel width override")}
+            >${t("Reset widths")}</button>`
           : null}
         ${window.__foyer?.store?.state?.rbac?.isTunnel
           ? null
           : html`<button class="listen-chip ${this._listening ? "on" : ""}"
                     data-foyer-listen-toggle="1"
                     @click=${this._toggleListen}
-                    title="${this._listening ? "Stop monitoring" : "Monitor the master bus in your browser"}">
+                    title=${this._listening ? t("Stop monitoring") : t("Monitor the master bus in your browser")}>
               ${icon(this._listening ? "speaker-wave" : "speaker-x-mark", 12)}
-              <span>${this._listening ? "Monitoring" : "Listen"}</span>
+              <span>${this._listening ? t("Monitoring") : t("Listen")}</span>
             </button>`}
-        <span>${tracks.length} tracks · ${density.trackWidth}px</span>
+        <span>${tn("%{count} track", "%{count} tracks", tracks.length)} · ${density.trackWidth}px</span>
       </div>
       ${tracks.length === 0
-        ? html`<div class="empty">Waiting for session…</div>`
+        ? html`<div class="empty">${t("Waiting for session…")}</div>`
         : (() => {
             // Partition into "inputs" (audio/midi + busses) and
             // "master-like" strips (master + monitor). Both categories

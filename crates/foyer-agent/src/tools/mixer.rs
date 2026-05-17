@@ -18,12 +18,49 @@ pub struct MixerTool;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "subcommand", rename_all = "snake_case")]
 enum Op {
-    SetGainDb { track_id: String, db: f64 },
-    SetMute { track_id: String, muted: bool },
-    SetSolo { track_id: String, soloed: bool },
-    SetPan { track_id: String, pan: f64 },
-    Get { track_id: String },
+    SetGainDb {
+        track_id: String,
+        db: f64,
+    },
+    SetMute {
+        track_id: String,
+        muted: bool,
+    },
+    SetSolo {
+        track_id: String,
+        soloed: bool,
+    },
+    SetPan {
+        track_id: String,
+        pan: f64,
+    },
+    Get {
+        track_id: String,
+    },
+    /// Bulk mixer changes — one tool call applies any mix of
+    /// gain / mute / solo / pan deltas across many tracks. Each entry
+    /// in `changes` specifies a `track_id` plus exactly one of
+    /// `gain_db` | `muted` | `soloed` | `pan`. Cap is 256 changes
+    /// per call.
+    Apply {
+        changes: Vec<MixerChange>,
+    },
 }
+
+#[derive(Debug, Deserialize)]
+pub struct MixerChange {
+    pub track_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_db: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soloed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan: Option<f64>,
+}
+
+const MAX_MIXER_BATCH: usize = 256;
 
 #[async_trait]
 impl Tool for MixerTool {
@@ -32,26 +69,46 @@ impl Tool for MixerTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read or modify the mixer state of a single track. Subcommands: \
+        "Read or modify the mixer state. Subcommands: \
          set_gain_db(track_id, db), set_mute(track_id, muted), \
          set_solo(track_id, soloed), set_pan(track_id, pan in [-1, 1]), \
-         get(track_id) returns a summary of current fader/mute/solo/pan."
+         get(track_id) returns a summary of current fader/mute/solo/pan, \
+         apply(changes:[{track_id, gain_db?, muted?, soloed?, pan?}…]) \
+         — BATCHED mix change in a single round-trip; prefer this when \
+         tweaking multiple tracks at once (e.g. balancing a mix). Capped \
+         at 256 changes per call."
     }
 
     fn schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["subcommand", "track_id"],
+            "required": ["subcommand"],
             "properties": {
                 "subcommand": {
                     "type": "string",
-                    "enum": ["set_gain_db", "set_mute", "set_solo", "set_pan", "get"]
+                    "enum": ["set_gain_db", "set_mute", "set_solo", "set_pan",
+                            "get", "apply"]
                 },
                 "track_id": { "type": "string" },
                 "db": { "type": "number" },
                 "muted": { "type": "boolean" },
                 "soloed": { "type": "boolean" },
-                "pan": { "type": "number", "minimum": -1, "maximum": 1 }
+                "pan": { "type": "number", "minimum": -1, "maximum": 1 },
+                "changes": {
+                    "type": "array",
+                    "description": "apply: list of per-track mixer changes. Each entry needs `track_id` and at least one of gain_db/muted/soloed/pan.",
+                    "items": {
+                        "type": "object",
+                        "required": ["track_id"],
+                        "properties": {
+                            "track_id": { "type": "string" },
+                            "gain_db": { "type": "number" },
+                            "muted":   { "type": "boolean" },
+                            "soloed":  { "type": "boolean" },
+                            "pan":     { "type": "number", "minimum": -1, "maximum": 1 }
+                        }
+                    }
+                }
             }
         })
     }
@@ -69,12 +126,18 @@ impl Tool for MixerTool {
             .snapshot()
             .await
             .map_err(|e| ToolError::Execution(e.to_string()))?;
+        // `Apply` resolves track_ids per-entry below; everything else
+        // works against a single track.
+        if let Op::Apply { changes } = &op {
+            return apply_mixer_changes(backend.as_ref(), &snapshot, changes).await;
+        }
         let track_id_str = match &op {
             Op::SetGainDb { track_id, .. }
             | Op::SetMute { track_id, .. }
             | Op::SetSolo { track_id, .. }
             | Op::SetPan { track_id, .. }
             | Op::Get { track_id } => track_id,
+            Op::Apply { .. } => unreachable!("handled above"),
         };
         let track = snapshot
             .tracks
@@ -159,6 +222,101 @@ impl Tool for MixerTool {
                     }
                 })))
             }
+            Op::Apply { .. } => unreachable!("handled before the match above"),
         }
     }
+}
+
+/// Walk a batched `apply` payload, validate every track + value, then
+/// dispatch each `set_control` against the backend. Pre-validates so a
+/// typo in one change doesn't leave the mixer half-applied — same
+/// invariant `plugins.set_params` honours.
+async fn apply_mixer_changes(
+    backend: &dyn foyer_backend::Backend,
+    snapshot: &foyer_schema::Session,
+    changes: &[MixerChange],
+) -> Result<ToolResult, ToolError> {
+    if changes.is_empty() {
+        return Err(ToolError::InvalidArgs(
+            "mixer.apply requires at least one entry in `changes`".into(),
+        ));
+    }
+    if changes.len() > MAX_MIXER_BATCH {
+        return Err(ToolError::InvalidArgs(format!(
+            "mixer.apply batch size {} exceeds cap of {}",
+            changes.len(),
+            MAX_MIXER_BATCH,
+        )));
+    }
+    // Resolve every track up front; collect the (control_id, value)
+    // pairs we'll actually dispatch.
+    let mut planned: Vec<(foyer_schema::EntityId, ControlValue, String)> = Vec::new();
+    for ch in changes {
+        let track = snapshot
+            .tracks
+            .iter()
+            .find(|t| t.id.as_str() == ch.track_id)
+            .ok_or_else(|| ToolError::InvalidArgs(format!("unknown track_id: {}", ch.track_id)))?;
+        if ch.gain_db.is_none() && ch.muted.is_none() && ch.soloed.is_none() && ch.pan.is_none() {
+            return Err(ToolError::InvalidArgs(format!(
+                "mixer.apply change for track '{}' has no fields set — supply at least one \
+                 of gain_db, muted, soloed, pan",
+                ch.track_id,
+            )));
+        }
+        if let Some(db) = ch.gain_db {
+            let linear = 10f64.powf(db / 20.0);
+            planned.push((
+                track.gain.id.clone(),
+                ControlValue::Float(linear),
+                format!("{} gain → {db:+.2} dB", track.name),
+            ));
+        }
+        if let Some(m) = ch.muted {
+            planned.push((
+                track.mute.id.clone(),
+                ControlValue::Bool(m),
+                format!("{} mute={m}", track.name),
+            ));
+        }
+        if let Some(s) = ch.soloed {
+            planned.push((
+                track.solo.id.clone(),
+                ControlValue::Bool(s),
+                format!("{} solo={s}", track.name),
+            ));
+        }
+        if let Some(p) = ch.pan {
+            if !(-1.0..=1.0).contains(&p) {
+                return Err(ToolError::InvalidArgs(format!(
+                    "pan {p} out of range [-1, 1] for track '{}'",
+                    ch.track_id,
+                )));
+            }
+            planned.push((
+                track.pan.id.clone(),
+                ControlValue::Float(p),
+                format!("{} pan → {p:+.2}", track.name),
+            ));
+        }
+    }
+    let mut applied = Vec::with_capacity(planned.len());
+    for (control_id, value, label) in &planned {
+        backend
+            .set_control(control_id.clone(), value.clone())
+            .await
+            .map_err(|e| {
+                ToolError::Execution(format!(
+                    "set_control failed for '{}' (after {} of {} applied): {e}",
+                    control_id.as_str(),
+                    applied.len(),
+                    planned.len(),
+                ))
+            })?;
+        applied.push(label.clone());
+    }
+    Ok(
+        ToolResult::ok(format!("applied {} mix change(s)", applied.len()))
+            .with_data(json!({ "applied": applied })),
+    )
 }

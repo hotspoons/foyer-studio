@@ -5,7 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{io::IoPort, scripting::ScriptingCapabilities, EntityId, Parameter};
+use crate::{
+    io::IoPort, scripting::ScriptingCapabilities, spectrum::SpectrumCapabilities, EntityId,
+    Parameter,
+};
 
 /// Distinguishes audio/MIDI tracks from internal buses. Kept coarse on purpose; more
 /// host-specific flavors map to the nearest neighbor.
@@ -363,6 +366,12 @@ pub struct Session {
     /// taxonomy into the FE.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripting: Option<ScriptingCapabilities>,
+    /// Real-time spectrogram capability advertisement. `None` for
+    /// backends that haven't shipped the FFT pipeline; FE hides the
+    /// spectrum tile-view + visualize subcommand when this is missing
+    /// or `available=false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spectrum: Option<SpectrumCapabilities>,
 }
 
 const fn default_sample_rate() -> u32 {
@@ -503,6 +512,7 @@ mod tests {
             ppqn: Some(1920),
             meta: serde_json::json!({ "project": "demo" }),
             scripting: None,
+            spectrum: None,
         };
 
         let j = serde_json::to_string(&session).unwrap();

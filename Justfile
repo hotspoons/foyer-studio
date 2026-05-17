@@ -481,6 +481,15 @@ verify: fmt-check clippy test test-ui-ci
 ui-probe *args='':
     ./scripts/dev/ui-probe.sh {{args}}
 
+# Walk every t() / tn() / tr!() / tn!() / loc!() call site, harvest
+# the source-language keys, and write them to
+# `web/locales/_template.json`. Per-locale catalogs (`es.json`, …)
+# are checked against this template; missing keys + orphaned keys
+# are reported but never auto-deleted. Run after wrapping new
+# strings to surface them to translators.
+i18n-extract:
+    ./scripts/dev/i18n-extract.sh
+
 config-reset:
     #!/usr/bin/env bash
     cfg_path="$(cargo run --bin foyer -- config-path | awk 'NF { line=$0 } END { print line }')"

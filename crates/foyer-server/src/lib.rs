@@ -13,6 +13,8 @@
 
 mod agent_render;
 mod session_director;
+mod spectrum;
+mod spectrum_director;
 mod ui_director;
 
 /// Public re-export so the CLI can fire the chromium boot probe.
@@ -262,7 +264,9 @@ pub struct TlsConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen: "127.0.0.1:3838".parse().unwrap(),
+            listen: "127.0.0.1:3838"
+                .parse()
+                .expect("hardcoded default socket addr is statically valid"),
             web_root: None,
             web_overlays: Vec::new(),
             jail_root: None,
@@ -412,6 +416,12 @@ pub(crate) struct AppState {
     /// `stream_id`; the `/ws/audio/:stream_id` route subscribes to
     /// its broadcasts. Shared across all connections.
     pub(crate) audio_hub: Arc<audio::AudioHub>,
+    /// Server-side spectrum analyser. Used as a fallback when the
+    /// active backend advertises `spectrum.available = false` (the
+    /// Ardour shim today) — we tap its audio egress and run the FFT
+    /// in Rust so the FE / agent get usable spectrum frames without
+    /// waiting on the shim's native pipeline.
+    pub(crate) spectrum_svc: spectrum::SpectrumService,
     /// M6b ingress senders. Keyed by `stream_id`; browser pushes
     /// binary PCM to `/ws/ingress/:stream_id`, and the task there
     /// forwards frames into this sink. Dropping the entry
@@ -898,6 +908,7 @@ impl Server {
             listen_port: std::sync::atomic::AtomicU16::new(0),
             tls_enabled: std::sync::atomic::AtomicBool::new(false),
             audio_hub: Arc::new(audio::AudioHub::new(calibration.clone())),
+            spectrum_svc: spectrum::SpectrumService::new(),
             ingress_senders: Mutex::new(HashMap::new()),
             ingress_latency,
             fake_ingress_latency_ms: std::sync::atomic::AtomicU32::new(
@@ -1041,6 +1052,18 @@ impl Server {
         agent
             .set_session_director(Some(
                 session_dir as std::sync::Arc<dyn foyer_agent::tools::SessionDirector>,
+            ))
+            .await;
+
+        // Spectrum director — lets `spectrum.capture_at` /
+        // `capture_window` drive transport for offline FFT capture.
+        // Same pattern as session director: weak ref to AppState, no
+        // correlation table.
+        let spectrum_dir =
+            spectrum_director::SpectrumDirectorImpl::new(std::sync::Arc::downgrade(&self.state));
+        agent
+            .set_spectrum_director(Some(
+                spectrum_dir as std::sync::Arc<dyn foyer_agent::tools::SpectrumDirector>,
             ))
             .await;
     }

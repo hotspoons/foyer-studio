@@ -75,6 +75,17 @@ surface for the Ardour DAW. The user is producing music and you can \
 directly read AND modify the live session — they expect you to act, \
 not narrate. Be concise; they're mid-session.\n\
 \n\
+SKILL-FIRST: the harness ships task-oriented playbooks under \
+`scripts.skills` (list) / `scripts.skill { name }` (body). For ANY \
+non-trivial request involving `plugins`, `midi`, `sequencer`, \
+`automation`, `ui`, `visualize`, `session`, or `scripts` — load the \
+relevant playbook FIRST. The playbooks document exact call shapes, \
+the batch-vs-loop tradeoffs that matter for latency, and the gotchas \
+(silent failures, jail-path stripping, solo hygiene) that are easy to \
+trip on a cold start. The `welcome` payload's `skills` index lists \
+every available playbook by name + one-line summary. ONE skill read \
+saves several round-trip mistakes — especially on smaller models.\n\
+\n\
 Tools are polymorphic — one tool per domain with a `subcommand` \
 field selecting the operation. Current surface (selected highlights, \
 schema is authoritative):\n\
@@ -103,13 +114,12 @@ clear, show_viz (Hydrogen / Fruity-Loops-style cell + pattern + \
 arrangement authoring — first-class in Foyer)\n\
   * scripts — capabilities, list, get, save, delete, enable, run, \
 recover_disabled (host scripts — Lua under Ardour. Call `capabilities` \
-FIRST to learn what types/languages/hooks the shim advertises; DSP \
-scripts produce real audio plugins. Recovered scripts come back \
-with `disabled_on_upload=true` so the user can audit before enabling. \
-The agent's `skills/` store ships authoring guides as built-in skills \
-— `ardour-lua-dsp`, `ardour-lua-action`, `ardour-lua-hook`, \
-`ardour-lua-snippet` — read them BEFORE drafting a script so you \
-don't trip the silent-instantiation-failure traps documented there)\n\
+FIRST to learn what types/languages/hooks the shim advertises). ALSO \
+the agent-skill surface: `skills` (manifest of all enabled \
+playbooks) + `skill { name }` (fetch one playbook body). Lua-authoring \
+playbooks live there too — `ardour-lua-dsp`, `ardour-lua-action`, \
+`ardour-lua-hook`, `ardour-lua-snippet` — load them BEFORE drafting a \
+script so you don't trip the silent-instantiation-failure traps.\n\
   * ui — query, open, close, focus, set_tile_tree (drive the user's \
 browser layout: spawn missing windows on their behalf, focus a \
 buried panel, swap the tile tree to a preset. Always `query` first \
@@ -117,10 +127,31 @@ to learn what's open + the available window kinds. Pair with \
 `visualize.screen` to confirm the change visually)\n\
   * visualize — timeline / mixer / waveform / spectrogram / \
 automation_lane / event_heatmap / midi_roll\n\
+  * spectrum — capabilities (probe what the host's FFT pipeline \
+supports), snapshot (one-shot FFT frame on master / monitor / a \
+specific track, returned as per-channel dBFS bins). Pair with \
+`visualize.spectrogram` for a temporal waterfall PNG\n\
 \n\
 Operating principles:\n\
   * Always survey state first when the request is vague — \
 session.summary + tracks.list / regions.list are cheap.\n\
+  * **Batch whenever you can.** Each tool call is a WS round-trip; \
+firing 30 of them sequentially is observable user latency. Prefer:\n\
+      - `plugins.set_params { plugin_id, params: [{control_id, value}…] }` \
+when programming a synth patch (one call instead of 30+ set_param calls).\n\
+      - `mixer.apply { changes: [{track_id, gain_db?, muted?, soloed?, pan?}…] }` \
+when tweaking the mix across multiple tracks.\n\
+      - `tracks.describe_many { track_ids: [...] }` instead of N \
+`tracks.describe` calls when surveying many tracks at once.\n\
+      - `regions.list` with NO `track_id` to enumerate every region \
+across every track in one call (the FE was firing 8 sequential per-track \
+list calls — one call returns everything).\n\
+      - `automation.draw { lane_id, points: [...] }` to swap a whole \
+lane atomically instead of point-by-point.\n\
+      - `midi.region_replace_notes` for bulk note edits — much cheaper \
+than note-by-note `note_add` calls.\n\
+    The model gets the same outcome and the user sees the change land \
+in one beat instead of thirty.\n\
   * Beat / drum / repetitive patterns: use the `sequencer` tool, \
 not hand-written note arrays. Define rows (one per drum or pitch), \
 add patterns of cells (`{row, step, velocity}`), and slot patterns \
@@ -167,6 +198,7 @@ pub struct AgentRuntime {
     headless_render: tokio::sync::RwLock<Option<Arc<dyn crate::tools::HeadlessRenderer>>>,
     ui_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::UiDirector>>>,
     session_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::SessionDirector>>>,
+    spectrum_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::SpectrumDirector>>>,
     /// Active session id. Every record produced by the conversation
     /// is queued for batched JSONL append against this session.
     active_session_id: tokio::sync::RwLock<String>,
@@ -181,6 +213,14 @@ pub struct AgentRuntime {
     /// trips it so the engine can finalize the partial assistant
     /// content and return.
     current_cancel: tokio::sync::RwLock<Option<tokio_util::sync::CancellationToken>>,
+    /// Serialises run_turn so a "stop + send" gesture waits for the
+    /// prior turn to fully unwind before the new turn's
+    /// `inner.busy = true` flips. Without this, two `send_user_message`
+    /// tasks can run concurrently — the new one acquires the slot,
+    /// the old one's deferred busy=false then clears the new turn's
+    /// busy flag mid-flight and the UI shows the agent as idle while
+    /// it's still working.
+    turn_lock: tokio::sync::Mutex<()>,
 }
 
 const FLUSH_INTERVAL_MS: u64 = 1500;
@@ -228,7 +268,11 @@ impl AgentRuntime {
         let welcome_ctx = Arc::new(RwLock::new(WelcomeContext::default()));
         let mut tools_vec: Vec<Arc<dyn crate::tools::Tool>> =
             vec![Arc::new(WelcomeTool::new(welcome_ctx.clone()))];
-        for t in crate::tools::default_registry().iter() {
+        // Pass a weak ref to the agent store so the scripts tool's
+        // `skills` / `skill` subcommands can load playbooks from the
+        // harness's skill directory on demand.
+        let store_weak = Arc::downgrade(&store);
+        for t in crate::tools::default_registry_with_store(Some(store_weak)).iter() {
             tools_vec.push(t.clone());
         }
         let tools = ToolRegistry::from_tools(tools_vec);
@@ -268,9 +312,11 @@ impl AgentRuntime {
             headless_render: tokio::sync::RwLock::new(None),
             ui_director: tokio::sync::RwLock::new(None),
             session_director: tokio::sync::RwLock::new(None),
+            spectrum_director: tokio::sync::RwLock::new(None),
             active_session_id: tokio::sync::RwLock::new(active_id),
             pending_writes: Arc::new(Mutex::new(Default::default())),
             current_cancel: tokio::sync::RwLock::new(None),
+            turn_lock: tokio::sync::Mutex::new(()),
         });
         WelcomeTool::refresh_from_store(&welcome_ctx, &store, DEFAULT_SYSTEM_PROMPT.to_string())
             .await;
@@ -413,6 +459,20 @@ impl AgentRuntime {
     /// Read the currently installed session director (if any).
     pub async fn session_director(&self) -> Option<Arc<dyn crate::tools::SessionDirector>> {
         self.session_director.read().await.clone()
+    }
+
+    /// Install the spectrum director (drives transport for offline
+    /// capture). See `SpectrumDirector` in `tools/mod.rs`.
+    pub async fn set_spectrum_director(
+        &self,
+        director: Option<Arc<dyn crate::tools::SpectrumDirector>>,
+    ) {
+        *self.spectrum_director.write().await = director;
+    }
+
+    /// Read the currently installed spectrum director (if any).
+    pub async fn spectrum_director(&self) -> Option<Arc<dyn crate::tools::SpectrumDirector>> {
+        self.spectrum_director.read().await.clone()
     }
 
     /// Read the current "prefer headless renderer" flag — surfaced to
@@ -576,6 +636,7 @@ impl AgentRuntime {
         let headless_render = self.headless_render.read().await.clone();
         let ui_director = self.ui_director.read().await.clone();
         let session_director = self.session_director.read().await.clone();
+        let spectrum_director = self.spectrum_director.read().await.clone();
         Some(ExternalEngineParts {
             llm,
             model,
@@ -587,6 +648,7 @@ impl AgentRuntime {
                 headless_render,
                 ui_director,
                 session_director,
+                spectrum_director,
                 prefer_headless_render: prefer_headless,
             },
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
@@ -605,6 +667,24 @@ impl AgentRuntime {
         body: String,
         attachments: Vec<foyer_schema::agent::AgentAttachment>,
     ) -> Result<(), EngineError> {
+        // Trip any prior turn's cancellation FIRST, BEFORE waiting on
+        // the turn lock. Stop+Send works by firing `agent_stop`
+        // followed immediately by `agent_send`; the stop alone cancels
+        // the token but the send_user_message still has to wait for
+        // the prior task to release the turn lock. Tripping cancel
+        // here makes that wait short — the prior task's tool loop +
+        // LLM stream both check the token and bail out quickly.
+        if let Some(prev) = self.current_cancel.read().await.clone() {
+            prev.cancel();
+        }
+        // Serialise concurrent turns. Without this, the second send's
+        // `inner.busy = true` and the first send's
+        // `inner.busy = false` race; the UI ends up flicking the busy
+        // indicator off mid-turn. The lock is dropped at function end,
+        // after the new turn finishes — so the next `send` only
+        // proceeds once we're fully unwound.
+        let _turn_guard = self.turn_lock.lock().await;
+
         let Some((engine, ctx)) = self.build_engine_and_ctx().await else {
             return Err(EngineError::Tool(crate::tools::ToolError::BackendGone));
         };
@@ -615,14 +695,13 @@ impl AgentRuntime {
         });
         // Install a fresh cancellation token so `stop_current_turn`
         // can interrupt a runaway / unwanted stream while we're mid-
-        // turn. Holding the token across the run_turn means the
-        // existing token from the previous turn (if any was left
-        // behind by a panic etc.) gets dropped and reset.
+        // turn.
         let cancel = tokio_util::sync::CancellationToken::new();
         {
             let mut slot = self.current_cancel.write().await;
-            // Cancel any orphan token before swapping (defensive — a
-            // healthy turn lifecycle clears it below).
+            // Belt-and-braces: cancel any token that snuck in between
+            // our prior cancel call and acquiring the slot. Healthy
+            // turn lifecycle clears it below.
             if let Some(prev) = slot.take() {
                 prev.cancel();
             }
@@ -674,6 +753,7 @@ impl AgentRuntime {
             let inner = self.inner.lock().await;
             inner.config.prefer_headless_render
         };
+        let spectrum_director = self.spectrum_director.read().await.clone();
         let ctx = ToolContext {
             backend,
             fe_attached: fe_render.is_some(),
@@ -681,6 +761,7 @@ impl AgentRuntime {
             headless_render,
             ui_director,
             session_director,
+            spectrum_director,
             prefer_headless_render: prefer_headless,
         };
         let engine = AgentEngine {

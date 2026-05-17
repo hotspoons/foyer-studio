@@ -145,6 +145,7 @@ fn fake_session() -> Session {
         ppqn: Some(960),
         meta: serde_json::Value::Null,
         scripting: None,
+        spectrum: None,
     }
 }
 

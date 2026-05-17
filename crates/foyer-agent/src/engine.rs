@@ -148,7 +148,37 @@ impl AgentEngine {
                 "tools": &request.tools,
             }))
             .await;
-            let mut stream = self.llm.stream(request).await?;
+            let mut stream = match self.llm.stream(request).await {
+                Ok(s) => s,
+                Err(crate::llm::LlmError::Server { status: 400, body })
+                    if is_context_overflow(&body) =>
+                {
+                    // Context window blown — common when the model's
+                    // tool spree filled up the conversation. Compact
+                    // the prefix into a summary system message and
+                    // retry this round. The compaction is best-effort:
+                    // if it ALSO 400s (e.g. summary call had no
+                    // budget either), we give up and propagate.
+                    sink.on_trace(serde_json::json!({
+                        "ts_ms": now_ms(),
+                        "kind": "context_overflow",
+                        "round": rounds,
+                        "body": body,
+                    }))
+                    .await;
+                    match self.compact_conversation_inline(&sink).await {
+                        Ok(()) => continue,
+                        Err(e) => {
+                            tracing::warn!(
+                                "context compaction failed after 400; \
+                                 propagating original error: {e}"
+                            );
+                            return Err(crate::llm::LlmError::Server { status: 400, body }.into());
+                        }
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            };
             // Pre-allocate the assistant record so streaming deltas
             // have a target id to refer to.
             let assistant_id = {
@@ -330,8 +360,30 @@ impl AgentEngine {
                 return Ok(());
             }
 
-            // Run each tool, honoring autonomy gate.
+            // Run each tool, honoring autonomy gate. The cancel check
+            // runs BEFORE every call AND races each tool.call so a
+            // user-pressed Stop interrupts the batch promptly. Without
+            // this, a model that emitted N tool calls in one round
+            // would tie up the harness for N×tool-latency milliseconds
+            // before the cancel could land (the next cancel check only
+            // happened in the NEXT LLM stream — irrelevant for a
+            // batch-of-tools round).
             for call in calls {
+                if cancel.is_cancelled() {
+                    // Mark remaining as rejected so the FE doesn't show
+                    // them indefinitely pending.
+                    self.record_tool_result(
+                        &sink,
+                        assistant_id,
+                        &call.call_id,
+                        AgentToolStatus::Rejected,
+                        "interrupted by stop",
+                        "interrupted",
+                    )
+                    .await;
+                    interrupted = true;
+                    continue;
+                }
                 let tool = match self.tools.get(&call.tool_name) {
                     Some(t) => t,
                     None => {
@@ -358,7 +410,26 @@ impl AgentEngine {
                         String::new(),
                     )
                     .await;
-                    let approved = sink.await_confirm(call.call_id.clone()).await?;
+                    // Race confirmation with cancel so the user can
+                    // bail out of "awaiting confirm" with the Stop
+                    // button instead of having to reject every call.
+                    let approved = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            self.record_tool_result(
+                                &sink,
+                                assistant_id,
+                                &call.call_id,
+                                AgentToolStatus::Rejected,
+                                "interrupted by stop",
+                                "interrupted",
+                            )
+                            .await;
+                            interrupted = true;
+                            continue;
+                        }
+                        approved = sink.await_confirm(call.call_id.clone()) => approved?,
+                    };
                     if !approved {
                         self.record_tool_result(
                             &sink,
@@ -382,7 +453,31 @@ impl AgentEngine {
                 )
                 .await;
                 let args: Value = serde_json::from_str(&call.args_json).unwrap_or(Value::Null);
-                let result = tool.call(&ctx, args).await;
+                // Race the tool against the cancel token. Most tools
+                // are short-lived (msgpack round-trip to the shim) but
+                // a few (visualize.spectrogram with chromium headless,
+                // a long script run) can take seconds, and we don't
+                // want Stop to be a no-op while one of those is in
+                // flight. The tool task is dropped on cancel; tools
+                // that need to clean up resources do so via the
+                // backend's own Drop impls.
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        self.record_tool_result(
+                            &sink,
+                            assistant_id,
+                            &call.call_id,
+                            AgentToolStatus::Rejected,
+                            "interrupted by stop",
+                            "interrupted",
+                        )
+                        .await;
+                        interrupted = true;
+                        continue;
+                    }
+                    r = tool.call(&ctx, args) => r,
+                };
                 match result {
                     Ok(res) => {
                         let result_json = serde_json::to_string(&res).unwrap_or_default();
@@ -410,6 +505,15 @@ impl AgentEngine {
                     }
                 }
             }
+            // If cancel fired during tool execution, exit before
+            // looping back into another LLM call. Without this, the
+            // engine would happily kick off the NEXT round (the model
+            // would see "interrupted" tool results and keep going)
+            // and the user's Stop would feel like it only delayed
+            // things by one tool.
+            if interrupted {
+                return Ok(());
+            }
             // Loop to let the model see the tool results.
         }
     }
@@ -417,6 +521,148 @@ impl AgentEngine {
     #[allow(dead_code)]
     fn build_request(&self) -> LlmRequest {
         self.build_request_with_nudge(None)
+    }
+
+    /// Compact the conversation in-place after a context-window 400.
+    ///
+    /// Strategy: ask the LLM to summarise everything BEFORE the last
+    /// user message (the one that triggered the current turn), then
+    /// replace those records with a single system message containing
+    /// the summary. The last user message and any partial assistant
+    /// turn from this round stay intact so the upcoming retry has the
+    /// full prompt context.
+    ///
+    /// Emphasis on big-picture + recent events per the user's ask —
+    /// the prompt explicitly tells the summariser to bias toward
+    /// recent activity and the user's headline goal.
+    async fn compact_conversation_inline(
+        &self,
+        sink: &Arc<dyn EngineSink>,
+    ) -> Result<(), EngineError> {
+        let (older_records, anchor_idx, conv_len) = {
+            let conv = self.conversation.lock().await;
+            let snap = conv.snapshot();
+            let len = snap.len();
+            // Find the last user record — anything before it is fair
+            // game for summarisation; the last user message + anything
+            // after it is the "live" tail we must preserve.
+            let anchor = snap
+                .iter()
+                .rposition(|r| matches!(r.role, AgentRole::User))
+                .unwrap_or(len);
+            let older: Vec<_> = snap.iter().take(anchor).cloned().collect();
+            (older, anchor, len)
+        };
+        if older_records.len() < 4 {
+            // Not enough to summarise — the overflow is from the live
+            // tail itself (huge tool output, giant attachment). Bail
+            // so the caller propagates the original error.
+            return Err(EngineError::Llm(crate::llm::LlmError::Server {
+                status: 400,
+                body: "context overflow with <4 messages to summarise — \
+                       reduce the live message or attach less content"
+                    .into(),
+            }));
+        }
+        // Build a compaction request. Use the same model but explicit
+        // tool-less, no-streaming complete() to keep this self-contained
+        // and avoid recursing into another stream loop.
+        let summary_messages: Vec<LlmMessage> = vec![
+            LlmMessage {
+                role: "system".into(),
+                content: Value::String(
+                    "You are condensing an AI-agent transcript so the conversation can \
+                     keep going within the LLM's context window. \
+                     OUTPUT REQUIREMENTS:\n\
+                     - Open with one sentence stating the user's overall goal.\n\
+                     - Follow with a short bullet list of what has been done so far \
+                       (the key decisions and tool calls — not every tool name).\n\
+                     - Then a bullet list of OPEN questions, blockers, and recent \
+                       events from the last few turns. Bias toward RECENT events; \
+                       they're what the assistant needs to keep momentum.\n\
+                     - Keep the whole summary under ~1500 tokens. No preamble like \
+                       \"Here is a summary\" — just the summary itself."
+                        .into(),
+                ),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            LlmMessage {
+                role: "user".into(),
+                content: Value::String(serde_json::to_string(&older_records).unwrap_or_default()),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+        ];
+        let compact_req = LlmRequest {
+            model: self.model.clone(),
+            messages: summary_messages,
+            tools: vec![],
+            temperature: Some(0.2),
+            stream: false,
+        };
+        sink.on_trace(serde_json::json!({
+            "ts_ms": now_ms(),
+            "kind": "compaction_request",
+            "older_messages": older_records.len(),
+        }))
+        .await;
+        let summary = match self.llm.complete(compact_req).await {
+            Ok(r) => r
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| c.message.content)
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default(),
+            Err(e) => {
+                return Err(EngineError::Llm(e));
+            }
+        };
+        if summary.trim().is_empty() {
+            return Err(EngineError::Llm(crate::llm::LlmError::Server {
+                status: 400,
+                body: "compaction returned empty summary".into(),
+            }));
+        }
+        // Replace the [0..anchor) prefix with a single system record
+        // carrying the summary. Anything from `anchor` onward stays.
+        {
+            let mut conv = self.conversation.lock().await;
+            let tail: Vec<_> = conv.snapshot().into_iter().skip(anchor_idx).collect();
+            conv.clear();
+            let banner = format!(
+                "[Earlier conversation ({} messages of {}) was compacted to keep within the \
+                 context window. Summary follows.]\n\n{}",
+                older_records.len(),
+                conv_len,
+                summary.trim(),
+            );
+            conv.push_system(banner);
+            for rec in tail {
+                conv.import_record(rec);
+            }
+        }
+        sink.on_trace(serde_json::json!({
+            "ts_ms": now_ms(),
+            "kind": "compaction_applied",
+            "older_messages": older_records.len(),
+            "summary_chars": summary.len(),
+        }))
+        .await;
+        // Surface a visible notice in the transcript so the user can
+        // see what happened. Append as a system record (the FE already
+        // renders system rows distinctly).
+        let banner_record = {
+            let mut conv = self.conversation.lock().await;
+            conv.push_system(format!(
+                "(Compacted {} earlier messages to fit the context window; \
+                 continuing with summary as preamble.)",
+                older_records.len(),
+            ))
+        };
+        sink.on_record(banner_record).await;
+        Ok(())
     }
 
     /// Build the chat-completions payload for the current turn.
@@ -739,6 +985,20 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Heuristic match for "your prompt exceeded the model's context
+/// window" 400s. Different providers word this differently — match on
+/// the common substrings rather than a structured error code, which
+/// not every provider populates.
+fn is_context_overflow(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("maximum context length")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("context window")
+        || lower.contains("too long")
+        || lower.contains("input_tokens") && (lower.contains("exceed") || lower.contains("maximum"))
+        || lower.contains("reduce the length")
 }
 
 /// Build the text line that announces image/audio attachments to the

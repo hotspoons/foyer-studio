@@ -296,12 +296,16 @@ export class SoftKeyboard extends LitElement {
   }
 
   _handleKeyDown(e) {
-    // Skip if typing in an input/textarea/contenteditable (the
-    // keyboard's parent window may have a focus target the user
-    // expects to receive keys, e.g. a search field).
+    // Skip if typing in an input/textarea/contenteditable. Window-
+    // level keydown listeners receive the SHADOW-ROOT HOST as
+    // `e.target` (the event is retargeted across the shadow
+    // boundary), so a naïve `target.matches("input, …")` misses any
+    // input that lives inside a `<foyer-window>` / `<foyer-modal>`
+    // shadow root — exactly the case in the Layouts dialog. Walk
+    // `composedPath()` to see the real in-shadow element and
+    // surrender the keypress to it.
     if (e.repeat) return;
-    const target = e.target;
-    if (target && (target.matches?.("input, textarea, [contenteditable]"))) return;
+    if (_eventTargetsTextInput(e)) return;
     // Track shift/ctrl as chord-shape modifiers — values reflect
     // current key state; a chord triggered while holding shift
     // gets `modShift=true` even if the user toggled it after
@@ -329,6 +333,11 @@ export class SoftKeyboard extends LitElement {
   }
 
   _handleKeyUp(e) {
+    // Mirror keydown's focus check — if the user is typing into a
+    // text input, the matching key-up shouldn't release a phantom
+    // note (the corresponding key-down was suppressed, but stray
+    // releases would still toggle `_heldDigits` and `_keyboardKeysDown`).
+    if (_eventTargetsTextInput(e)) return;
     this._modShift = !!e.shiftKey;
     this._modCtrl = !!(e.ctrlKey || e.metaKey);
     const k = e.key.toLowerCase();
@@ -432,3 +441,24 @@ export class SoftKeyboard extends LitElement {
 }
 
 customElements.define("foyer-soft-keyboard", SoftKeyboard);
+
+/// Return true if the keyboard event was directed at a text-input-like
+/// element, even one nested inside a shadow root. Window-level
+/// listeners see `e.target` retargeted to the shadow-host element, so
+/// a plain `target.matches("input, textarea, …")` would miss the
+/// `<input>` inside a `<foyer-window>` / `<foyer-modal>` / any custom
+/// element. Walking `composedPath()` reveals the real in-shadow path.
+function _eventTargetsTextInput(e) {
+  const selector =
+    'input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="range"]), ' +
+    'textarea, ' +
+    "[contenteditable=''], [contenteditable='true']";
+  const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+  for (const el of path) {
+    if (el && typeof el.matches === "function" && el.matches(selector)) return true;
+  }
+  // Fallback for engines without composedPath: best-effort target check.
+  const t = e.target;
+  if (t && typeof t.matches === "function" && t.matches(selector)) return true;
+  return false;
+}

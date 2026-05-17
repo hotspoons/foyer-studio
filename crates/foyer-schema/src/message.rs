@@ -13,6 +13,7 @@ use crate::{
     audio::{AudioPoolSource, AudioTransport, IceCandidate, SdpPayload},
     midi::{MidiNote, MidiNotePatch, MidiPatchNames},
     session::{Group, GroupPatch, Track, TrackPatch},
+    spectrum::{SpectrumFrame, SpectrumOpts, SpectrumTarget},
     Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, LatencyReport,
     PathListing, PluginCatalogEntry, PluginInstance, PluginPreset, Region, RegionPatch, Session,
     TimelineMeta, WaveformPeaks,
@@ -169,6 +170,33 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         transport_pos_samples: Option<u64>,
     },
+    /// One FFT analysis frame produced by the shim's spectrogram
+    /// pipeline. Streamed at the subscription's hop rate; clients
+    /// render each frame as a column in a waterfall display OR as
+    /// the latest bar plot in an instantaneous view. Tagged by
+    /// `target` so a multiplexed connection can subscribe to several
+    /// scopes (master + per-track) and demultiplex on the FE.
+    SpectrumFrame {
+        frame: Box<SpectrumFrame>,
+    },
+    /// Subscription confirmation — the shim acknowledges the
+    /// requested `SpectrumOpts` and reports what it actually applied
+    /// after clamping. Lets the FE update its UI hints without
+    /// re-deriving the clamped values from the first frame.
+    SpectrumSubscribed {
+        target: SpectrumTarget,
+        applied: SpectrumOpts,
+    },
+    /// Subscription closed — emitted in response to
+    /// `Command::UnsubscribeSpectrum` or when the backend decides to
+    /// tear it down (target gone, host overloaded, …).
+    SpectrumUnsubscribed {
+        target: SpectrumTarget,
+        /// `None` = clean unsubscribe; `Some(_)` = host-initiated
+        /// teardown with a reason for the FE to surface.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<String>,
+    },
     /// Server → browser: reply to `RequestIngressLatency` and also
     /// broadcast whenever the server-side empirical roundtrip median
     /// shifts past the apply threshold (i.e. whenever the server is
@@ -234,9 +262,19 @@ pub enum Event {
     /// other guests don't see denial banners flash by.
     Error {
         code: String,
+        /// English (pre-localized) message. Always populated so older
+        /// clients that don't grok `localized` still show something
+        /// readable. New emit sites set BOTH fields via the
+        /// `loc!(...)` macro from `foyer-i18n`.
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_peer_id: Option<String>,
+        /// Structured translation key + placeholder map. Clients
+        /// prefer this when present so multi-locale collab sessions
+        /// can render the same error in each viewer's own language.
+        /// `None` is the legacy shape — `message` is rendered as-is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        localized: Option<crate::LocalizedString>,
     },
     /// Reply to `Command::ProbeSessionRecovery`. `artifacts` is empty
     /// when the project has nothing to recover and the launch can
@@ -805,6 +843,27 @@ pub enum Event {
     },
 }
 
+impl Event {
+    /// Build an `Event::Error` from a structured [`LocalizedString`].
+    /// Renders the English source as the legacy `message` field so
+    /// pre-i18n clients still see something readable, AND stashes the
+    /// structured form so new clients can translate at receive time.
+    /// Most callers should reach for this instead of building the
+    /// struct literal by hand.
+    pub fn error_localized(
+        code: impl Into<String>,
+        loc: crate::LocalizedString,
+        target_peer_id: Option<String>,
+    ) -> Self {
+        Event::Error {
+            code: code.into(),
+            message: loc.render_english(),
+            target_peer_id,
+            localized: Some(loc),
+        }
+    }
+}
+
 /// One chat message as stored in the server's in-memory ring.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessageRecord {
@@ -1259,6 +1318,21 @@ pub enum Command {
     AudioEgressStop {
         stream_id: u32,
     },
+    /// Open a spectrogram subscription on the named target. The shim
+    /// starts a per-subscription analyser ring + FFT pipeline and
+    /// emits `Event::SpectrumFrame` at the configured hop rate. The
+    /// FE multiplexes by `target`; multiple subscriptions on the
+    /// same connection don't interfere.
+    SubscribeSpectrum {
+        target: SpectrumTarget,
+        #[serde(default)]
+        opts: SpectrumOpts,
+    },
+    /// Tear down a spectrum subscription. The shim emits
+    /// `Event::SpectrumUnsubscribed` once the pipeline is drained.
+    UnsubscribeSpectrum {
+        target: SpectrumTarget,
+    },
     /// Open an ingress sink (subscriber → DAW) bound to a host input.
     ///
     /// `format.sample_rate` is the **client capture rate** (e.g. browser
@@ -1542,6 +1616,35 @@ pub enum Command {
     ClearRecents,
 
     // ───── track / group / plugin lifecycle ─────────────────────────────
+    /// Create a new track. `kind` selects audio / midi / bus (master
+    /// and monitor are not user-creatable). `color` is an optional CSS
+    /// hex; `after_id` places the new track immediately after the
+    /// given existing track (omit to append at the end).
+    ///
+    /// The remaining fields wire up plugins on the new track in one
+    /// atomic step (wrapped in the same undo group as the track
+    /// creation). Resolution order (first non-empty wins):
+    /// 1. `copy_from_track_id` — duplicate the named track's plugin
+    ///    chain (URIs + current params + active presets) onto the new
+    ///    track. Use for "another track like X".
+    /// 2. `plugins` — explicit URIs to insert in order.
+    /// 3. `instrument_uri` — single-plugin shorthand. For MIDI tracks
+    ///    the agent typically asks the user which instrument; this
+    ///    field is the answer.
+    CreateTrack {
+        name: String,
+        kind: crate::TrackKind,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        color: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        after_id: Option<EntityId>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        instrument_uri: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        plugins: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        copy_from_track_id: Option<EntityId>,
+    },
     /// Mutate a track. Fields in `patch` that are `None` stay unchanged.
     /// Emits `Event::TrackUpdated` on success.
     UpdateTrack {

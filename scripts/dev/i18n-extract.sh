@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# Drupal-style i18n extractor — walks every Rust + JS source under
+# `crates/` and `web/`, harvests `t(...)`/`tn(...)`/`tr!(...)`/`tn!(...)`/`loc!(...)`
+# string-literal first arguments, and writes the master template to
+# `web/locales/_template.json`. The template is the canonical list
+# of keys translators work against; per-locale catalogs are diffed
+# against it (missing keys printed in red, orphaned keys printed in
+# yellow) but never modified — translation work stays a manual step.
+#
+# Catalog format (matches what foyer-i18n and web/core/i18n.js read):
+#
+#   { "_meta": {...}, "<english source>": "<translation>", ... }
+#
+# Plural entries: a single key joins both forms with `||`, e.g.
+# "%{count} track||%{count} tracks". The extractor harvests those
+# automatically from `tn(...)` / `tn!(...)` call sites.
+#
+# Limitations:
+#   * String-literal first args only. `t(variable)` is invisible —
+#     intentional, since dynamic strings can't be translated.
+#   * Doesn't follow concatenation. Wrap the whole sentence in one
+#     literal so the translator has full context.
+
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+mkdir -p web/locales
+
+python3 - <<'PY'
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(".")
+SOURCES = [
+    ROOT / "crates",
+    ROOT / "web",
+]
+EXCLUDE_DIRS = {"target", "node_modules", ".git", "vendor", "dist", "build", "locales", "tests-ui"}
+
+# Match patterns by call shape:
+#   JS:  t("foo", ...)                                 → singular
+#        tn("singular", "plural", count, ...)          → plural
+#   Rust: tr!(locale_expr, "foo", ...)                 → singular
+#         tn!(locale_expr, "singular", "plural", ...)  → plural
+#         loc!("foo", ...)                             → singular
+# The Rust forms have a `locale` expression first which we have to
+# skip — `[^,"']+,` matches up to the first comma without crossing
+# a string boundary.
+JS_T_RE = re.compile(
+    r'''(?<![A-Za-z0-9_])t\s*\(\s*"((?:[^"\\]|\\.)*)"'''
+)
+JS_TN_RE = re.compile(
+    r'''(?<![A-Za-z0-9_])tn\s*\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"'''
+)
+RS_TR_RE = re.compile(
+    r'''(?<![A-Za-z0-9_])tr!\s*\(\s*[^,"']+,\s*"((?:[^"\\]|\\.)*)"'''
+)
+RS_TN_RE = re.compile(
+    r'''(?<![A-Za-z0-9_])tn!\s*\(\s*[^,"']+,\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"'''
+)
+RS_LOC_RE = re.compile(
+    r'''(?<![A-Za-z0-9_])loc!\s*\(\s*"((?:[^"\\]|\\.)*)"'''
+)
+
+# In JS, `t(...)` is too common as a local name — require an explicit
+# i18n import before harvesting. Rust macros can't shadow, so we
+# skip the gate there.
+JS_IMPORT_HINT = re.compile(r'from\s+["\'](?:[^"\']*?/)?core/i18n\.js["\']')
+
+# Files that DEFINE the extractor's targets (their own test snippets
+# and doc-comments would otherwise self-harvest and pollute the
+# template). Skip them by exact path-suffix match.
+SELF_EXCLUDES = {
+    "web/core/i18n.js",
+    "crates/foyer-i18n/src/lib.rs",
+    "crates/foyer-i18n/src/catalog.rs",
+    "crates/foyer-schema/src/i18n.rs",
+}
+
+
+def scan_file(path: Path):
+    rel = str(path).lstrip("./")
+    if rel in SELF_EXCLUDES:
+        return [], []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [], []
+    is_js = path.suffix == ".js"
+    is_rs = path.suffix == ".rs"
+    if not (is_js or is_rs):
+        return [], []
+    singular_keys = []
+    plural_keys = []
+    if is_js:
+        if not JS_IMPORT_HINT.search(text):
+            return [], []
+        for m in JS_T_RE.finditer(text):
+            singular_keys.append(m.group(1))
+        for m in JS_TN_RE.finditer(text):
+            plural_keys.append((m.group(1), m.group(2)))
+    elif is_rs:
+        for m in RS_TR_RE.finditer(text):
+            singular_keys.append(m.group(1))
+        for m in RS_LOC_RE.finditer(text):
+            singular_keys.append(m.group(1))
+        for m in RS_TN_RE.finditer(text):
+            plural_keys.append((m.group(1), m.group(2)))
+    return singular_keys, plural_keys
+
+
+def walk(root: Path):
+    files = []
+    for p in root.rglob("*"):
+        if any(part in EXCLUDE_DIRS for part in p.parts):
+            continue
+        if p.is_file() and p.suffix in (".rs", ".js"):
+            files.append(p)
+    return files
+
+
+singular = set()
+plurals = set()
+for root in SOURCES:
+    if not root.is_dir():
+        continue
+    for f in walk(root):
+        s, p = scan_file(f)
+        singular.update(s)
+        for sing, plur in p:
+            plurals.add((sing, plur))
+
+# Merge plural pairs into the `singular||plural` form the catalogs use.
+combined = sorted(singular) + sorted(f"{s}||{p}" for (s, p) in plurals)
+
+# Write template — English identity catalog with every harvested key
+# pointing at itself. Translators copy this to <lang>.json and edit
+# the values.
+template = {
+    "_meta": {
+        "comment": "Auto-generated by `just i18n-extract`. DO NOT translate this file directly — copy to <lang>.json and edit there.",
+        "code": "_template",
+        "name": "English (extractor template)",
+        "string_count": len(combined),
+    },
+}
+for k in combined:
+    template[k] = k
+
+Path("web/locales/_template.json").write_text(
+    json.dumps(template, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+)
+print(f"i18n-extract: harvested {len(combined)} keys → web/locales/_template.json")
+
+# Diff each existing locale against the template (excluding en + the
+# template itself). Reports missing + orphaned keys; doesn't modify
+# the locale files — translation work stays manual.
+import os
+for path in sorted(Path("web/locales").glob("*.json")):
+    name = path.stem
+    if name in ("_template", "en", "index"):
+        continue
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        print(f"  {name}: skipped (parse error: {e})")
+        continue
+    have = set(k for k in doc.keys() if k != "_meta")
+    want = set(combined)
+    missing = sorted(want - have)
+    orphan = sorted(have - want)
+    print(f"  {name}: {len(have)} translations, {len(missing)} missing, {len(orphan)} orphaned")
+    if missing[:8]:
+        print(f"    missing (first 8): {missing[:8]}")
+    if orphan[:8]:
+        print(f"    orphaned (first 8): {orphan[:8]}")
+PY

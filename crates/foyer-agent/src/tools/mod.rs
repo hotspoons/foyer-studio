@@ -8,6 +8,7 @@
 //! tool names that have to be re-vetted on every prompt.
 
 pub mod automation;
+pub mod groups;
 pub mod midi;
 pub mod mixer;
 pub mod plugins;
@@ -15,6 +16,7 @@ pub mod regions;
 pub mod scripts;
 pub mod sequencer;
 pub mod session;
+pub mod spectrum;
 pub mod tracks;
 pub mod transport;
 pub mod ui;
@@ -86,6 +88,12 @@ pub struct ToolContext {
     /// goes through `Backend::save_session` instead so it works
     /// without a director attached (in-process tests, etc.).
     pub session_director: Option<Arc<dyn SessionDirector>>,
+    /// Server-side spectrum analyser. Lets the `spectrum` agent tool
+    /// drive transport and capture FFT frames offline when the
+    /// backend's native spectrum is unavailable. None during the
+    /// stub-MCP tests and the in-process agent's first turn (the
+    /// director is attached during `attach_agent`).
+    pub spectrum_director: Option<Arc<dyn SpectrumDirector>>,
     /// Snapshot of `AgentConfig.prefer_headless_render` at the
     /// moment this turn started. Read by the `visualize` tool to
     /// flip the renderer priority.
@@ -174,6 +182,49 @@ pub trait UiDirector: Send + Sync {
 pub enum UiDirectorError {
     #[error("{0}")]
     Execution(String),
+}
+
+/// Server-side spectrum analyser surface. Lets the agent's
+/// `spectrum.capture_at` / `spectrum.capture_window` subcommands
+/// drive transport, mute master, and aggregate FFT bins without
+/// needing the backend to implement an offline spectrum natively.
+#[async_trait]
+pub trait SpectrumDirector: Send + Sync {
+    /// One FFT window at `at_samples`. Locates transport, plays
+    /// briefly, captures, and restores prior state. Returns the
+    /// frame as JSON-able SpectrumFrame.
+    async fn capture_at(
+        &self,
+        target: serde_json::Value,
+        opts: serde_json::Value,
+        at_samples: u64,
+        mute_master: bool,
+    ) -> Result<serde_json::Value, SpectrumDirectorError>;
+    /// Time-slice EMA capture across [start, end]. Same restore
+    /// semantics. `decay` 0..1 weights the running average.
+    async fn capture_window(
+        &self,
+        target: serde_json::Value,
+        opts: serde_json::Value,
+        start_samples: u64,
+        end_samples: u64,
+        decay: f32,
+        mute_master: bool,
+    ) -> Result<serde_json::Value, SpectrumDirectorError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SpectrumDirectorError {
+    #[error("{0}")]
+    Execution(String),
+}
+
+impl From<SpectrumDirectorError> for ToolError {
+    fn from(e: SpectrumDirectorError) -> Self {
+        match e {
+            SpectrumDirectorError::Execution(m) => ToolError::Execution(m),
+        }
+    }
 }
 
 impl From<UiDirectorError> for ToolError {
@@ -343,6 +394,21 @@ impl ToolRegistry {
 }
 
 pub fn default_registry() -> ToolRegistry {
+    default_registry_with_store(None)
+}
+
+/// Build the registry threading an `AgentStore` weak ref through the
+/// scripts tool so its `skills` / `skill` subcommands can read the
+/// harness's playbook library. Pass `None` from tests / external MCP
+/// runners that don't have an agent store; those callers will see
+/// "agent skill store is not attached" when calling the skill ops.
+pub fn default_registry_with_store(
+    store: Option<std::sync::Weak<crate::store::AgentStore>>,
+) -> ToolRegistry {
+    let scripts_tool = match store {
+        Some(s) => scripts::ScriptsTool::with_store(s),
+        None => scripts::ScriptsTool::without_store(),
+    };
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(transport::TransportTool),
         Arc::new(mixer::MixerTool),
@@ -352,10 +418,12 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(plugins::PluginsTool),
         Arc::new(midi::MidiTool),
         Arc::new(sequencer::SequencerTool),
-        Arc::new(scripts::ScriptsTool),
+        Arc::new(scripts_tool),
         Arc::new(session::SessionTool),
+        Arc::new(spectrum::SpectrumTool),
         Arc::new(ui::UiTool),
         Arc::new(visualize::VisualizeTool),
+        Arc::new(groups::GroupsTool),
     ];
     ToolRegistry::from_tools(tools)
 }

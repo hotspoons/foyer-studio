@@ -512,7 +512,15 @@ private:
 /// the canonical post-save record (with `updated_at_ms` stamped).
 /// `id` may be empty on create — a deterministic slug is derived
 /// from `name` so the cache and Lua registration agree.
-ScriptRecord save_script (ARDOUR::Session& session, ScriptRecord rec);
+///
+/// `out_error` (optional, nullable for back-compat) receives the
+/// Lua VM / file-write exception message when one fires. The body
+/// is STILL cached so the user doesn't lose their work; the error
+/// is for callers (e.g. the WS dispatcher) to surface as a typed
+/// `Event::Error` so the agent sees "your DSP body has a syntax
+/// error on line 12" instead of a silent success.
+ScriptRecord save_script (ARDOUR::Session& session, ScriptRecord rec,
+                          std::string* out_error = nullptr);
 
 /// Unregister + drop. No-op when the id is unknown.
 void delete_script (ARDOUR::Session& session, const std::string& id);

@@ -5,6 +5,7 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { getTransportPref, toggleTransportPref } from "foyer-core/transport-settings.js";
+import { t, tn, onLocaleChange } from "/core/i18n.js";
 import { showProjectPicker } from "./project-picker-modal.js";
 import { openSaveSessionAs } from "./save-session-as-modal.js";
 import { openSettings } from "./settings-modal.js";
@@ -46,6 +47,69 @@ const MENU_ORDER = [
   { cat: "session",   label: "Session"   },
   { cat: "edit",      label: "Edit"      },
   { cat: "track",     label: "Track"     },
+];
+
+// `MENU_ORDER` carries its labels as plain strings so the menu code
+// stays declarative. Translation happens at render time via
+// `t(label)` — which means the `just i18n-extract` regex (it harvests
+// string-literal first args only) never sees these. Park the
+// literals here so the extractor picks them up and adds them to the
+// catalog. The lambda is dead code; the call sites that matter live
+// on the render path.
+// eslint-disable-next-line no-unused-vars
+const _i18nMenuLabels = () => [t("Session"), t("Edit"), t("Track")];
+
+// Same trick for action-catalog labels coming off the wire. The
+// backend's `list_actions` ships them as English strings; we
+// translate them at render time via `t(a.label)`. Register them
+// here so the extractor harvests them for the catalogs.
+// eslint-disable-next-line no-unused-vars
+const _i18nActionLabels = () => [
+  t("New Session…"),
+  t("Open Session…"),
+  t("Save Session"),
+  t("Save Session As…"),
+  t("Export Project…"),
+  t("Upload Project…"),
+  t("Quantize"),
+  t("Crop to selection"),
+  t("Snap fades to overlap"),
+  t("Clear fades"),
+  t("Reset gain"),
+  t("Glue"),
+  t("Reverse audio"),
+  t("Strip silence"),
+  t("Pitch shift"),
+  t("Bring to front"),
+  t("Bring forward"),
+  t("Send backward"),
+  t("Send to back"),
+  t("Group regions"),
+  t("Add to group"),
+  t("Ungroup"),
+  t("Add track"),
+  t("Add audio track"),
+  t("Add MIDI track"),
+  t("Add bus"),
+  t("Add audio bus"),
+  t("Add stereo audio track"),
+  t("Add mono audio track"),
+  t("Add stereo bus"),
+  t("Add mono bus"),
+  t("Delete selected tracks"),
+  t("Duplicate selected tracks"),
+  t("Add new region"),
+  t("Add region at playhead"),
+  t("Insert region"),
+  t("Loop selection"),
+  t("Loop region"),
+  t("Toggle metronome"),
+  t("Save snapshot"),
+  t("Save snapshot (switch to copy)"),
+  t("Save snapshot (stay on current)"),
+  t("New from template"),
+  t("New session from template"),
+  t("Show/Hide editor list"),
 ];
 
 // The "+ New" tile launcher used to live here — a button that
@@ -207,6 +271,7 @@ export class MainMenu extends LitElement {
     // cache; re-render when the cache flips.
     this._onRecents = () => this.requestUpdate();
     window.__foyer?.store?.addEventListener("recents", this._onRecents);
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     document.removeEventListener("pointerdown", this._onDocDown, true);
@@ -215,6 +280,7 @@ export class MainMenu extends LitElement {
     window.__foyer?.store?.removeEventListener("rbac", this._onRbac);
     window.__foyer?.store?.removeEventListener("sessions", this._onSessions);
     window.__foyer?.store?.removeEventListener("recents", this._onRecents);
+    this._i18nDispose?.();
     super.disconnectedCallback();
   }
 
@@ -377,7 +443,7 @@ export class MainMenu extends LitElement {
       <button class="btn ${open ? 'open' : ''}"
               @click=${() => { this._openMenu = open ? "" : cat; }}
               @mouseenter=${() => { if (this._openMenu) this._openMenu = cat; }}>
-        ${label}
+        ${t(label)}
       </button>
       ${open ? html`
         <div class="dropdown" style="left:${this._menuLeftFor(cat)}px">
@@ -389,7 +455,7 @@ export class MainMenu extends LitElement {
                 <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">
                   ${checked ? icon("check", 11) : null}
                 </span>
-                <span class="label">${a.label}</span>
+                <span class="label">${t(a.label)}</span>
                 ${a.shortcut ? html`<span class="shortcut">${a.shortcut}</span>` : null}
               </div>
             `;
@@ -404,21 +470,21 @@ export class MainMenu extends LitElement {
               import("./audio-pool-modal.js").then((m) => m.openAudioPoolModal());
             }}>
               <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("musical-note", 11)}</span>
-              <span class="label">Audio pool…</span>
+              <span class="label">${t("Audio pool…")}</span>
             </div>
             <div class="item" @click=${() => {
               this._openMenu = "";
               import("foyer-ui-core/widgets/window.js").then((m) => m.spawnWindowKind("midi-devices"));
             }}>
               <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("musical-note", 11)}</span>
-              <span class="label">MIDI devices…</span>
+              <span class="label">${t("MIDI devices…")}</span>
             </div>
             <div class="item" @click=${() => {
               this._openMenu = "";
               import("foyer-ui-core/widgets/window.js").then((m) => m.spawnWindowKind("soft-keyboard"));
             }}>
               <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("musical-note", 11)}</span>
-              <span class="label">On-screen keyboard…</span>
+              <span class="label">${t("On-screen keyboard…")}</span>
             </div>
           ` : null}
           ${cat === "session" ? this._renderCloseSessionItem() : null}
@@ -426,15 +492,15 @@ export class MainMenu extends LitElement {
             <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
             <div class="item" @click=${() => { this._openMenu = ""; import("./tunnel-manager-modal.js").then((m) => m.openTunnelManager()); }}>
               <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("globe-alt", 11)}</span>
-              <span class="label">Remote Access…</span>
-              <span class="shortcut">Share</span>
+              <span class="label">${t("Remote Access…")}</span>
+              <span class="shortcut">${t("Share")}</span>
             </div>
           ` : null}
           ${cat === "track" ? html`
             <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
             <div class="item" @click=${() => { this._openMenu = ""; import("./group-manager-modal.js").then((m) => m.openGroupManager()); }}>
               <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("users", 11)}</span>
-              <span class="label">Group Manager…</span>
+              <span class="label">${t("Group Manager…")}</span>
             </div>
           ` : null}
         </div>
@@ -452,7 +518,7 @@ export class MainMenu extends LitElement {
         openSettings();
       }}>
         <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("cog-6-tooth", 11)}</span>
-        <span class="label">Preferences…</span>
+        <span class="label">${t("Preferences…")}</span>
         <span class="shortcut">⌘ ,</span>
       </div>
     `;
@@ -478,7 +544,7 @@ export class MainMenu extends LitElement {
       <div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>
       <div class="item disabled" style="opacity:0.55;pointer-events:none;font-size:10px;letter-spacing:0.05em;text-transform:uppercase">
         <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto"></span>
-        <span class="label">${nSel === 1 ? "Region" : `${nSel} regions`}</span>
+        <span class="label">${nSel === 1 ? t("Region") : tn("%{count} region", "%{count} regions", nSel)}</span>
       </div>
       ${actions.map((a) => a.separator
         ? html`<div class="sep" style="height:1px;background:var(--color-border);margin:4px 0"></div>`
@@ -489,7 +555,7 @@ export class MainMenu extends LitElement {
             <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">
               ${a.icon ? icon(a.icon, 11) : null}
             </span>
-            <span class="label">${a.label}</span>
+            <span class="label">${t(a.label)}</span>
           </div>
         `)}
     `;
@@ -526,8 +592,8 @@ export class MainMenu extends LitElement {
       return html`
         <div class="item disabled" style="opacity:0.55">
           <span style="width:14px"></span>
-          <span class="label">Open Recent…</span>
-          <span class="shortcut">empty</span>
+          <span class="label">${t("Open Recent…")}</span>
+          <span class="shortcut">${t("empty")}</span>
         </div>
       `;
     }
@@ -536,7 +602,7 @@ export class MainMenu extends LitElement {
            @mouseenter=${(e) => { this._recentOpen = true; this.requestUpdate(); }}
            @mouseleave=${(e) => { this._recentOpen = false; this.requestUpdate(); }}>
         <span style="width:14px"></span>
-        <span class="label">Open Recent…</span>
+        <span class="label">${t("Open Recent…")}</span>
         <span class="shortcut">▸</span>
         ${this._recentOpen ? html`
           <div class="sub-dropdown">
@@ -546,14 +612,14 @@ export class MainMenu extends LitElement {
                 <span style="width:14px"></span>
                 <span class="label">${r.name || r.path}</span>
                 <button class="forget"
-                        title="Forget this entry"
+                        title=${t("Forget this entry")}
                         @click=${(e) => { e.stopPropagation(); forgetRecent(r.path); this.requestUpdate(); }}>×</button>
               </div>
             `)}
             <div class="sep"></div>
             <div class="item" @click=${(e) => { e.stopPropagation(); clearRecents(); this.requestUpdate(); }}>
               <span style="width:14px"></span>
-              <span class="label" style="color:var(--color-danger,#ef4444)">Clear list</span>
+              <span class="label" style="color:var(--color-danger,#ef4444)">${t("Clear list")}</span>
             </div>
           </div>
         ` : null}
@@ -587,7 +653,7 @@ export class MainMenu extends LitElement {
       <div class="item ${enabled ? '' : 'disabled'}"
            @click=${() => enabled && this._closeCurrentSession()}>
         <span style="width:14px;display:inline-flex;justify-content:center;flex:0 0 auto">${icon("x-mark", 11)}</span>
-        <span class="label">Close Session${enabled && cur?.name ? ` — ${cur.name}` : ''}</span>
+        <span class="label">${enabled && cur?.name ? t("Close Session — %{name}", { name: cur.name }) : t("Close Session")}</span>
       </div>
     `;
   }
@@ -622,11 +688,17 @@ export class MainMenu extends LitElement {
 
   _menuLeftFor(cat) {
     // Measure each preceding button's width so the dropdown aligns.
+    // Don't compare textContent to `cat` — that breaks the moment the
+    // labels are translated (e.g. "세션".toLowerCase() !== "session"),
+    // sending the dropdown way off to the right because the loop
+    // never finds its match and sums every button's width. Index the
+    // buttons by MENU_ORDER position instead, which is locale-stable.
     const btns = Array.from(this.renderRoot.querySelectorAll(".btn"));
+    const targetIdx = MENU_ORDER.findIndex((m) => m.cat === cat);
+    if (targetIdx < 0) return 0;
     let x = 0;
-    for (const b of btns) {
-      if (b.textContent.trim().toLowerCase() === cat) break;
-      x += b.offsetWidth;
+    for (let i = 0; i < targetIdx && i < btns.length; i++) {
+      x += btns[i].offsetWidth;
     }
     return x;
   }

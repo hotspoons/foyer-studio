@@ -140,7 +140,9 @@ pub fn decode_peaks(
             let duration = audio_buffer_capacity(&decoded);
             sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
         }
-        let buf = sample_buf.as_mut().unwrap();
+        let buf = sample_buf
+            .as_mut()
+            .expect("sample_buf was just set Some(_) on the line above");
         buf.copy_interleaved_ref(decoded);
         let samples = buf.samples();
         let frames = samples.len() / channels as usize;

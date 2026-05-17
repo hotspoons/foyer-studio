@@ -485,6 +485,15 @@ struct DecodedCmd
 		EnableScript,
 		RunScript,
 		RecoverDisabledScripts,
+		// Real-time spectrogram pipeline (instant + temporal, per-
+		// channel + main mix). The wire surface lives on the Rust
+		// side today; the shim's FFT path is the remaining bit of
+		// work — see the dispatch arm below + the `spectrum` field
+		// in `encode_session_snapshot`. Subscribing emits a polite
+		// "not yet wired" error so the FE can fall back to the stub
+		// backend for demos.
+		SubscribeSpectrum,
+		UnsubscribeSpectrum,
 	};
 	Kind kind = Kind::Unknown;
 	std::string id;
@@ -1834,6 +1843,8 @@ decode (const std::vector<std::uint8_t>& buf)
             else if (cmd_type == "enable_script")            out.kind = DecodedCmd::Kind::EnableScript;
             else if (cmd_type == "run_script")               out.kind = DecodedCmd::Kind::RunScript;
             else if (cmd_type == "recover_disabled_scripts") out.kind = DecodedCmd::Kind::RecoverDisabledScripts;
+            else if (cmd_type == "subscribe_spectrum")       out.kind = DecodedCmd::Kind::SubscribeSpectrum;
+            else if (cmd_type == "unsubscribe_spectrum")     out.kind = DecodedCmd::Kind::UnsubscribeSpectrum;
             else if (cmd_type == "audio_stream_open"
                 ||   cmd_type == "audio_egress_start")  out.kind = DecodedCmd::Kind::AudioStreamOpen;
 			else if (cmd_type == "audio_stream_close"
@@ -3859,9 +3870,21 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				rec.body = snap.script_body;
 				rec.args = snap.script_args;
 				rec.hook = snap.script_hook;
-				auto saved = schema_map::save_script (shim->session (), std::move (rec));
+				std::string save_err;
+				auto saved = schema_map::save_script (shim->session (), std::move (rec), &save_err);
+				// Always emit script_saved so the FE caches what the user
+				// typed (don't lose their work on a syntax error). When the
+				// Lua VM rejected the body, ALSO emit a typed
+				// `save_script_failed` Event::Error so the agent sees the
+				// failure instead of believing the script is installed.
 				auto bytes = msgpack_out::encode_script_saved (saved);
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				if (!save_err.empty ()) {
+					auto err = msgpack_out::encode_error (
+						"save_script_failed",
+						"script '" + saved.id + "': " + save_err);
+					if (!err.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, err);
+				}
 			});
 			break;
 		}
@@ -3891,9 +3914,16 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				cur->enabled = snap.script_enabled;
 				if (snap.script_enabled) cur->disabled_on_upload = false;
-				schema_map::ScriptRecord saved = schema_map::save_script (shim->session (), *cur);
+				std::string save_err;
+				schema_map::ScriptRecord saved = schema_map::save_script (shim->session (), *cur, &save_err);
 				auto bytes = msgpack_out::encode_script_saved (saved);
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+				if (!save_err.empty ()) {
+					auto err = msgpack_out::encode_error (
+						"save_script_failed",
+						"script '" + saved.id + "': " + save_err);
+					if (!err.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, err);
+				}
 			});
 			break;
 		}
@@ -3923,6 +3953,29 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				auto bytes = msgpack_out::encode_script_list (scripts);
 				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			});
+			break;
+		}
+		case DecodedCmd::Kind::SubscribeSpectrum:
+		case DecodedCmd::Kind::UnsubscribeSpectrum: {
+			// The Ardour shim hasn't shipped its FFT pipeline yet — see
+			// the encode_session_snapshot's `spectrum.available = false`
+			// advertisement, which the FE keys off to hide the analyser
+			// surfaces on this backend. Subscribers that get here
+			// despite the cap flag receive a clear error event so MCP
+			// agents don't sit idle waiting for frames that never
+			// arrive. Implementing the real path means: tap the
+			// destination Route's outputs through a per-subscription
+			// disk-thread analyser, run a Hann-windowed FFT every hop,
+			// and emit `encode_spectrum_frame` from a low-priority
+			// idle slot.
+			FoyerShim* shim = &_shim;
+			auto bytes = msgpack_out::encode_error (
+				"spectrum_not_supported",
+				"This Ardour shim build hasn't shipped the FFT pipeline yet — "
+				"switch to the stub backend for a working spectrum analyser, "
+				"or wait for a shim with `spectrum.available=true` advertised "
+				"in the session snapshot.");
+			if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
 			break;
 		}
 		case DecodedCmd::Kind::SetTrackInput: {

@@ -68,6 +68,28 @@ const _spawnSoftKeyboard = () => {
     viewProps: {},
   });
 };
+// Spectrum analyser. Same "single floater per kind" rule as the
+// other workspace widgets — re-opening returns the existing window.
+// The tile-class registration in widget-tile-views.js still works
+// for dragging it into the tile grid; this registration just adds
+// the "+ launcher" / docked-window codepath.
+const _spawnSpectrum = (props = {}) => {
+  import("./spectrum-tile.js").then(() => {
+    const el = document.createElement("foyer-spectrum-tile");
+    if (props.target) el.target = props.target;
+    openWindow({
+      title: "Spectrum",
+      icon: "chart-bar",
+      storageKey: "spectrum-widget",
+      content: el,
+      width: 760,
+      height: 520,
+      persist: { kind: "spectrum", id: "spectrum", props: {} },
+      viewKind: "spectrum",
+      viewProps: {},
+    });
+  });
+};
 // Lazy-import the scripts view so the hljs + grammar bundle stays out
 // of the boot path. Users who never open the Scripts panel don't pay.
 const _spawnScripts = () => {
@@ -82,11 +104,30 @@ const _spawnScripts = () => {
     });
   });
 };
-registerWindowKind("console", _spawnConsole);
-registerWindowKind("diagnostics", _spawnDiagnostics);
-registerWindowKind("midi-devices", _spawnMidiDevices);
-registerWindowKind("soft-keyboard", _spawnSoftKeyboard);
-registerWindowKind("scripts", _spawnScripts);
+registerWindowKind("console", _spawnConsole, {
+  label: "Console",
+  description: "Logs + diagnostic output. No viz fallback.",
+});
+registerWindowKind("diagnostics", _spawnDiagnostics, {
+  label: "Diagnostics",
+  description: "Engine / WS / RBAC live state. No viz fallback.",
+});
+registerWindowKind("midi-devices", _spawnMidiDevices, {
+  label: "MIDI devices",
+  description: "Connected MIDI in/out ports + monitor.",
+});
+registerWindowKind("soft-keyboard", _spawnSoftKeyboard, {
+  label: "Soft keyboard",
+  description: "On-screen piano keyboard for MIDI input.",
+});
+registerWindowKind("scripts", _spawnScripts, {
+  label: "Scripts",
+  description: "Host-script editor (Lua under Ardour).",
+});
+registerWindowKind("spectrum", _spawnSpectrum, {
+  label: "Spectrum",
+  description: "Real-time FFT analyser + waterfall. Per-target picker for master / monitor / individual tracks.",
+});
 
 // Track Editor / MIDI Editor / Beat Sequencer factories. The heavy
 // editor modules are lazy-imported at rehydrate time so we don't drag
@@ -97,6 +138,10 @@ registerWindowKind("track-editor", (props) => {
   import("./track-editor-modal.js").then((m) => {
     m.openTrackEditor(props.trackId, { tab: props.tab || "" });
   });
+}, {
+  label: "Track editor",
+  description: "Per-track inspector + plugin chain editor.",
+  viz_fallback: "mixer",
 });
 
 function _findRegion(regionId) {
@@ -124,6 +169,9 @@ registerWindowKind("plugin", (props) => {
   const p = props?.pluginId ? _findPlugin(props.pluginId) : null;
   if (!p) return;
   import("foyer-ui-core/layout/plugin-layer.js").then((m) => m.openPluginFloat(p));
+}, {
+  label: "Plugin panel",
+  description: "One plugin's params + native-GUI button. Use for plugins whose params aren't exposed over the schema (xpra native-GUI passthrough).",
 });
 
 function _retargetMidiEditor(editor, found) {
@@ -157,6 +205,10 @@ registerWindowKind("midi-editor", (props) => {
       onReuse: (existing) => _retargetMidiEditor(existing, found),
     });
   });
+}, {
+  label: "Piano roll",
+  description: "Per-region MIDI note editor. Variants without this kind support `visualize.midi_roll` as a read-only fallback.",
+  viz_fallback: "midi_roll",
 });
 
 function _retargetBeatSequencer(seq, found) {
@@ -190,6 +242,10 @@ registerWindowKind("beat-sequencer", (props) => {
       onReuse: (existing) => _retargetBeatSequencer(existing, found),
     });
   });
+}, {
+  label: "Beat sequencer",
+  description: "Cell-grid drum / pattern authoring. Variants without this kind support `visualize.beat_sequencer` as a read-only fallback.",
+  viz_fallback: "beat_sequencer",
 });
 
 const PANEL_KEY = "foyer.rightdock.v1";
@@ -258,6 +314,7 @@ const VIEW_ICON = {
 const SPAWNABLE_WIDGETS = [
   { group: "Workspace", view: "console",     label: "Console",     icon: "command-line" },
   { group: "Workspace", view: "diagnostics", label: "Diagnostics", icon: "check-circle" },
+  { group: "Workspace", view: "spectrum",    label: "Spectrum",    icon: "chart-bar" },
   { group: "Workspace", view: "scripts",     label: "Scripts",     icon: "document-text",
     requires: (state) => !!state?.session?.scripting },
 
@@ -429,6 +486,13 @@ export class RightDock extends LitElement {
     }
     .spawn-menu button {
       display: flex; align-items: center; gap: 8px;
+      /* Explicit justify-content so the icon + label sit flush against
+         the left padding instead of being centered by an inherited
+         justify-content: center from a parent flex context (the rail
+         buttons use that for their square icon tiles; without an
+         explicit override these column-style buttons inherit the
+         look). */
+      justify-content: flex-start;
       width: 100%; height: auto;
       padding: 6px 10px;
       font: inherit; font-size: 12px;
@@ -437,6 +501,9 @@ export class RightDock extends LitElement {
       border: 1px solid transparent;
       border-radius: var(--radius-sm);
       cursor: pointer;
+      text-align: left;
+    }
+    .spawn-menu .spawn-header {
       text-align: left;
     }
     .spawn-menu button:hover {

@@ -270,9 +270,19 @@ export class TileLeaf extends LitElement {
       this.requestUpdate();
     };
     this._onDocClick = (e) => {
-      if (this._menuMode && !this.renderRoot.querySelector(".menu")?.contains(e.target)) {
-        this._menuMode = "";
-      }
+      if (!this._menuMode) return;
+      const menu = this.renderRoot.querySelector(".menu");
+      if (!menu) return;
+      // `e.target` is retargeted across shadow boundaries to the host
+      // element (the tile-leaf itself), so `menu.contains(e.target)`
+      // is always FALSE for clicks inside the menu — which used to
+      // clear `_menuMode` before `_pickView` could read it, and the
+      // split-right / split-below picks fell through to the `else`
+      // branch (setFocusedView → replace). Walk the composed event
+      // path instead; that one preserves the real in-shadow target.
+      const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+      if (path.includes(menu)) return;
+      this._menuMode = "";
     };
     // The body of this tile reads session from the data store at render time,
     // so we need to re-render whenever the snapshot / controls change — not
@@ -673,7 +683,27 @@ export class TileLeaf extends LitElement {
   }
 
   _renderMenu() {
-    const items = Array.from(viewCatalog().values()).filter(v => v.id !== "preview");
+    // Filter out:
+    //   - the dummy `preview` entry (used by the tear-out flow),
+    //   - any view whose `checkAvailable({}, session)` reports
+    //     `ok: false` — those views (track-editor, midi-editor,
+    //     beat-sequencer, plugin, automation-editor) need a
+    //     pre-bound trackId / regionId / pluginId in their props,
+    //     and spawning them blind from this menu just renders the
+    //     "missing reference" placeholder. The user reaches those
+    //     views from the timeline / mixer (right-click → "Open in
+    //     piano roll") or from the dock — not from the tile picker.
+    const session = window.__foyer?.store?.state?.session ?? null;
+    const items = Array.from(viewCatalog().values()).filter((v) => {
+      if (v.id === "preview") return false;
+      if (typeof v.checkAvailable !== "function") return true;
+      try {
+        const r = v.checkAvailable({}, session);
+        return !!(r && r.ok);
+      } catch {
+        return true;
+      }
+    });
     const heading = this._menuMode === "split-row"    ? "Split right as…"
                   : this._menuMode === "split-column" ? "Split below as…"
                   : "Change view to…";

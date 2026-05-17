@@ -8,15 +8,40 @@
 //! to see what's available before authoring.
 
 use std::collections::BTreeMap;
+use std::sync::Weak;
 
 use async_trait::async_trait;
 use foyer_schema::{EntityId, Script};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::store::AgentStore;
 use crate::tools::{Tool, ToolContext, ToolError, ToolResult};
 
-pub struct ScriptsTool;
+/// Surfaces both the backend's scripting catalog AND the harness's
+/// agent-skill store (authoring playbooks for plugins, MIDI, regions,
+/// Lua DSP, etc.). Skills live in the agent store; bodies are loaded
+/// on demand so they don't bloat every external client's context the
+/// way they did when welcome shipped them inline.
+pub struct ScriptsTool {
+    store: Option<Weak<AgentStore>>,
+}
+
+impl ScriptsTool {
+    /// Default constructor used by `default_registry()` for unit tests
+    /// and the stub MCP. Skills subcommands return an empty manifest
+    /// when no store is attached.
+    pub fn without_store() -> Self {
+        Self { store: None }
+    }
+
+    /// Constructor used by the live runtime. The weak ref drops cleanly
+    /// when the runtime shuts down, so the tool registry doesn't keep
+    /// the store alive past its natural lifetime.
+    pub fn with_store(store: Weak<AgentStore>) -> Self {
+        Self { store: Some(store) }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "subcommand", rename_all = "snake_case")]
@@ -65,6 +90,17 @@ enum Op {
     /// disabled state on upload (recovered with the
     /// `disabled_on_upload` flag set so the user can re-confirm).
     RecoverDisabled,
+    /// List the harness's agent-skill manifest (name + summary +
+    /// approx token count for each enabled playbook). Skill bodies
+    /// document the recommended call shapes for each domain — read
+    /// the relevant one BEFORE driving an unfamiliar tool. Bodies are
+    /// fetched separately via `skill { name }` to keep the manifest
+    /// cheap.
+    Skills,
+    /// Fetch one skill's full body from the harness store. Pair with
+    /// `skills` to discover names. The body is markdown with an
+    /// `enabled: true|false` frontmatter line.
+    Skill { name: String },
 }
 
 fn yes_bool() -> bool {
@@ -78,14 +114,20 @@ impl Tool for ScriptsTool {
     }
 
     fn description(&self) -> &'static str {
-        "Author and run DAW scripts (Lua in Ardour; other shims may \
-         advertise other languages). Subcommands: capabilities (advertised \
-         types/languages/hooks), list, get(id), save(...), delete(id), \
+        "Author + run DAW scripts AND fetch agent-skill playbooks. \
+         Two surfaces: \
+         (1) DAW scripts (Lua in Ardour; other shims may advertise other \
+         languages): capabilities, list, get(id), save(...), delete(id), \
          enable(id, enabled), run(id, args_override?), recover_disabled. \
-         Always call `capabilities` first when authoring — the backend \
-         picks the type taxonomy and hook names; do not assume Ardour \
-         names without confirming. DSP-type scripts produce Lua-authored \
-         audio plugins that show up alongside native plugins."
+         Always call `capabilities` first when authoring — DSP-type scripts \
+         produce Lua plugins that show up alongside native plugins. \
+         (2) Agent skills (task-oriented playbooks the harness ships for \
+         small models): `skills` lists every enabled playbook (name + \
+         one-line summary + token count); `skill { name }` returns the full \
+         markdown body. READ THE RELEVANT SKILL FIRST before driving an \
+         unfamiliar tool (plugins, midi, sequencer, automation, ui, \
+         visualize, session) — playbooks document the exact call shapes \
+         and the batch-vs-loop tradeoffs that small models otherwise miss."
     }
 
     fn schema(&self) -> Value {
@@ -98,6 +140,7 @@ impl Tool for ScriptsTool {
                     "enum": [
                         "capabilities", "list", "get", "save",
                         "delete", "enable", "run", "recover_disabled",
+                        "skills", "skill",
                     ]
                 },
                 "id": { "type": "string" },
@@ -132,6 +175,60 @@ impl Tool for ScriptsTool {
     async fn call(&self, ctx: &ToolContext, args: Value) -> Result<ToolResult, ToolError> {
         let op: Op =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+        // Skill subcommands hit the harness's agent-skill store, NOT
+        // the backend's script catalog — they should still work when
+        // no DAW is loaded (e.g. the agent has been asked "what skills
+        // do you have?" before opening a project).
+        match &op {
+            Op::Skills => {
+                let store = self
+                    .store
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                    .ok_or_else(|| {
+                        ToolError::Execution(
+                            "agent skill store is not attached to this runtime".into(),
+                        )
+                    })?;
+                let infos = store
+                    .list_skills()
+                    .await
+                    .map_err(|e| ToolError::Execution(format!("listing skills failed: {e}")))?;
+                let enabled: Vec<Value> = infos
+                    .into_iter()
+                    .filter(|s| s.enabled)
+                    .map(|s| {
+                        json!({
+                            "name": s.name,
+                            "summary": s.summary,
+                            "tokens_approx": s.tokens_approx,
+                        })
+                    })
+                    .collect();
+                return Ok(
+                    ToolResult::ok(format!("{} enabled skill(s)", enabled.len()))
+                        .with_data(json!({ "skills": enabled })),
+                );
+            }
+            Op::Skill { name } => {
+                let store = self
+                    .store
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                    .ok_or_else(|| {
+                        ToolError::Execution(
+                            "agent skill store is not attached to this runtime".into(),
+                        )
+                    })?;
+                let body = store
+                    .read_skill_body(name)
+                    .await
+                    .map_err(|e| ToolError::Execution(format!("reading skill '{name}': {e}")))?;
+                return Ok(ToolResult::ok(format!("{name} ({} bytes)", body.len()))
+                    .with_data(json!({ "name": name, "body": body })));
+            }
+            _ => {}
+        }
         let backend = ctx.backend()?;
         match op {
             Op::Capabilities => {
@@ -318,6 +415,8 @@ impl Tool for ScriptsTool {
                     "recovered_ids": recovered.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
                 })))
             }
+            // Handled in the pre-backend dispatch above.
+            Op::Skills | Op::Skill { .. } => unreachable!(),
         }
     }
 }

@@ -66,9 +66,17 @@ impl Tool for UiTool {
         "Drive the user's UI: query layout, open/close/focus floating \
          windows (console, diagnostics, scripts, track-editor, \
          midi-editor, beat-sequencer, plugin-panel, …), swap the tile \
-         tree to a preset. Pair with `visualize.screen` to verify a \
-         change landed visually. Subcommands: query, open, close, \
-         focus, set_tile_tree."
+         tree to a preset. Subcommands: query, open, close, focus, \
+         set_tile_tree. \
+         The `query` response now returns: `available_kinds` (string \
+         ids registered in THIS variant), `kinds` (same list enriched \
+         with label/description/viz_fallback), `canonical_kinds` \
+         (every kind Foyer recognizes globally), and `missing_kinds` \
+         (canonical kinds NOT in this variant — use the per-entry \
+         `viz_fallback` to render via `visualize.<that>` instead of \
+         telling the user 'I can't open the piano roll here'). Pair \
+         with `visualize.screen` (FE-attached only) or the more \
+         specific viz subcommands to verify changes."
     }
 
     fn schema(&self) -> Value {

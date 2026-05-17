@@ -6,6 +6,8 @@
 
 #include <chrono>
 #include <cctype>
+#include <cerrno>
+#include <cstring>
 #include <sstream>
 #include <algorithm>
 #include <map>
@@ -1288,7 +1290,7 @@ void ScriptStore::replace_all (std::vector<ScriptRecord> rec)
 
 // ── save_script ────────────────────────────────────────────────────
 ScriptRecord
-save_script (Session& session, ScriptRecord rec)
+save_script (Session& session, ScriptRecord rec, std::string* out_error)
 {
     if (rec.id.empty ()) rec.id = slugify (rec.name.empty () ? "script" : rec.name);
     if (rec.id.empty ()) rec.id = "foyer_script";
@@ -1298,16 +1300,20 @@ save_script (Session& session, ScriptRecord rec)
     // Replace-by-name semantics: Ardour's
     // `register_lua_function(name, ...)` REPLACES any prior
     // registration under that name, so we don't need a separate
-    // unregister step. Wrapping the call so it throws cleanly if
-    // the script body is malformed — caller logs the error and
-    // surfaces it back to the FE.
+    // unregister step. The body is cached either way so the user
+    // doesn't lose their work; any Lua VM exception is captured
+    // into *out_error so the dispatcher can ship a typed
+    // `Event::Error` to the FE / agent. Earlier these catches were
+    // bare `catch (...)` swallows — the agent saw "saved!" and the
+    // script never registered.
     if (rec.script_type != "dsp") {
         try {
             auto params = build_param_list (rec.args);
             session.register_lua_function (rec.id, rec.body, params);
+        } catch (std::exception const& e) {
+            if (out_error) *out_error = e.what ();
         } catch (...) {
-            // Best-effort; the FE save still records the body so the
-            // user can fix syntax errors without losing their work.
+            if (out_error) *out_error = "unknown Lua VM error during register_lua_function";
         }
     } else {
         // DSP scripts ride the luaproc plugin path. Write the body
@@ -1324,18 +1330,25 @@ save_script (Session& session, ScriptRecord rec)
         // PluginManager directly.
         try {
             const std::string dir = LuaScripting::user_script_dir ();
-            if (!dir.empty ()) {
+            if (dir.empty ()) {
+                if (out_error) *out_error = "LuaScripting::user_script_dir() empty";
+            } else {
                 const std::string fname = dir + "/" + rec.id + ".lua";
                 FILE* fp = std::fopen (fname.c_str (), "w");
-                if (fp) {
+                if (!fp) {
+                    if (out_error) {
+                        *out_error = "fopen('" + fname + "') failed: " + std::strerror (errno);
+                    }
+                } else {
                     std::fwrite (rec.body.data (), 1, rec.body.size (), fp);
                     std::fclose (fp);
+                    LuaScripting::instance ().refresh (/*run_scan=*/true);
                 }
-                LuaScripting::instance ().refresh (/*run_scan=*/true);
             }
+        } catch (std::exception const& e) {
+            if (out_error) *out_error = e.what ();
         } catch (...) {
-            // Best-effort; the FE save still records the body even
-            // if the file write fails (e.g. read-only home).
+            if (out_error) *out_error = "unknown error during DSP script save";
         }
     }
 

@@ -121,12 +121,22 @@ const CAPTURES = {
     return await canvasToB64(canvas);
   },
   async spectrogram({ track_id, duration_ms }) {
-    const view = deepFind("foyer-spectrogram") || deepFind("foyer-meter-spectrum");
+    // Look for the live spectrum widget first (the one wired to the
+    // backend's FFT pipeline); fall back to the legacy names so this
+    // keeps working against any future renderer.
+    const view = deepFind("foyer-spectrum-tile")
+      || deepFind("foyer-spectrum")
+      || deepFind("foyer-spectrogram")
+      || deepFind("foyer-meter-spectrum");
     if (!view) {
-      throw new Error("no spectrogram component mounted; needs backend wiring");
+      throw new Error("no spectrum component mounted; the spectrum tile-view must be visible to capture");
     }
-    const canvas = findInsideShadow(view, "canvas");
-    if (!canvas) throw new Error("spectrogram has no canvas");
+    // The spectrum widget renders two canvases (bars + waterfall).
+    // Prefer the waterfall — it's the time-history view the agent
+    // usually wants. Falls back to the first canvas it finds.
+    const wf = findInsideShadow(view, "canvas.waterfall");
+    const canvas = wf || findInsideShadow(view, "canvas");
+    if (!canvas) throw new Error("spectrum view has no canvas");
     void track_id;
     void duration_ms;
     return await canvasToB64(canvas);
