@@ -877,7 +877,7 @@ async fn serve(
     // we end up serving a 503 inside.
     server.set_openai_proxy_api_key(agent_api_key.clone()).await;
 
-    match server.attach_agent().await {
+    match server.attach_agent(config.mcp_proxies.clone()).await {
         Ok(runtime) => {
             runtime
                 .set_prefer_headless_render(config.agent.prefer_headless_render)
@@ -1034,7 +1034,7 @@ impl BackendSpawner for CliSpawner {
                     project.to_path_buf()
                 };
                 let sr_hint = sample_rate.or(cfg_backend.sample_rate);
-                let (socket, child) = launch_and_wait_for_shim(
+                let launch = launch_and_wait_for_shim(
                     &exec,
                     &cfg_backend.args,
                     &cfg_backend.env,
@@ -1043,13 +1043,35 @@ impl BackendSpawner for CliSpawner {
                     recover_crash,
                 )
                 .await?;
-                let host = HostBackend::connect(socket.clone())
+                let host = HostBackend::connect(launch.socket.clone())
                     .await
-                    .with_context(|| format!("connect to shim at {}", socket.display()))?;
-                Ok(foyer_server::LaunchedBackend::with_process(
+                    .with_context(|| format!("connect to shim at {}", launch.socket.display()))?;
+                let mut launched = foyer_server::LaunchedBackend::with_process(
                     Arc::new(host),
-                    Box::new(ChildProcess::new(child)),
-                ))
+                    Box::new(ChildProcess::new(launch.child)),
+                );
+                // MCP probe — fire-and-wait briefly. The MCPHttp surface
+                // (Ardour ≥ post-9.2) starts its HTTP listener during
+                // session-load, so the port is available within a few
+                // seconds of the shim advertising. Builds that don't ship
+                // mcp_http never bind the port; the probe times out and
+                // we leave `mcp_endpoint = None`, which hides this
+                // session from the `daw_proxy` tool's enumeration.
+                if let Some(port) = launch.mcp_port {
+                    let probe_timeout = std::time::Duration::from_secs(8);
+                    if probe_mcp_http(port, probe_timeout).await {
+                        let endpoint = format!("http://127.0.0.1:{port}/mcp");
+                        tracing::info!("foyer: MCPHttp confirmed live at {endpoint}");
+                        launched = launched.with_mcp_endpoint(endpoint);
+                    } else {
+                        tracing::info!(
+                            "foyer: MCPHttp on port {port} didn't answer within {}s — \
+                             treating this Ardour build as MCP-incapable",
+                            probe_timeout.as_secs(),
+                        );
+                    }
+                }
+                Ok(launched)
             }
         }
     }
@@ -1102,6 +1124,16 @@ impl BackendSpawner for CliSpawner {
 /// `sample-rate="…"` attribute **only if** both `.ardour` paths were
 /// absent before bootstrap (brand-new session). Matches `LaunchProject`
 /// + optional per-backend config from the sidecar.
+/// Result of [`launch_and_wait_for_shim`] — the shim socket + child
+/// handle (as before), plus the MCPHttp port we pinned this session
+/// to (when one was successfully claimed) so callers can probe it
+/// and stash the resulting endpoint on the session registry entry.
+pub(crate) struct ShimLaunch {
+    pub socket: PathBuf,
+    pub child: tokio::process::Child,
+    pub mcp_port: Option<u16>,
+}
+
 async fn launch_and_wait_for_shim(
     exec: &std::path::Path,
     extra_args: &[String],
@@ -1109,8 +1141,25 @@ async fn launch_and_wait_for_shim(
     project: &std::path::Path,
     sample_rate_hint: Option<u32>,
     recover_crash: Option<bool>,
-) -> Result<(PathBuf, tokio::process::Child)> {
+) -> Result<ShimLaunch> {
     use std::time::Duration;
+
+    // Pre-allocate the MCPHttp listen port we'll pin this session to.
+    // Each spawn gets its own free port so multiple Ardour instances
+    // (e.g. two open sessions, or Foyer + a user-launched Ardour) don't
+    // collide on the upstream default of 4820. The XML edit happens
+    // inside `preflight_session`; the agent's `daw_proxy` tool reads
+    // this back as the per-session MCP endpoint.
+    let mcp_port = alloc_free_mcp_port();
+    if let Some(p) = mcp_port {
+        tracing::info!("foyer: allocated MCPHttp port {p} for this Ardour spawn");
+    } else {
+        tracing::warn!(
+            "foyer: couldn't find a free TCP port in the MCPHttp range — \
+             skipping per-session MCP enablement (daw_proxy will fall back to \
+             whatever the session file already pins, if anything)"
+        );
+    }
 
     // Clean Ardour's atomic-save tempfiles BEFORE spawning the shim.
     // A previous foyer crash mid-save leaves `<name>.pending` /
@@ -1180,7 +1229,14 @@ async fn launch_and_wait_for_shim(
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()?;
-            return Ok((ad.socket, dummy));
+            // Reuse path: we didn't fork this Ardour and don't know
+            // which MCP port (if any) it picked. Caller probes via
+            // the discovery cache if it needs it.
+            return Ok(ShimLaunch {
+                socket: ad.socket,
+                child: dummy,
+                mcp_port: None,
+            });
         }
     }
 
@@ -1401,7 +1457,7 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
         // Mirrors what the dev-build bash branch above does inline.
         // Shadowing here keeps the dev-build path's bindings intact.
         let (session_dir, snapshot_name) =
-            preflight_session(&resolved_exec, &session_dir, &snapshot_name);
+            preflight_session(&resolved_exec, &session_dir, &snapshot_name, mcp_port);
         if let Some(sr) = sample_rate_hint {
             if !had_session {
                 let session_file = session_dir.join(format!("{snapshot_name}.ardour"));
@@ -1530,7 +1586,11 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
                 Ok(stream) => {
                     drop(stream);
                     tracing::info!("shim advertised at {}", s.socket.display());
-                    return Ok((s.socket, child));
+                    return Ok(ShimLaunch {
+                        socket: s.socket,
+                        child,
+                        mcp_port,
+                    });
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -1981,6 +2041,7 @@ fn preflight_session(
     resolved_exec: &Path,
     session_dir: &Path,
     snapshot_name: &str,
+    mcp_port: Option<u16>,
 ) -> (PathBuf, String) {
     let (dir, name) = bootstrap_session_if_missing(resolved_exec, session_dir, snapshot_name);
     let session_file = dir.join(format!("{name}.ardour"));
@@ -1997,6 +2058,18 @@ fn preflight_session(
                     session_file.display(),
                 );
             }
+            // Pin the MCPHttp port if we allocated one. Idempotent on
+            // a repeat open against the same session — same port stays
+            // pinned, the XML doesn't get rewritten when it already
+            // matches.
+            if let Some(port) = mcp_port {
+                if let Err(e) = crate::ardour_xml::ensure_mcp_http_on_port(&session_file, port) {
+                    tracing::warn!(
+                        "foyer: failed to pin MCPHttp port {port} in {}: {e:#}",
+                        session_file.display(),
+                    );
+                }
+            }
         } else {
             tracing::warn!(
                 "foyer: session file {} is not a regular file — skipping shim activation",
@@ -2011,6 +2084,70 @@ fn preflight_session(
     // path injects that env via `BackendSpawner::launch` based on a
     // pre-launch probe (see the `launch()` call in `start_command`).
     (dir, name)
+}
+
+/// Allocate a free TCP port for an MCPHttp listener. We bias the
+/// search to the [4820, 4900) range (4820 is Ardour's published
+/// default; staying close keeps firewall rules and dev-tooling
+/// muscle memory aligned) but fall through to a free ephemeral
+/// port if every slot is taken.
+///
+/// Returns `None` if the OS can't hand us a port at all — extremely
+/// unusual; the caller logs and skips the per-session pin in that
+/// case (the session still works, the `daw_proxy` tool just doesn't
+/// see this session as MCP-capable until the next open).
+fn alloc_free_mcp_port() -> Option<u16> {
+    use std::net::TcpListener;
+    for port in 4820u16..4900 {
+        // bind-then-close gives us a port we can hand to Ardour with
+        // the (small) risk of a race against another process. The MCP
+        // surface re-binds on session-load, so we accept that window.
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Some(port);
+        }
+    }
+    // Fall through: let the kernel pick anything free.
+    TcpListener::bind("127.0.0.1:0")
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|addr| addr.port())
+}
+
+/// Probe an MCPHttp endpoint to see if it's up. Used post-spawn to
+/// decide whether to register this session as MCP-capable. Returns
+/// `true` when the endpoint answers an `initialize` within `deadline`.
+/// Older Ardour builds without `mcp_http` compiled in just never bind
+/// the port — the probe will time out and the session reports no MCP.
+async fn probe_mcp_http(port: u16, deadline: std::time::Duration) -> bool {
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let client = match reqwest::Client::builder().timeout(deadline).build() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "foyer-mcp-probe", "version": "0.1" }
+        }
+    });
+    let deadline_at = tokio::time::Instant::now() + deadline;
+    while tokio::time::Instant::now() < deadline_at {
+        let r = client
+            .post(&url)
+            .header("Accept", "application/json, text/event-stream")
+            .json(&body)
+            .send()
+            .await;
+        if matches!(r, Ok(ref resp) if resp.status().is_success()) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    false
 }
 
 /// Step 1 of `preflight_session`: if the session file is missing,

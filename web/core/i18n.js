@@ -87,6 +87,7 @@ export async function setLocale(code) {
   // English is implicit — never fetched.
   if (norm === "en" || norm.startsWith("en-")) {
     _state.locale = norm;
+    _applyDirection(norm);
     _persist();
     _broadcast();
     return;
@@ -95,8 +96,25 @@ export async function setLocale(code) {
     await _ensureCatalog(norm);
   }
   _state.locale = norm;
+  _applyDirection(norm);
   _persist();
   _broadcast();
+}
+
+/// Set `<html dir="rtl|ltr">` to match the catalog's declared
+/// `_meta.direction`. CSS flexbox / grid + `start`/`end` logical
+/// properties react automatically, so Arabic / Persian / Urdu lay
+/// out right-to-left without per-component changes. Falls back to
+/// `ltr` when the catalog is unloaded or the `_meta` is missing
+/// — same default the browser would pick.
+function _applyDirection(code) {
+  if (typeof document === "undefined") return;
+  const meta = _state.metas[code] || _state.metas[code.split("-")[0]];
+  const dir = (meta && meta.direction === "rtl") ? "rtl" : "ltr";
+  if (document.documentElement) {
+    document.documentElement.setAttribute("dir", dir);
+    document.documentElement.setAttribute("lang", code);
+  }
 }
 
 /// Read the active locale code. Cheap; safe to call from `render()`.

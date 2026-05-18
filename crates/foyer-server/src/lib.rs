@@ -182,6 +182,15 @@ pub trait BackendSpawner: Send + Sync + 'static {
 pub struct LaunchedBackend {
     pub backend: Arc<dyn Backend>,
     pub process: Option<Box<dyn ProcessHandle>>,
+    /// HTTP URL of the upstream DAW's MCP endpoint, when one is
+    /// available for this specific session. `None` means either the
+    /// spawned DAW build doesn't ship an MCP surface (Ardour 9.2 and
+    /// older) or the spawner didn't try to pin a port (stub backends,
+    /// reattach to an orphan shim Foyer didn't fork).
+    /// Populated by the spawner; consumed by `swap_backend` which
+    /// stashes it on the session registry entry so the `daw_proxy`
+    /// agent tool can route per-session calls to the right port.
+    pub mcp_endpoint: Option<String>,
 }
 
 impl LaunchedBackend {
@@ -189,6 +198,7 @@ impl LaunchedBackend {
         Self {
             backend,
             process: None,
+            mcp_endpoint: None,
         }
     }
 
@@ -196,7 +206,14 @@ impl LaunchedBackend {
         Self {
             backend,
             process: Some(p),
+            mcp_endpoint: None,
         }
+    }
+
+    /// Tag the launch with the upstream MCP URL. Chainable.
+    pub fn with_mcp_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.mcp_endpoint = Some(endpoint.into());
+        self
     }
 }
 
@@ -502,6 +519,13 @@ pub(crate) struct AppState {
     /// persisted across sidecar restarts; the host re-assigns per
     /// session.
     pub(crate) track_browser_sources: RwLock<HashMap<foyer_schema::EntityId, String>>,
+    /// Static `mcp_proxies:` from config.yaml — upstream MCP servers
+    /// Foyer didn't spawn (e.g. a Reaper instance the user started
+    /// separately). The `daw_proxy` agent tool merges these with
+    /// per-session entries (from `Session.mcp_endpoint`) at query
+    /// time. Held in a RwLock so a hot-reload of config could update
+    /// it without restarting the runtime.
+    pub(crate) mcp_proxies: RwLock<Vec<foyer_config::McpProxyConfig>>,
     /// Broadcast for PTT binary frames. Separate channel from the
     /// JSON envelope bus so the writer loop can forward it as a
     /// `Message::Binary` without re-encoding. Each connection
@@ -764,6 +788,7 @@ impl AppState {
         session_id: Option<EntityId>,
         session_name: Option<String>,
         process: Option<Box<dyn ProcessHandle>>,
+        mcp_endpoint: Option<String>,
     ) {
         self.install_active_backend(next.clone()).await;
         *self.active_backend_id.write().await = Some(backend_id.clone());
@@ -822,7 +847,15 @@ impl AppState {
             .unwrap_or_default();
         self.sessions
             .clone()
-            .add(sid.clone(), backend_id.clone(), next, path, name, process)
+            .add(
+                sid.clone(),
+                backend_id.clone(),
+                next,
+                path,
+                name,
+                process,
+                mcp_endpoint,
+            )
             .await;
         // Newly-opened session automatically becomes the focus
         // target so untagged commands flow to it. User can switch
@@ -932,6 +965,7 @@ impl Server {
             drift_integral: Mutex::new(HashMap::new()),
             chat: chat::ChatState::new(),
             track_browser_sources: RwLock::new(HashMap::new()),
+            mcp_proxies: RwLock::new(Vec::new()),
             ptt_tx,
             sessions,
             orphans: RwLock::new(Vec::new()),
@@ -966,11 +1000,21 @@ impl Server {
     /// Attach the agent runtime. Called by foyer-cli after the
     /// AppState is constructed so the agent's filesystem store has a
     /// chance to fail gracefully without blocking the rest of the
-    /// server from coming up.
+    /// server from coming up. `mcp_proxies` is the list of upstream
+    /// MCP backends the agent's `daw_proxy` tool will speak to;
+    /// usually fed from `foyer_config::Config.mcp_proxies`.
     pub async fn attach_agent(
         &self,
+        mcp_proxies: Vec<foyer_config::McpProxyConfig>,
     ) -> Result<std::sync::Arc<foyer_agent::AgentRuntime>, foyer_agent::store::StoreError> {
-        let runtime = foyer_agent::AgentRuntime::new().await?;
+        // Stash the static proxy list on AppState so the SessionDirector
+        // can merge it with per-session live entries when the agent
+        // queries `daw_proxy.list_backends`. Runtime gets it too as a
+        // boot-time fallback for thin dispatch paths that don't have a
+        // director attached.
+        *self.state.mcp_proxies.write().await = mcp_proxies.clone();
+        let store = std::sync::Arc::new(foyer_agent::store::AgentStore::open_default().await?);
+        let runtime = foyer_agent::AgentRuntime::with_store_and_proxies(store, mcp_proxies).await?;
         let backend = self.state.backend.read().await.clone();
         runtime
             .attach_backend(std::sync::Arc::downgrade(&backend))

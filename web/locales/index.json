@@ -1,12 +1,26 @@
 {
-  "_comment": "Hand-maintained list of locale catalogs served from /locales/. Add an entry here when a new <lang>.json lands so the picker can find it. Ordered alphabetically by ISO code (en is the implicit identity catalog).",
+  "_comment": "Hand-maintained list of locale catalogs served from /locales/. Add an entry here when a new <lang>.json lands so the picker can find it. Ordered alphabetically by ISO code (en is the implicit identity catalog). `direction: rtl` is present on right-to-left scripts; absent (or `ltr`) for left-to-right.",
   "locales": [
-    { "code": "de", "name": "German",              "native_name": "Deutsch",     "plural_rule": "n_neq_1" },
-    { "code": "en", "name": "English",             "native_name": "English",     "plural_rule": "n_neq_1" },
-    { "code": "es", "name": "Spanish",             "native_name": "Español",     "plural_rule": "n_neq_1" },
-    { "code": "it", "name": "Italian",             "native_name": "Italiano",    "plural_rule": "n_neq_1" },
-    { "code": "ja", "name": "Japanese",            "native_name": "日本語",        "plural_rule": "single"  },
-    { "code": "ko", "name": "Korean",              "native_name": "한국어",        "plural_rule": "single"  },
-    { "code": "zh", "name": "Chinese (Simplified)","native_name": "简体中文",      "plural_rule": "single"  }
+    { "code": "ar", "name": "Arabic",                "native_name": "العربية",      "plural_rule": "n_neq_1", "direction": "rtl" },
+    { "code": "bn", "name": "Bengali",               "native_name": "বাংলা",        "plural_rule": "n_neq_1" },
+    { "code": "de", "name": "German",                "native_name": "Deutsch",     "plural_rule": "n_neq_1" },
+    { "code": "el", "name": "Greek",                 "native_name": "Ελληνικά",     "plural_rule": "n_neq_1" },
+    { "code": "en", "name": "English",               "native_name": "English",     "plural_rule": "n_neq_1" },
+    { "code": "es", "name": "Spanish",               "native_name": "Español",     "plural_rule": "n_neq_1" },
+    { "code": "fa", "name": "Persian",               "native_name": "فارسی",        "plural_rule": "n_gt_1",  "direction": "rtl" },
+    { "code": "fr", "name": "French",                "native_name": "Français",    "plural_rule": "n_gt_1"  },
+    { "code": "hi", "name": "Hindi",                 "native_name": "हिन्दी",        "plural_rule": "n_neq_1" },
+    { "code": "id", "name": "Indonesian",            "native_name": "Bahasa Indonesia", "plural_rule": "single" },
+    { "code": "it", "name": "Italian",               "native_name": "Italiano",    "plural_rule": "n_neq_1" },
+    { "code": "ja", "name": "Japanese",              "native_name": "日本語",       "plural_rule": "single"  },
+    { "code": "ko", "name": "Korean",                "native_name": "한국어",       "plural_rule": "single"  },
+    { "code": "pl", "name": "Polish",                "native_name": "Polski",      "plural_rule": "n_neq_1" },
+    { "code": "pt", "name": "Portuguese (Brazilian)","native_name": "Português",   "plural_rule": "n_gt_1"  },
+    { "code": "ru", "name": "Russian",               "native_name": "Русский",     "plural_rule": "n_neq_1" },
+    { "code": "ta", "name": "Tamil",                 "native_name": "தமிழ்",        "plural_rule": "n_neq_1" },
+    { "code": "tr", "name": "Turkish",               "native_name": "Türkçe",      "plural_rule": "n_neq_1" },
+    { "code": "ur", "name": "Urdu",                  "native_name": "اردو",         "plural_rule": "n_neq_1", "direction": "rtl" },
+    { "code": "vi", "name": "Vietnamese",            "native_name": "Tiếng Việt",  "plural_rule": "single"  },
+    { "code": "zh", "name": "Chinese (Simplified)",  "native_name": "简体中文",     "plural_rule": "single"  }
   ]
 }

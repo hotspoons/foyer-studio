@@ -13,7 +13,9 @@
 
 use std::sync::Arc;
 
-use foyer_agent::tools::{io::IoTool, tracks::TracksTool, Tool, ToolContext};
+use foyer_agent::tools::{
+    io::IoTool, tracks::TracksTool, transport::TransportTool, Tool, ToolContext,
+};
 use foyer_backend::Backend;
 use foyer_backend_stub::StubBackend;
 use serde_json::{json, Value};
@@ -320,4 +322,156 @@ async fn midi_track_route_to_midi_input_marks_is_midi() {
         track.inputs[0].is_midi,
         "midi-routed input should be is_midi"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transport_set_tempo_writes_parameter() {
+    let backend: Arc<dyn Backend> = Arc::new(StubBackend::new());
+    let ctx = ctx_for(&backend);
+    let transport = TransportTool;
+
+    let res = transport
+        .call(&ctx, json!({ "subcommand": "set_tempo", "bpm": 140.0 }))
+        .await
+        .expect("set_tempo(140) succeeds");
+    assert_eq!(res.data["bpm"], json!(140.0));
+
+    let snap = backend.snapshot().await.unwrap();
+    match &snap.transport.tempo.value {
+        foyer_schema::ControlValue::Float(f) => {
+            assert!((*f - 140.0).abs() < 1e-6, "tempo should be 140, got {f}");
+        }
+        other => panic!("tempo should be Float, got {other:?}"),
+    }
+
+    // Out-of-range clamps; agent reports the clamped value back.
+    let clamped = transport
+        .call(&ctx, json!({ "subcommand": "set_tempo", "bpm": 999.0 }))
+        .await
+        .expect("set_tempo(999) clamps + succeeds");
+    assert_eq!(clamped.data["bpm"], json!(300.0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transport_set_time_signature_writes_both_params() {
+    let backend: Arc<dyn Backend> = Arc::new(StubBackend::new());
+    let ctx = ctx_for(&backend);
+    let transport = TransportTool;
+
+    let res = transport
+        .call(
+            &ctx,
+            json!({
+                "subcommand": "set_time_signature",
+                "numerator": 7,
+                "denominator": 8,
+            }),
+        )
+        .await
+        .expect("set_time_signature(7/8) succeeds");
+    assert_eq!(res.data["numerator"], json!(7));
+    assert_eq!(res.data["denominator"], json!(8));
+
+    let snap = backend.snapshot().await.unwrap();
+    match &snap.transport.time_signature_num.value {
+        foyer_schema::ControlValue::Int(n) => assert_eq!(*n, 7),
+        other => panic!("ts.num should be Int, got {other:?}"),
+    }
+    match &snap.transport.time_signature_den.value {
+        foyer_schema::ControlValue::Int(n) => assert_eq!(*n, 8),
+        other => panic!("ts.den should be Int, got {other:?}"),
+    }
+
+    // Invalid denominator (non-power-of-2) errors before any
+    // ControlSet fires — leaves the previous 7/8 intact.
+    let err = transport
+        .call(
+            &ctx,
+            json!({
+                "subcommand": "set_time_signature",
+                "numerator": 4,
+                "denominator": 6,
+            }),
+        )
+        .await
+        .expect_err("denominator=6 should be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("denominator must be one of"),
+        "expected validation error, got: {msg}"
+    );
+    // Verify the prior 7/8 is still in place.
+    let snap2 = backend.snapshot().await.unwrap();
+    match &snap2.transport.time_signature_num.value {
+        foyer_schema::ControlValue::Int(n) => {
+            assert_eq!(*n, 7, "bad denominator must not have stomped numerator")
+        }
+        other => panic!("ts.num should be Int, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transport_set_metronome_toggles_click_and_gain() {
+    let backend: Arc<dyn Backend> = Arc::new(StubBackend::new());
+    let ctx = ctx_for(&backend);
+    let transport = TransportTool;
+
+    // On + custom gain in one call.
+    transport
+        .call(
+            &ctx,
+            json!({
+                "subcommand": "set_metronome",
+                "enabled": true,
+                "gain_db": -3.0,
+            }),
+        )
+        .await
+        .expect("set_metronome(on, -3 dB) succeeds");
+
+    let snap = backend.snapshot().await.unwrap();
+    let metro = snap
+        .transport
+        .metronome
+        .as_ref()
+        .expect("stub session exposes metronome param");
+    match &metro.value {
+        foyer_schema::ControlValue::Bool(b) => assert!(*b, "metronome should be on"),
+        other => panic!("metronome should be bool, got {other:?}"),
+    }
+    let gain = snap
+        .transport
+        .metronome_gain
+        .as_ref()
+        .expect("stub session exposes metronome_gain param");
+    match &gain.value {
+        foyer_schema::ControlValue::Float(f) => {
+            assert!(
+                (*f + 3.0).abs() < 1e-6,
+                "metronome gain should be -3 dB, got {f}"
+            );
+        }
+        other => panic!("metronome gain should be Float, got {other:?}"),
+    }
+
+    // Toggle off without touching the gain — prior gain should
+    // survive a no-gain-arg call.
+    transport
+        .call(
+            &ctx,
+            json!({"subcommand": "set_metronome", "enabled": false}),
+        )
+        .await
+        .expect("set_metronome(off) succeeds");
+    let snap2 = backend.snapshot().await.unwrap();
+    match &snap2.transport.metronome.as_ref().unwrap().value {
+        foyer_schema::ControlValue::Bool(b) => assert!(!*b, "metronome should be off"),
+        other => panic!("metronome should be bool, got {other:?}"),
+    }
+    match &snap2.transport.metronome_gain.as_ref().unwrap().value {
+        foyer_schema::ControlValue::Float(f) => {
+            assert!((*f + 3.0).abs() < 1e-6, "gain should remain -3 dB, got {f}");
+        }
+        other => panic!("metronome gain should be Float, got {other:?}"),
+    }
 }

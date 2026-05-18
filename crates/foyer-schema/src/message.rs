@@ -957,6 +957,16 @@ pub struct SessionInfo {
     /// `Event::SessionDirtyChanged` for convenience in the UI.
     #[serde(default)]
     pub dirty: bool,
+    /// HTTP URL of the upstream DAW's MCP endpoint for this specific
+    /// session, when one is available. Populated by the launcher when
+    /// it pins a per-session port (Ardour 9.4+ `mcp_http` surface);
+    /// `None` means either the DAW build doesn't ship an MCP surface
+    /// (Ardour 9.2 and older), the spawner didn't try (stub backends,
+    /// reattach to an orphan shim), or the post-spawn probe didn't
+    /// answer. Read by the `daw_proxy` agent tool to enumerate the
+    /// MCP-capable sessions and route per-session calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_endpoint: Option<String>,
 }
 
 /// One entry in the server-tracked "recently opened projects" list.

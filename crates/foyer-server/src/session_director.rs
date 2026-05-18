@@ -18,7 +18,10 @@ use std::path::Path;
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use foyer_agent::tools::{BackendsListing, LaunchOutcome, SessionDirector, SessionDirectorError};
+use foyer_agent::tools::{
+    ArmIngressOutcome, BackendsListing, LaunchOutcome, McpProxyEntry, SessionDirector,
+    SessionDirectorError,
+};
 use foyer_schema::{Event, PathListing, RecentEntry, SessionInfo};
 
 use crate::recents;
@@ -218,6 +221,7 @@ impl SessionDirector for SessionDirectorImpl {
                 Some(session_id.clone()),
                 None,
                 launched.process,
+                launched.mcp_endpoint,
             )
             .await;
         // Push the project onto recents so the picker's most-recent
@@ -300,6 +304,176 @@ impl SessionDirector for SessionDirectorImpl {
             )
             .await;
         }
+        Ok(())
+    }
+
+    async fn arm_track_for_browser_audio(
+        &self,
+        track_id: &str,
+        peer_id: Option<&str>,
+    ) -> Result<ArmIngressOutcome, SessionDirectorError> {
+        let state = self.state()?;
+        let tid = foyer_schema::EntityId::new(track_id);
+        // Verify the track exists on the active backend before
+        // committing the claim. Without this the map fills up with
+        // dead ids and the broadcast bewilders connected clients.
+        let snap = state
+            .backend()
+            .await
+            .snapshot()
+            .await
+            .map_err(|e| SessionDirectorError::Execution(e.to_string()))?;
+        let track = snap.tracks.iter().find(|t| t.id == tid).ok_or_else(|| {
+            SessionDirectorError::Execution(format!(
+                "unknown track_id `{track_id}` — call tracks.list to see live ids"
+            ))
+        })?;
+        // Buses + master have no audio input — refuse the claim with a
+        // clear message so the agent can pick a real track.
+        if matches!(
+            track.kind,
+            foyer_schema::TrackKind::Bus
+                | foyer_schema::TrackKind::Master
+                | foyer_schema::TrackKind::Monitor
+        ) {
+            return Err(SessionDirectorError::Execution(format!(
+                "track `{track_id}` is a {:?} — only audio/midi tracks can host browser ingress",
+                track.kind
+            )));
+        }
+
+        // Resolve the peer assignee. Empty string = "claimable by any
+        // peer that opens an ingress next" (matches what the WS
+        // SetTrackBrowserSource handler treats as "clear").
+        let assigned = peer_id.unwrap_or("").to_string();
+        {
+            let mut map = state.track_browser_sources.write().await;
+            if assigned.is_empty() {
+                // Wipe any prior claim so a new browser tab can pick
+                // this up. The agent is saying "any browser can fill
+                // this track" — leave the slot open.
+                map.remove(&tid);
+            } else {
+                map.insert(tid.clone(), assigned.clone());
+            }
+        }
+        crate::ws::broadcast_event(
+            &state,
+            Event::TrackBrowserSourceChanged {
+                track_id: tid.clone(),
+                peer_id: if assigned.is_empty() {
+                    None
+                } else {
+                    Some(assigned.clone())
+                },
+            },
+        )
+        .await;
+
+        // Force monitoring=off — the browser round-trip (100–300 ms
+        // typical, more on a tunnelled link) is audible as slap-back
+        // if the user hears live input. Same policy the WS handler
+        // applies on the manual Take chip path.
+        let monitor_patch = foyer_schema::session::TrackPatch {
+            monitoring: Some("off".to_string()),
+            ..Default::default()
+        };
+        if let Err(e) = state.backend().await.update_track(tid, monitor_patch).await {
+            tracing::debug!("arm_track_for_browser_audio: best-effort monitoring=off failed: {e}");
+        }
+
+        // Snapshot the live peer count so the agent can phrase its
+        // reply usefully ("no browsers connected — open Foyer in a
+        // tab" vs. "2 browsers connected — click Take on one of them").
+        let connected_peer_count = state.peers.read().await.len();
+
+        Ok(ArmIngressOutcome {
+            track_id: track_id.to_string(),
+            peer_id: assigned,
+            connected_peer_count,
+        })
+    }
+
+    async fn list_mcp_proxies(&self) -> Result<Vec<McpProxyEntry>, SessionDirectorError> {
+        let state = self.state()?;
+        let mut out: Vec<McpProxyEntry> = Vec::new();
+        // Live sessions first — these are the per-session Ardour MCP
+        // ports we pinned at spawn time. Their ids include the session
+        // id so the agent can target a specific Ardour instance when
+        // multiple are open.
+        for entry in state.sessions.list().await {
+            if let Some(endpoint) = entry.mcp_endpoint.as_deref() {
+                let short = entry
+                    .id
+                    .as_str()
+                    .rsplit_once('.')
+                    .map(|(_, s)| s.chars().take(8).collect::<String>())
+                    .unwrap_or_else(|| entry.id.to_string());
+                let label = if entry.name.is_empty() {
+                    format!("{} ({})", entry.backend_id, short)
+                } else {
+                    format!("{} ({})", entry.name, short)
+                };
+                out.push(McpProxyEntry {
+                    id: format!("session.{short}"),
+                    label,
+                    endpoint: endpoint.to_string(),
+                    enabled: true,
+                    source: "session",
+                    api_key: None,
+                });
+            }
+        }
+        // Static config entries — for upstream MCP servers Foyer
+        // didn't spawn (a separate Reaper, an external Ardour, etc.).
+        // De-duplicate against the live set by endpoint URL so we
+        // don't list the same Ardour both as "session.xxx" and as
+        // the user's hand-configured `ardour` entry.
+        for cfg in state.mcp_proxies.read().await.iter() {
+            if out.iter().any(|e| e.endpoint == cfg.endpoint) {
+                continue;
+            }
+            let api_key =
+                std::env::var(format!("FOYER_MCP_PROXY_{}_API_KEY", cfg.id.to_uppercase()))
+                    .ok()
+                    .or_else(|| cfg.api_key.clone());
+            out.push(McpProxyEntry {
+                id: cfg.id.clone(),
+                label: cfg.label.clone().unwrap_or_else(|| cfg.id.clone()),
+                endpoint: cfg.endpoint.clone(),
+                enabled: cfg.enabled,
+                source: "config",
+                api_key,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn release_track_browser_audio(
+        &self,
+        track_id: &str,
+    ) -> Result<(), SessionDirectorError> {
+        let state = self.state()?;
+        let tid = foyer_schema::EntityId::new(track_id);
+        {
+            let mut map = state.track_browser_sources.write().await;
+            map.remove(&tid);
+        }
+        // Also strip any track→stream binding so a subsequent region
+        // doesn't get auto-stamped with a stale latency report. The
+        // browser side handles port_name cleanup on its own.
+        {
+            let mut tmap = state.track_ingress.lock().await;
+            tmap.remove(&tid);
+        }
+        crate::ws::broadcast_event(
+            &state,
+            Event::TrackBrowserSourceChanged {
+                track_id: tid,
+                peer_id: None,
+            },
+        )
+        .await;
         Ok(())
     }
 }

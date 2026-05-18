@@ -108,6 +108,27 @@ enum Op {
         track_id: String,
         armed: bool,
     },
+    /// Arm a track to receive browser-sourced audio — the server-side
+    /// half of what the "I" / Take chip in the UI runs. Sets the
+    /// track→browser-source claim and forces `monitoring=off` (the
+    /// 100–300 ms browser round trip is audible as slap-back if a
+    /// user hears it live). After this call, the actual mic capture
+    /// still has to happen browser-side: a connected user clicks the
+    /// Take chip on their tab and the mic stream is auto-routed. With
+    /// no browser connected the track sits armed and ready.
+    /// `peer_id` (optional): bind to a specific peer; omit to leave
+    /// open ("first browser to claim wins").
+    ArmForBrowserAudio {
+        track_id: String,
+        #[serde(default)]
+        peer_id: Option<String>,
+    },
+    /// Release a previous browser-audio claim — strips the source-user
+    /// binding and any pending track→ingress mapping. Doesn't re-enable
+    /// monitoring (use `tracks.update(monitoring="auto")` if desired).
+    ReleaseBrowserAudio {
+        track_id: String,
+    },
 }
 
 #[async_trait]
@@ -146,7 +167,13 @@ impl Tool for TracksTool {
          set_arm(track_id, armed) — toggle record-arm on an audio/MIDI \
          track. Required before recording. Pair with \
          `io.list_ports` → `update(input_port)` to pick the source and \
-         `transport.record(armed=true)` to actually start tracking."
+         `transport.record(armed=true)` to actually start tracking, \
+         arm_for_browser_audio(track_id, peer_id?) — server-side half of \
+         the UI's \"I\" / Take chip. Marks the track as browser-fed and \
+         forces monitoring=off (browser round-trip would be audible). \
+         A connected browser tab still has to fulfil the actual mic \
+         capture — getUserMedia needs a user gesture. \
+         release_browser_audio(track_id) — clear the browser-fed claim."
     }
 
     fn schema(&self) -> Value {
@@ -157,7 +184,8 @@ impl Tool for TracksTool {
                 "subcommand": { "type": "string",
                     "enum": ["list", "describe", "describe_many",
                              "create", "update", "delete", "reorder",
-                             "set_midi_channel_mode", "set_arm"] },
+                             "set_midi_channel_mode", "set_arm",
+                             "arm_for_browser_audio", "release_browser_audio"] },
                 "kind": { "type": "string", "enum": ["audio", "midi", "bus"] },
                 "after_id": { "type": "string" },
                 "instrument_uri": { "type": "string",
@@ -182,7 +210,9 @@ impl Tool for TracksTool {
                     "enum": ["all", "filter", "force"] },
                 "mask":              { "type": "integer", "minimum": 0, "maximum": 65535 },
                 "armed":             { "type": "boolean",
-                    "description": "set_arm: true to arm the track for recording, false to disarm." }
+                    "description": "set_arm: true to arm the track for recording, false to disarm." },
+                "peer_id":           { "type": "string",
+                    "description": "arm_for_browser_audio: peer id to bind. Omit to leave the claim open." }
             }
         })
     }
@@ -429,6 +459,64 @@ impl Tool for TracksTool {
                     "track_id": track_id,
                     "armed": armed,
                 })))
+            }
+            Op::ArmForBrowserAudio { track_id, peer_id } => {
+                // Route through the SessionDirector so we hit the same
+                // server-state path the WS `Command::SetTrackBrowserSource`
+                // handler uses (records the claim, forces monitoring=off,
+                // emits the TrackBrowserSourceChanged event). Browser-side
+                // mic capture still needs a user gesture; this just preps
+                // the slot.
+                let director = ctx.session_director.as_ref().ok_or_else(|| {
+                    ToolError::Execution(
+                        "arm_for_browser_audio needs a session director — not available in this \
+                         dispatch context"
+                            .into(),
+                    )
+                })?;
+                let outcome = director
+                    .arm_track_for_browser_audio(&track_id, peer_id.as_deref())
+                    .await
+                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                let next_step = if outcome.connected_peer_count == 0 {
+                    "no browser tabs connected — open Foyer in a browser and click Take on this track"
+                        .to_string()
+                } else if outcome.peer_id.is_empty() {
+                    format!(
+                        "{} browser tab(s) connected — ask the user to click Take on this track",
+                        outcome.connected_peer_count
+                    )
+                } else {
+                    format!(
+                        "bound to peer {} — they should click Take to feed mic audio",
+                        outcome.peer_id
+                    )
+                };
+                Ok(ToolResult::ok(format!(
+                    "track {track_id} armed for browser audio · {next_step}"
+                ))
+                .with_data(json!({
+                    "track_id": outcome.track_id,
+                    "peer_id": outcome.peer_id,
+                    "connected_peer_count": outcome.connected_peer_count,
+                    "next_step": next_step,
+                })))
+            }
+            Op::ReleaseBrowserAudio { track_id } => {
+                let director = ctx.session_director.as_ref().ok_or_else(|| {
+                    ToolError::Execution(
+                        "release_browser_audio needs a session director — not available in this \
+                         dispatch context"
+                            .into(),
+                    )
+                })?;
+                director
+                    .release_track_browser_audio(&track_id)
+                    .await
+                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                Ok(ToolResult::ok(format!(
+                    "browser-audio claim released on track {track_id}"
+                )))
             }
         }
     }

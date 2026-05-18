@@ -56,6 +56,13 @@ pub(crate) struct SessionEntry {
     /// SIGTERM/SIGKILL escalation on a detached task — we don't want
     /// to block close() on the wait window.
     pub process: Mutex<Option<Box<dyn ProcessHandle>>>,
+    /// HTTP URL of the upstream DAW's MCP endpoint for this specific
+    /// session, when one is available. `None` means either the DAW
+    /// build doesn't ship an MCP surface (Ardour 9.2 and older) or
+    /// the spawner didn't try to pin a port (stub backends, reattach
+    /// to an orphan shim). Surfaced to the `daw_proxy` agent tool so
+    /// it can route per-session calls to the right port.
+    pub mcp_endpoint: Option<String>,
 }
 
 impl SessionEntry {
@@ -67,6 +74,7 @@ impl SessionEntry {
             name: self.name.clone(),
             opened_at: self.opened_at,
             dirty: self.dirty.load(Ordering::Relaxed),
+            mcp_endpoint: self.mcp_endpoint.clone(),
         }
     }
 }
@@ -140,6 +148,7 @@ impl SessionRegistry {
         path: String,
         name: String,
         process: Option<Box<dyn ProcessHandle>>,
+        mcp_endpoint: Option<String>,
     ) -> EntityId {
         let opened_at = now_secs();
         let dirty = Arc::new(AtomicBool::new(false));
@@ -164,6 +173,7 @@ impl SessionRegistry {
             dirty,
             pump,
             process: Mutex::new(process),
+            mcp_endpoint,
         };
         // Strip the jail prefix before we broadcast — UI-facing paths
         // never include the jail root (PLAN 162). Internal lookups

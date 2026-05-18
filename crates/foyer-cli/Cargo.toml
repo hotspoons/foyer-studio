@@ -30,6 +30,10 @@ tracing-subscriber.workspace = true
 # edit in place to hack (see web/HACKING.md). `--web-root <path>`
 # overrides; `./web` takes precedence when it exists (dev mode).
 include_dir = "0.7"
+# MCP-probe + JSON-RPC body for the per-session port-up check. Same
+# rustls-only build as the rest of the workspace.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json.workspace = true
 
 # `libc::kill` for SIGTERM-vs-SIGKILL distinction in `ChildProcess`.
 # `tokio::process::Child::kill()` always sends SIGKILL, which bypasses

@@ -27,6 +27,7 @@ pub mod config;
 pub mod conversation;
 pub mod engine;
 pub mod llm;
+pub mod mcp_proxy;
 pub mod openai_proxy;
 pub mod runtime;
 pub mod store;

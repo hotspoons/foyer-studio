@@ -2077,6 +2077,37 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						    Temporal::Tempo (bpm, bpm, 4.0));
 						Temporal::TempoMap::update (tmap);
 						PBD::warning << "foyer_shim: updated transport tempo to " << bpm << endmsg;
+					} else if (snap.id == "transport.ts.num" || snap.id == "transport.ts.den") {
+						// Time-signature edits arrive as two independent
+						// ControlSets (one per component). Snapshot the
+						// current Meter, override the half being set,
+						// install at the playhead. Either order works —
+						// the second SET re-reads the first's effect.
+						const bool is_num = (snap.id == "transport.ts.num");
+						Temporal::TempoMap::WritableSharedPtr tmap (Temporal::TempoMap::write_copy ());
+						const Temporal::timepos_t pos (session.transport_sample ());
+						const Temporal::TempoMetric metric (tmap->metric_at (pos));
+						const Temporal::Meter old_meter = metric.meter ();
+						int new_num = old_meter.divisions_per_bar ();
+						int new_den = old_meter.note_value ();
+						if (is_num) {
+							new_num = std::max (1, std::min (32, static_cast<int> (snap.value)));
+						} else {
+							const int v = static_cast<int> (snap.value);
+							// Power-of-2 in {1, 2, 4, 8, 16, 32}; clamp to
+							// the nearest legal value if a stray request
+							// slips through.
+							if (v <= 1) new_den = 1;
+							else if (v <= 2) new_den = 2;
+							else if (v <= 4) new_den = 4;
+							else if (v <= 8) new_den = 8;
+							else if (v <= 16) new_den = 16;
+							else new_den = 32;
+						}
+						tmap->set_meter (Temporal::Meter (new_num, new_den), pos);
+						Temporal::TempoMap::update (tmap);
+						PBD::warning << "foyer_shim: updated time signature to "
+						             << new_num << "/" << new_den << endmsg;
 					} else if (snap.id == "transport.metronome") {
 						// `Config::clicking` is the engine-level click
 						// switch; ParameterChanged fires from inside

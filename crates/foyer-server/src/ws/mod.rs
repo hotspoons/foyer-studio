@@ -1910,6 +1910,7 @@ async fn dispatch_command(
                             None,
                             None,
                             launched.process,
+                            launched.mcp_endpoint,
                         )
                         .await;
                     // Promote the just-opened project to the top of
@@ -3511,6 +3512,12 @@ async fn dispatch_command(
                             info.name.clone()
                         },
                         None,
+                        // Boot-time hello path: no spawner involved,
+                        // so we have no idea what MCP port (if any)
+                        // this Ardour was started on. Leave None;
+                        // operator can re-attach via a fresh launch
+                        // if they want MCP routing for this session.
+                        None,
                     )
                     .await;
                 *state.focus_session_id.write().await = Some(info.id.clone());
@@ -3547,6 +3554,7 @@ async fn dispatch_command(
                                 Some(info.name.clone())
                             },
                             launched.process,
+                            launched.mcp_endpoint,
                         )
                         .await;
                     // Remove the on-disk registry entry — the orphan

@@ -13,6 +13,7 @@ unsafe_code = "forbid"
 [dependencies]
 foyer-schema = { workspace = true }
 foyer-backend = { workspace = true }
+foyer-config = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

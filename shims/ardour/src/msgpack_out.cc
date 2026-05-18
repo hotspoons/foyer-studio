@@ -748,7 +748,13 @@ encode_session_snapshot (Session& session,
 		o.str ("schema_version"); o.array (2); o.u (0); o.u (1);
 
 		// Transport is a struct; map keys are Rust field names, values are Parameter structs.
-		double tempo_bpm = Temporal::TempoMap::fetch ()->metric_at (Temporal::timepos_t (session.transport_sample ())).tempo ().note_types_per_minute ();
+		const Temporal::TempoMetric tm = Temporal::TempoMap::fetch ()->metric_at (Temporal::timepos_t (session.transport_sample ()));
+		double tempo_bpm = tm.tempo ().note_types_per_minute ();
+		// Live meter readout — was hardcoded 4/4 before, which broke
+		// time-signature visibility on any session whose meter wasn't
+		// 4/4 (and silently lied to the agent's `transport.get`).
+		int ts_num = tm.meter ().divisions_per_bar ();
+		int ts_den = tm.meter ().note_value ();
 		bool playing_b   = session.transport_rolling ();
 		bool recording_b = session.get_record_enabled ();
 		bool looping_b   = session.get_play_loop ();
@@ -789,8 +795,8 @@ encode_session_snapshot (Session& session,
 		o.str ("recording");          emit_param_bool ("transport.recording", "Record",   recording_b);
 		o.str ("looping");            emit_param_bool ("transport.looping",   "Loop",     looping_b);
 		o.str ("tempo");              emit_param_num  ("transport.tempo",     "Tempo",    "continuous", tempo_bpm);
-		o.str ("time_signature_num"); emit_param_num  ("transport.ts.num",    "TS Num",   "discrete",   4.0);
-		o.str ("time_signature_den"); emit_param_num  ("transport.ts.den",    "TS Den",   "discrete",   4.0);
+		o.str ("time_signature_num"); emit_param_num  ("transport.ts.num",    "TS Num",   "discrete",   static_cast<double> (ts_num));
+		o.str ("time_signature_den"); emit_param_num  ("transport.ts.den",    "TS Den",   "discrete",   static_cast<double> (ts_den));
 		o.str ("position_beats");     emit_param_num  ("transport.position",  "Position", "meter",      static_cast<double> (session.transport_sample ()));
 		// Metronome: typed parameters so the UI knows this host
 		// supports a click. `metronome_peak` is just an EntityId

@@ -158,6 +158,107 @@ pub(crate) enum FoyerShimEdit {
     NoControlProtocolsBlock,
 }
 
+/// Outcome of one pass of the MCPHttp activation rule.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum McpHttpEdit {
+    /// `<Protocol name="MCPHttp" active="1" port="N"/>` already present
+    /// with the same port — leave alone.
+    AlreadyOnPort,
+    /// Was present at a different port (or inactive); rewrote the port
+    /// (and active=1) in place.
+    Repointed { updated: String },
+    /// Wasn't listed at all; inserted a fresh `<Protocol …/>` before
+    /// `</ControlProtocols>`.
+    Inserted { updated: String },
+    /// No `<ControlProtocols>` block at all — same edge case
+    /// `apply_foyer_shim_edit` warns on.
+    NoControlProtocolsBlock,
+}
+
+/// Rewrite an Ardour session XML so the MCPHttp control surface is
+/// enabled on `port`. Idempotent on the same port; rewrites in place
+/// when the port differs or the surface was inactive.
+///
+/// Why per-session XML and not the user-level Ardour config? Each
+/// Foyer-spawned Ardour shares one user config dir, so a per-user
+/// global port would collide when two sessions are open at once.
+/// MCPHttp's XML reader prefers the session value over the global
+/// (see `mcp_http.cc`: `node.get_property("port", …)` runs before
+/// `read_global_protocol_property`).
+pub(crate) fn apply_mcp_http_edit(input: &str, port: u16) -> McpHttpEdit {
+    // Quick exact match — same port + active. Avoids a redundant
+    // rewrite (and a fresh file mtime that would surprise the
+    // bootstrap helper's "needs save?" check).
+    let happy = format!(r#"<Protocol name="MCPHttp" active="1" port="{port}"/>"#);
+    if input.contains(&happy) {
+        return McpHttpEdit::AlreadyOnPort;
+    }
+    // Find any prior `<Protocol name="MCPHttp" …/>` entry and swap
+    // it for a canonical one. Bounded by the matching `/>` so we
+    // never reach into the next protocol.
+    let needle = r#"<Protocol name="MCPHttp""#;
+    if let Some(start) = input.find(needle) {
+        if let Some(rel_end) = input[start..].find("/>") {
+            let end = start + rel_end + 2;
+            let mut new = String::with_capacity(input.len());
+            new.push_str(&input[..start]);
+            new.push_str(&format!(
+                r#"<Protocol name="MCPHttp" active="1" port="{port}"/>"#
+            ));
+            new.push_str(&input[end..]);
+            return McpHttpEdit::Repointed { updated: new };
+        }
+    }
+    if let Some(idx) = input.find("</ControlProtocols>") {
+        let insertion =
+            format!("    <Protocol name=\"MCPHttp\" active=\"1\" port=\"{port}\"/>\n  ");
+        let mut new = String::with_capacity(input.len() + insertion.len());
+        new.push_str(&input[..idx]);
+        new.push_str(&insertion);
+        new.push_str(&input[idx..]);
+        return McpHttpEdit::Inserted { updated: new };
+    }
+    McpHttpEdit::NoControlProtocolsBlock
+}
+
+/// I/O wrapper around [`apply_mcp_http_edit`]. Reads the session
+/// file, applies the edit, writes atomically. Returns `Ok(())` for
+/// any outcome that didn't require a write (already-on-port, no
+/// `<ControlProtocols>` block).
+pub(crate) fn ensure_mcp_http_on_port(session_file: &Path, port: u16) -> Result<()> {
+    let meta = std::fs::symlink_metadata(session_file)
+        .with_context(|| format!("stat session file {}", session_file.display()))?;
+    if !meta.file_type().is_file() {
+        anyhow::bail!(
+            "session file {} is not a regular file — refusing to follow",
+            session_file.display(),
+        );
+    }
+    let original = std::fs::read_to_string(session_file)
+        .with_context(|| format!("read session file {}", session_file.display()))?;
+    match apply_mcp_http_edit(&original, port) {
+        McpHttpEdit::AlreadyOnPort => Ok(()),
+        McpHttpEdit::Repointed { updated } | McpHttpEdit::Inserted { updated } => {
+            write_atomic(session_file, &updated).with_context(|| {
+                format!("write MCPHttp port edit to {}", session_file.display())
+            })?;
+            tracing::info!(
+                "foyer: pinned MCPHttp to port {port} in {}",
+                session_file.display(),
+            );
+            Ok(())
+        }
+        McpHttpEdit::NoControlProtocolsBlock => {
+            tracing::warn!(
+                "foyer: no <ControlProtocols> block in {} — MCPHttp NOT enabled \
+                 (Ardour likely too old for this surface)",
+                session_file.display(),
+            );
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn apply_foyer_shim_edit(input: &str) -> FoyerShimEdit {
     if input.contains(r#"name="Foyer Studio Shim" active="1""#) {
         return FoyerShimEdit::AlreadyActive;

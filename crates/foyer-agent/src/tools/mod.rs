@@ -9,6 +9,7 @@
 
 pub mod automation;
 pub mod continue_working;
+pub mod daw_proxy;
 pub mod groups;
 pub mod io;
 pub mod midi;
@@ -329,6 +330,104 @@ pub trait SessionDirector: Send + Sync {
             "session.focus not wired in this director".into(),
         ))
     }
+
+    /// Arm a track to receive browser-sourced audio — the same
+    /// server-side handshake the "I" / Take chip runs when a user
+    /// clicks it (browser-side mic capture still needs a real user
+    /// gesture; the agent's job ends at preparing the track).
+    /// Specifically: records the track→browser-source claim in
+    /// `track_browser_sources`, forces `monitoring=off` (otherwise
+    /// the 100-300 ms browser round-trip is audible as slap-back),
+    /// and broadcasts `TrackBrowserSourceChanged` so any connected
+    /// surfaces light up the affordance.
+    ///
+    /// `peer_id`:
+    ///   - `Some(<peer>)`: lock the track to that specific peer
+    ///     (their browser tab auto-engages when the user clicks).
+    ///   - `None`: leave the assignee open — the next browser peer
+    ///     to claim the track wins.
+    ///
+    /// Default impl errors out; server-side `SessionDirectorImpl`
+    /// overrides with the real handshake.
+    async fn arm_track_for_browser_audio(
+        &self,
+        _track_id: &str,
+        _peer_id: Option<&str>,
+    ) -> Result<ArmIngressOutcome, SessionDirectorError> {
+        Err(SessionDirectorError::Unsupported(
+            "arm_track_for_browser_audio not wired in this director".into(),
+        ))
+    }
+
+    /// Release a prior `arm_track_for_browser_audio` claim — clears
+    /// the browser-source assignment + lets monitoring fall back to
+    /// the user's choice (no automatic re-enable; the agent can call
+    /// `tracks.update(monitoring=…)` separately if it wants live
+    /// monitoring back).
+    async fn release_track_browser_audio(
+        &self,
+        _track_id: &str,
+    ) -> Result<(), SessionDirectorError> {
+        Err(SessionDirectorError::Unsupported(
+            "release_track_browser_audio not wired in this director".into(),
+        ))
+    }
+
+    /// Enumerate the MCP proxy targets the `daw_proxy` agent tool
+    /// should consider. Two sources merge here:
+    ///   1. **Live sessions** — every open session whose backend
+    ///      registered an `mcp_endpoint` at spawn time
+    ///      (Ardour ≥ 9.4 with `mcp_http` compiled in). Each session
+    ///      gets a unique id derived from its session entry so the
+    ///      agent can target a specific Ardour instance when more
+    ///      than one is open.
+    ///   2. **Static config** — `mcp_proxies:` entries from
+    ///      config.yaml for upstream MCP servers Foyer didn't spawn
+    ///      (e.g. a Reaper instance the operator manually started).
+    ///
+    /// Default impl returns an empty list — the in-process tool
+    /// dispatchers used by tests don't have a session registry to
+    /// read from.
+    async fn list_mcp_proxies(&self) -> Result<Vec<McpProxyEntry>, SessionDirectorError> {
+        Ok(Vec::new())
+    }
+}
+
+/// One row returned by [`SessionDirector::list_mcp_proxies`]. Renamed
+/// `McpProxyEntry` rather than reusing `foyer_config::McpProxyConfig`
+/// so the runtime version (which knows about live sessions) doesn't
+/// pretend to be a config-file record.
+#[derive(Debug, Clone)]
+pub struct McpProxyEntry {
+    /// Stable id the agent passes back as `backend:` in subsequent
+    /// `daw_proxy` calls. Either the config-file `id` for static
+    /// entries or `session.<short-id>` for live sessions.
+    pub id: String,
+    /// Human-readable label shown in `daw_proxy.list_backends`.
+    pub label: String,
+    pub endpoint: String,
+    pub enabled: bool,
+    /// "session" for live-session entries, "config" for static.
+    /// Surfaced so the agent + operator can tell which sessions
+    /// support MCP vs. which are configured externally.
+    pub source: &'static str,
+    /// Optional API key (env-var override applied before this point).
+    /// Not serialized out of the proxy registry — used by the client
+    /// directly.
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArmIngressOutcome {
+    pub track_id: String,
+    /// The peer that's been bound — same string the WS layer broadcasts
+    /// in `TrackBrowserSourceChanged.peer_id`. Empty string means
+    /// "claimable by any peer".
+    pub peer_id: String,
+    /// Connected browser peers as of arm-time. Useful for the agent's
+    /// reply ("waiting for a browser tab to open" vs. "peer XYZ is
+    /// connected, ask them to click Take").
+    pub connected_peer_count: usize,
 }
 
 #[derive(Debug, Clone)]

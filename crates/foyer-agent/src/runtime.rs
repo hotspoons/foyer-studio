@@ -242,10 +242,23 @@ struct RuntimeInner {
 impl AgentRuntime {
     pub async fn new() -> Result<Arc<Self>, crate::store::StoreError> {
         let store = Arc::new(AgentStore::open_default().await?);
-        Self::with_store(store).await
+        Self::with_store_and_proxies(store, Vec::new()).await
     }
 
     pub async fn with_store(store: Arc<AgentStore>) -> Result<Arc<Self>, crate::store::StoreError> {
+        Self::with_store_and_proxies(store, Vec::new()).await
+    }
+
+    /// Build a runtime that's aware of upstream MCP proxies (the
+    /// configured backend DAWs Foyer's `daw_proxy` tool can reach).
+    /// Pass `Vec::new()` to disable the proxy surface — the tool
+    /// stays registered but reports "no backends configured" on
+    /// every subcommand. Read from `foyer-config::Config.mcp_proxies`
+    /// by the launcher; tests / in-process callers usually pass empty.
+    pub async fn with_store_and_proxies(
+        store: Arc<AgentStore>,
+        mcp_proxies: Vec<foyer_config::McpProxyConfig>,
+    ) -> Result<Arc<Self>, crate::store::StoreError> {
         let mut config = AgentConfig::default();
         // Rehydrate any prior LLM transport / autonomy settings. Lets
         // a server restart pick up the operator's last-saved endpoint
@@ -281,6 +294,14 @@ impl AgentRuntime {
         for t in crate::tools::default_registry_with_store(Some(store_weak)).iter() {
             tools_vec.push(t.clone());
         }
+        // The DAW MCP proxy tool is constructed with the configured
+        // upstream list. We register it unconditionally so the agent
+        // always sees the single `daw_proxy` slot — even when no
+        // backends are configured the subcommands give an actionable
+        // "set `mcp_proxies:` in config.yaml" message.
+        tools_vec.push(Arc::new(crate::tools::daw_proxy::DawProxyTool::new(
+            mcp_proxies,
+        )));
         let tools = ToolRegistry::from_tools(tools_vec);
         // Pick the active session: prefer the persisted one, else
         // create a fresh empty session so first-boot has something
