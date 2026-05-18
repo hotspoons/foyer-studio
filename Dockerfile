@@ -222,7 +222,18 @@ RUN /workspace/scripts/dev/tw.sh build
 # Build the foyer binary in release mode. `cargo build --release`
 # bakes the web tree into the binary via include_dir!, which is the
 # canonical ship path (see Justfile run-static).
-RUN cargo build --release --manifest-path /workspace/Cargo.toml --bin foyer
+#
+# `FOYER_BUNDLED_SHIM` points at the libfoyer_shim.so produced by the
+# cmake step above (~line 177). build.rs reads this env var and stamps
+# `FOYER_BUNDLED_SHIM_PRESENT=1` into the binary; without it,
+# `ensure_ardour_ready()` aborts every `foyer serve --backend ardour`
+# launch with `this Foyer build has no embedded Ardour shim` — even
+# though the runtime stage copies the shim into /opt/foyer/surfaces/
+# (the preflight is compile-time gated on the const, not a filesystem
+# probe). Skipping this line is what made `latest` reject the bundled
+# Ardour path the README advertises.
+RUN FOYER_BUNDLED_SHIM=/workspace/shims/ardour/cmake-build/libfoyer_shim.so \
+    cargo build --release --manifest-path /workspace/Cargo.toml --bin foyer
 
 # ─────────────────────────────────────────────────────────────────
 # Stage 2 — runtime
