@@ -1967,6 +1967,8 @@ async fn dispatch_command(
             instrument_uri,
             plugins,
             copy_from_track_id,
+            gm_program,
+            gm_channel,
         } => {
             match state
                 .backend()
@@ -1979,6 +1981,8 @@ async fn dispatch_command(
                     instrument_uri,
                     plugins,
                     copy_from_track_id,
+                    gm_program,
+                    gm_channel,
                 )
                 .await
             {
@@ -2266,6 +2270,61 @@ async fn dispatch_command(
                     },
                 )
                 .await;
+            }
+        }
+        Command::AddDefaultInstrument { track_id } => {
+            let backend = state.backend().await;
+            match backend.default_instrument_uri().await {
+                Ok(Some(uri)) => {
+                    tracing::info!(
+                        "add_default_instrument: resolved '{uri}' for track {}",
+                        track_id.as_str()
+                    );
+                    if let Err(e) = backend.add_plugin(track_id, uri, None, None).await {
+                        broadcast_event(
+                            state,
+                            Event::Error {
+                                code: "add_default_instrument_failed".into(),
+                                message: e.to_string(),
+                                target_peer_id: None,
+                                localized: None,
+                            },
+                        )
+                        .await;
+                    }
+                }
+                Ok(None) => {
+                    // Zero instruments installed (or none classify
+                    // as instrument and the fuzzy match missed too).
+                    // Tell the UI explicitly so it can swap the
+                    // banner for an "install a synth plugin" hint
+                    // instead of looking like the click did nothing.
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "no_instruments_installed".into(),
+                            message: "No instrument plugins are installed. \
+                                      Install at least one synth (e.g. gmsynth, \
+                                      drumkv1, synthv1) and reload."
+                                .into(),
+                            target_peer_id: None,
+                            localized: None,
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    broadcast_event(
+                        state,
+                        Event::Error {
+                            code: "default_instrument_resolve_failed".into(),
+                            message: e.to_string(),
+                            target_peer_id: None,
+                            localized: None,
+                        },
+                    )
+                    .await;
+                }
             }
         }
 

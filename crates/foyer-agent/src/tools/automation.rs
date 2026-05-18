@@ -8,11 +8,13 @@
 use async_trait::async_trait;
 use base64::Engine;
 use foyer_schema::id::EntityId;
-use foyer_schema::{AutomationMode, AutomationPoint};
+use foyer_schema::{AutomationMode, AutomationPoint, TimeArg};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::tools::{render_visualization, Tool, ToolContext, ToolError, ToolResult};
+use crate::tools::{
+    render_visualization, tempo_map_from_snapshot, Tool, ToolContext, ToolError, ToolResult,
+};
 
 pub struct AutomationTool;
 
@@ -40,18 +42,30 @@ enum Op {
     },
     PointAdd {
         control_id: String,
-        time_samples: u64,
+        #[serde(default)]
+        time_samples: Option<u64>,
+        #[serde(default)]
+        time: Option<TimeArg>,
         value: f64,
     },
     PointUpdate {
         control_id: String,
-        original_time_samples: u64,
-        new_time_samples: u64,
+        #[serde(default)]
+        original_time_samples: Option<u64>,
+        #[serde(default)]
+        original_time: Option<TimeArg>,
+        #[serde(default)]
+        new_time_samples: Option<u64>,
+        #[serde(default)]
+        new_time: Option<TimeArg>,
         value: f64,
     },
     PointDelete {
         control_id: String,
-        time_samples: u64,
+        #[serde(default)]
+        time_samples: Option<u64>,
+        #[serde(default)]
+        time: Option<TimeArg>,
     },
     /// Return the raw numeric points for one lane — what the LLM
     /// needs to reason about a curve before editing it.
@@ -70,7 +84,10 @@ enum Op {
 
 #[derive(Debug, Deserialize)]
 struct DrawPoint {
-    time_samples: u64,
+    #[serde(default)]
+    time_samples: Option<u64>,
+    #[serde(default)]
+    time: Option<TimeArg>,
     value: f64,
 }
 
@@ -81,18 +98,38 @@ impl Tool for AutomationTool {
     }
 
     fn description(&self) -> &'static str {
-        "Inspect, edit, and display automation lanes. Subcommands: \
+        "Inspect, edit, and display automation lanes. Every time field \
+         accepts EITHER `_samples` (legacy) OR a polymorphic `time` \
+         (samples|seconds|bbt). Subcommands: \
          list(track_id), set_mode(control_id, mode), \
-         draw(control_id, points=[{time_samples,value}], mode?) — \
-         atomically replace the lane with the given 2D curve, \
-         point_add(control_id, time_samples, value), \
-         point_update(control_id, original_time_samples, new_time_samples, value), \
-         point_delete(control_id, time_samples), \
+         draw(control_id, points=[{time|time_samples,value}], mode?), \
+         point_add(control_id, time|time_samples, value), \
+         point_update(control_id, original_time|original_time_samples, \
+                       new_time|new_time_samples, value), \
+         point_delete(control_id, time|time_samples), \
          show_value(track_id, control_id) — numeric point list, \
          show_viz(track_id, control_id) — PNG of the lane."
     }
 
     fn schema(&self) -> Value {
+        let time_schema = json!({
+            "type": "object",
+            "description": "Polymorphic time — exactly one of samples / seconds / bbt.",
+            "properties": {
+                "samples": { "type": "integer", "minimum": 0 },
+                "seconds": { "type": "number", "minimum": 0 },
+                "bbt": {
+                    "type": "object",
+                    "required": ["bar", "beat", "tick"],
+                    "properties": {
+                        "bar": { "type": "integer", "minimum": 1 },
+                        "beat": { "type": "integer", "minimum": 1 },
+                        "tick": { "type": "integer", "minimum": 0 }
+                    }
+                }
+            },
+            "additionalProperties": false
+        });
         json!({
             "type": "object",
             "required": ["subcommand"],
@@ -110,16 +147,20 @@ impl Tool for AutomationTool {
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "required": ["time_samples", "value"],
+                        "required": ["value"],
                         "properties": {
                             "time_samples": { "type": "integer", "minimum": 0 },
+                            "time": time_schema,
                             "value": { "type": "number" }
                         }
                     }
                 },
                 "time_samples": { "type": "integer", "minimum": 0 },
+                "time": time_schema,
                 "original_time_samples": { "type": "integer", "minimum": 0 },
+                "original_time": time_schema,
                 "new_time_samples": { "type": "integer", "minimum": 0 },
+                "new_time": time_schema,
                 "value": { "type": "number" }
             }
         })
@@ -139,6 +180,32 @@ impl Tool for AutomationTool {
             Op::List { .. } | Op::ShowValue { .. } | Op::ShowViz { .. } => ctx.backend()?,
             _ => ctx.backend_with_loaded_session().await?,
         };
+        let need_map = op_needs_tempo_map(&op);
+        let tempo_map = if need_map {
+            let snap = backend
+                .snapshot()
+                .await
+                .map_err(|e| ToolError::Execution(e.to_string()))?;
+            Some(tempo_map_from_snapshot(&snap))
+        } else {
+            None
+        };
+        let resolve =
+            |time: Option<TimeArg>, legacy: Option<u64>, field: &str| -> Result<u64, ToolError> {
+                match (time, legacy) {
+                    (Some(t), _) => {
+                        let map = tempo_map.ok_or_else(|| {
+                            ToolError::Execution(format!("{field}: tempo map missing (BUG)"))
+                        })?;
+                        t.to_samples(&map)
+                            .map_err(|e| ToolError::InvalidArgs(format!("{field}: {e}")))
+                    }
+                    (None, Some(s)) => Ok(s),
+                    (None, None) => Err(ToolError::InvalidArgs(format!(
+                    "{field}: provide `{field}` (samples/seconds/bbt) or legacy `{field}_samples`"
+                ))),
+                }
+            };
         match op {
             Op::List { track_id } => {
                 let snap = backend
@@ -181,11 +248,14 @@ impl Tool for AutomationTool {
             } => {
                 let ps: Vec<AutomationPoint> = points
                     .into_iter()
-                    .map(|p| AutomationPoint {
-                        time_samples: p.time_samples,
-                        value: p.value,
+                    .map(|p| {
+                        let ts = resolve(p.time, p.time_samples, "time")?;
+                        Ok(AutomationPoint {
+                            time_samples: ts,
+                            value: p.value,
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, ToolError>>()?;
                 let count = ps.len();
                 backend
                     .replace_automation_lane(EntityId::new(control_id.clone()), ps)
@@ -205,52 +275,56 @@ impl Tool for AutomationTool {
             Op::PointAdd {
                 control_id,
                 time_samples,
+                time,
                 value,
             } => {
+                let ts = resolve(time, time_samples, "time")?;
                 backend
                     .add_automation_point(
                         EntityId::new(control_id.clone()),
                         AutomationPoint {
-                            time_samples,
+                            time_samples: ts,
                             value,
                         },
                     )
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
-                Ok(ToolResult::ok(format!(
-                    "{control_id}[{time_samples}] = {value}"
-                )))
+                Ok(ToolResult::ok(format!("{control_id}[{ts}] = {value}")))
             }
             Op::PointUpdate {
                 control_id,
                 original_time_samples,
+                original_time,
                 new_time_samples,
+                new_time,
                 value,
             } => {
+                let original = resolve(original_time, original_time_samples, "original_time")?;
+                let new = resolve(new_time, new_time_samples, "new_time")?;
                 backend
                     .update_automation_point(
                         EntityId::new(control_id.clone()),
-                        original_time_samples,
-                        new_time_samples,
+                        original,
+                        new,
                         value,
                     )
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 Ok(ToolResult::ok(format!(
-                    "{control_id}: {original_time_samples} → {new_time_samples} = {value}"
+                    "{control_id}: {original} → {new} = {value}"
                 )))
             }
             Op::PointDelete {
                 control_id,
                 time_samples,
+                time,
             } => {
+                let ts = resolve(time, time_samples, "time")?;
                 backend
-                    .delete_automation_point(EntityId::new(control_id.clone()), time_samples)
+                    .delete_automation_point(EntityId::new(control_id.clone()), ts)
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
-                Ok(ToolResult::ok(format!(
-                    "deleted {control_id}[{time_samples}]"
-                )))
+                Ok(ToolResult::ok(format!("deleted {control_id}[{ts}]")))
             }
             Op::ShowValue {
                 track_id,
@@ -317,6 +391,19 @@ impl Tool for AutomationTool {
                 })
             }
         }
+    }
+}
+
+fn op_needs_tempo_map(op: &Op) -> bool {
+    match op {
+        Op::PointAdd { time, .. } | Op::PointDelete { time, .. } => time.is_some(),
+        Op::PointUpdate {
+            original_time,
+            new_time,
+            ..
+        } => original_time.is_some() || new_time.is_some(),
+        Op::Draw { points, .. } => points.iter().any(|p| p.time.is_some()),
+        _ => false,
     }
 }
 

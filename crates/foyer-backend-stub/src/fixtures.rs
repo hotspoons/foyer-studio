@@ -673,6 +673,9 @@ pub(crate) fn initial_session() -> Session {
         meta: serde_json::json!({ "project": "demo" }),
         scripting: Some(stub_scripting_capabilities()),
         spectrum: Some(foyer_schema::SpectrumCapabilities::stub()),
+        mixer_scenes: vec![],
+        active_scene_id: None,
+        sections: vec![],
     }
 }
 

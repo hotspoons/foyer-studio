@@ -10,10 +10,13 @@ use async_trait::async_trait;
 use base64::Engine;
 use foyer_schema::id::EntityId;
 use foyer_schema::midi::{MidiNote, MidiNotePatch};
+use foyer_schema::TimeArg;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::tools::{render_visualization, Tool, ToolContext, ToolError, ToolResult};
+use crate::tools::{
+    render_visualization, tempo_map_from_snapshot, Tool, ToolContext, ToolError, ToolResult,
+};
 
 pub struct MidiTool;
 
@@ -22,6 +25,15 @@ pub struct MidiTool;
 enum Op {
     PatchesOnTrack {
         track_id: String,
+    },
+    /// Enumerate the GM program map (0..=127 → human-readable name).
+    /// Optionally filter by case-insensitive substring against the
+    /// program name. Use this when the user says "make this sound
+    /// like a honky tonk piano" — match by name rather than program
+    /// number.
+    ListGmPrograms {
+        #[serde(default)]
+        query: Option<String>,
     },
     ChannelConfig {
         track_id: String,
@@ -32,8 +44,14 @@ enum Op {
         region_id: String,
         pitch: u8,
         velocity: u8,
-        start_ticks: u64,
-        length_ticks: u64,
+        #[serde(default)]
+        start_ticks: Option<u64>,
+        #[serde(default)]
+        start: Option<TimeArg>,
+        #[serde(default)]
+        length_ticks: Option<u64>,
+        #[serde(default)]
+        length: Option<TimeArg>,
         #[serde(default)]
         channel: Option<u8>,
         #[serde(default)]
@@ -49,7 +67,11 @@ enum Op {
         #[serde(default)]
         start_ticks: Option<u64>,
         #[serde(default)]
+        start: Option<TimeArg>,
+        #[serde(default)]
         length_ticks: Option<u64>,
+        #[serde(default)]
+        length: Option<TimeArg>,
         #[serde(default)]
         channel: Option<u8>,
     },
@@ -81,8 +103,14 @@ struct NoteSpec {
     note_id: Option<String>,
     pitch: u8,
     velocity: u8,
-    start_ticks: u64,
-    length_ticks: u64,
+    #[serde(default)]
+    start_ticks: Option<u64>,
+    #[serde(default)]
+    start: Option<TimeArg>,
+    #[serde(default)]
+    length_ticks: Option<u64>,
+    #[serde(default)]
+    length: Option<TimeArg>,
     #[serde(default)]
     channel: Option<u8>,
 }
@@ -94,10 +122,19 @@ impl Tool for MidiTool {
     }
 
     fn description(&self) -> &'static str {
-        "Inspect, edit, and display MIDI notes on a region. Subcommands: \
-         patches_on_track(track_id), channel_config(track_id), \
-         note_add(region_id, pitch, velocity, start_ticks, length_ticks, channel?, note_id?), \
-         note_update(region_id, note_id, ...patch), \
+        "Inspect, edit, and display MIDI notes on a region. Tick fields \
+         accept EITHER `_ticks` (legacy integer, region-relative) OR \
+         a polymorphic `start` / `length` (samples|seconds|bbt) which \
+         the server converts to ticks via the live tempo map. \
+         Subcommands: \
+         patches_on_track(track_id) — returns per-channel patch with \
+            `gm_program_name` decoded + `is_gm_drum_kit` hint for ch9, \
+         channel_config(track_id), \
+         list_gm_programs(query?) — enumerate the 128 GM program names \
+            so you can match by name (e.g. 'honky tonk') instead of \
+            memorizing GM program numbers, \
+         note_add(region_id, pitch, velocity, start|start_ticks, length|length_ticks, channel?, note_id?), \
+         note_update(region_id, note_id, ...patch — same time-field rules), \
          note_delete(region_id, note_id), \
          region_replace_notes(region_id, notes=[...]) — atomic, single undo, \
          show_value(region_id) — note list, \
@@ -112,11 +149,12 @@ impl Tool for MidiTool {
             "required": ["subcommand"],
             "properties": {
                 "subcommand": { "type": "string", "enum": [
-                    "patches_on_track", "channel_config",
+                    "patches_on_track", "channel_config", "list_gm_programs",
                     "note_add", "note_update", "note_delete",
                     "region_replace_notes",
                     "show_value", "show_viz"
                 ]},
+                "query": { "type": "string" },
                 "track_id": { "type": "string" },
                 "region_id": { "type": "string" },
                 "note_id": { "type": "string" },
@@ -156,10 +194,85 @@ impl Tool for MidiTool {
         let backend = match &op {
             Op::PatchesOnTrack { .. }
             | Op::ChannelConfig { .. }
+            | Op::ListGmPrograms { .. }
             | Op::ShowValue { .. }
             | Op::ShowViz { .. } => ctx.backend()?,
             _ => ctx.backend_with_loaded_session().await?,
         };
+        // `list_gm_programs` is a pure lookup against a const table —
+        // short-circuit before bothering with the snapshot.
+        if let Op::ListGmPrograms { query } = &op {
+            let q = query.as_deref().unwrap_or("").to_lowercase();
+            let rows: Vec<Value> = (0u8..=127)
+                .map(|p| (p, crate::tools::tracks::gm_program_name(p)))
+                .filter_map(|(p, n)| n.map(|name| (p, name)))
+                .filter(|(_, name)| q.is_empty() || name.to_lowercase().contains(&q))
+                .map(|(p, name)| {
+                    json!({
+                        "program": p,
+                        "name": name,
+                    })
+                })
+                .collect();
+            return Ok(ToolResult::ok(format!(
+                "{} GM programs{}",
+                rows.len(),
+                if q.is_empty() { "" } else { " (filtered)" }
+            ))
+            .with_data(json!({ "programs": rows })));
+        }
+        let need_map = midi_op_needs_tempo_map(&op);
+        let tempo_map = if need_map {
+            let snap = backend
+                .snapshot()
+                .await
+                .map_err(|e| ToolError::Execution(e.to_string()))?;
+            Some(tempo_map_from_snapshot(&snap))
+        } else {
+            None
+        };
+        // Region-relative `TimeArg` resolves to ticks (not samples)
+        // because the MIDI model is tick-native — converting through
+        // samples would lose precision. The conversion uses meter +
+        // ppqn only; tempo doesn't matter for tick offsets.
+        let to_ticks = |t: TimeArg| -> Result<u64, ToolError> {
+            let map =
+                tempo_map.ok_or_else(|| ToolError::Execution("tempo map missing (BUG)".into()))?;
+            // Reuse to_samples then convert; cleaner than re-deriving.
+            // Tempo cancels out: ticks = (samples / sample_rate) *
+            // (bpm/60) * ppqn. The intermediate samples value is
+            // fine for the precision we care about (1 tick at 1920
+            // ppqn @ 120 BPM is ~13 samples @ 48 kHz).
+            let s = t
+                .to_samples(&map)
+                .map_err(|e| ToolError::InvalidArgs(format!("note time: {e}")))?;
+            if map.sample_rate == 0 || map.bpm <= 0.0 {
+                return Ok(0);
+            }
+            let seconds = s as f64 / map.sample_rate as f64;
+            let quarters = seconds / map.seconds_per_quarter();
+            Ok((quarters * map.ticks_per_quarter as f64).round().max(0.0) as u64)
+        };
+        let resolve_ticks =
+            |time: Option<TimeArg>, legacy: Option<u64>, field: &str| -> Result<u64, ToolError> {
+                match (time, legacy) {
+                    (Some(t), _) => to_ticks(t),
+                    (None, Some(s)) => Ok(s),
+                    (None, None) => Err(ToolError::InvalidArgs(format!(
+                        "{field}: provide `{field}` or legacy `{field}_ticks`"
+                    ))),
+                }
+            };
+        // For NoteUpdate / NoteSpec where the field is optional, we
+        // return Option<u64>: None means "leave unchanged".
+        let resolve_ticks_opt =
+            |time: Option<TimeArg>, legacy: Option<u64>| -> Result<Option<u64>, ToolError> {
+                match (time, legacy) {
+                    (Some(t), _) => Ok(Some(to_ticks(t)?)),
+                    (None, Some(s)) => Ok(Some(s)),
+                    (None, None) => Ok(None),
+                }
+            };
         match op {
             Op::PatchesOnTrack { track_id } => {
                 let snap = backend
@@ -174,7 +287,20 @@ impl Tool for MidiTool {
                 let data: Vec<Value> = t
                     .midi_patches
                     .iter()
-                    .map(|p| json!({ "channel": p.channel, "bank": p.bank, "program": p.program }))
+                    .map(|p| {
+                        let gm_name = crate::tools::tracks::gm_program_name(p.program);
+                        // Channel 9 is the GM drum kit by convention —
+                        // surface that as a hint so the agent doesn't
+                        // misread a snare hit as middle-C piano.
+                        let is_gm_drum_kit = p.channel == 9;
+                        json!({
+                            "channel": p.channel,
+                            "bank": p.bank,
+                            "program": p.program,
+                            "gm_program_name": gm_name,
+                            "is_gm_drum_kit": is_gm_drum_kit,
+                        })
+                    })
                     .collect();
                 Ok(
                     ToolResult::ok(format!("{} patches on {}", data.len(), t.name))
@@ -205,18 +331,22 @@ impl Tool for MidiTool {
                 pitch,
                 velocity,
                 start_ticks,
+                start,
                 length_ticks,
+                length,
                 channel,
                 note_id,
             } => {
+                let start_resolved = resolve_ticks(start, start_ticks, "start")?;
+                let length_resolved = resolve_ticks(length, length_ticks, "length")?;
                 let note = MidiNote {
                     id: note_id
                         .map(EntityId::new)
                         .unwrap_or_else(|| EntityId::new("")),
                     pitch,
                     velocity,
-                    start_ticks,
-                    length_ticks,
+                    start_ticks: start_resolved,
+                    length_ticks: length_resolved,
                     channel: channel.unwrap_or(0),
                 };
                 backend
@@ -224,7 +354,7 @@ impl Tool for MidiTool {
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 Ok(ToolResult::ok(format!(
-                    "added pitch {pitch} @ {start_ticks} on {region_id}"
+                    "added pitch {pitch} @ {start_resolved} on {region_id}"
                 )))
             }
             Op::NoteUpdate {
@@ -233,14 +363,16 @@ impl Tool for MidiTool {
                 pitch,
                 velocity,
                 start_ticks,
+                start,
                 length_ticks,
+                length,
                 channel,
             } => {
                 let patch = MidiNotePatch {
                     pitch,
                     velocity,
-                    start_ticks,
-                    length_ticks,
+                    start_ticks: resolve_ticks_opt(start, start_ticks)?,
+                    length_ticks: resolve_ticks_opt(length, length_ticks)?,
                     channel,
                 };
                 backend
@@ -267,18 +399,22 @@ impl Tool for MidiTool {
                 let count = notes.len();
                 let ns: Vec<MidiNote> = notes
                     .into_iter()
-                    .map(|n| MidiNote {
-                        id: n
-                            .note_id
-                            .map(EntityId::new)
-                            .unwrap_or_else(|| EntityId::new("")),
-                        pitch: n.pitch,
-                        velocity: n.velocity,
-                        start_ticks: n.start_ticks,
-                        length_ticks: n.length_ticks,
-                        channel: n.channel.unwrap_or(0),
+                    .map(|n| {
+                        let st = resolve_ticks(n.start, n.start_ticks, "start")?;
+                        let ln = resolve_ticks(n.length, n.length_ticks, "length")?;
+                        Ok(MidiNote {
+                            id: n
+                                .note_id
+                                .map(EntityId::new)
+                                .unwrap_or_else(|| EntityId::new("")),
+                            pitch: n.pitch,
+                            velocity: n.velocity,
+                            start_ticks: st,
+                            length_ticks: ln,
+                            channel: n.channel.unwrap_or(0),
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, ToolError>>()?;
                 backend
                     .replace_region_notes(EntityId::new(region_id.clone()), ns)
                     .await
@@ -326,7 +462,19 @@ impl Tool for MidiTool {
                     image_png_b64: Some(b64),
                 })
             }
+            Op::ListGmPrograms { .. } => unreachable!("handled in early-return above"),
         }
+    }
+}
+
+fn midi_op_needs_tempo_map(op: &Op) -> bool {
+    match op {
+        Op::NoteAdd { start, length, .. } => start.is_some() || length.is_some(),
+        Op::NoteUpdate { start, length, .. } => start.is_some() || length.is_some(),
+        Op::RegionReplaceNotes { notes, .. } => notes
+            .iter()
+            .any(|n| n.start.is_some() || n.length.is_some()),
+        _ => false,
     }
 }
 

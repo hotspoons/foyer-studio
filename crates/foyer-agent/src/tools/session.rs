@@ -38,6 +38,14 @@ enum Op {
     /// jail-relative. The backend re-points the active session at the
     /// new path (matches the WS save-as behavior).
     SaveAs { path: String },
+    /// Quick named snapshot — Ardour's "Quick Snapshot". Writes a copy
+    /// of the current `.ardour` file alongside the session so users
+    /// can A/B without leaving the project. Returns the new file's
+    /// jail-relative path. `name` defaults to a timestamp.
+    Snapshot {
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// Open a project by jail-relative path. Spawns a fresh backend
     /// instance (or focuses the existing one if it's already in the
     /// sidecar registry), then makes it the active session.
@@ -107,6 +115,8 @@ impl Tool for SessionTool {
         "Session lifecycle + inspection. Subcommands: \
          summary (cheap counters) · full (whole snapshot) · \
          save / save_as (write the current project) · \
+         snapshot(name?) — Ardour-style quick snapshot, writes a named \
+         copy of the .ardour file alongside the session for A/B work · \
          open / new / close / focus (manage which project is live) · \
          list_open / recents / forget_recent · \
          browse (filesystem inside the jail) · \
@@ -122,13 +132,14 @@ impl Tool for SessionTool {
                     "type": "string",
                     "enum": [
                         "summary", "full",
-                        "save", "save_as",
+                        "save", "save_as", "snapshot",
                         "open", "new", "close", "focus",
                         "list_open", "recents", "forget_recent",
                         "browse", "backends"
                     ]
                 },
                 "path":        { "type": "string" },
+                "name":        { "type": "string" },
                 "session_id":  { "type": "string" },
                 "backend_id":  { "type": "string" },
                 "sample_rate": { "type": "integer", "minimum": 8000, "maximum": 384000 },
@@ -198,6 +209,20 @@ impl Tool for SessionTool {
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 Ok(ToolResult::ok(format!("saved as {path}")).with_data(json!({ "path": path })))
+            }
+            Op::Snapshot { name } => {
+                let backend = ctx.backend_with_loaded_session().await?;
+                let path = backend
+                    .snapshot_session(name.clone())
+                    .await
+                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                Ok(ToolResult::ok(format!(
+                    "snapshot{} → {path}",
+                    name.as_deref()
+                        .map(|n| format!(" '{n}'"))
+                        .unwrap_or_default()
+                ))
+                .with_data(json!({ "path": path, "name": name })))
             }
             Op::Open { path, backend_id } => {
                 let director = require_director(ctx)?;

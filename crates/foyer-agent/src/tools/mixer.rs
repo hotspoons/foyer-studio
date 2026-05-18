@@ -7,7 +7,7 @@
 //! LLM doesn't have to memorize Foyer's `track.<n>.gain` naming.
 
 use async_trait::async_trait;
-use foyer_schema::ControlValue;
+use foyer_schema::{ControlValue, EntityId};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -45,6 +45,39 @@ enum Op {
     Apply {
         changes: Vec<MixerChange>,
     },
+    /// Snapshot the entire mix state (every track's fader, pan, mute,
+    /// solo, send levels) under `name` for later recall. Common live
+    /// + production use: "save the chorus mix" / "snapshot before
+    /// touching anything." Returns the canonical scene record.
+    StoreScene {
+        name: String,
+        #[serde(default)]
+        color: Option<String>,
+    },
+    /// Recall a previously-stored scene. Resolves by `id` first; if
+    /// `id` is unset and `name` matches exactly one scene, recalls
+    /// that one (ambiguous name = error). Sets `active_scene_id` on
+    /// the session.
+    RecallScene {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    ListScenes,
+    DeleteScene {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    RenameScene {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        old_name: Option<String>,
+        new_name: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,7 +109,13 @@ impl Tool for MixerTool {
          apply(changes:[{track_id, gain_db?, muted?, soloed?, pan?}…]) \
          — BATCHED mix change in a single round-trip; prefer this when \
          tweaking multiple tracks at once (e.g. balancing a mix). Capped \
-         at 256 changes per call."
+         at 256 changes per call. \
+         store_scene(name, color?) — snapshot every track's mix state \
+         (fader/pan/mute/solo/sends) under `name`. \
+         recall_scene(id?|name?) — flip the entire mix back to a stored \
+         scene; faster than per-track restoration. \
+         list_scenes — enumerate stored scenes. \
+         delete_scene(id?|name?), rename_scene(id?|old_name?, new_name)."
     }
 
     fn schema(&self) -> Value {
@@ -87,13 +126,20 @@ impl Tool for MixerTool {
                 "subcommand": {
                     "type": "string",
                     "enum": ["set_gain_db", "set_mute", "set_solo", "set_pan",
-                            "get", "apply"]
+                            "get", "apply",
+                            "store_scene", "recall_scene", "list_scenes",
+                            "delete_scene", "rename_scene"]
                 },
                 "track_id": { "type": "string" },
                 "db": { "type": "number" },
                 "muted": { "type": "boolean" },
                 "soloed": { "type": "boolean" },
                 "pan": { "type": "number", "minimum": -1, "maximum": 1 },
+                "name": { "type": "string" },
+                "old_name": { "type": "string" },
+                "new_name": { "type": "string" },
+                "id": { "type": "string" },
+                "color": { "type": "string" },
                 "changes": {
                     "type": "array",
                     "description": "apply: list of per-track mixer changes. Each entry needs `track_id` and at least one of gain_db/muted/soloed/pan.",
@@ -119,13 +165,91 @@ impl Tool for MixerTool {
         // `get` is read-only; every other mixer subcommand writes a
         // control value and needs a real project loaded.
         let backend = match &op {
-            Op::Get { .. } => ctx.backend()?,
+            Op::Get { .. } | Op::ListScenes => ctx.backend()?,
             _ => ctx.backend_with_loaded_session().await?,
         };
         let snapshot = backend
             .snapshot()
             .await
             .map_err(|e| ToolError::Execution(e.to_string()))?;
+        // Scene ops route through their own subhandler so they can
+        // resolve by id-or-name.
+        if let Op::StoreScene { name, color } = &op {
+            let scene = backend
+                .store_mixer_scene(name.clone(), color.clone())
+                .await
+                .map_err(|e| ToolError::Execution(e.to_string()))?;
+            return Ok(ToolResult::ok(format!(
+                "stored scene '{}' ({} tracks)",
+                scene.name,
+                scene.snapshots.len()
+            ))
+            .with_data(
+                serde_json::to_value(&scene).map_err(|e| ToolError::Execution(e.to_string()))?,
+            ));
+        }
+        if let Op::RecallScene { id, name } = &op {
+            let scene_id = resolve_scene_id(&snapshot, id.as_deref(), name.as_deref())?;
+            let scene = backend
+                .recall_mixer_scene(scene_id)
+                .await
+                .map_err(|e| ToolError::Execution(e.to_string()))?;
+            return Ok(ToolResult::ok(format!(
+                "recalled scene '{}' ({} tracks restored)",
+                scene.name,
+                scene.snapshots.len()
+            ))
+            .with_data(
+                serde_json::to_value(&scene).map_err(|e| ToolError::Execution(e.to_string()))?,
+            ));
+        }
+        if let Op::ListScenes = &op {
+            let data: Vec<Value> = snapshot
+                .mixer_scenes
+                .iter()
+                .map(|s| {
+                    json!({
+                        "id": s.id.as_str(),
+                        "name": s.name,
+                        "color": s.color,
+                        "created_at_unix": s.created_at_unix,
+                        "track_count": s.snapshots.len(),
+                        "is_active": snapshot.active_scene_id.as_ref() == Some(&s.id),
+                    })
+                })
+                .collect();
+            return Ok(ToolResult::ok(format!("{} scene(s) stored", data.len()))
+                .with_data(json!({ "scenes": data })));
+        }
+        if let Op::DeleteScene { id, name } = &op {
+            let scene_id = resolve_scene_id(&snapshot, id.as_deref(), name.as_deref())?;
+            backend
+                .delete_mixer_scene(scene_id.clone())
+                .await
+                .map_err(|e| ToolError::Execution(e.to_string()))?;
+            return Ok(ToolResult::ok(format!(
+                "deleted scene {}",
+                scene_id.as_str()
+            )));
+        }
+        if let Op::RenameScene {
+            id,
+            old_name,
+            new_name,
+        } = &op
+        {
+            let scene_id = resolve_scene_id(&snapshot, id.as_deref(), old_name.as_deref())?;
+            let scene = backend
+                .rename_mixer_scene(scene_id, new_name.clone())
+                .await
+                .map_err(|e| ToolError::Execution(e.to_string()))?;
+            return Ok(
+                ToolResult::ok(format!("renamed → '{}'", scene.name)).with_data(
+                    serde_json::to_value(&scene)
+                        .map_err(|e| ToolError::Execution(e.to_string()))?,
+                ),
+            );
+        }
         // `Apply` resolves track_ids per-entry below; everything else
         // works against a single track.
         if let Op::Apply { changes } = &op {
@@ -137,7 +261,12 @@ impl Tool for MixerTool {
             | Op::SetSolo { track_id, .. }
             | Op::SetPan { track_id, .. }
             | Op::Get { track_id } => track_id,
-            Op::Apply { .. } => unreachable!("handled above"),
+            Op::Apply { .. }
+            | Op::StoreScene { .. }
+            | Op::RecallScene { .. }
+            | Op::ListScenes
+            | Op::DeleteScene { .. }
+            | Op::RenameScene { .. } => unreachable!("handled above"),
         };
         let track = snapshot
             .tracks
@@ -222,8 +351,48 @@ impl Tool for MixerTool {
                     }
                 })))
             }
-            Op::Apply { .. } => unreachable!("handled before the match above"),
+            Op::Apply { .. }
+            | Op::StoreScene { .. }
+            | Op::RecallScene { .. }
+            | Op::ListScenes
+            | Op::DeleteScene { .. }
+            | Op::RenameScene { .. } => unreachable!("handled before the match above"),
         }
+    }
+}
+
+/// Resolve a scene reference to its `EntityId`. Accepts `id` or
+/// unique `name`; returns `InvalidArgs` on miss / ambiguity.
+fn resolve_scene_id(
+    snap: &foyer_schema::Session,
+    id: Option<&str>,
+    name: Option<&str>,
+) -> Result<EntityId, ToolError> {
+    if let Some(id) = id {
+        if !snap.mixer_scenes.iter().any(|s| s.id.as_str() == id) {
+            return Err(ToolError::InvalidArgs(format!("unknown scene id '{id}'")));
+        }
+        return Ok(EntityId::new(id.to_string()));
+    }
+    if let Some(name) = name {
+        let matches: Vec<_> = snap
+            .mixer_scenes
+            .iter()
+            .filter(|s| s.name.eq_ignore_ascii_case(name))
+            .collect();
+        match matches.len() {
+            0 => Err(ToolError::InvalidArgs(format!(
+                "no scene named '{name}' — call mixer.list_scenes"
+            ))),
+            1 => Ok(matches[0].id.clone()),
+            n => Err(ToolError::InvalidArgs(format!(
+                "scene name '{name}' is ambiguous ({n} matches) — pass `id` instead"
+            ))),
+        }
+    } else {
+        Err(ToolError::InvalidArgs(
+            "scene reference: provide `id` or `name`".into(),
+        ))
     }
 }
 

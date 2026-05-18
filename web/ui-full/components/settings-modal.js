@@ -23,6 +23,11 @@ import {
 import {
   t, setLocale, currentLocale, localeMeta, availableLocales, onLocaleChange,
 } from "/core/i18n.js";
+import {
+  listUiVariants,
+  setUserVariantPreference,
+  getUserVariantPreference,
+} from "foyer-core/registry/ui-variants.js";
 
 export class SettingsModal extends LitElement {
   static properties = {
@@ -608,6 +613,7 @@ export class SettingsModal extends LitElement {
         </header>
         <div class="body">
           ${this._renderLanguageSection()}
+          ${this._renderUiVariantSection()}
           ${this._renderEditorConventionsSection()}
           ${this._renderAudioSection()}
           ${this._renderWindowsSection()}
@@ -656,6 +662,56 @@ export class SettingsModal extends LitElement {
         </div>
         <div style="font-size:10px;color:var(--color-text-muted);padding:4px 0 0 2px;line-height:1.5">
           ${t("Missing translations fall back to English.")}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * UI variant chooser. Lets the user swap between the shipping
+   * desktop UI and any sibling variant (`ui-touch`, `ui-phone`,
+   * future themes). Two reasons this lives here rather than only
+   * in the touch variant's More menu:
+   *   1. A kid on a laptop should be able to land in the touch UI
+   *      without learning `?ui=touch`.
+   *   2. A user who landed in touch by accident (auto-detection
+   *      misfire) needs a way back.
+   *
+   * Re-uses `setUserVariantPreference` from foyer-core's registry,
+   * which writes the localStorage key. We reload the page to swap;
+   * a hot-swap via `window.__foyer.mountVariant({ id })` exists but
+   * has rough edges around teardown of widget state, so we keep the
+   * preference path simple.
+   */
+  _renderUiVariantSection() {
+    const variants = listUiVariants();
+    if (!variants || variants.length <= 1) return null;
+    const current = getUserVariantPreference() || "full";
+    return html`
+      <div class="section">
+        <h3>${t("UI Variant")}</h3>
+        <div class="row">
+          <label title=${t("Pick a different shell for this device — Touch is bigger buttons and progressive disclosure, Full is the desktop tile-tree.")}>
+            ${t("Variant")}
+          </label>
+          <select
+            style="background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border);border-radius:4px;padding:2px 6px"
+            @change=${(e) => {
+              const id = e.currentTarget.value;
+              setUserVariantPreference(id);
+              if (window.__foyer?.mountVariant) {
+                window.__foyer.mountVariant({ id });
+              } else {
+                globalThis.location.reload();
+              }
+            }}>
+            ${variants.map((v) => html`
+              <option value=${v.id} ?selected=${v.id === current}>${v.label}</option>
+            `)}
+          </select>
+        </div>
+        <div style="font-size:10px;color:var(--color-text-muted);padding:4px 0 0 2px;line-height:1.5">
+          ${t("Foyer Touch is a panel + tab layout with bigger touch targets — works for tablets, kids, or anyone who wants a slimmer surface. Foyer Full is the desktop UI with tiles and floating windows.")}
         </div>
       </div>
     `;

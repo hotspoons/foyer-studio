@@ -17,6 +17,7 @@ pub mod mixer;
 pub mod plugins;
 pub mod regions;
 pub mod scripts;
+pub mod sections;
 pub mod sequencer;
 pub mod session;
 pub mod spectrum;
@@ -92,6 +93,42 @@ pub fn make_backend_ref(weak: std::sync::Weak<dyn Backend>) -> BackendRef {
     std::sync::Arc::new(std::sync::RwLock::new(Some(weak)))
 }
 
+/// Build a [`foyer_schema::TempoMap`] from a session snapshot. Pulls
+/// BPM, time signature, sample rate, and PPQN off the snapshot,
+/// falling back to sensible defaults (4/4 @ 120 BPM @ 48 kHz, PPQN
+/// 1920) when the backend hasn't populated those parameters yet
+/// (legacy shims, cold-boot transient state). Used by `ToolContext::
+/// tempo_map` and by tools that already hold a snapshot in hand.
+pub fn tempo_map_from_snapshot(snap: &foyer_schema::Session) -> foyer_schema::TempoMap {
+    let t = &snap.transport;
+    let bpm = t.tempo.value.as_f64().unwrap_or(120.0);
+    let num = t
+        .time_signature_num
+        .value
+        .as_f64()
+        .map(|v| v as u32)
+        .unwrap_or(4)
+        .max(1);
+    let den = t
+        .time_signature_den
+        .value
+        .as_f64()
+        .map(|v| v as u32)
+        .unwrap_or(4)
+        .max(1);
+    foyer_schema::TempoMap {
+        sample_rate: if snap.sample_rate == 0 {
+            foyer_schema::DEFAULT_SAMPLE_RATE
+        } else {
+            snap.sample_rate
+        },
+        bpm,
+        time_sig_num: num,
+        time_sig_den: den,
+        ticks_per_quarter: snap.ppqn.unwrap_or(1920).max(1),
+    }
+}
+
 /// Shared, per-turn budget handle. The `continue_working` tool grabs
 /// this to extend the round cap mid-turn. Use `Arc<std::sync::Mutex>`
 /// (not tokio's) so tools that don't touch async can read/write it
@@ -138,6 +175,25 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
+    /// Fetch the live tempo map (sample-rate + BPM + meter + PPQN)
+    /// off the current session snapshot. Used by every tool that
+    /// accepts a polymorphic [`foyer_schema::TimeArg`] — the resolver
+    /// needs these four values to convert {seconds, BBT} to samples.
+    ///
+    /// One snapshot round-trip per tool call. That's the same cost
+    /// every mutating tool already pays once (e.g. for
+    /// `backend_with_loaded_session`); tools that need both should
+    /// fetch the snapshot themselves and call the pure conversion
+    /// on `foyer_schema::TempoMap` directly to avoid two round trips.
+    pub async fn tempo_map(&self) -> Result<foyer_schema::TempoMap, ToolError> {
+        let backend = self.backend()?;
+        let snap = backend
+            .snapshot()
+            .await
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
+        Ok(tempo_map_from_snapshot(&snap))
+    }
+
     pub fn backend(&self) -> Result<Arc<dyn Backend>, ToolError> {
         // Read the LIVE Weak each call so a session swap mid-turn is
         // picked up by every subsequent tool call. `expect`: the lock
@@ -580,6 +636,7 @@ pub fn default_registry_with_store(
         Arc::new(visualize::VisualizeTool),
         Arc::new(groups::GroupsTool),
         Arc::new(io::IoTool),
+        Arc::new(sections::SectionsTool),
         Arc::new(continue_working::ContinueWorkingTool),
     ];
     ToolRegistry::from_tools(tools)

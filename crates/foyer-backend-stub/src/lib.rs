@@ -769,6 +769,20 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    async fn normalize_region(&self, id: EntityId, target_dbfs: f64) -> Result<f64, BackendError> {
+        // Stub has no real audio buffer to scan; assume the source
+        // peak is at -3 dBFS so the agent gets a sane gain back
+        // (real backends will actually scan). gain = 10^((target-peak)/20).
+        let assumed_peak_dbfs = -3.0;
+        let gain = 10f64.powf((target_dbfs - assumed_peak_dbfs) / 20.0);
+        let patch = foyer_schema::timeline::RegionPatch {
+            gain_linear: Some(gain),
+            ..Default::default()
+        };
+        self.update_region(id, patch).await?;
+        Ok(gain)
+    }
+
     async fn combine_regions(&self, _region_ids: Vec<EntityId>) -> Result<(), BackendError> {
         Ok(())
     }
@@ -1153,6 +1167,125 @@ impl Backend for StubBackend {
                 path: Some(p.to_string()),
             });
         }
+        Ok(())
+    }
+
+    async fn snapshot_session(&self, name: Option<String>) -> Result<String, BackendError> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let basename = name.unwrap_or_else(|| format!("snapshot-{stamp}"));
+        Ok(format!("snapshots/{basename}.ardour"))
+    }
+
+    async fn store_mixer_scene(
+        &self,
+        name: String,
+        color: Option<String>,
+    ) -> Result<foyer_schema::MixerScene, BackendError> {
+        let (scene, session) = {
+            let mut st = self.state.lock().await;
+            let scene = st.store_mixer_scene(name, color);
+            (scene, st.session_clone())
+        };
+        let _ = self.tx.send(Event::SessionSnapshot {
+            session: Box::new(session),
+        });
+        Ok(scene)
+    }
+
+    async fn recall_mixer_scene(
+        &self,
+        id: EntityId,
+    ) -> Result<foyer_schema::MixerScene, BackendError> {
+        let (scene, updates, session) = {
+            let mut st = self.state.lock().await;
+            let (scene, updates) = st.recall_mixer_scene(&id)?;
+            let session = st.session_clone();
+            (scene, updates, session)
+        };
+        for u in updates {
+            let _ = self.tx.send(Event::ControlUpdate { update: u });
+        }
+        let _ = self.tx.send(Event::SessionSnapshot {
+            session: Box::new(session),
+        });
+        Ok(scene)
+    }
+
+    async fn delete_mixer_scene(&self, id: EntityId) -> Result<(), BackendError> {
+        let session = {
+            let mut st = self.state.lock().await;
+            st.delete_mixer_scene(&id)?;
+            st.session_clone()
+        };
+        let _ = self.tx.send(Event::SessionSnapshot {
+            session: Box::new(session),
+        });
+        Ok(())
+    }
+
+    async fn rename_mixer_scene(
+        &self,
+        id: EntityId,
+        name: String,
+    ) -> Result<foyer_schema::MixerScene, BackendError> {
+        let (scene, session) = {
+            let mut st = self.state.lock().await;
+            let scene = st.rename_mixer_scene(&id, name)?;
+            (scene, st.session_clone())
+        };
+        let _ = self.tx.send(Event::SessionSnapshot {
+            session: Box::new(session),
+        });
+        Ok(scene)
+    }
+
+    async fn create_section(
+        &self,
+        name: String,
+        start_samples: i64,
+        end_samples: Option<i64>,
+        color: Option<String>,
+        flags: foyer_schema::SectionFlags,
+    ) -> Result<foyer_schema::Section, BackendError> {
+        let (section, session) = {
+            let mut st = self.state.lock().await;
+            let section = st.create_section(name, start_samples, end_samples, color, flags);
+            (section, st.session_clone())
+        };
+        let _ = self.tx.send(Event::SessionSnapshot {
+            session: Box::new(session),
+        });
+        Ok(section)
+    }
+
+    async fn update_section(
+        &self,
+        id: EntityId,
+        patch: foyer_schema::SectionPatch,
+    ) -> Result<foyer_schema::Section, BackendError> {
+        let (section, session) = {
+            let mut st = self.state.lock().await;
+            let section = st.update_section(&id, patch)?;
+            (section, st.session_clone())
+        };
+        let _ = self.tx.send(Event::SessionSnapshot {
+            session: Box::new(session),
+        });
+        Ok(section)
+    }
+
+    async fn delete_section(&self, id: EntityId) -> Result<(), BackendError> {
+        let session = {
+            let mut st = self.state.lock().await;
+            st.delete_section(&id)?;
+            st.session_clone()
+        };
+        let _ = self.tx.send(Event::SessionSnapshot {
+            session: Box::new(session),
+        });
         Ok(())
     }
 

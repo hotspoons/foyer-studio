@@ -259,6 +259,43 @@ pub(crate) fn ensure_mcp_http_on_port(session_file: &Path, port: u16) -> Result<
     }
 }
 
+/// Parse the configured MCPHttp port out of a session XML body.
+/// Returns `None` when MCPHttp isn't listed, is inactive, or the
+/// port= attribute is missing / malformed.
+///
+/// The reported value is the *configured* port (what the session
+/// tells Ardour to bind), not the actually-bound port. The bound
+/// port is normally the same, but a port collision at the OS layer
+/// would diverge them; callers that need certainty should probe the
+/// endpoint after this returns.
+pub(crate) fn parse_mcp_http_port(input: &str) -> Option<u16> {
+    // Find the MCPHttp protocol entry. The element is a void XML
+    // element so the whole record fits between the opening `<` and
+    // the next `/>`. We scan that range for `active="1"` and a
+    // `port="N"` attribute.
+    let needle = r#"<Protocol name="MCPHttp""#;
+    let start = input.find(needle)?;
+    let rel_end = input[start..].find("/>")?;
+    let elem = &input[start..start + rel_end + 2];
+    if !elem.contains(r#"active="1""#) {
+        return None;
+    }
+    let port_anchor = elem.find(r#"port=""#)?;
+    let after = &elem[port_anchor + r#"port=""#.len()..];
+    let close = after.find('"')?;
+    after[..close].parse::<u16>().ok()
+}
+
+/// Disk-side wrapper around [`parse_mcp_http_port`] — read the
+/// session's `.ardour` file and look for an MCPHttp port pin.
+/// Public to the CLI crate so the reuse-existing-shim path can call
+/// it as a fallback when the shim's advert JSON didn't carry the
+/// port (older shim builds, 9.2).
+pub(crate) fn read_mcp_http_port(session_file: &Path) -> Option<u16> {
+    let text = std::fs::read_to_string(session_file).ok()?;
+    parse_mcp_http_port(&text)
+}
+
 pub(crate) fn apply_foyer_shim_edit(input: &str) -> FoyerShimEdit {
     if input.contains(r#"name="Foyer Studio Shim" active="1""#) {
         return FoyerShimEdit::AlreadyActive;

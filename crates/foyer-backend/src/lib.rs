@@ -264,6 +264,73 @@ pub trait Backend: Send + Sync + 'static {
             Vec::new(),
         ))
     }
+    /// Resolve the "best available" instrument plugin URI for an
+    /// add-default-instrument flow (UI banner, agent's MIDI-track-setup
+    /// skill, etc.). The resolution order is:
+    ///
+    ///   1. **Preferred names** — `gmsynth` first, then `Reasonable
+    ///      Synth`. Both are stock with Ardour but the Debian sid
+    ///      build doesn't always ship gmsynth, so we widen the net
+    ///      rather than hard-failing on that single URI.
+    ///   2. **Any plugin marked `PluginRole::Instrument`** — covers
+    ///      whatever the user has installed (synthv1, dexed,
+    ///      drumkv1, fluidsynth, etc.).
+    ///   3. **Any plugin whose name hints "synth" / "instrument"**
+    ///      — last-ditch fuzzy match for hosts that don't classify
+    ///      role correctly (some LADSPA / LV2 plugins ship without
+    ///      a category).
+    ///   4. **`None`** — no instruments installed; caller surfaces
+    ///      "you need to install at least one synth plugin" to the
+    ///      user.
+    ///
+    /// Default impl walks `list_plugins()`; concrete backends with
+    /// faster paths (e.g. a host-side `Session::pick_default_instrument`
+    /// natively) can override.
+    async fn default_instrument_uri(&self) -> Result<Option<String>, BackendError> {
+        let entries = self.list_plugins().await?;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        // Preferred candidates by display name, in priority order.
+        // Match case-insensitive so the Ardour shim's "GMsynth" /
+        // "gmsynth" / "GM Synth" naming variants all resolve.
+        let preferred: &[&str] = &[
+            "gmsynth",
+            "general midi synth",
+            "gm synth",
+            "reasonable synth",
+        ];
+        for pref in preferred {
+            if let Some(e) = entries
+                .iter()
+                .find(|e| e.name.to_lowercase().contains(pref))
+            {
+                if let Some(uri) = e.uri.as_deref() {
+                    return Ok(Some(uri.to_string()));
+                }
+            }
+        }
+        // Any plugin the host categorised as an instrument.
+        if let Some(e) = entries
+            .iter()
+            .find(|e| matches!(e.role, foyer_schema::PluginRole::Instrument))
+        {
+            if let Some(uri) = e.uri.as_deref() {
+                return Ok(Some(uri.to_string()));
+            }
+        }
+        // Fuzzy: anything that calls itself a synth/instrument/sampler.
+        let needles = ["synth", "instrument", "sampler", "piano"];
+        for n in &needles {
+            if let Some(e) = entries.iter().find(|e| e.name.to_lowercase().contains(n)) {
+                if let Some(uri) = e.uri.as_deref() {
+                    return Ok(Some(uri.to_string()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     async fn list_plugins(&self) -> Result<Vec<PluginCatalogEntry>, BackendError> {
         Ok(Vec::new())
     }
@@ -411,6 +478,8 @@ pub trait Backend: Send + Sync + 'static {
         instrument_uri: Option<String>,
         plugins: Vec<String>,
         copy_from_track_id: Option<EntityId>,
+        gm_program: Option<u8>,
+        gm_channel: Option<u8>,
     ) -> Result<Track, BackendError> {
         // Coalesce the plugin sources by precedence.
         let plugin_uris: Vec<String> = if let Some(source) = copy_from_track_id.as_ref() {
@@ -440,6 +509,16 @@ pub trait Backend: Send + Sync + 'static {
                 // final plugin list back via the re-snapshot below and
                 // can report whatever landed.
                 let _ = self.add_plugin(track.id.clone(), uri, None, None).await;
+            }
+            // GM patch (program + channel) applied AFTER the instrument
+            // lands — gmsynth's program-change handler reads bank+pgm
+            // out of MIDI data on each channel, so the patch only
+            // sticks if the synth is already inserted.
+            if let Some(program) = gm_program {
+                let channel = gm_channel.unwrap_or(0).min(15);
+                let _ = self
+                    .set_track_midi_patch(track.id.clone(), channel, 0, program)
+                    .await;
             }
             // Re-snapshot so the returned Track carries the inserted
             // plugins (the bare `create_track` impl returned the
@@ -571,6 +650,20 @@ pub trait Backend: Send + Sync + 'static {
     /// Reverse audio region in time. Fire-and-forget.
     async fn reverse_region(&self, _id: EntityId) -> Result<(), BackendError> {
         Err(BackendError::Other("reverse_region not supported".into()))
+    }
+
+    /// Audio peak normalization. Scans the region's source samples
+    /// once, computes the absolute-peak magnitude, and sets
+    /// `gain_linear` so that peak hits `target_dbfs`. Returns the
+    /// new linear gain the backend applied so the agent can echo it
+    /// back to the user. MIDI regions should be rejected with a
+    /// `BackendError::Invalid`.
+    async fn normalize_region(
+        &self,
+        _id: EntityId,
+        _target_dbfs: f64,
+    ) -> Result<f64, BackendError> {
+        Err(BackendError::Other("normalize_region not supported".into()))
     }
 
     /// Combine regions on one track (same as Ardour Region → Combine).
@@ -815,6 +908,83 @@ pub trait Backend: Send + Sync + 'static {
         Err(BackendError::Other(
             "load_plugin_preset not supported".into(),
         ))
+    }
+
+    // ─── mixer scenes ───────────────────────────────────────────────────
+
+    /// Store a snapshot of every track's mix state under `name` (and
+    /// optional `color`). Backends decide how to assign the `id` —
+    /// stub uses `scene.<short>`, Ardour wraps its native
+    /// `Session::store_mixer_scene`. Returns the canonical scene.
+    async fn store_mixer_scene(
+        &self,
+        _name: String,
+        _color: Option<String>,
+    ) -> Result<foyer_schema::MixerScene, BackendError> {
+        Err(BackendError::Other(
+            "store_mixer_scene not supported".into(),
+        ))
+    }
+
+    /// Recall scene `id`. Sets `active_scene_id` on the session
+    /// snapshot. Returns the scene that was applied so the agent can
+    /// echo a summary.
+    async fn recall_mixer_scene(
+        &self,
+        _id: EntityId,
+    ) -> Result<foyer_schema::MixerScene, BackendError> {
+        Err(BackendError::Other(
+            "recall_mixer_scene not supported".into(),
+        ))
+    }
+
+    async fn delete_mixer_scene(&self, _id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other(
+            "delete_mixer_scene not supported".into(),
+        ))
+    }
+
+    async fn rename_mixer_scene(
+        &self,
+        _id: EntityId,
+        _name: String,
+    ) -> Result<foyer_schema::MixerScene, BackendError> {
+        Err(BackendError::Other(
+            "rename_mixer_scene not supported".into(),
+        ))
+    }
+
+    // ─── sections (markers / ranges / loop / punch unified) ─────────────
+
+    async fn create_section(
+        &self,
+        _name: String,
+        _start_samples: i64,
+        _end_samples: Option<i64>,
+        _color: Option<String>,
+        _flags: foyer_schema::SectionFlags,
+    ) -> Result<foyer_schema::Section, BackendError> {
+        Err(BackendError::Other("create_section not supported".into()))
+    }
+
+    async fn update_section(
+        &self,
+        _id: EntityId,
+        _patch: foyer_schema::SectionPatch,
+    ) -> Result<foyer_schema::Section, BackendError> {
+        Err(BackendError::Other("update_section not supported".into()))
+    }
+
+    async fn delete_section(&self, _id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("delete_section not supported".into()))
+    }
+
+    /// Saves a named copy of the current session next to the
+    /// in-progress one — Ardour's "Quick Snapshot" / `session_quick_snapshot`.
+    /// Returns the relative path (jail-relative) of the saved
+    /// snapshot file so the agent can echo where it landed.
+    async fn snapshot_session(&self, _name: Option<String>) -> Result<String, BackendError> {
+        Err(BackendError::Other("snapshot_session not supported".into()))
     }
 
     // ─── session undo / redo ────────────────────────────────────────────

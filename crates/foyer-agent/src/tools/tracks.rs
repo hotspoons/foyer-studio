@@ -51,6 +51,17 @@ enum Op {
         plugins: Vec<String>,
         #[serde(default)]
         copy_from_track_id: Option<String>,
+        /// GM program (0–127) to set on the track's MIDI patch after
+        /// the instrument inserts. Atomically applied inside the same
+        /// undo group. Only meaningful on MIDI tracks with a GM-aware
+        /// synth (gmsynth, fluidsynth-style SF2 plugins). Ignored on
+        /// audio + bus tracks.
+        #[serde(default)]
+        gm_program: Option<u8>,
+        /// MIDI channel for the GM patch above. Defaults to 0 (CH1).
+        /// Use 9 (CH10) for GM drums on gmsynth.
+        #[serde(default)]
+        gm_channel: Option<u8>,
     },
     /// Patch metadata on an existing track: name, color, group
     /// membership, bus assignment, monitoring mode, input port.
@@ -108,6 +119,17 @@ enum Op {
         track_id: String,
         armed: bool,
     },
+    /// Toggle record-safe on a track — distinct from record-arm.
+    /// When `rec_safe=true` the track refuses to arm even on a
+    /// global record + arm, protecting keeper takes from accidental
+    /// overwrite. Use during long sessions where the user keeps
+    /// arming new tracks but wants previous takes locked. Audio +
+    /// MIDI tracks only — buses + master are rejected by the
+    /// backend.
+    SetRecSafe {
+        track_id: String,
+        rec_safe: bool,
+    },
     /// Arm a track to receive browser-sourced audio — the server-side
     /// half of what the "I" / Take chip in the UI runs. Sets the
     /// track→browser-source claim and forces `monitoring=off` (the
@@ -148,14 +170,17 @@ impl Tool for TracksTool {
          writing notes / cells), \
          describe_many(track_ids:[…]) — batched in one round-trip, \
          create(name, kind, color?, after_id?, \
-         instrument_uri? OR plugins?[] OR copy_from_track_id?) — kind \
+         instrument_uri? OR plugins?[] OR copy_from_track_id?, \
+         gm_program?, gm_channel?) — kind \
          is 'audio' | 'midi' | 'bus' (master + monitor are immutable). \
-         The plugin-wiring fields are atomic with the create (one \
-         undo unwinds everything). For MIDI tracks PROMPT THE USER \
-         which instrument unless they said 'synth' generically (then \
-         default to Ardour's built-in gmsynth); the choice changes \
+         The plugin-wiring AND `gm_program` patch are atomic with the \
+         create (one undo unwinds everything). For MIDI tracks PROMPT \
+         THE USER which instrument unless they said 'synth' generically \
+         (then default to Ardour's built-in gmsynth); the choice changes \
          the sound dramatically. Use `copy_from_track_id` when the \
-         user asks for 'another track like X'. \
+         user asks for 'another track like X'. `gm_program` (0–127) \
+         and `gm_channel` (0–15, default 0) target gmsynth-style \
+         instruments — use channel 9 for GM drums. \
          update(track_id, name?, color?, group_id?, bus_assign?, \
          monitoring?, input_port?) — pass `\"\"` to unassign a group / \
          restore master, \
@@ -167,7 +192,10 @@ impl Tool for TracksTool {
          set_arm(track_id, armed) — toggle record-arm on an audio/MIDI \
          track. Required before recording. Pair with \
          `io.list_ports` → `update(input_port)` to pick the source and \
-         `transport.record(armed=true)` to actually start tracking, \
+         `transport.record(armed=true)` to actually start tracking. \
+         set_rec_safe(track_id, rec_safe) — DISTINCT from arm. When \
+         true, the track refuses to arm even on a global record + arm, \
+         protecting keeper takes. Audio + MIDI tracks only. \
          arm_for_browser_audio(track_id, peer_id?) — server-side half of \
          the UI's \"I\" / Take chip. Marks the track as browser-fed and \
          forces monitoring=off (browser round-trip would be audible). \
@@ -184,7 +212,7 @@ impl Tool for TracksTool {
                 "subcommand": { "type": "string",
                     "enum": ["list", "describe", "describe_many",
                              "create", "update", "delete", "reorder",
-                             "set_midi_channel_mode", "set_arm",
+                             "set_midi_channel_mode", "set_arm", "set_rec_safe",
                              "arm_for_browser_audio", "release_browser_audio"] },
                 "kind": { "type": "string", "enum": ["audio", "midi", "bus"] },
                 "after_id": { "type": "string" },
@@ -211,6 +239,12 @@ impl Tool for TracksTool {
                 "mask":              { "type": "integer", "minimum": 0, "maximum": 65535 },
                 "armed":             { "type": "boolean",
                     "description": "set_arm: true to arm the track for recording, false to disarm." },
+                "rec_safe":          { "type": "boolean",
+                    "description": "set_rec_safe: when true, the track refuses to arm — protects keeper takes." },
+                "gm_program":        { "type": "integer", "minimum": 0, "maximum": 127,
+                    "description": "create: GM program for the track's MIDI patch (0=Acoustic Grand). Use channel 9 for GM drums." },
+                "gm_channel":        { "type": "integer", "minimum": 0, "maximum": 15,
+                    "description": "create: MIDI channel for `gm_program`. Default 0 (CH1)." },
                 "peer_id":           { "type": "string",
                     "description": "arm_for_browser_audio: peer id to bind. Omit to leave the claim open." }
             }
@@ -317,6 +351,8 @@ impl Tool for TracksTool {
                 instrument_uri,
                 plugins,
                 copy_from_track_id,
+                gm_program,
+                gm_channel,
             } => {
                 let kind = match kind.as_str() {
                     "audio" => foyer_schema::TrackKind::Audio,
@@ -339,6 +375,8 @@ impl Tool for TracksTool {
                         instrument_uri.clone(),
                         plugins,
                         copy_from.map(EntityId::new),
+                        gm_program,
+                        gm_channel,
                     )
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
@@ -460,6 +498,44 @@ impl Tool for TracksTool {
                     "armed": armed,
                 })))
             }
+            Op::SetRecSafe { track_id, rec_safe } => {
+                // Route through the same set_control surface as
+                // set_arm — the backend exposes `track.<id>.rec_safe`
+                // alongside `track.<id>.rec` as a sibling bool. Stub
+                // and Ardour both round-trip via the standard control
+                // path, no new IPC primitive needed.
+                let snap = backend
+                    .snapshot()
+                    .await
+                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                let track = snap
+                    .tracks
+                    .iter()
+                    .find(|t| t.id.as_str() == track_id)
+                    .ok_or_else(|| {
+                        ToolError::InvalidArgs(format!("unknown track_id: {track_id}"))
+                    })?;
+                if track.record_arm.is_none() {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "track {} ({track_id}) has no record_arm — buses/master can't be \
+                         record-safed",
+                        track.name
+                    )));
+                }
+                let rec_safe_id = EntityId::new(format!("track.{}.rec_safe", track.id.as_str()));
+                backend
+                    .set_control(rec_safe_id, ControlValue::Bool(rec_safe))
+                    .await
+                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                Ok(ToolResult::ok(format!(
+                    "track {} ({track_id}) rec_safe={rec_safe}",
+                    track.name
+                ))
+                .with_data(json!({
+                    "track_id": track_id,
+                    "rec_safe": rec_safe,
+                })))
+            }
             Op::ArmForBrowserAudio { track_id, peer_id } => {
                 // Route through the SessionDirector so we hit the same
                 // server-state path the WS `Command::SetTrackBrowserSource`
@@ -579,7 +655,7 @@ fn instrument_summary(t: &foyer_schema::Track) -> Value {
 /// for non-GM-recognised programs (e.g. a custom SoundFont's
 /// program 17). The label is informational only; the canonical
 /// numeric program / bank lives in `active_patches`.
-fn gm_program_name(p: u8) -> Option<&'static str> {
+pub(crate) fn gm_program_name(p: u8) -> Option<&'static str> {
     const NAMES: &[&str] = &[
         "Acoustic Grand Piano",
         "Bright Acoustic Piano",
