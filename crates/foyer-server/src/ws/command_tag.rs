@@ -77,6 +77,7 @@ pub(crate) fn command_tag(cmd: &Command) -> &'static str {
         Command::UpdateGroup { .. } => "update_group",
         Command::DeleteGroup { .. } => "delete_group",
         Command::AddPlugin { .. } => "add_plugin",
+        Command::AddDefaultInstrument { .. } => "add_default_instrument",
         Command::RemovePlugin { .. } => "remove_plugin",
         Command::MovePlugin { .. } => "move_plugin",
         Command::ListPluginPresets { .. } => "list_plugin_presets",

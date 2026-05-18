@@ -16,10 +16,13 @@ pub mod id;
 pub mod io;
 pub mod message;
 pub mod midi;
+pub mod mixer;
 pub mod plugin;
 pub mod scripting;
+pub mod sections;
 pub mod session;
 pub mod spectrum;
+pub mod time;
 pub mod timeline;
 pub mod tunnel;
 pub mod value;
@@ -47,11 +50,13 @@ pub use midi::{
     MidiNote, MidiNotePatch, MidiPatchBank, MidiPatchNames, MidiPatchProgram, PatchChange,
     PatchChangePatch, SequencerCell, SequencerLayout, SequencerPattern, SequencerRow,
 };
+pub use mixer::{MixerScene, SceneSendLevel, SceneTrackSnapshot};
 pub use plugin::{PluginCatalogEntry, PluginFormat, PluginPreset, PluginRole};
 pub use scripting::{
     Script, ScriptLanguage, ScriptRunResult, ScriptTypeDescriptor, ScriptingCapabilities,
     ScriptingFeatures,
 };
+pub use sections::{Section, SectionFlags, SectionPatch};
 pub use session::{
     Bus, Group, GroupPatch, MidiPatchState, PluginInstance, Send, Session, Track, TrackKind,
     TrackPatch, Transport, DEFAULT_SAMPLE_RATE,
@@ -60,6 +65,7 @@ pub use spectrum::{
     SpectrumCapabilities, SpectrumChannel, SpectrumFrame, SpectrumOpts, SpectrumTarget,
     SpectrumWindow,
 };
+pub use time::{Bbt, TempoMap, TimeArg, TimeResolveError};
 pub use timeline::{
     AudioSourceSegment, FadeShape, Region, RegionPatch, TimelineMeta, WaveformPeaks,
     WaveformRequest,

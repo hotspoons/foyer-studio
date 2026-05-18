@@ -1654,6 +1654,15 @@ pub enum Command {
         plugins: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         copy_from_track_id: Option<EntityId>,
+        /// GM program (0–127) to set on the track's MIDI patch after
+        /// the instrument lands. Atomic with the create. Ignored on
+        /// audio + bus tracks.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        gm_program: Option<u8>,
+        /// MIDI channel for `gm_program`. Defaults to 0 (CH1); use 9
+        /// (CH10) for GM drums on gmsynth.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        gm_channel: Option<u8>,
     },
     /// Mutate a track. Fields in `patch` that are `None` stay unchanged.
     /// Emits `Event::TrackUpdated` on success.
@@ -1716,6 +1725,18 @@ pub enum Command {
         /// default plugin on the target track.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         clone_from: Option<EntityId>,
+    },
+    /// Insert whatever instrument the backend resolves as a "sensible
+    /// default" on `track_id`. The backend picks from its installed
+    /// plugin catalog — see [`crate::foyer_backend::Backend::default_instrument_uri`]
+    /// for the resolution order. Used by the empty-MIDI-track banner
+    /// in the UI: the user doesn't know or care which synth lands,
+    /// they just want sound. The host echoes a normal `PluginsList`
+    /// after the insert; if no instrument is resolvable, an
+    /// `Event::NoInstrumentsAvailable` fires instead so the UI can
+    /// nudge the user toward installing one.
+    AddDefaultInstrument {
+        track_id: EntityId,
     },
     RemovePlugin {
         plugin_id: EntityId,

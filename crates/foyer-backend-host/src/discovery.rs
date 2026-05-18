@@ -41,6 +41,15 @@ pub struct Advertisement {
     /// doesn't race a fresh spawn against the live one.
     #[serde(default)]
     pub project_path: String,
+    /// MCPHttp listener port the shim's host bound, when the shim
+    /// build has `mcp_http` compiled in (Ardour ≥ 9.4) AND the shim
+    /// surfaces it via its advert JSON. Absent on 9.2 builds + on
+    /// shims that haven't been updated to write the field — JSON's
+    /// open-schema posture means neither side breaks. The reuse-
+    /// existing-shim path reads this so a reattached session can
+    /// still participate in `daw_proxy` without re-pinning the port.
+    #[serde(default)]
+    pub mcp_port: Option<u16>,
     /// ISO-8601 timestamp the shim was started (UTC).
     #[serde(default)]
     pub started: String,

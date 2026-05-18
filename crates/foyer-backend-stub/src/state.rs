@@ -58,6 +58,8 @@ pub(crate) struct StubState {
     pub(crate) scripts: Vec<Script>,
     /// Monotonic counter for auto-generated script ids.
     pub(crate) next_script_seq: u64,
+    /// Monotonic counter for auto-generated scene / section ids.
+    pub(crate) next_seq: u64,
 }
 
 impl StubState {
@@ -75,6 +77,7 @@ impl StubState {
             last_midi_input_track: None,
             scripts: fixtures::seed_scripts(),
             next_script_seq: 1,
+            next_seq: 1,
         }
     }
 
@@ -89,6 +92,7 @@ impl StubState {
             last_midi_input_track: None,
             scripts: fixtures::seed_scripts(),
             next_script_seq: 1,
+            next_seq: 1,
         }
     }
 
@@ -857,6 +861,248 @@ impl StubState {
         lane.points = points;
         Ok(())
     }
+
+    // ─── mixer scenes ──────────────────────────────────────────────
+
+    pub(crate) fn store_mixer_scene(
+        &mut self,
+        name: String,
+        color: Option<String>,
+    ) -> foyer_schema::MixerScene {
+        self.next_seq += 1;
+        let id = EntityId::new(format!("scene-{}", self.next_seq));
+        let snapshots = self
+            .session
+            .tracks
+            .iter()
+            .map(|t| {
+                let gain_db = match t.gain.value {
+                    ControlValue::Float(f) => f,
+                    ControlValue::Int(i) => i as f64,
+                    _ => 0.0,
+                };
+                let pan = t.pan.value.as_f64();
+                let mute = matches!(t.mute.value, ControlValue::Bool(true));
+                let solo = matches!(t.solo.value, ControlValue::Bool(true));
+                let send_levels = t
+                    .sends
+                    .iter()
+                    .filter_map(|s| {
+                        let db = s.level.value.as_f64()?;
+                        Some(foyer_schema::SceneSendLevel {
+                            target_track_id: s.target_track.clone(),
+                            db,
+                        })
+                    })
+                    .collect();
+                foyer_schema::SceneTrackSnapshot {
+                    track_id: t.id.clone(),
+                    gain_db,
+                    pan,
+                    mute: Some(mute),
+                    solo: Some(solo),
+                    send_levels,
+                }
+            })
+            .collect();
+        let scene = foyer_schema::MixerScene {
+            id: id.clone(),
+            name,
+            color,
+            created_at_unix: current_epoch_unix(),
+            snapshots,
+        };
+        self.session.mixer_scenes.push(scene.clone());
+        scene
+    }
+
+    pub(crate) fn recall_mixer_scene(
+        &mut self,
+        id: &EntityId,
+    ) -> Result<(foyer_schema::MixerScene, Vec<ControlUpdate>), BackendError> {
+        let scene = self
+            .session
+            .mixer_scenes
+            .iter()
+            .find(|s| &s.id == id)
+            .cloned()
+            .ok_or_else(|| BackendError::Other(format!("unknown scene {id}")))?;
+        let mut updates = Vec::new();
+        for snap in &scene.snapshots {
+            if let Some(t) = self
+                .session
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == snap.track_id)
+            {
+                t.gain.value = ControlValue::Float(snap.gain_db);
+                updates.push(ControlUpdate {
+                    id: t.gain.id.clone(),
+                    value: t.gain.value.clone(),
+                });
+                if let Some(p) = snap.pan {
+                    t.pan.value = ControlValue::Float(p);
+                    updates.push(ControlUpdate {
+                        id: t.pan.id.clone(),
+                        value: t.pan.value.clone(),
+                    });
+                }
+                if let Some(m) = snap.mute {
+                    t.mute.value = ControlValue::Bool(m);
+                    updates.push(ControlUpdate {
+                        id: t.mute.id.clone(),
+                        value: t.mute.value.clone(),
+                    });
+                }
+                if let Some(s) = snap.solo {
+                    t.solo.value = ControlValue::Bool(s);
+                    updates.push(ControlUpdate {
+                        id: t.solo.id.clone(),
+                        value: t.solo.value.clone(),
+                    });
+                }
+                for sent in &snap.send_levels {
+                    if let Some(send) = t
+                        .sends
+                        .iter_mut()
+                        .find(|s| s.target_track == sent.target_track_id)
+                    {
+                        send.level.value = ControlValue::Float(sent.db);
+                        updates.push(ControlUpdate {
+                            id: send.level.id.clone(),
+                            value: send.level.value.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        self.session.active_scene_id = Some(id.clone());
+        Ok((scene, updates))
+    }
+
+    pub(crate) fn delete_mixer_scene(&mut self, id: &EntityId) -> Result<(), BackendError> {
+        let before = self.session.mixer_scenes.len();
+        self.session.mixer_scenes.retain(|s| &s.id != id);
+        if self.session.mixer_scenes.len() == before {
+            return Err(BackendError::Other(format!("unknown scene {id}")));
+        }
+        if self.session.active_scene_id.as_ref() == Some(id) {
+            self.session.active_scene_id = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rename_mixer_scene(
+        &mut self,
+        id: &EntityId,
+        name: String,
+    ) -> Result<foyer_schema::MixerScene, BackendError> {
+        let scene = self
+            .session
+            .mixer_scenes
+            .iter_mut()
+            .find(|s| &s.id == id)
+            .ok_or_else(|| BackendError::Other(format!("unknown scene {id}")))?;
+        scene.name = name;
+        Ok(scene.clone())
+    }
+
+    // ─── sections ──────────────────────────────────────────────────
+
+    pub(crate) fn create_section(
+        &mut self,
+        name: String,
+        start_samples: i64,
+        end_samples: Option<i64>,
+        color: Option<String>,
+        flags: foyer_schema::SectionFlags,
+    ) -> foyer_schema::Section {
+        self.next_seq += 1;
+        let id = EntityId::new(format!("section-{}", self.next_seq));
+        if flags.is_loop_target {
+            for s in &mut self.session.sections {
+                s.flags.is_loop_target = false;
+            }
+        }
+        if flags.is_punch_target {
+            for s in &mut self.session.sections {
+                s.flags.is_punch_target = false;
+            }
+        }
+        let section = foyer_schema::Section {
+            id: id.clone(),
+            name,
+            start_samples,
+            end_samples,
+            color,
+            flags,
+        };
+        self.session.sections.push(section.clone());
+        section
+    }
+
+    pub(crate) fn update_section(
+        &mut self,
+        id: &EntityId,
+        patch: foyer_schema::SectionPatch,
+    ) -> Result<foyer_schema::Section, BackendError> {
+        // Enforce mutual exclusivity on transport-role flags BEFORE
+        // we hold a mutable borrow on the target section.
+        if let Some(flags) = patch.flags {
+            if flags.is_loop_target {
+                for s in &mut self.session.sections {
+                    if &s.id != id {
+                        s.flags.is_loop_target = false;
+                    }
+                }
+            }
+            if flags.is_punch_target {
+                for s in &mut self.session.sections {
+                    if &s.id != id {
+                        s.flags.is_punch_target = false;
+                    }
+                }
+            }
+        }
+        let section = self
+            .session
+            .sections
+            .iter_mut()
+            .find(|s| &s.id == id)
+            .ok_or_else(|| BackendError::Other(format!("unknown section {id}")))?;
+        if let Some(n) = patch.name {
+            section.name = n;
+        }
+        if let Some(s) = patch.start_samples {
+            section.start_samples = s;
+        }
+        if let Some(e) = patch.end_samples {
+            section.end_samples = e;
+        }
+        if let Some(c) = patch.color {
+            section.color = c;
+        }
+        if let Some(f) = patch.flags {
+            section.flags = f;
+        }
+        Ok(section.clone())
+    }
+
+    pub(crate) fn delete_section(&mut self, id: &EntityId) -> Result<(), BackendError> {
+        let before = self.session.sections.len();
+        self.session.sections.retain(|s| &s.id != id);
+        if self.session.sections.len() == before {
+            return Err(BackendError::Other(format!("unknown section {id}")));
+        }
+        Ok(())
+    }
+}
+
+fn current_epoch_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn current_epoch_ms() -> u64 {

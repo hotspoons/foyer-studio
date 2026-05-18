@@ -1229,13 +1229,27 @@ async fn launch_and_wait_for_shim(
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()?;
-            // Reuse path: we didn't fork this Ardour and don't know
-            // which MCP port (if any) it picked. Caller probes via
-            // the discovery cache if it needs it.
+            // Discover the live shim's MCP port via two backwards-
+            // compatible paths:
+            //   1. Advert JSON: 9.4+ shims with `mcp_http` compiled in
+            //      write the bound port into their advert when they
+            //      come up. JSON absent on 9.2; the field is `Option`.
+            //   2. Session XML fallback: parse the project's `.ardour`
+            //      file for `<Protocol name="MCPHttp" active="1"
+            //      port="N"/>`. Reports the CONFIGURED port (what
+            //      Ardour was told to bind), which on the common case
+            //      matches the bound port. A hand-edited XML with no
+            //      live process would mislead us; we mitigate by
+            //      probing the endpoint right after (see `probe_mcp_http`
+            //      in CliSpawner::launch — same path for spawned and
+            //      reused sessions).
+            let discovered_mcp = ad
+                .mcp_port
+                .or_else(|| read_mcp_port_from_session_file(project));
             return Ok(ShimLaunch {
                 socket: ad.socket,
                 child: dummy,
-                mcp_port: None,
+                mcp_port: discovered_mcp,
             });
         }
     }
@@ -1273,253 +1287,119 @@ async fn launch_and_wait_for_shim(
         snapshot_name,
     );
 
-    let patch_sr_shell = if sample_rate_hint.is_some() && !had_session {
-        r#"
+    // ONE launch path for both system + dev Ardour. The Rust path
+    // owns:
+    //   * `preflight_session` — bootstrap empty session if missing,
+    //     ensure the Foyer Studio Shim is active="1" in the XML,
+    //     pin the per-session MCPHttp port.
+    //   * `patch_ardour_session_sample_rate` — rewrite the root
+    //     `sample-rate=` attr on a fresh session.
+    //   * For dev builds: source `ardev_common_waf.sh` via a
+    //     short-lived bash invocation, capture the resulting env
+    //     delta, and apply it to the spawn `Command`.
+    //
+    // Dev tree discovery: `FOYER_ARDOUR_DEV_TREE` (env, set by the
+    // relevant `just` recipe) takes precedence; otherwise we infer
+    // from `resolved_exec` sitting inside `<tree>/build/gtk2_ardour/`.
+    // Externalising this means CI / contributors aren't tied to one
+    // checkout path.
+    let dev_root = std::env::var_os("FOYER_ARDOUR_DEV_TREE")
+        .map(PathBuf::from)
+        .filter(|p| p.join("build/gtk2_ardour/ardev_common_waf.sh").is_file())
+        .or_else(|| foyer_config::ardour_dev_root(&resolved_exec));
 
-# Foyer: rewrite root <Session> sample-rate on freshly bootstrapped sessions only.
-if [ -n "${FOYER_SESSION_SAMPLE_RATE:-}" ] && [ -f "$SESSION_FILE" ]; then
-  echo "foyer: patching session sample-rate to ${FOYER_SESSION_SAMPLE_RATE} in $SESSION_FILE" >&2
-  perl -pi -e 's/sample-rate="[0-9]+"/sample-rate="'"$FOYER_SESSION_SAMPLE_RATE"'"/' "$SESSION_FILE" || true
-fi
-"#
-    } else {
-        ""
-    };
-
-    let dev_root = foyer_config::ardour_dev_root(&resolved_exec);
-    let mut cmd = if let Some(ref root) = dev_root {
-        let shim = root.join("build/libs/surfaces/foyer_shim");
-        // Script does four things before handing off to Ardour:
-        //   1. Source `ardev_common_waf.sh` so lib paths resolve.
-        //   2. Default `ARDOUR_BACKEND` to "None (Dummy)" for devcontainer
-        //      / CI hosts that don't have JACK running. User can override
-        //      via config.yaml `env`.
-        //   3. Prepend the Foyer shim to ARDOUR_SURFACES_PATH.
-        //   4. Pre-flight the session file:
-        //      · If <DIR>/<NAME>.ardour doesn't exist, bootstrap it via
-        //        `ardour<N>-new_empty_session`.
-        //      · If the Protocols block doesn't list Foyer Studio Shim
-        //        with active="1", insert that line. Without this, Ardour
-        //        loads the surface library but never instantiates the
-        //        shim — no advertisement is written and the sidecar
-        //        times out waiting.
-        // NOTE on quoting: the `{shim}` / `{dir}` / `{name}` etc. come
-        // from `shell_escape()` which wraps them in single quotes so
-        // they're safe as STANDALONE arguments (e.g. `VAR='...'`).
-        // Inside a double-quoted string those single quotes become
-        // literal. So we first assign each path to a bash var (where
-        // bash strips the surrounding quotes), then interpolate the
-        // var inside double-quoted compound strings.
-        let script = format!(
-            r#"set -e
-export TOP={top}
-source "$TOP/build/gtk2_ardour/ardev_common_waf.sh"
-: "${{ARDOUR_BACKEND:=None (Dummy)}}"
-export ARDOUR_BACKEND
-# Suppress Ardour's "this screen is not tall enough" dialog. The
-# check at editor_mixer.cc:91 fires when screen height < 700 — true
-# whenever the iframe (or xpra-html5 reported screen) is short.
-# This env var is Ardour's own escape hatch, designed exactly for
-# headless / virtual-screen deploys. Without it, the modal blocks
-# session load with no human there to dismiss it.
-export ARDOUR_LOVES_STUPID_TINY_SCREENS=1
-FOYER_SHIM_DIR={shim}
-export ARDOUR_SURFACES_PATH="$FOYER_SHIM_DIR${{ARDOUR_SURFACES_PATH:+:$ARDOUR_SURFACES_PATH}}"
-
-DIR={dir}
-NAME={name}
-SESSION_DIR="$DIR"
-SESSION_FILE="$SESSION_DIR/$NAME.ardour"
-
-if [ ! -f "$SESSION_FILE" ]; then
-    # `ardour9-new_empty_session <leaf-dir> <name>` CREATES <leaf-dir>
-    # and writes <leaf-dir>/<name>.ardour inside. It refuses to run
-    # when <leaf-dir> already exists ("Session folder already exists",
-    # then throws SessionException). Earlier versions of this script
-    # `mkdir -p`'d the dir first and then wondered why the helper
-    # always failed — kicking $DIR/$NAME directly without
-    # pre-creating it is the working pattern.
-    LEAF_DIR="$DIR/$NAME"
-    # If a previous failed run left an empty $LEAF_DIR, clean it up
-    # so the helper can mkdir it itself. A non-empty dir we leave
-    # alone — caller can rm -rf manually once they're sure.
-    if [ -d "$LEAF_DIR" ] && [ -z "$(ls -A "$LEAF_DIR" 2>/dev/null)" ]; then
-        rmdir "$LEAF_DIR" 2>/dev/null || true
-    fi
-    for HELPER in "$TOP"/build/session_utils/ardour*-new_empty_session; do
-        if [ -x "$HELPER" ]; then
-            echo "foyer: bootstrapping new session $LEAF_DIR via $HELPER" >&2
-            # Two scoped env tweaks for the helper child only — see the
-            # Rust path's `bootstrap_session_if_missing` for the long
-            # form. Short version:
-            #   FOYER_SHIM_NO_IPC=1 — shim skips its IPC bring-up so it
-            #     can't race-advertise ahead of the real ardour-9.
-            #   ARDOUR_BACKEND_PATH= — keep our patched
-            #     `libfoyer_audiobackend.so` out of this transient
-            #     libardour process. The helper hardcodes "None
-            #     (Dummy)" and never picks ours, but the .so being
-            #     dlopen'd alongside upstream's still makes glibc abort
-            #     with "corrupted size" inside a static dtor's `free()`
-            #     on exit. Real ardour-9 below inherits a clean env and
-            #     still gets ARDOUR_BACKEND_PATH so it picks Foyer
-            #     Dummy.
-            ARDOUR_BACKEND_PATH= FOYER_SHIM_NO_IPC=1 "$HELPER" "$LEAF_DIR" "$NAME" || true
-            if [ -f "$LEAF_DIR/$NAME.ardour" ]; then
-                SESSION_DIR="$LEAF_DIR"
-                SESSION_FILE="$SESSION_DIR/$NAME.ardour"
-            fi
-            break
-        fi
-    done
-fi
-
-if [ ! -f "$SESSION_FILE" ]; then
-    echo "foyer: ERROR failed to create session file $SESSION_FILE" >&2
-    echo "foyer: hint: run '$TOP/build/session_utils/ardour9-new_empty_session \"$DIR/$NAME\" \"$NAME\"' manually" >&2
-    echo "foyer: hint: also remove any leftover dir: rm -rf \"$DIR/$NAME\"" >&2
-    exit 1
-fi
-
-if [ -f "$SESSION_FILE" ] && ! grep -q 'name="Foyer Studio Shim" active="1"' "$SESSION_FILE"; then
-    if grep -q 'name="Foyer Studio Shim"' "$SESSION_FILE"; then
-        # Already listed but inactive — flip active="0" to "1".
-        echo "foyer: flipping Foyer Studio Shim to active=\"1\" in $SESSION_FILE" >&2
-        sed -i 's|<Protocol name="Foyer Studio Shim" active="0"\([^/]*\)/>|<Protocol name="Foyer Studio Shim" active="1"\1/>|' "$SESSION_FILE"
-    elif grep -q '</ControlProtocols>' "$SESSION_FILE"; then
-        # Not listed yet — insert before the closing </ControlProtocols>.
-        # Universal anchor that doesn't depend on which protocols Ardour
-        # happens to ship with in this build.
-        echo "foyer: inserting Foyer Studio Shim into $SESSION_FILE" >&2
-        sed -i 's|  </ControlProtocols>|    <Protocol name="Foyer Studio Shim" active="1"/>\n  </ControlProtocols>|' "$SESSION_FILE"
-    else
-        echo "foyer: WARNING no <ControlProtocols> block found in $SESSION_FILE — add Foyer Studio Shim by hand" >&2
-    fi
-fi
-{patch_sr_shell}
-# Crash-recovery is now handled in-band by the Foyer shim:
-# when `FOYER_CRASH_RECOVERY=recover` is set (exported below by
-# the Rust spawner), the shim's GTK toplevel watcher auto-clicks
-# Ardour's "Recover from crash" dialog. When the user picked
-# Discard, the `.pending` file is deleted server-side BEFORE
-# this spawn, so the dialog never opens. `.history` (regular
-# undo state) is preserved verbatim.
-
-# FOYER_DEBUG_ARDOUR=1 wraps the Ardour spawn in `gdb --batch` so
-# SIGSEGV/SIGABRT dump a backtrace into stderr (which lands in
-# daw.log) instead of vanishing silently. Useful when chasing
-# "DAW dies on plugin add" bugs in container deploys where there's
-# no human to attach a debugger interactively. Off by default
-# because gdb adds startup overhead and rewrites stderr framing.
-# Requires `gdb` in the image (runtime Dockerfile installs it).
-if [ -n "${{FOYER_DEBUG_ARDOUR:-}}" ] && command -v gdb >/dev/null 2>&1; then
-    echo "foyer: FOYER_DEBUG_ARDOUR=$FOYER_DEBUG_ARDOUR — wrapping Ardour in gdb --batch" >&2
-    # `set pagination off` keeps gdb from blocking on the "press
-    # return to continue" prompt. `handle SIG33 nostop noprint pass`
-    # silences the JACK xrun signal noise. `thread apply all bt full`
-    # gives every thread's stack with locals — much more useful than
-    # a single-thread bt for a multi-threaded DAW.
-    exec gdb --batch \
-        -ex "set pagination off" \
-        -ex "handle SIG33 nostop noprint pass" \
-        -ex "handle SIGPIPE nostop noprint pass" \
-        -ex "run" \
-        -ex "thread apply all bt full" \
-        -ex "quit" \
-        --args {exec} "$@" "$SESSION_DIR" "$NAME"
-fi
-exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
-            patch_sr_shell = patch_sr_shell,
-            top = shell_escape(root.to_string_lossy().as_ref()),
-            shim = shell_escape(shim.to_string_lossy().as_ref()),
-            exec = shell_escape(resolved_exec.to_string_lossy().as_ref()),
-            dir = shell_escape(session_dir.to_string_lossy().as_ref()),
-            name = shell_escape(&snapshot_name),
-        );
+    let (session_dir, snapshot_name) =
+        preflight_session(&resolved_exec, &session_dir, &snapshot_name, mcp_port);
+    if let Some(sr) = sample_rate_hint {
+        if !had_session {
+            let session_file = session_dir.join(format!("{snapshot_name}.ardour"));
+            if session_file.is_file() {
+                if let Err(e) = patch_ardour_session_sample_rate(&session_file, sr) {
+                    tracing::warn!(
+                        "foyer: failed to patch new session sample-rate in {}: {e:#}",
+                        session_file.display(),
+                    );
+                }
+            }
+        }
+    }
+    tracing::info!(
+        "spawning {} {} {} {}",
+        resolved_exec.display(),
+        extra_args.join(" "),
+        session_dir.display(),
+        snapshot_name,
+    );
+    let mut cmd = tokio::process::Command::new(&resolved_exec);
+    if let Some(ref root) = dev_root {
         tracing::info!(
             "dev-build Ardour detected at {} — sourcing ardev env + foyer_shim surface",
             root.display()
         );
-        let mut c = tokio::process::Command::new("bash");
-        c.arg("-c").arg(script).arg("bash"); // $0
-        for a in extra_args {
-            c.arg(a);
+        // Apply the env delta from `ardev_common_waf.sh` (LD_LIBRARY_PATH,
+        // ARDOUR_DLL_PATH, ARDOUR_DATA_PATH, ARDOUR_CONFIG_PATH,
+        // ARDOUR_BACKEND_PATH, etc.).
+        for (k, v) in load_ardour_dev_env(root) {
+            cmd.env(k, v);
         }
-        // DIR + NAME are baked into the script via $DIR/$NAME so the
-        // pre-flight can use them. They're appended to argv via the
-        // `exec ... "$@" "$DIR" "$NAME"` line in the script.
-        c
-    } else {
-        // Pre-flight the session XML so the shim actually instantiates.
-        // Ardour 9 only loads protocols listed with active="1" in the
-        // session file; the global preferences toggle just seeds NEW
-        // sessions. Without this, the .dylib gets dlopened but never
-        // instantiated and the discovery loop below times out at 30s.
-        // Mirrors what the dev-build bash branch above does inline.
-        // Shadowing here keeps the dev-build path's bindings intact.
-        let (session_dir, snapshot_name) =
-            preflight_session(&resolved_exec, &session_dir, &snapshot_name, mcp_port);
-        if let Some(sr) = sample_rate_hint {
-            if !had_session {
-                let session_file = session_dir.join(format!("{snapshot_name}.ardour"));
-                if session_file.is_file() {
-                    if let Err(e) = patch_ardour_session_sample_rate(&session_file, sr) {
-                        tracing::warn!(
-                            "foyer: failed to patch new session sample-rate in {}: {e:#}",
-                            session_file.display(),
-                        );
-                    }
-                }
-            }
+        // Prepend the Foyer shim to ARDOUR_SURFACES_PATH. The shim
+        // directory can be overridden via FOYER_ARDOUR_SHIM_DIR — see
+        // the `just` recipe — so contributors with a non-default
+        // build layout aren't blocked.
+        let shim_dir = std::env::var_os("FOYER_ARDOUR_SHIM_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("build/libs/surfaces/foyer_shim"));
+        let prior = std::env::var_os("ARDOUR_SURFACES_PATH").unwrap_or_default();
+        let mut surfaces = std::ffi::OsString::from(&shim_dir);
+        if !prior.is_empty() {
+            surfaces.push(":");
+            surfaces.push(&prior);
         }
+        cmd.env("ARDOUR_SURFACES_PATH", surfaces);
+        // Default to the Dummy backend for headless / containerised
+        // hosts that lack JACK. Honors any pre-existing value
+        // (user config.yaml `env:` block).
+        if std::env::var_os("ARDOUR_BACKEND").is_none() {
+            cmd.env("ARDOUR_BACKEND", "None (Dummy)");
+        }
+        // Suppress Ardour's "this screen is not tall enough" dialog
+        // for short virtual screens.
+        cmd.env("ARDOUR_LOVES_STUPID_TINY_SCREENS", "1");
+    }
+    // macOS `.app` bundles need `ARDOUR_BUNDLED=true` for the binary
+    // to derive its DLL/DATA/CONFIG paths from the bundle layout
+    // instead of exiting with "ARDOUR_DLL_PATH not set in environment".
+    // LaunchServices would normally set this via Info.plist's
+    // `LSEnvironment`, but a direct spawn bypasses that path. We set
+    // it ourselves so we keep stdio piped to daw.log.
+    if let Some(bundle) = macos_app_bundle(&resolved_exec) {
         tracing::info!(
-            "spawning {} {} {} {}",
-            resolved_exec.display(),
-            extra_args.join(" "),
-            session_dir.display(),
-            snapshot_name,
+            "macOS .app bundle detected at {}; setting ARDOUR_BUNDLED=true",
+            bundle.display(),
         );
-        let mut c = tokio::process::Command::new(&resolved_exec);
-        // macOS `.app` bundles need `ARDOUR_BUNDLED=true` for the binary
-        // to derive its DLL/DATA/CONFIG paths from the bundle layout
-        // instead of exiting with "ARDOUR_DLL_PATH not set in environment".
-        // LaunchServices would normally set this via Info.plist's
-        // `LSEnvironment`, but a direct spawn bypasses that path. We set
-        // it ourselves so we keep stdio piped to daw.log (an `open -na`
-        // form would detach stdio and route everything through launchd).
-        // Note: when bundled, Ardour also redirects its own stdout/stderr
-        // to `~/Library/Preferences/Ardour9/{stdout,stderr}.log`, so the
-        // foyer-side daw.log stays mostly empty on macOS — the link is
-        // logged below for users who tail it.
-        if let Some(bundle) = macos_app_bundle(&resolved_exec) {
-            tracing::info!(
-                "macOS .app bundle detected at {}; setting ARDOUR_BUNDLED=true",
-                bundle.display(),
-            );
-            tracing::info!(
-                "Ardour's own stdio will land in ~/Library/Preferences/Ardour9/{{stdout,stderr}}.log"
-            );
-            c.env("ARDOUR_BUNDLED", "true");
-        }
-        for a in extra_args {
-            c.arg(a);
-        }
-        c.arg(&session_dir);
-        c.arg(&snapshot_name);
-        c
-    };
+        tracing::info!(
+            "Ardour's own stdio will land in ~/Library/Preferences/Ardour9/{{stdout,stderr}}.log"
+        );
+        cmd.env("ARDOUR_BUNDLED", "true");
+    }
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    cmd.arg(&session_dir);
+    cmd.arg(&snapshot_name);
     // Apply any env overrides from config.yaml. These land on the bash
     // wrapper (or the direct exec) so the `:=` defaults in the script
     // pick them up instead of overriding.
     for (k, v) in env {
         cmd.env(k, v);
     }
-    if dev_root.is_some() {
-        if let Some(sr) = sample_rate_hint {
-            if !had_session {
-                cmd.env("FOYER_SESSION_SAMPLE_RATE", sr.to_string());
-            }
-        }
-    }
+    // FOYER_SESSION_SAMPLE_RATE is a vestige of the old bash heredoc —
+    // patching landed inline via `patch_ardour_session_sample_rate`
+    // above for both dev and system spawns, so the env var no longer
+    // serves a runtime purpose. Left out intentionally; an out-of-tree
+    // shim that reads the var would already have failed silently in
+    // the system-Ardour branch.
+    let _ = dev_root.as_ref();
     // The shim picks this up at library-constructor time and installs
     // a GTK toplevel watcher that auto-clicks Ardour's crash-recovery
     // dialog. `discard` is set for symmetry / logging only — the
@@ -2086,6 +1966,40 @@ fn preflight_session(
     (dir, name)
 }
 
+/// Try to read the configured MCPHttp port out of `project`'s
+/// `.ardour` file. Used by the reuse-existing-shim path when the
+/// shim's advert JSON didn't carry a `mcp_port` (older shim builds,
+/// Ardour 9.2 without `mcp_http` compiled in). Returns `None` if no
+/// `.ardour` file is found or it doesn't list an active MCPHttp
+/// protocol.
+///
+/// `project` can be either the project directory or the `.ardour`
+/// file directly — mirrors how the launcher accepts both.
+fn read_mcp_port_from_session_file(project: &Path) -> Option<u16> {
+    let session_file = if project.is_file() {
+        project.to_path_buf()
+    } else if project.is_dir() {
+        // Walk the directory for the first `.ardour` file. The shim
+        // advertises `session().path()` which is the project dir; the
+        // session file inside it has the same basename or one of the
+        // session-snapshot names.
+        std::fs::read_dir(project)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| {
+                p.extension().and_then(|s| s.to_str()) == Some("ardour")
+                    && !p
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.ends_with(".bak") || s.starts_with("."))
+            })?
+    } else {
+        return None;
+    };
+    crate::ardour_xml::read_mcp_http_port(&session_file)
+}
+
 /// Allocate a free TCP port for an MCPHttp listener. We bias the
 /// search to the [4820, 4900) range (4820 is Ardour's published
 /// default; staying close keeps firewall rules and dev-tooling
@@ -2252,7 +2166,27 @@ fn bootstrap_session_if_missing(
 /// case-insensitive `ardour*-new_empty_session` match and picks the
 /// first regular-file hit.
 fn find_new_empty_session_helper(resolved_exec: &Path) -> Option<PathBuf> {
-    let dir = resolved_exec.parent()?;
+    // Sibling check — system Ardour packages drop the helper next to
+    // `ardour-9`.
+    if let Some(dir) = resolved_exec.parent() {
+        if let Some(hit) = scan_for_helper(dir) {
+            return Some(hit);
+        }
+    }
+    // Dev-build layout: `build/session_utils/ardour9-new_empty_session`
+    // lives alongside `build/gtk2_ardour/ardour-9` (the binary). When
+    // we're running a dev build, walk up to the dev tree root and
+    // scan its `build/session_utils/` directory.
+    if let Some(root) = foyer_config::ardour_dev_root(resolved_exec) {
+        let session_utils = root.join("build/session_utils");
+        if let Some(hit) = scan_for_helper(&session_utils) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn scan_for_helper(dir: &Path) -> Option<PathBuf> {
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name();
         let lower = name.to_string_lossy().to_lowercase();
@@ -2264,4 +2198,71 @@ fn find_new_empty_session_helper(resolved_exec: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Source `ardev_common_waf.sh` from a dev tree root and return the
+/// env vars it defines as a `(name, value)` list. The script wires up
+/// the lib-path / data-path / config-path / backend-path env vars
+/// needed for an in-tree Ardour binary to find its companion .so's
+/// without an `install` step. We invoke bash to source it, then dump
+/// the env back out — same effect as the previous bash heredoc, but
+/// the env application happens in Rust so the rest of the spawn flow
+/// stays in one place.
+///
+/// `FOYER_ARDOUR_DEV_TREE` (when set) overrides the auto-detected
+/// dev root, so a `just` recipe can point us at any checkout without
+/// having to plant the binary at a specific path.
+fn load_ardour_dev_env(root: &Path) -> Vec<(String, String)> {
+    let waf = root.join("build/gtk2_ardour/ardev_common_waf.sh");
+    if !waf.is_file() {
+        return Vec::new();
+    }
+    // `source <script> && env -0` (NUL-separated env) avoids quoting
+    // issues for values that contain newlines. We compare against the
+    // *current* process env and only return entries that actually
+    // changed — keeps the spawn-side env minimal and audit-able.
+    let out = match std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -e; source {} >/dev/null 2>&1; env -0",
+            shell_escape(waf.to_string_lossy().as_ref())
+        ))
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        Ok(o) => {
+            tracing::warn!(
+                "foyer: sourcing {} returned status {}; dev-build env may be incomplete",
+                waf.display(),
+                o.status
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!("foyer: bash for {} failed: {e}", waf.display());
+            return Vec::new();
+        }
+    };
+    let mut delta = Vec::new();
+    for slice in out.split(|b| *b == 0) {
+        if slice.is_empty() {
+            continue;
+        }
+        let Ok(s) = std::str::from_utf8(slice) else {
+            continue;
+        };
+        if let Some(eq) = s.find('=') {
+            let key = &s[..eq];
+            let val = &s[eq + 1..];
+            // Skip transient bash internals — we only want the
+            // ardour-specific vars.
+            if matches!(key, "PWD" | "OLDPWD" | "SHLVL" | "_" | "PS1" | "PS4") {
+                continue;
+            }
+            if std::env::var(key).map(|cur| cur != val).unwrap_or(true) {
+                delta.push((key.to_string(), val.to_string()));
+            }
+        }
+    }
+    delta
 }

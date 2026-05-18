@@ -230,6 +230,13 @@ run *args='':
             cargo run --bin foyer -- configure --force >/dev/null
     fi
 
+    # Export the dev-tree paths so the spawner's `load_ardour_dev_env`
+    # picks them up without re-detecting from the binary location.
+    # Lets contributors with non-canonical layouts swap in a tree by
+    # setting FOYER_ARDOUR_DIR without us baking paths into Rust.
+    export FOYER_ARDOUR_DEV_TREE="$ARDOUR_DIR"
+    export FOYER_ARDOUR_SHIM_DIR="$ARDOUR_DIR/build/libs/surfaces/foyer_shim"
+
     cargo run --bin foyer -- serve \
         --listen 0.0.0.0:3838 \
         --web-root web \

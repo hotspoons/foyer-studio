@@ -527,10 +527,64 @@ export class MidiEditor extends LitElement {
       this.requestUpdate();
     };
     window.addEventListener("foyer:sequencer-layout-changed", this._onSequencerLayoutChanged);
+    // Subscribe to store changes so the "no instrument" banner picks
+    // up plugin inserts immediately. Cheap — the handler just nudges
+    // Lit to re-render, the diff handles the rest.
+    this._onStoreChange = () => this.requestUpdate();
+    window.__foyer?.store?.addEventListener?.("change", this._onStoreChange);
   }
   _reflectReadOnlyAttr() {
     if (this.readOnly) this.setAttribute("readonly", "");
     else this.removeAttribute("readonly");
+  }
+
+  /// Resolve the current track's plugin chain from the store snapshot.
+  /// Returns `null` when no session is loaded (so the banner doesn't
+  /// flash on cold boot); returns `[]` when the track is known but
+  /// carries zero plugins (the case we want to surface).
+  _currentTrackPlugins() {
+    try {
+      const tracks = window.__foyer?.store?.state?.session?.tracks;
+      if (!Array.isArray(tracks) || tracks.length === 0) return null;
+      const t = tracks.find((x) => x?.id === this.trackId);
+      return t ? (t.plugins || []) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  _insertDefaultInstrument() {
+    // The backend picks: gmsynth preferred (Ardour stock), falling
+    // back to any installed instrument, then any plugin whose name
+    // hints "synth". Debian sid builds of Ardour sometimes don't
+    // ship gmsynth at all, so we route the choice server-side
+    // rather than pinning a URI here. If the backend has nothing
+    // it broadcasts an Event::Error with code
+    // `no_instruments_installed` — the toast pipeline already
+    // surfaces that to the user.
+    if (!this.trackId) return;
+    window.__foyer?.ws?.send({
+      type: "add_default_instrument",
+      track_id: this.trackId,
+    });
+  }
+
+  _openInstrumentPicker() {
+    // Delegate to the plugin-picker-modal already used elsewhere in
+    // the UI. `lockedRole: "instrument"` biases its initial filter
+    // toward synths.
+    import("./plugin-picker-modal.js").then((mod) => {
+      const open = mod.openPluginPicker || mod.default?.openPluginPicker;
+      if (typeof open === "function") {
+        const trackName = window.__foyer?.store?.state?.session?.tracks
+          ?.find((t) => t?.id === this.trackId)?.name || "";
+        open({ trackId: this.trackId, trackName, lockedRole: "instrument" });
+      } else {
+        // Picker not registered in this UI variant — fall back to
+        // the gmsynth shortcut so the user can still proceed.
+        this._insertDefaultInstrument();
+      }
+    });
   }
 
   _convertSequencerToMidi() {
@@ -600,6 +654,10 @@ export class MidiEditor extends LitElement {
     window.removeEventListener("pointermove", this._onPointerMove);
     if (this._onSequencerLayoutChanged) {
       window.removeEventListener("foyer:sequencer-layout-changed", this._onSequencerLayoutChanged);
+    }
+    if (this._onStoreChange) {
+      window.__foyer?.store?.removeEventListener?.("change", this._onStoreChange);
+      this._onStoreChange = null;
     }
     this._stopStripResize(false);
     super.disconnectedCallback();
@@ -1222,6 +1280,11 @@ export class MidiEditor extends LitElement {
       selVelocity = count ? Math.round(sum / count) : null;
     }
 
+    const trackPlugins = this._currentTrackPlugins();
+    const needsInstrument = !this.readOnly
+      && this.trackId
+      && Array.isArray(trackPlugins)
+      && trackPlugins.length === 0;
     return html`
       ${this.readOnly && this.sequencerLayout ? html`
         <div class="seq-banner">
@@ -1232,6 +1295,19 @@ export class MidiEditor extends LitElement {
           </span>
           <button title="Archive the sequencer layout and make the notes editable"
                   @click=${() => this._convertSequencerToMidi()}>Convert to MIDI</button>
+        </div>
+      ` : null}
+      ${needsInstrument ? html`
+        <div class="seq-banner" data-instrument-banner>
+          <span class="icon">♪</span>
+          <span class="text">
+            This MIDI track has <strong>no instrument</strong> — notes won't make sound.
+            Insert one before recording or playing.
+          </span>
+          <button title="Pick a sensible default — gmsynth where available, otherwise the first installed synth"
+                  @click=${() => this._insertDefaultInstrument()}>Add instrument</button>
+          <button title="Browse installed synth plugins"
+                  @click=${() => this._openInstrumentPicker()}>Browse…</button>
         </div>
       ` : null}
       <div class="toolbar">

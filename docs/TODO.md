@@ -672,7 +672,7 @@ aren't already DAW-fluent.
 
 ### Polymorphic time arguments — one tool, sample-OR-BBT
 
-- [ ] Refactor every Foyer tool that takes a time component to
+- [x] Refactor every Foyer tool that takes a time component to
   accept EITHER samples/seconds OR BBT (`{bar, beat, tick}`), with
   exactly one provided. Ardour's `mcp_http` recently split each
   multi-form tool into two explicit variants (`_sample` + `_bbt`)
@@ -700,7 +700,7 @@ aren't already DAW-fluent.
 
 ### Track + region creation: "what plays through this?" in one shot
 
-- [ ] **`tracks.create_with_instrument`** path — extend the existing
+- [x] **`tracks.create_with_instrument`** path — extend the existing
   `tracks.create` to atomically accept an instrument selection +
   optional patch (program / channel / GM map). Today the flow is
   three commands: `tracks.create` → `plugins.insert(instrument_uri)`
@@ -708,7 +708,7 @@ aren't already DAW-fluent.
   Schema-side that's already half there (`instrument_uri` /
   `plugins[]` / `copy_from_track_id` on `Op::Create`); needs a
   `gm_program?: u8` / `channel?: u8` extension on the same op.
-- [ ] **UI prompt on first edit of an empty MIDI track** — when the
+- [x] **UI prompt on first edit of an empty MIDI track** — when the
   user opens the piano roll / beat sequencer on a MIDI track with
   no instrument inserted, surface a modal: "This track has no
   instrument. Pick one before recording / playing." Drop-down
@@ -719,7 +719,7 @@ aren't already DAW-fluent.
   explicitly opts in. Matches the existing midi-track-setup skill
   the agent already knows — this lifts it into the UI for
   non-agent workflows.
-- [ ] **Bulk MIDI region + notes in one call** (mirror Ardour's
+- [x] **Bulk MIDI region + notes in one call** (mirror Ardour's
   `midi_note_import_json_to_new_region_*`). `regions.create_midi`
   grows an optional `notes: [{pitch, on_beat, off_beat, velocity}]`
   array; when set, the region is created AND populated atomically.
@@ -728,16 +728,16 @@ aren't already DAW-fluent.
 
 ### Plugins: parameters at insert time, addressable by name
 
-- [ ] **`plugins.insert` accepts a `params: [{name | index, value}]`
+- [x] **`plugins.insert` accepts a `params: [{name | index, value}]`
   array** so an LLM can ship a fully-configured plugin in one
   call. Today: insert, then per-param `set_parameter`. Each round
   trip is a turn the agent doesn't have.
-- [ ] **Address parameters by control name** alongside index. Mirror
+- [x] **Address parameters by control name** alongside index. Mirror
   Ardour's `plugin_set_parameter_by_control_value/_interface` —
   expose both `name` (display label or symbol) and `index` on
   every parameter setter. Index is stable; name is human-readable
   and what the agent will pick first if both are documented.
-- [ ] **`plugins.describe(track_id, plugin_id)` returns the full
+- [x] **`plugins.describe(track_id, plugin_id)` returns the full
   parameter graph** including current values, ranges, units,
   enum labels, scale curve. Foyer already has all this on the
   schema; the agent tool surface just doesn't expose a per-plugin
@@ -751,29 +751,31 @@ the entire mix state in one operation. Common live + production
 use case (verse balance vs chorus balance, A/B comparison of
 mixes, recall a starting point after deep edits).
 
-- [ ] Schema (`crates/foyer-schema/src/mixer.rs` new):
+- [x] Schema (`crates/foyer-schema/src/mixer.rs` new):
       `MixerScene { id, name, color?, created_at, snapshots: [{
         track_id, gain_db, pan, mute, solo, send_levels_db: [{
         target_track_id, db }] }] }`. Session carries
       `Vec<MixerScene>` + an optional `active_scene_id` (the last
       one recalled — UI shows a "drifted from <name>" indicator
       when current state diverges).
-- [ ] Backend trait — `store_mixer_scene(name, color?)`,
+- [x] Backend trait — `store_mixer_scene(name, color?)`,
       `recall_mixer_scene(id)`, `list_mixer_scenes`, `delete_mixer_scene`,
       `rename_mixer_scene`. Stub stores in `Session.mixer_scenes`;
       Ardour shim wraps `Session::store_mixer_scene` / `recall_mixer_scene`
       (Ardour ships these natively — `daw_proxy` already exposes
       them).
-- [ ] Agent tool — `mixer.store_scene(name, color?)`,
+- [x] Agent tool — `mixer.store_scene(name, color?)`,
       `mixer.recall_scene(id|name)`, `mixer.list_scenes`,
       `mixer.delete_scene`. Use the same schema for natural language
       ("recall the chorus scene").
-- [ ] UI — a compact scene strip docked above the mixer:
+- [/] UI — a compact scene strip docked above the mixer:
       one chip per scene with a colored swatch; click to recall,
       right-click for rename/delete/duplicate; a "Store…" button
       next to the chip row prompts for a name. "Drifted" indicator
       when the active scene's snapshot differs from current
-      controls (compare-by-value, tolerance ~0.1 dB).
+      controls (compare-by-value, tolerance ~0.1 dB). *Schema +
+      backend + agent shipped; the chip strip is the remaining
+      half — separate UI pass, tracked here.*
 
 ### "Sections" — replacement for markers / ranges / auto-loop / auto-punch
 
@@ -793,7 +795,7 @@ ask what they did wrong.
 
 Foyer's proposal — collapse all four into ONE primitive: **Section**.
 
-- [ ] Schema:
+- [x] Schema:
       ```
       Section {
         id, name, start_samples, end_samples: Option<u64>, color,
@@ -810,7 +812,7 @@ Foyer's proposal — collapse all four into ONE primitive: **Section**.
       - `is_navigation` → shows up in the section nav bar / arrow-
         key cycle. Default true. Allows hiding utility sections
         without deleting them.
-- [ ] UI — a **Section bar** strip above the timeline (not crammed
+- [/] UI — a **Section bar** strip above the timeline (not crammed
       into the ruler — its own affordance, ~24 px tall):
       - Each section renders as a colored pill spanning its bounds
         (or a single thin tab for 0-length cues).
@@ -825,7 +827,7 @@ Foyer's proposal — collapse all four into ONE primitive: **Section**.
         text-input mode → name → press Enter. Or right-click the
         ruler at a time position. Or `Cmd+Shift+M` (mnemonic:
         "Mark"). Or via the agent.
-- [ ] Backend trait — `list_sections`, `create_section`,
+- [x] Backend trait — `list_sections`, `create_section`,
       `update_section`, `delete_section`. Stub stores natively;
       Ardour shim translates:
       - `is_loop_target=true` → maps to Ardour's auto-loop location
@@ -836,10 +838,10 @@ Foyer's proposal — collapse all four into ONE primitive: **Section**.
       - range → Ardour `markers_add_range_*`
       The Foyer-side abstraction is one primitive; the Ardour-side
       plumbing is its existing four primitives wired up automatically.
-- [ ] Agent tool — `sections.list / create / update / delete /
+- [x] Agent tool — `sections.list / create / update / delete /
       set_loop_target / set_punch_target`. Each accepts the polymorphic
       time arg (samples OR BBT — see above).
-- [ ] Workflow examples this enables:
+- [/] Workflow examples this enables:
       - "Mark this 8 bars as 'Verse 1'" → creates a section.
       - "Loop the chorus" → finds section named "Chorus" → sets
         `is_loop_target=true` → if transport.loop wasn't already
@@ -848,33 +850,35 @@ Foyer's proposal — collapse all four into ONE primitive: **Section**.
         `is_punch_target=true` + sets transport.record_armed=true.
         ONE agent intent.
       - "Skip to the bridge" → seeks to the section's start.
-- [ ] Migration: existing Ardour sessions opened in Foyer read
+- [/] Migration: existing Ardour sessions opened in Foyer read
       markers/ranges + auto-loop/auto-punch from the .ardour file
       and surface them as sections automatically. Saving back
       writes the same primitives, so round-tripping doesn't lose
-      anything.
+      anything. *Stub round-trips natively; Ardour shim translation
+      lands when we move off 9.2 onto the `mcp_http` build that
+      exposes markers/ranges over the wire.*
 
 ### Smaller wins worth picking off
 
-- [ ] **`regions.normalize`** — audio peak normalization (Ardour
+- [x] **`regions.normalize`** — audio peak normalization (Ardour
       has it; we don't). One sample-pass scan + a `gain_linear`
       patch in one undo group.
-- [ ] **`session.snapshot(name?)`** — Ardour's `quick_snapshot`,
+- [x] **`session.snapshot(name?)`** — Ardour's `quick_snapshot`,
       writes a named copy of the current .ardour file alongside
       the session so users can A/B without leaving the project.
       Wrap `daw_proxy.call("session_quick_snapshot")` for the
       Ardour case + native impl for the stub. Surface in the UI
       as a "📸 Snapshot" button in the session-info modal.
-- [ ] **`tracks.set_rec_safe`** — separate from rec_enable. When
+- [x] **`tracks.set_rec_safe`** — separate from rec_enable. When
       `rec_safe=true` the track refuses to arm even on a global
       record + arm — protects keeper takes from accidental
       overwrite. Useful during long sessions where the user wants
       to keep arming new tracks without worrying about hot mics.
       Tiny addition: one bool on `Track`, one UI button (matches
       the existing M/S/R/A row), one ControlSet path.
-- [ ] **`plugins.describe`** (full parameter graph readout) — see
+- [x] **`plugins.describe`** (full parameter graph readout) — see
       above under Plugins. Cheap, high agent value.
-- [ ] **MIDI patch graph via `list_midi_patch_names`** — already
+- [x] **MIDI patch graph via `list_midi_patch_names`** — already
       shipped but worth surfacing in the agent's instrument-picker
       response so it can choose "Acoustic Grand Piano" vs "Honky
       Tonk" vs "Electric Grand" by name instead of program number.
@@ -883,7 +887,7 @@ Foyer's proposal — collapse all four into ONE primitive: **Section**.
 
 ### Plumbing debt surfaced by the MCP work
 
-- [ ] **One Ardour launch path, not two.** Today
+- [x] **One Ardour launch path, not two.** Today
   [crates/foyer-cli/src/main.rs:1278-1431](../crates/foyer-cli/src/main.rs#L1278)
   is ~150 lines of bash heredoc embedded in Rust — the dev-build
   branch sources `ardev_common_waf.sh`, prepends the shim to
@@ -915,7 +919,7 @@ Foyer's proposal — collapse all four into ONE primitive: **Section**.
     is "did the operator point us at a dev tree?". A boolean env
     var (or just the presence of `FOYER_ARDOUR_DEV_TREE`) does
     the same job without filesystem heuristics.
-- [ ] **Discover MCPHttp port on reuse-existing-shim path.** The
+- [x] **Discover MCPHttp port on reuse-existing-shim path.** The
   reuse path in `launch_and_wait_for_shim` ([main.rs:1164](../crates/foyer-cli/src/main.rs#L1164))
   reattaches to a still-running Ardour without forking — we don't
   know what MCP port the user's Ardour bound to, so the session
@@ -962,6 +966,14 @@ Foyer's proposal — collapse all four into ONE primitive: **Section**.
     + the cold-start race). (2) is the absolute fallback for
     pathological reattach scenarios where neither shim path is
     available, but probably not worth implementing.
+  - **Shipped**: (1) — `Advertisement.mcp_port: Option<u16>` field
+    added to `crates/foyer-backend-host/src/discovery.rs` (forward-
+    compatible JSON; absent on 9.2 builds). (2) — XML fallback via
+    `read_mcp_port_from_session_file` in foyer-cli for builds that
+    don't populate the advert yet. Both feed the same
+    `probe_mcp_http` confirmation step so a configured-but-not-bound
+    port doesn't mis-register. (3) reserved for if (1) turns out
+    racy on shim cold-start once we move past Ardour 9.2.
 
 ## i18n / runtime translation
 

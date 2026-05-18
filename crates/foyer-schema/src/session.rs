@@ -372,6 +372,24 @@ pub struct Session {
     /// or `available=false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spectrum: Option<SpectrumCapabilities>,
+    /// Stored mixer scenes — named snapshots of the entire mix state.
+    /// Recall flips every track's fader / pan / mute / solo / send
+    /// levels in one operation. See [`crate::MixerScene`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mixer_scenes: Vec<crate::MixerScene>,
+    /// The scene most recently recalled. Drives the UI's "drifted
+    /// from <name>" indicator: when the active scene's snapshot
+    /// diverges from the current track state by more than ~0.1 dB,
+    /// the UI surfaces the drift hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_scene_id: Option<EntityId>,
+    /// User-defined timeline sections (markers + ranges + auto-loop /
+    /// auto-punch unified into one primitive). See [`crate::Section`].
+    /// Empty session = no sections; the Ardour shim translates Ardour's
+    /// native markers + ranges + auto-loop/auto-punch into this single
+    /// surface at session-open time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<crate::Section>,
 }
 
 const fn default_sample_rate() -> u32 {
@@ -513,6 +531,9 @@ mod tests {
             meta: serde_json::json!({ "project": "demo" }),
             scripting: None,
             spectrum: None,
+            mixer_scenes: vec![],
+            active_scene_id: None,
+            sections: vec![],
         };
 
         let j = serde_json::to_string(&session).unwrap();

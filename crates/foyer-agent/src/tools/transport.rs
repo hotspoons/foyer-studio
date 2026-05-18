@@ -2,11 +2,11 @@
 //! Transport control — play, stop, record, locate, loop.
 
 use async_trait::async_trait;
-use foyer_schema::{ControlValue, EntityId};
+use foyer_schema::{ControlValue, EntityId, TimeArg};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::tools::{Tool, ToolContext, ToolError, ToolResult};
+use crate::tools::{tempo_map_from_snapshot, Tool, ToolContext, ToolError, ToolResult};
 
 pub struct TransportTool;
 
@@ -18,8 +18,14 @@ enum Op {
     Record {
         armed: bool,
     },
+    /// Polymorphic locate. EITHER `samples` (legacy, kept for back
+    /// compat) OR the unified `time` arg (samples | seconds | BBT).
+    /// If both forms are set, `time` wins.
     Locate {
-        samples: u64,
+        #[serde(default)]
+        samples: Option<u64>,
+        #[serde(default)]
+        time: Option<TimeArg>,
     },
     Loop {
         enabled: bool,
@@ -74,7 +80,10 @@ impl Tool for TransportTool {
 
     fn description(&self) -> &'static str {
         "Drive the engine's transport. Subcommands: play, stop, \
-         record(armed: bool), locate(samples: u64), loop(enabled: bool), \
+         record(armed: bool), \
+         locate(time: {samples?,seconds?,bbt?{bar,beat,tick}}) — exactly \
+         one field; legacy positional `samples: u64` is also accepted, \
+         loop(enabled: bool), \
          get (returns current position + state including tempo/time \
          signature), wait(seconds: u32) — block the current turn for a \
          bounded delay (max 600 s) so a multi-step plan like \
@@ -101,7 +110,29 @@ impl Tool for TransportTool {
                             "set_metronome"]
                 },
                 "armed": { "type": "boolean" },
-                "samples": { "type": "integer", "minimum": 0 },
+                "samples": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "locate: legacy sample position. Prefer `time` for new code."
+                },
+                "time": {
+                    "type": "object",
+                    "description": "Polymorphic time: provide EXACTLY one of `samples`, `seconds`, or `bbt`. The server resolves to samples using the live tempo map.",
+                    "properties": {
+                        "samples": { "type": "integer", "minimum": 0 },
+                        "seconds": { "type": "number", "minimum": 0 },
+                        "bbt": {
+                            "type": "object",
+                            "required": ["bar", "beat", "tick"],
+                            "properties": {
+                                "bar": { "type": "integer", "minimum": 1 },
+                                "beat": { "type": "integer", "minimum": 1 },
+                                "tick": { "type": "integer", "minimum": 0 }
+                            }
+                        }
+                    },
+                    "additionalProperties": false
+                },
                 "enabled": { "type": "boolean" },
                 "seconds": {
                     "type": "integer",
@@ -173,15 +204,34 @@ impl Tool for TransportTool {
                     "record disarmed"
                 }))
             }
-            Op::Locate { samples } => {
+            Op::Locate { samples, time } => {
+                let resolved = match (time, samples) {
+                    (Some(t), _) => {
+                        // Pull the live tempo map for BBT/seconds → samples
+                        let snap = backend
+                            .snapshot()
+                            .await
+                            .map_err(|e| ToolError::Execution(e.to_string()))?;
+                        let map = tempo_map_from_snapshot(&snap);
+                        t.to_samples(&map)
+                            .map_err(|e| ToolError::InvalidArgs(format!("locate: {e}")))?
+                    }
+                    (None, Some(s)) => s,
+                    (None, None) => {
+                        return Err(ToolError::InvalidArgs(
+                            "locate: provide `time` (samples|seconds|bbt) or legacy `samples`"
+                                .into(),
+                        ));
+                    }
+                };
                 backend
                     .set_control(
                         EntityId::new("transport.position"),
-                        ControlValue::Int(samples as i64),
+                        ControlValue::Int(resolved as i64),
                     )
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
-                Ok(ToolResult::ok(format!("transport located to {samples}")))
+                Ok(ToolResult::ok(format!("transport located to {resolved}")))
             }
             Op::Loop { enabled } => {
                 backend

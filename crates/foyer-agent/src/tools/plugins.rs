@@ -14,12 +14,100 @@ use crate::tools::{Tool, ToolContext, ToolError, ToolResult};
 
 pub struct PluginsTool;
 
-/// One entry in a `set_params` batch — control id + the target value
-/// in the parameter's natural scale.
+/// One entry in a `set_params` / `insert.params` batch. Address the
+/// target param by EITHER `control_id` (stable, fully-qualified —
+/// e.g. `plugin.<id>.cutoff`), OR `name` (display label or symbol,
+/// case-insensitive — what a user would type), OR `index` (positional
+/// — survives plugin renames). The resolver picks the first one set;
+/// supplying more than one is rejected as ambiguous.
 #[derive(Debug, Deserialize)]
 pub struct ParamChange {
-    pub control_id: String,
+    #[serde(default)]
+    pub control_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub index: Option<u32>,
     pub value: f64,
+}
+
+impl ParamChange {
+    /// How many addressing fields are set. The validator wants exactly 1.
+    fn populated(&self) -> usize {
+        usize::from(self.control_id.is_some())
+            + usize::from(self.name.is_some())
+            + usize::from(self.index.is_some())
+    }
+}
+
+/// Resolve a [`ParamChange`] to the live `control_id` on a specific
+/// plugin instance. Returns `InvalidArgs` if zero / multiple fields
+/// are set, or if the lookup misses.
+fn resolve_param_id(
+    change: &ParamChange,
+    plugin: &foyer_schema::PluginInstance,
+) -> Result<EntityId, ToolError> {
+    match change.populated() {
+        0 => {
+            return Err(ToolError::InvalidArgs(
+                "param: provide one of `control_id`, `name`, or `index`".into(),
+            ));
+        }
+        n if n > 1 => {
+            return Err(ToolError::InvalidArgs(format!(
+                "param: provide exactly one of {{control_id, name, index}} — got {n}"
+            )));
+        }
+        _ => {}
+    };
+    if let Some(cid) = change.control_id.as_deref() {
+        // Verify the control_id actually belongs to this plugin —
+        // otherwise the shim would silently drop the set_control.
+        if !plugin.params.iter().any(|p| p.id.as_str() == cid) {
+            return Err(ToolError::InvalidArgs(format!(
+                "param control_id '{cid}' is not on plugin '{}' — \
+                 call plugins.describe for the live param list",
+                plugin.id.as_str()
+            )));
+        }
+        return Ok(EntityId::new(cid.to_string()));
+    }
+    if let Some(name) = change.name.as_deref() {
+        // Match against label first (most common — that's what the
+        // user sees in the UI), then the id's last segment as a
+        // fallback for plugins that expose param symbols.
+        let n = name.to_lowercase();
+        let hit = plugin.params.iter().find(|p| {
+            p.label.eq_ignore_ascii_case(name)
+                || p.label.to_lowercase().contains(&n)
+                || p.id
+                    .as_str()
+                    .split('.')
+                    .last()
+                    .map_or(false, |s| s.eq_ignore_ascii_case(name))
+        });
+        return hit.map(|p| p.id.clone()).ok_or_else(|| {
+            ToolError::InvalidArgs(format!(
+                "param '{name}' not found on plugin '{}' — \
+                 call plugins.describe for valid labels",
+                plugin.id.as_str()
+            ))
+        });
+    }
+    if let Some(idx) = change.index {
+        return plugin
+            .params
+            .get(idx as usize)
+            .map(|p| p.id.clone())
+            .ok_or_else(|| {
+                ToolError::InvalidArgs(format!(
+                    "param index {idx} out of range — plugin '{}' has {} params",
+                    plugin.id.as_str(),
+                    plugin.params.len()
+                ))
+            });
+    }
+    unreachable!()
 }
 
 /// Server-side cap on a single `set_params` batch. 256 is generous
@@ -49,11 +137,23 @@ enum Op {
     Describe {
         plugin_id: String,
     },
+    /// Insert a plugin onto a track, optionally pre-loading parameter
+    /// values + a preset in one atomic call. The `params` array lets
+    /// the agent ship a fully-configured plugin in one round-trip
+    /// instead of insert → describe → set_param × N. Param addressing
+    /// is polymorphic (control_id | name | index). If both `params`
+    /// and `preset_uri` are set, the preset is applied FIRST then the
+    /// explicit params layer on top — same semantics as the UI's
+    /// "load preset, then tweak" flow.
     Insert {
         track_id: String,
         plugin_uri: String,
         #[serde(default)]
         index: Option<u32>,
+        #[serde(default)]
+        params: Option<Vec<ParamChange>>,
+        #[serde(default)]
+        preset_uri: Option<String>,
     },
     Remove {
         plugin_id: String,
@@ -68,9 +168,18 @@ enum Op {
     },
     /// Set a single plugin parameter. `value` is in the parameter's
     /// natural scale (post-curve) — see `describe.params[i].range`
-    /// and `scale` for what the model should pick from.
+    /// and `scale` for what the model should pick from. Address the
+    /// param by `control_id` (legacy / fully-qualified) OR by
+    /// `plugin_id` + (`name` | `index`).
     SetParam {
-        control_id: String,
+        #[serde(default)]
+        control_id: Option<String>,
+        #[serde(default)]
+        plugin_id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        index: Option<u32>,
         value: f64,
     },
     /// Bulk parameter set against ONE plugin. Equivalent to N
@@ -126,23 +235,24 @@ impl Tool for PluginsTool {
     }
 
     fn description(&self) -> &'static str {
-        "Inspect AND modify the plugin chain. Subcommands: \
-         catalog(query?, limit?) (search installed plugins by name / vendor / uri — \
-         default cap is 50 results, raise `limit` or refine `query` to narrow), \
+        "Inspect AND modify the plugin chain. Param addressing is \
+         polymorphic — every param-targeting field accepts {control_id} \
+         OR {plugin_id + name} OR {plugin_id + index}. Subcommands: \
+         catalog(query?, limit?) (search installed plugins; default cap 50), \
          on_track(track_id), \
-         describe(plugin_id) (full param list with control_ids + ranges), \
-         insert(track_id, plugin_uri, index?), \
+         describe(plugin_id) — full param list with control_ids + ranges + \
+            scales + enum labels + current values, \
+         insert(track_id, plugin_uri, index?, params?:[…], preset_uri?) — \
+            atomic insert + preset + per-param set in one undo group, \
          remove(plugin_id), \
          move(plugin_id, new_index), \
          set_bypass(plugin_id, bypassed), \
-         set_param(control_id, value) — for a SINGLE change, \
-         set_params(plugin_id, params:[{control_id,value}…]) — \
-         BATCHED, prefer this when programming a synth patch (one tool \
-         call applies the whole 30-knob preset; capped at 256 params), \
+         set_param(control_id | (plugin_id + name|index), value), \
+         set_params(plugin_id, params:[{control_id|name|index, value}…]) — \
+            BATCHED, prefer this when programming a synth patch, \
          list_presets(plugin_id), \
          load_preset(plugin_id, preset_uri), \
-         duplicate(source_plugin_id, target_track_id, index?) — \
-         clones URI + current params + active preset to another track."
+         duplicate(source_plugin_id, target_track_id, index?)."
     }
 
     fn schema(&self) -> Value {
@@ -157,12 +267,14 @@ impl Tool for PluginsTool {
                              "list_presets", "load_preset", "duplicate"] },
                 "params": {
                     "type": "array",
-                    "description": "set_params: list of {control_id, value} pairs to apply against one plugin in a single round-trip.",
+                    "description": "set_params / insert.params: list of {address, value} pairs against one plugin. Address EACH entry by exactly one of `control_id`, `name`, or `index`.",
                     "items": {
                         "type": "object",
-                        "required": ["control_id", "value"],
+                        "required": ["value"],
                         "properties": {
                             "control_id": { "type": "string" },
+                            "name": { "type": "string", "description": "Display label or symbol — case-insensitive." },
+                            "index": { "type": "integer", "minimum": 0, "description": "Positional index in the plugin's param list." },
                             "value": { "type": "number" }
                         }
                     }
@@ -174,6 +286,7 @@ impl Tool for PluginsTool {
                 "new_index": { "type": "integer", "minimum": 0 },
                 "bypassed": { "type": "boolean" },
                 "control_id": { "type": "string" },
+                "name": { "type": "string", "description": "set_param: param label/symbol when addressing by name." },
                 "value": { "type": "number" },
                 "preset_uri": { "type": "string" },
                 "source_plugin_id": { "type": "string" },
@@ -349,23 +462,114 @@ impl Tool for PluginsTool {
                 track_id,
                 plugin_uri,
                 index,
+                params,
+                preset_uri,
             } => {
-                backend
+                // Wrap the whole insert + preset + params batch in one
+                // undo group so a Ctrl-Z unwinds the entire configured
+                // plugin instead of just the params layer.
+                let _ = backend
+                    .undo_group_begin(format!("Insert {plugin_uri}"))
+                    .await;
+                let insert_res = backend
                     .add_plugin(
                         EntityId::new(track_id.clone()),
                         plugin_uri.clone(),
                         index,
                         None,
                     )
+                    .await;
+                if let Err(e) = insert_res {
+                    let _ = backend.undo_group_end().await;
+                    return Err(ToolError::Execution(e.to_string()));
+                }
+                // Locate the just-inserted plugin id by re-snapshotting
+                // and finding the last plugin on the track that matches
+                // the URI — host doesn't return the id from add_plugin
+                // directly.
+                let snap = backend
+                    .snapshot()
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
+                let track = snap
+                    .tracks
+                    .iter()
+                    .find(|t| t.id.as_str() == track_id)
+                    .ok_or_else(|| {
+                        ToolError::Execution(format!(
+                            "track {track_id} disappeared between insert and snapshot"
+                        ))
+                    })?;
+                let plugin = track
+                    .plugins
+                    .iter()
+                    .rev()
+                    .find(|p| p.uri.as_deref() == Some(plugin_uri.as_str()))
+                    .ok_or_else(|| {
+                        ToolError::Execution(format!(
+                            "could not locate inserted plugin '{plugin_uri}' on track {track_id} \
+                             — check the host's plugins_list echo"
+                        ))
+                    })?;
+                let pid = plugin.id.clone();
+                // Optional preset application — first, so the explicit
+                // `params` overlay always wins.
+                if let Some(preset) = preset_uri.as_deref() {
+                    backend
+                        .load_plugin_preset(pid.clone(), EntityId::new(preset.to_string()))
+                        .await
+                        .map_err(|e| ToolError::Execution(e.to_string()))?;
+                }
+                let mut applied = 0usize;
+                if let Some(params) = params {
+                    if params.len() > MAX_SET_PARAMS_BATCH {
+                        let _ = backend.undo_group_end().await;
+                        return Err(ToolError::InvalidArgs(format!(
+                            "insert.params batch size {} exceeds cap of {}",
+                            params.len(),
+                            MAX_SET_PARAMS_BATCH,
+                        )));
+                    }
+                    for change in &params {
+                        let cid = match resolve_param_id(change, plugin) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                let _ = backend.undo_group_end().await;
+                                return Err(e);
+                            }
+                        };
+                        if let Err(e) = backend
+                            .set_control(cid, ControlValue::Float(change.value))
+                            .await
+                        {
+                            let _ = backend.undo_group_end().await;
+                            return Err(ToolError::Execution(e.to_string()));
+                        }
+                        applied += 1;
+                    }
+                }
+                let _ = backend.undo_group_end().await;
                 Ok(ToolResult::ok(format!(
-                    "inserted {plugin_uri} on track {track_id}{}",
+                    "inserted {plugin_uri} on track {track_id}{}{}{}",
                     match index {
                         Some(i) => format!(" @ {i}"),
                         None => String::new(),
-                    }
-                )))
+                    },
+                    if let Some(p) = preset_uri.as_deref() {
+                        format!(" · preset '{p}'")
+                    } else {
+                        String::new()
+                    },
+                    if applied > 0 {
+                        format!(" · {applied} params set")
+                    } else {
+                        String::new()
+                    },
+                ))
+                .with_data(json!({
+                    "plugin_id": pid.as_str(),
+                    "params_applied": applied,
+                })))
             }
             Op::Remove { plugin_id } => {
                 backend
@@ -427,7 +631,13 @@ impl Tool for PluginsTool {
                     )))
                 }
             }
-            Op::SetParam { control_id, value } => {
+            Op::SetParam {
+                control_id,
+                plugin_id,
+                name,
+                index,
+                value,
+            } => {
                 // Validate against the live snapshot — the shim
                 // happily accepts set_control on bogus ids and drops
                 // them silently. Surface that here as InvalidArgs so
@@ -438,41 +648,75 @@ impl Tool for PluginsTool {
                     .snapshot()
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
-                let mut found: Option<&foyer_schema::Parameter> = None;
-                'outer: for t in &snap.tracks {
-                    for p in &t.plugins {
-                        for param in &p.params {
-                            if param.id.as_str() == control_id {
-                                found = Some(param);
-                                break 'outer;
+                let (resolved_id, label, range) = if let Some(cid) = control_id.as_deref() {
+                    // Legacy path — direct control_id; locate the
+                    // parameter on whatever plugin owns it.
+                    let mut found: Option<&foyer_schema::Parameter> = None;
+                    'outer: for t in &snap.tracks {
+                        for p in &t.plugins {
+                            for param in &p.params {
+                                if param.id.as_str() == cid {
+                                    found = Some(param);
+                                    break 'outer;
+                                }
                             }
                         }
                     }
-                }
-                let param = found.ok_or_else(|| {
-                    ToolError::InvalidArgs(format!(
-                        "unknown control_id '{control_id}' — call plugins.describe to list \
-                         valid control_ids for a given plugin"
-                    ))
-                })?;
-                if let Some([lo, hi]) = param.range {
+                    let param = found.ok_or_else(|| {
+                        ToolError::InvalidArgs(format!(
+                            "unknown control_id '{cid}' — call plugins.describe to list \
+                             valid control_ids for a given plugin"
+                        ))
+                    })?;
+                    (
+                        EntityId::new(cid.to_string()),
+                        param.label.clone(),
+                        param.range,
+                    )
+                } else {
+                    // New path — address by plugin_id + (name | index).
+                    let pid = plugin_id.as_deref().ok_or_else(|| {
+                        ToolError::InvalidArgs(
+                            "set_param: provide `control_id`, or `plugin_id` + (`name`|`index`)"
+                                .into(),
+                        )
+                    })?;
+                    let plugin = snap
+                        .tracks
+                        .iter()
+                        .flat_map(|t| t.plugins.iter())
+                        .find(|p| p.id.as_str() == pid)
+                        .ok_or_else(|| {
+                            ToolError::InvalidArgs(format!("unknown plugin_id '{pid}'"))
+                        })?;
+                    let change = ParamChange {
+                        control_id: None,
+                        name: name.clone(),
+                        index,
+                        value,
+                    };
+                    let cid = resolve_param_id(&change, plugin)?;
+                    let param = plugin
+                        .params
+                        .iter()
+                        .find(|p| p.id.as_str() == cid.as_str())
+                        .expect("resolve_param_id returned id not on plugin (BUG)");
+                    (cid, param.label.clone(), param.range)
+                };
+                if let Some([lo, hi]) = range {
                     if value < lo || value > hi {
                         return Err(ToolError::InvalidArgs(format!(
-                            "value {value} out of range for '{}' [{lo}, {hi}]",
-                            param.label
+                            "value {value} out of range for '{label}' [{lo}, {hi}]",
                         )));
                     }
                 }
                 backend
-                    .set_control(
-                        EntityId::new(control_id.clone()),
-                        ControlValue::Float(value),
-                    )
+                    .set_control(resolved_id.clone(), ControlValue::Float(value))
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 Ok(ToolResult::ok(format!(
-                    "{} ({}) ← {value}",
-                    param.label, control_id
+                    "{label} ({}) ← {value}",
+                    resolved_id.as_str()
                 )))
             }
             Op::SetParams { plugin_id, params } => {
@@ -510,20 +754,16 @@ impl Tool for PluginsTool {
                 // set_controls. Half-applying a patch leaves the
                 // plugin in a worse state than not touching it,
                 // which is the opposite of what Stop-and-retry
-                // expects.
+                // expects. Address can be `control_id`, `name`, or
+                // `index` (mutually exclusive).
                 let mut resolved = Vec::with_capacity(params.len());
                 for change in &params {
-                    let Some(param) = plugin
+                    let cid = resolve_param_id(change, plugin)?;
+                    let param = plugin
                         .params
                         .iter()
-                        .find(|p| p.id.as_str() == change.control_id)
-                    else {
-                        return Err(ToolError::InvalidArgs(format!(
-                            "control_id '{}' is not a parameter of plugin '{}' \
-                             (call plugins.describe to list valid control_ids)",
-                            change.control_id, plugin_id,
-                        )));
-                    };
+                        .find(|p| p.id == cid)
+                        .expect("resolve_param_id returned id not on plugin (BUG)");
                     if let Some([lo, hi]) = param.range {
                         if change.value < lo || change.value > hi {
                             return Err(ToolError::InvalidArgs(format!(
@@ -532,7 +772,7 @@ impl Tool for PluginsTool {
                             )));
                         }
                     }
-                    resolved.push((change.control_id.clone(), change.value, param.label.clone()));
+                    resolved.push((cid.as_str().to_string(), change.value, param.label.clone()));
                 }
                 // Apply. We could parallelise with `join_all` here,
                 // but most backends serialise set_control on the
