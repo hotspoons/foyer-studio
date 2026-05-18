@@ -265,12 +265,13 @@ export class PhoneApp extends LitElement {
         <!--
           AI agent FAB. Speech-to-text into the chat lets the user
           drive transport / record / sequencing from the phone
-          without touching the phone screen.  Gated on the
-          `agent_send` RBAC tag — LAN connections + admin +
+          without touching the phone screen. Gated on the
+          'agent_send' RBAC tag — LAN connections + admin +
           session_controller see it; performers and viewers don't.
-          Same role mask `foyer-server`'s WS dispatch already
+          Same role mask 'foyer-server' WS dispatch already
           enforces, so the gate is UX sugar (the server is still
-          the security boundary).
+          the security boundary). NOTE: avoid backticks in this
+          comment — they end the surrounding html template literal.
         -->
         <foyer-agent-panel></foyer-agent-panel>
       ` : null}

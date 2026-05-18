@@ -174,14 +174,30 @@ impl Tool for SessionTool {
                 let plugin_count: usize = snap.tracks.iter().map(|t| t.plugins.len()).sum();
                 let sr = backend.sample_rate();
                 let pos = backend.transport_position_samples();
-                Ok(ToolResult::ok(format!(
-                    "{track_count} tracks · {plugin_count} plugins · pos={pos} sr={sr}"
-                ))
-                .with_data(json!({
+                // Signal "no session loaded" to the agent on the
+                // cheapest inspection call so it can pivot to
+                // session.open / session.new BEFORE trying to mutate.
+                // The presence of a Master bus is the cleanest "real
+                // session" tell — the launcher stub backend reports
+                // zero tracks and no Master.
+                let session_loaded = !snap.tracks.is_empty()
+                    && snap
+                        .tracks
+                        .iter()
+                        .any(|t| matches!(t.kind, foyer_schema::TrackKind::Master));
+                let summary = if session_loaded {
+                    format!("{track_count} tracks · {plugin_count} plugins · pos={pos} sr={sr}")
+                } else {
+                    "no project loaded — call session(subcommand=\"recents\") or \
+                     session(subcommand=\"new\") before editing"
+                        .to_string()
+                };
+                Ok(ToolResult::ok(summary).with_data(json!({
                     "track_count": track_count,
                     "plugin_count": plugin_count,
                     "sample_rate": sr,
                     "position_samples": pos,
+                    "session_loaded": session_loaded,
                 })))
             }
             Op::Full => {

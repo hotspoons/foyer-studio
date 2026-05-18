@@ -115,7 +115,11 @@ pub async fn chat_completions(
 
     let wants_stream = request.stream;
     let echoed_model = request.model.clone();
-    let (rx, cancel) = foyer_agent::openai_proxy::run_external_chat(parts, request);
+    let expose_tool_calls = state
+        .openai_proxy_expose_tool_calls
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let (rx, cancel) =
+        foyer_agent::openai_proxy::run_external_chat(parts, request, expose_tool_calls);
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
     if wants_stream {
@@ -177,6 +181,29 @@ async fn collect_completion(
                 }
                 buf.push_str(&attachment_markdown(&att));
                 attachments.push(att);
+            }
+            ExternalChatStreamEvent::ToolStart {
+                tool_name,
+                args_json,
+                ..
+            } => {
+                if !buf.is_empty() && !buf.ends_with('\n') {
+                    buf.push('\n');
+                }
+                buf.push_str(&tool_start_markdown(&tool_name, &args_json));
+                buf.push('\n');
+            }
+            ExternalChatStreamEvent::ToolEnd {
+                tool_name,
+                ok,
+                summary,
+                ..
+            } => {
+                if !buf.is_empty() && !buf.ends_with('\n') {
+                    buf.push('\n');
+                }
+                buf.push_str(&tool_end_markdown(&tool_name, ok, &summary));
+                buf.push('\n');
             }
             ExternalChatStreamEvent::End => break,
             ExternalChatStreamEvent::Error(e) => {
@@ -240,6 +267,66 @@ async fn collect_completion(
         }
     });
     (StatusCode::OK, Json(body))
+}
+
+/// Markdown line shown when a tool starts dispatching. Plain-text
+/// clients see "🔧 tool(args)"; markdown clients render the same
+/// thing as a blockquote so it's visually distinct from the
+/// assistant's narrative. Args are inlined as code; very long arg
+/// blobs are truncated so a single tool call doesn't paint a wall
+/// of JSON. Empty args render as `tool()`.
+fn tool_start_markdown(tool_name: &str, args_json: &str) -> String {
+    let args = args_preview(args_json);
+    if args.is_empty() {
+        format!("> 🔧 `{tool_name}()`")
+    } else {
+        format!("> 🔧 `{tool_name}({args})`")
+    }
+}
+
+/// Markdown line shown when a tool finishes. Success uses ✅,
+/// failure uses ❌; an empty summary collapses to just the icon and
+/// name (callers that want full data can read structured tool events
+/// — this line is the human-readable surface).
+fn tool_end_markdown(tool_name: &str, ok: bool, summary: &str) -> String {
+    let icon = if ok { "✅" } else { "❌" };
+    let label = if tool_name.is_empty() {
+        "tool".to_string()
+    } else {
+        format!("`{tool_name}`")
+    };
+    if summary.is_empty() {
+        format!("> {icon} {label}")
+    } else {
+        format!("> {icon} {label} → {summary}")
+    }
+}
+
+/// Compact args preview — strips outer braces, collapses whitespace,
+/// truncates over 120 chars. Pure-cosmetic; the structured event
+/// still carries the full args JSON for clients that want it.
+fn args_preview(args_json: &str) -> String {
+    let trimmed = args_json.trim();
+    if trimmed.is_empty() || trimmed == "{}" {
+        return String::new();
+    }
+    let inner = trimmed
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or(trimmed);
+    let collapsed: String = inner
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.chars().count() > 120 {
+        let head: String = collapsed.chars().take(120).collect();
+        format!("{head}…")
+    } else {
+        collapsed
+    }
 }
 
 /// Markdown rendering for an attachment that can be appended to a
@@ -461,6 +548,23 @@ impl Stream for ChunkStream {
                         return Poll::Ready(Some(
                             Ok(SseEvent::default().data(payload.to_string())),
                         ));
+                    }
+                    Poll::Ready(Some(ExternalChatStreamEvent::ToolStart {
+                        tool_name,
+                        args_json,
+                        ..
+                    })) => {
+                        let line = format!("\n{}\n", tool_start_markdown(&tool_name, &args_json));
+                        return Poll::Ready(Some(Ok(self.content_chunk(&line))));
+                    }
+                    Poll::Ready(Some(ExternalChatStreamEvent::ToolEnd {
+                        tool_name,
+                        ok,
+                        summary,
+                        ..
+                    })) => {
+                        let line = format!("\n{}\n", tool_end_markdown(&tool_name, ok, &summary));
+                        return Poll::Ready(Some(Ok(self.content_chunk(&line))));
                     }
                     Poll::Ready(Some(ExternalChatStreamEvent::End)) => {
                         self.state = ChunkState::NeedsFinish;

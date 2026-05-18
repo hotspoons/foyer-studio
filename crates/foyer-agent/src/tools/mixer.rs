@@ -46,9 +46,9 @@ enum Op {
         changes: Vec<MixerChange>,
     },
     /// Snapshot the entire mix state (every track's fader, pan, mute,
-    /// solo, send levels) under `name` for later recall. Common live
-    /// + production use: "save the chorus mix" / "snapshot before
-    /// touching anything." Returns the canonical scene record.
+    /// solo, send levels) under `name` for later recall. Common
+    /// live + production use: "save the chorus mix" / "snapshot
+    /// before touching anything." Returns the canonical scene record.
     StoreScene {
         name: String,
         #[serde(default)]

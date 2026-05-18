@@ -10,9 +10,15 @@
 //! The agent loop drives whatever upstream LLM is configured on the
 //! runtime, executes Foyer tools internally, and forwards the
 //! assistant's text deltas back to the caller as standard
-//! `delta.content` chunks. Tool calls + tool results never leak to
-//! the caller — from their perspective Foyer is a smarter chat model.
+//! `delta.content` chunks. By default tool calls + tool results stay
+//! invisible to the caller — from their perspective Foyer is a
+//! smarter chat model. Set `expose_tool_calls = true` (or env
+//! `FOYER_OPENAI_PROXY_SHOW_TOOL_CALLS=1`) to interleave each tool
+//! invocation (start + result line) into the content stream — useful
+//! when an upstream proxy or chat UI is debugging which tools fired
+//! during a turn.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -60,6 +66,25 @@ pub enum ExternalChatStreamEvent {
     /// the assistant message AND as a markdown snippet in the text
     /// stream so plain-text clients still see something.
     Attachment(AgentAttachment),
+    /// Tool call dispatched (status flipped to `Running`). Args are
+    /// the raw JSON string the model emitted so the upstream observer
+    /// gets the same shape Foyer's own UI sees. Only emitted when the
+    /// proxy is configured to expose tool calls (the default).
+    ToolStart {
+        call_id: String,
+        tool_name: String,
+        args_json: String,
+    },
+    /// Tool call finished. `ok` distinguishes `Done` from `Error`;
+    /// `summary` is a short, human-readable result line (the tool's
+    /// own summary if it set one, otherwise the first stretch of the
+    /// JSON result). Only emitted when `expose_tool_calls` is on.
+    ToolEnd {
+        call_id: String,
+        tool_name: String,
+        ok: bool,
+        summary: String,
+    },
     /// Engine finished cleanly. No more events follow.
     End,
     /// Engine errored mid-turn. No more events follow.
@@ -237,10 +262,13 @@ fn data_url_to_attachment(url: &str, default_stem: &str) -> Option<AgentAttachme
 /// `ExternalChatStreamEvent`s — the HTTP layer adapts these into
 /// either an SSE stream or a single non-streaming response. The
 /// returned cancel token can be tripped (e.g. on connection drop)
-/// to interrupt the engine.
+/// to interrupt the engine. `expose_tool_calls` opts into
+/// `ToolStart`/`ToolEnd` events — defaults to off at the HTTP layer
+/// so the caller sees plain assistant text only.
 pub fn run_external_chat(
     parts: ExternalEngineParts,
     request: ExternalChatRequest,
+    expose_tool_calls: bool,
 ) -> (
     mpsc::UnboundedReceiver<ExternalChatStreamEvent>,
     tokio_util::sync::CancellationToken,
@@ -269,7 +297,12 @@ pub fn run_external_chat(
             autonomy: AgentAutonomy::Auto,
             system_prompt: parts.system_prompt,
         };
-        let sink: Arc<dyn EngineSink> = Arc::new(ProxySink { tx: tx.clone() });
+        let sink: Arc<dyn EngineSink> = Arc::new(ProxySink {
+            tx: tx.clone(),
+            expose_tool_calls,
+            tool_names: Mutex::new(HashMap::new()),
+            started: Mutex::new(std::collections::HashSet::new()),
+        });
         let result = engine
             .run_turn(
                 request.final_user_body,
@@ -300,14 +333,58 @@ pub fn run_external_chat(
 
 struct ProxySink {
     tx: mpsc::UnboundedSender<ExternalChatStreamEvent>,
+    /// When `true`, emit `ToolStart`/`ToolEnd` events so external
+    /// callers can see which tools fired. When `false`, fall back to
+    /// the legacy text-only stream (Content + Attachment + End).
+    expose_tool_calls: bool,
+    /// Track call_id → tool_name from `on_record` so when
+    /// `on_tool_update` fires the terminal transition (which only
+    /// carries `call_id`) we still know the tool name to emit on the
+    /// `ToolEnd` event.
+    tool_names: Mutex<HashMap<String, String>>,
+    /// Track which call_ids we've already emitted `ToolStart` for —
+    /// `on_record` is called every time the assistant record is
+    /// rewritten (Pending → Running → Done all re-emit the record),
+    /// and we only want one ToolStart per call.
+    started: Mutex<std::collections::HashSet<String>>,
 }
 
 #[async_trait]
 impl EngineSink for ProxySink {
-    async fn on_record(&self, _record: AgentMessageRecord) {
-        // Records carry the full assistant snapshot AND tool-call
-        // metadata; the proxy only forwards assistant text deltas,
-        // which arrive via on_token. Ignored here.
+    async fn on_record(&self, record: AgentMessageRecord) {
+        // Each `on_record` snapshot is the full assistant turn at the
+        // moment of emission — `tool_calls` is rewritten in place as
+        // each call moves through Pending → Running → Done. We:
+        //   1. Stash call_id → tool_name on first sight so a later
+        //      `on_tool_update` terminal transition (which only
+        //      carries `call_id`) can name the tool in `ToolEnd`.
+        //   2. Emit a `ToolStart` the first time we see a call_id,
+        //      regardless of its current status — by the time we
+        //      hold the record we know the model intended the call.
+        //      The `started` set dedupes so a single call_id can't
+        //      fire ToolStart twice as the assistant snapshot grows.
+        if !self.expose_tool_calls {
+            return;
+        }
+        for tc in &record.tool_calls {
+            {
+                let mut names = self.tool_names.lock().await;
+                names
+                    .entry(tc.call_id.clone())
+                    .or_insert_with(|| tc.tool_name.clone());
+            }
+            let first_time = {
+                let mut started = self.started.lock().await;
+                started.insert(tc.call_id.clone())
+            };
+            if first_time {
+                let _ = self.tx.send(ExternalChatStreamEvent::ToolStart {
+                    call_id: tc.call_id.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    args_json: tc.args_json.clone(),
+                });
+            }
+        }
     }
     async fn on_token(&self, _message_id: u64, delta: String) {
         let _ = self.tx.send(ExternalChatStreamEvent::Content(delta));
@@ -320,6 +397,33 @@ impl EngineSink for ProxySink {
         _preview: Option<String>,
         result_json: String,
     ) {
+        // Emit a ToolEnd on the terminal transitions (Done / Error /
+        // Rejected) so the upstream caller can pair it with the
+        // matching ToolStart. The legacy attachment-harvesting block
+        // below still only fires on `Done` because Error/Rejected
+        // can't have media to harvest.
+        if self.expose_tool_calls {
+            let terminal = matches!(
+                status,
+                AgentToolStatus::Done | AgentToolStatus::Error | AgentToolStatus::Rejected
+            );
+            if terminal {
+                let (ok, summary) = summarize_tool_result(status, &result_json);
+                let tool_name = self
+                    .tool_names
+                    .lock()
+                    .await
+                    .get(&call_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let _ = self.tx.send(ExternalChatStreamEvent::ToolEnd {
+                    call_id: call_id.clone(),
+                    tool_name,
+                    ok,
+                    summary,
+                });
+            }
+        }
         // Surface only completed tool runs — the same tool is updated
         // multiple times per call (Pending → Running → Done) and we
         // only want to harvest media once at the end.
@@ -365,6 +469,46 @@ impl EngineSink for ProxySink {
         // construction and dispatch. Auto-approve so a stuck
         // confirm doesn't hang the HTTP response forever.
         Ok(true)
+    }
+}
+
+/// Boil a tool's terminal-state JSON down to (ok, one-line-summary).
+///
+/// `Done` payloads are serialized `ToolResult`s — prefer the tool's
+/// own `summary`, fall back to a stringified `data` (skipping
+/// `null`/`{}`), or yield an empty summary when there's nothing
+/// load-bearing to show.
+///
+/// `Error` / `Rejected` payloads are plain `ToolError::to_string()`
+/// output — the runtime writes the error text into `result_json`
+/// verbatim, so we just trim + truncate.
+pub fn summarize_tool_result(status: AgentToolStatus, result_json: &str) -> (bool, String) {
+    let ok = matches!(status, AgentToolStatus::Done);
+    if result_json.is_empty() {
+        return (ok, String::new());
+    }
+    if ok {
+        if let Ok(parsed) = serde_json::from_str::<ToolResult>(result_json) {
+            if !parsed.summary.is_empty() {
+                return (true, truncate_line(&parsed.summary, 200));
+            }
+            let data_str = parsed.data.to_string();
+            if data_str != "null" && data_str != "{}" {
+                return (true, truncate_line(&data_str, 200));
+            }
+            return (true, String::new());
+        }
+    }
+    (ok, truncate_line(result_json.trim(), 200))
+}
+
+fn truncate_line(s: &str, max: usize) -> String {
+    let one_line: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    if one_line.chars().count() > max {
+        let head: String = one_line.chars().take(max).collect();
+        format!("{head}…")
+    } else {
+        one_line
     }
 }
 

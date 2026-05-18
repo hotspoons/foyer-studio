@@ -392,9 +392,17 @@ export class Store extends EventTarget {
     if (!body || typeof body.type !== "string") return;
     const activeSessionId = this.state.currentSessionId || null;
     const envelopeSessionId = env?.session_id || null;
+    // `session_snapshot` is intentionally NOT in this list — the server
+    // emits a snapshot when it (re)focuses a session, so the snapshot
+    // itself is authoritative for `currentSessionId`. Filtering it out
+    // by stale focus would lock the store on the wrong session forever
+    // (the prior bug: `launch_project` against an already-open session
+    // changes the server's focus but the SessionList that arrives first
+    // sets the store's focus to a different entry; the matching
+    // snapshot then gets filtered out, and every region / control event
+    // routed through the new focus is rejected by tag mismatch).
     const isSessionScoped =
-      body.type === "session_snapshot"
-      || body.type === "control_update"
+      body.type === "control_update"
       || body.type === "meter_batch"
       || body.type === "session_patch"
       || body.type === "track_updated"
@@ -492,6 +500,17 @@ export class Store extends EventTarget {
         break;
       }
       case "session_snapshot": {
+        // The snapshot envelope tags itself with the session it's for —
+        // sync `currentSessionId` to it so subsequent session-scoped
+        // events (regions, controls, meters) for the same session are
+        // accepted by the filter above. Server emits a snapshot any
+        // time it focuses a session (boot, select, re-launch of an
+        // open project, backend swap), so this is the right place to
+        // pick up focus changes without a separate event.
+        if (envelopeSessionId && this.state.currentSessionId !== envelopeSessionId) {
+          this.state.currentSessionId = envelopeSessionId;
+          this.dispatchEvent(new CustomEvent("sessions"));
+        }
         this.state.session = body.session;
         // Seed the controls map with all known parameter values.
         const c = new Map();
@@ -709,6 +728,22 @@ export class Store extends EventTarget {
         }
         this.dispatchEvent(new CustomEvent("sessions"));
         this._emit();
+        break;
+      }
+      case "session_focus_changed": {
+        // Server-side focus moved (SelectSession, CloseSession fallback,
+        // or LaunchProject hitting an already-open project). Sync our
+        // currentSessionId so subsequent session-scoped events route to
+        // the right view. A `session_snapshot` for the new focus
+        // usually rides right behind this, but bumping focus here keeps
+        // the filter above honest in the gap between the two.
+        const sid = body.session_id || null;
+        if (this.state.currentSessionId !== sid) {
+          this.state.currentSessionId = sid;
+          if (!sid) this.state.session = null;
+          this.dispatchEvent(new CustomEvent("sessions"));
+          this._emit();
+        }
         break;
       }
       case "orphans_detected": {

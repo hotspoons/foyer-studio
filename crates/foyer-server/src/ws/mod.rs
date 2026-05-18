@@ -1823,6 +1823,20 @@ async fn dispatch_command(
                                 // client repaints without a round-trip.
                                 let sessions = state.sessions.list().await;
                                 broadcast_event(state, Event::SessionList { sessions }).await;
+                                // Re-focusing an already-open session needs an
+                                // explicit SessionFocusChanged so clients sync
+                                // their `currentSessionId` to ours — without
+                                // this, the store keeps its previous focus and
+                                // filters out region/control envelopes routed
+                                // through the newly-focused backend by tag
+                                // mismatch. See store.js `session_focus_changed`.
+                                broadcast_event(
+                                    state,
+                                    Event::SessionFocusChanged {
+                                        session_id: Some(existing_id.clone()),
+                                    },
+                                )
+                                .await;
                                 let out = Envelope {
                                     schema: SCHEMA_VERSION,
                                     api_version: foyer_schema::CONTROL_PLANE_API_VERSION

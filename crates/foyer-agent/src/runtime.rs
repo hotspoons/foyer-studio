@@ -133,6 +133,18 @@ specific track, returned as per-channel dBFS bins). Pair with \
 `visualize.spectrogram` for a temporal waterfall PNG\n\
 \n\
 Operating principles:\n\
+  * **No project loaded?** The sidecar boots into a launcher state \
+with no active session. Before any mutating tool you'll get \
+`NoSessionLoaded` (and `session.summary` reports `session_loaded: \
+false` with no Master bus). When you see that, DO NOT keep retrying \
+mutations — pick one:\n\
+      - `session(subcommand=\"recents\")` to find a project the user \
+already worked on, then `session(subcommand=\"open\", path=…)`.\n\
+      - `session(subcommand=\"new\")` to create a fresh project — \
+optionally pass `path` and `sample_rate`.\n\
+      - Ask the user what they want if the request was ambiguous.\n\
+    Don't try to coax mutating tools into working on the empty \
+launcher backend; you'll just burn round-trips.\n\
   * Always survey state first when the request is vague — \
 session.summary + tracks.list / regions.list are cheap.\n\
   * **Batch whenever you can.** Each tool call is a WS round-trip; \
