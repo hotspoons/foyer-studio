@@ -32,7 +32,12 @@ pub enum VisualizeRequest {
         region_id: String,
     },
     Spectrogram {
-        track_id: String,
+        /// Optional — defaults to the master bus when omitted. The
+        /// shim's FFT pipeline accepts master/monitor/per-track and
+        /// the FE renderer also defaults to master if no target prop
+        /// is passed.
+        #[serde(default)]
+        track_id: Option<String>,
         #[serde(default)]
         duration_ms: Option<u32>,
     },
@@ -51,6 +56,15 @@ pub enum VisualizeRequest {
         track_id: String,
         region_id: String,
     },
+    /// Capture exactly what the user currently sees in the attached
+    /// browser tab — full app shell, current tile layout, any open
+    /// modals or floating windows. Use this when the user asks for
+    /// help with the UI ("what should I click?") or to verify a
+    /// recent edit visually. Requires an attached browser session
+    /// (FE renderer); the headless renderer screenshots whatever the
+    /// throwaway tab happens to be showing, which is usually less
+    /// informative.
+    Screen,
 }
 
 #[async_trait]
@@ -62,8 +76,10 @@ impl Tool for VisualizeTool {
     fn description(&self) -> &'static str {
         "Render a Foyer visualization to PNG and return it inline. \
          Subcommands: timeline, mixer, waveform, spectrogram, \
-         automation_lane, event_heatmap, midi_roll, beat_sequencer. \
-         Prefers an attached browser; falls back to a headless renderer."
+         automation_lane, event_heatmap, midi_roll, beat_sequencer, \
+         screen (captures literally what the user sees right now — \
+         use for 'what should I click?' guidance). Prefers an attached \
+         browser; falls back to a headless renderer."
     }
 
     fn schema(&self) -> Value {
@@ -76,7 +92,7 @@ impl Tool for VisualizeTool {
                     "enum": [
                         "timeline", "mixer", "waveform", "spectrogram",
                         "automation_lane", "event_heatmap",
-                        "midi_roll", "beat_sequencer"
+                        "midi_roll", "beat_sequencer", "screen"
                     ]
                 },
                 "track_id": { "type": "string" },
@@ -92,8 +108,22 @@ impl Tool for VisualizeTool {
         // Validate via the typed request shape but pass the original
         // args to whichever renderer ends up handling it — both speak
         // the same protocol.
-        let _validated: VisualizeRequest = serde_json::from_value(args.clone())
+        let validated: VisualizeRequest = serde_json::from_value(args.clone())
             .map_err(|e| ToolError::InvalidArgs(e.to_string()))?;
+        // `screen` only makes sense against an actual attached browser.
+        // Falling through to the headless renderer screenshots a fresh
+        // throwaway tab with no live state, which produces a blank
+        // image and silently confuses the agent. Refuse early with a
+        // clear actionable error instead.
+        if matches!(validated, VisualizeRequest::Screen) && !ctx.fe_attached {
+            return Err(ToolError::Execution(
+                "visualize.screen requires an attached browser session — no FE \
+                 is currently connected. Use the more specific subcommands \
+                 (timeline, mixer, midi_roll, …) which work through the \
+                 headless renderer."
+                    .into(),
+            ));
+        }
         // Default order: FE first (faster — already has live data
         // and cached peaks), headless as fallback when no tab is
         // attached. The `prefer_headless_render` config flip is for

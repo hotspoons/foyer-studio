@@ -29,6 +29,7 @@ import "./diagnostics.js";
 import "./midi-devices-panel.js";
 import "./soft-keyboard.js";
 import "./automation-modal.js";
+import "./spectrum-tile.js";
 
 /// Float-out helper: pop a widget tile back into a foyer-window
 /// using the existing window-kind factory registered in right-dock /
@@ -205,4 +206,27 @@ registerView({
   elementTag: "foyer-soft-keyboard",
   order: 96,
   floatSpawn: floatSpawnFor("soft-keyboard"),
+});
+
+// Real-time spectrum analyser. Props:
+//   · target  — { kind: "master" | "monitor" | "track", id?: string }
+//   · channel — 0 (default), 1, or null (overlay all channels)
+//   · fftSize — passthrough into the backend subscribe; defaults to 2048
+// Default to the master bus so dropping the tile into the layout shows
+// something meaningful immediately. The widget owns its own WS
+// subscription lifecycle, so mounting/unmounting the tile is enough.
+registerView({
+  id: "spectrum",
+  label: "Spectrum",
+  // chart-bar exists in ui-core/icons.js; chart-bar-square doesn't,
+  // which is why the picker was showing an empty square before.
+  icon: "chart-bar",
+  elementTag: "foyer-spectrum-tile",
+  order: 97,
+  floatSpawn: floatSpawnFor("spectrum"),
+  // No checkAvailable gate — the server runs an FFT-fallback analyser
+  // whenever the backend's native pipeline says `available=false`,
+  // so the tile works on every backend. (Previously we read
+  // `session.spectrum.available` and hid the tile under Ardour; the
+  // server-side fallback makes that gate obsolete.)
 });

@@ -85,6 +85,48 @@ pub struct Config {
     /// settings modal); only deployment-level knobs land here.
     #[serde(default)]
     pub agent: AgentConfig,
+    /// Upstream MCP servers Foyer's `daw_proxy` agent tool will speak
+    /// to. Each entry is a backend DAW's MCP HTTP endpoint (e.g.
+    /// Ardour's `mcp_http` surface at `http://127.0.0.1:4820/mcp`).
+    /// The proxy advertises the upstream's tools as subcommands of a
+    /// single Foyer tool, with on-demand schema fetch — see
+    /// [`McpProxyConfig`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_proxies: Vec<McpProxyConfig>,
+}
+
+/// One entry in the `mcp_proxies:` config block — a backend DAW (or
+/// other MCP server) Foyer's `daw_proxy` tool will reach into.
+///
+/// **Why a single proxy tool instead of registering each upstream
+/// tool as its own Foyer tool?** Ardour's MCP surface alone is 70+
+/// tools; loading their full schemas into every prompt would eat
+/// thousands of tokens before the agent even reads the user's
+/// question. The proxy advertises only the AGGREGATE surface
+/// (1 tool), and lets the agent fetch detailed schemas for the
+/// specific upstream tools it actually intends to call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpProxyConfig {
+    /// Stable id (e.g. `ardour`, `bitwig`). Used as the proxy
+    /// subcommand selector + the cache filename prefix.
+    pub id: String,
+    /// Human-readable label shown in `daw_proxy.list_backends`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Full URL of the upstream MCP streamable-HTTP endpoint,
+    /// including the `/mcp` path. e.g. `http://127.0.0.1:4820/mcp`.
+    pub endpoint: String,
+    /// Optional Bearer token for `Authorization`. Same precedence as
+    /// the agent config: env var override wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Skip this entry without removing it from the config.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Deployment-level agent settings, set in `config.yaml`. None of
@@ -106,12 +148,43 @@ pub struct AgentConfig {
     /// on PATH (`apt install chromium` on Debian/Ubuntu).
     #[serde(default = "default_prefer_headless_render")]
     pub prefer_headless_render: bool,
+    /// Upstream OpenAI-compatible endpoint base (no trailing
+    /// `/chat/completions`). When set, seeds the agent's LLM transport
+    /// at boot — wins over the persisted store but loses to a CLI flag
+    /// or matching env var. Leave unset to let the FAB-saved value
+    /// (or built-in WebLLM-bridge default) win.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_endpoint: Option<String>,
+    /// Upstream model id passed in the chat-completions body. Same
+    /// precedence chain as `upstream_endpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_model: Option<String>,
+    /// Optional API key for the upstream endpoint (`Authorization:
+    /// Bearer …` for OpenAI-shape providers; `x-api-key` is also set
+    /// when the URL looks Anthropic). Same precedence chain. Prefer
+    /// the `FOYER_AGENT_UPSTREAM_API_KEY` env var on shared hosts so
+    /// the secret doesn't end up in config.yaml.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_api_key: Option<String>,
+    /// API key REQUIRED on the OpenAI-compatible endpoint Foyer
+    /// exposes at `/v1/*`. When unset the surface is open (operator
+    /// must keep it loopback-only or behind their own auth proxy);
+    /// when set, every `/v1/*` request must carry
+    /// `Authorization: Bearer <key>`. Same precedence chain as the
+    /// other agent fields — `FOYER_AGENT_API_KEY` env var or
+    /// `--agent-api-key` CLI flag win over this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             prefer_headless_render: default_prefer_headless_render(),
+            upstream_endpoint: None,
+            upstream_model: None,
+            upstream_api_key: None,
+            api_key: None,
         }
     }
 }
@@ -483,6 +556,7 @@ pub fn seed_default() -> Config {
         docker: None,
         desktop: None,
         agent: AgentConfig::default(),
+        mcp_proxies: Vec::new(),
     }
 }
 

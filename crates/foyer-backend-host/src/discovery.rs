@@ -33,6 +33,14 @@ pub struct Advertisement {
     /// Host session name, best-effort.
     #[serde(default)]
     pub session: String,
+    /// Absolute project directory the shim is hosting. Empty when the
+    /// shim hasn't reached `set_active(true)` with a loaded session
+    /// (early launcher) or the host doesn't expose it. The spawner
+    /// uses this to detect "you already have an Ardour open for this
+    /// project — reuse it" so the second open of an existing project
+    /// doesn't race a fresh spawn against the live one.
+    #[serde(default)]
+    pub project_path: String,
     /// ISO-8601 timestamp the shim was started (UTC).
     #[serde(default)]
     pub started: String,
@@ -105,14 +113,47 @@ fn is_alive(ad: &Advertisement) -> bool {
     true
 }
 
+/// Find a live shim already hosting `project_path` (or any prefix
+/// match — the shim writes its `session().path()` which is the project
+/// directory, not the .ardour file). Used by the launcher to detect
+/// "Ardour is already running this project, just reattach" instead of
+/// spawning a second instance that races for the lock file. Returns
+/// `None` when nothing matches.
+pub fn find_for_project(project_path: &Path) -> Option<Advertisement> {
+    let target = match project_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => project_path.to_path_buf(),
+    };
+    for ad in scan() {
+        if ad.project_path.is_empty() {
+            continue;
+        }
+        let pp = PathBuf::from(&ad.project_path);
+        let pp_canon = pp.canonicalize().unwrap_or(pp);
+        if pp_canon == target {
+            return Some(ad);
+        }
+        // Ardour reports `session.path()` as the project dir; the
+        // caller may pass either the dir OR the `.ardour` file. Treat
+        // either side being a parent of the other as a match.
+        if pp_canon.starts_with(&target) || target.starts_with(&pp_canon) {
+            return Some(ad);
+        }
+    }
+    None
+}
+
 /// Convenience: scan and return exactly-one or an error describing the
 /// ambiguity. Useful for CLI paths that want "auto-pick when unambiguous,
 /// yell when not".
 pub fn pick_single() -> Result<Advertisement, DiscoveryError> {
-    let found = scan();
+    let mut found = scan();
     match found.len() {
         0 => Err(DiscoveryError::NoShim),
-        1 => Ok(found.into_iter().next().unwrap()),
+        // Use `pop()` rather than `into_iter().next().unwrap()` so the
+        // exactly-one branch has zero panic surface — match exhausted
+        // the other cases, so found has a single element.
+        1 => found.pop().ok_or(DiscoveryError::NoShim),
         _ => Err(DiscoveryError::Ambiguous(found)),
     }
 }

@@ -39,6 +39,7 @@ import { chordIntervals, SCALES, PITCH_CLASS_LABELS } from "foyer-core/music-the
 import "foyer-ui-core/widgets/number-scrub.js";
 // Side-strip embedded body — see `_toggleStrip` + render().
 import "./midi-manager.js";
+import { sequencerStyles } from "./beat-sequencer.styles.js";
 
 // Matches Ardour's `Temporal::ticks_per_beat` and the
 // `expand_sequencer_layout` PPQN the server uses to render this
@@ -248,486 +249,7 @@ export class BeatSequencer extends LitElement {
     _stripOpen: { state: true, type: Boolean },
   };
 
-  static styles = css`
-    /* Force border-box throughout so padding + border don't drift
-       our cell heights away from the row-head heights. Same fix we
-       used in timeline-view after the lane-head width bug. */
-    :host, *, *::before, *::after { box-sizing: border-box; }
-    :host {
-      display: flex; flex-direction: column;
-      width: 100%; height: 100%; min-height: 0;
-      background: transparent;
-      color: var(--color-text);
-      font-family: var(--font-sans);
-      font-size: 11px;
-    }
-    /* Row split: main column fills, side-strip docks to the right. */
-    .root {
-      flex: 1; min-height: 0; min-width: 0;
-      display: flex; flex-direction: row;
-      overflow: hidden;
-    }
-    .main {
-      flex: 1 1 auto; min-width: 0; min-height: 0;
-      display: flex; flex-direction: column;
-      overflow: hidden;
-    }
-    .side-strip {
-      flex: 0 0 auto;
-      display: flex; flex-direction: row;
-      border-left: 1px solid var(--color-border);
-      background: var(--color-surface-elevated);
-      transition: width 0.18s ease;
-      width: 32px;           /* rail-only */
-      min-width: 0;
-    }
-    .side-strip.open {
-      width: var(--strip-w, 420px);
-      max-width: 65%;
-    }
-    .strip-handle {
-      flex: 0 0 32px;
-      display: flex; align-items: center; justify-content: center;
-      background: transparent; border: 0;
-      color: var(--color-text-muted);
-      cursor: pointer;
-      border-right: 1px solid var(--color-border);
-    }
-    .strip-handle:hover { color: var(--color-accent); }
-    .strip-resize {
-      flex: 0 0 8px;
-      cursor: ew-resize;
-      border-right: 1px solid var(--color-border);
-      background: transparent;
-    }
-    .strip-resize:hover {
-      background: color-mix(in oklab, var(--color-accent, #7c5cff) 20%, transparent);
-    }
-    .side-strip foyer-midi-manager {
-      flex: 1; min-width: 0;
-      overflow: auto;
-    }
-    .tb {
-      display: flex; align-items: center; gap: 10px;
-      flex-wrap: wrap; row-gap: 6px;
-      padding: 6px 12px;
-      background: var(--color-surface-elevated);
-      border-bottom: 1px solid var(--color-border);
-      color: var(--color-text-muted);
-      flex: 0 0 auto;
-    }
-    .tb .title { color: var(--color-text); font-weight: 600; }
-    .tb label {
-      display: inline-flex; align-items: center; gap: 6px;
-    }
-    .tb select, .tb button, .tb input[type="number"] {
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      color: var(--color-text);
-      padding: 2px 8px;
-      border-radius: var(--radius-sm, 4px);
-      cursor: pointer;
-      font: inherit; font-size: 11px;
-      /* Center any iconographic content (icon spans, unicode glyphs)
-       * in the button's box. Without this the SVG span sits at the
-       * baseline and looks top-heavy next to the textual buttons. */
-      display: inline-flex; align-items: center; justify-content: center;
-      min-height: 22px;
-      line-height: 1;
-    }
-    .tb button > span,
-    .tb button > svg {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .tb button:hover, .tb select:hover { background: var(--color-surface-muted); }
-    .tb input[type="range"] { flex: 0 0 90px; vertical-align: middle; }
-    .tb input[type="number"] { width: 58px; font-variant-numeric: tabular-nums; }
-    /* Pull the spacer out of the line-flow when the bar wraps; without
-     * flex 1 0 100 percent the spacer would still try to push later
-     * items to the second row, leaving big gaps. With wrap+full-width
-     * the second row starts cleanly with the buttons that come after. */
-    .tb .tb-spacer { flex: 1 1 auto; min-width: 0; }
-    /* Transport strip — only rendered when the host foyer-window is
-     * maximized. Holds the tempo widget + play/stop. Sits between
-     * the main toolbar and the seek bar. */
-    .transport-strip {
-      display: flex; align-items: center; gap: 12px;
-      padding: 6px 12px;
-      background: var(--color-surface);
-      border-bottom: 1px solid var(--color-border);
-      color: var(--color-text-muted);
-      font: inherit; font-size: 11px;
-    }
-    .transport-strip foyer-number { flex: 0 0 auto; }
-    .transport-strip button {
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      color: var(--color-text);
-      padding: 4px 10px;
-      border-radius: var(--radius-sm, 4px);
-      cursor: pointer;
-      font: inherit; font-size: 13px;
-      display: inline-flex; align-items: center; justify-content: center;
-      min-width: 36px; min-height: 28px;
-    }
-    .transport-strip button:hover { background: var(--color-surface-muted); }
-
-    .seek {
-      position: relative; height: 18px;
-      background: var(--color-surface-elevated);
-      border-bottom: 1px solid var(--color-border);
-      cursor: pointer; flex: 0 0 auto;
-    }
-    .seek .track { position: absolute; inset: 4px 8px; background: rgba(255,255,255,0.05); border-radius: 6px; }
-    .seek .ph { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--color-accent, #7c5cff); pointer-events: none; }
-    .seek .region-marker { position: absolute; top: 4px; bottom: 4px; background: rgba(124,92,255,0.25); border: 1px solid rgba(124,92,255,0.6); border-radius: 3px; pointer-events: none; }
-    .seek .region-marker.active { background: rgba(124,92,255,0.45); }
-
-    /* ── ARRANGEMENT ──────────────────────────────────── */
-    .arr {
-      flex: 0 0 auto;
-      display: flex; flex-direction: column;
-      background: var(--color-surface);
-      border-bottom: 2px solid var(--color-border);
-      overflow: hidden;
-      position: relative;
-    }
-    .arr-head {
-      display: flex; align-items: center; gap: 8px;
-      padding: 4px 10px;
-      background: var(--color-surface-muted);
-      border-bottom: 1px solid var(--color-border);
-      color: var(--color-text-muted);
-      font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
-    }
-    .arr-head .add {
-      background: transparent;
-      border: 1px dashed var(--color-border);
-      color: var(--color-text-muted);
-      padding: 2px 8px; border-radius: 4px;
-      cursor: pointer; font: inherit; font-size: 10px;
-    }
-    .arr-head .add:hover {
-      color: var(--color-text); border-color: var(--color-accent);
-    }
-    /* The "+ Pattern" button sits at the left side of arr-head so
-       it's visually *above* the pattern label column. Rich's ask
-       2026-04-21: "add pattern button should be above the patterns
-       boxes". Putting it inline in arr-head keeps the alignment
-       clean (no spacer row in the cell grid to drift out of sync
-       with the column header). */
-    .arr-head .add.add-pattern {
-      margin-left: 0;
-      padding: 1px 8px;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-    }
-    .arr-head .add.bars { margin-left: auto; }
-    .arr-body {
-      display: grid;
-      grid-template-columns: 160px 1fr;
-      flex: 1; min-height: 0;
-      overflow: auto;
-    }
-    .arr-resize {
-      position: absolute;
-      left: 0; right: 0; bottom: -3px;
-      height: 7px; cursor: ns-resize;
-      z-index: 2;
-    }
-    .arr-resize:hover { background: color-mix(in oklab, var(--color-accent) 35%, transparent); }
-    .arr-pat-list { display: flex; flex-direction: column; background: var(--color-surface-elevated); border-right: 1px solid var(--color-border); }
-    .arr-pat {
-      display: grid;
-      grid-template-columns: 12px 1fr 18px;
-      align-items: center; gap: 6px;
-      padding: 4px 8px;
-      height: 22px;
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-      cursor: pointer;
-      font-size: 11px;
-    }
-    .arr-pat:hover { background: var(--color-surface-muted); }
-    .arr-pat.active {
-      background: color-mix(in oklab, var(--color-accent, #7c5cff) 18%, transparent);
-    }
-    .arr-pat .swatch { width: 10px; height: 10px; border-radius: 2px; }
-    .arr-pat .name {
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      background: transparent; border: 0; color: var(--color-text);
-      font: inherit; font-size: 11px; padding: 0;
-    }
-    .arr-pat .name:focus { outline: 1px solid var(--color-accent); outline-offset: 1px; background: var(--color-surface); }
-    .arr-pat .x {
-      background: transparent; border: 0; color: var(--color-text-muted);
-      cursor: pointer; font-size: 14px; line-height: 1;
-    }
-    .arr-pat .x:hover { color: var(--color-danger, #ef4444); }
-    .arr-grid {
-      position: relative;
-      display: grid;
-      grid-auto-rows: 22px;
-      grid-template-columns: var(--arr-cols-tpl, repeat(16, 16px));
-    }
-    .arr-cell {
-      height: 22px;
-      border-right: 1px solid rgba(255,255,255,0.10);
-      border-bottom: 1px solid rgba(255,255,255,0.10);
-      cursor: pointer;
-    }
-    .arr-cell.beat-edge { border-right-color: rgba(255,255,255,0.28); }
-    .arr-cell:hover { background: rgba(255,255,255,0.06); }
-    .arr-cell.on { background: var(--cell-color, var(--color-accent, #7c5cff)); }
-    .arr-cell.on:hover { filter: brightness(1.15); }
-
-    /* ── PATTERN EDITOR (cell grid) ────────────────────── */
-    /*
-     * Outer flex split:
-     *    .body      — rows column + grid, scrolls together
-     *    .velocity  — pinned to the bottom, mirrors the grid's
-     *                 column layout, does not scroll with the body
-     *
-     * Previous design put velocity inside .body as a grid-area
-     * "velocity" row. That made it scroll with the grid when the
-     * rows column exceeded viewport height. Moving velocity to a
-     * sibling fixes the "velocity scrolls off the bottom" issue.
-     */
-    .body {
-      flex: 1; min-height: 0;
-      display: grid;
-      grid-template-columns: 180px 1fr;
-      grid-template-areas: "rows grid";
-      overflow: auto;
-    }
-    .rows {
-      grid-area: rows;
-      display: flex; flex-direction: column;
-      background: var(--color-surface-elevated);
-      border-right: 1px solid var(--color-border);
-      position: sticky; left: 0; z-index: 1;
-    }
-    .row-head {
-      display: grid;
-      grid-template-columns: 30px 30px 1fr;
-      align-items: center;
-      padding: 4px 8px;
-      border-bottom: 1px solid var(--color-border);
-      gap: 4px;
-      height: var(--row-h);
-      box-sizing: border-box;
-    }
-    .row-head .mute, .row-head .solo {
-      width: 22px; height: 18px;
-      border: 1px solid var(--color-border);
-      background: transparent;
-      color: var(--color-text-muted);
-      border-radius: 3px;
-      font: inherit; font-size: 10px;
-      cursor: pointer;
-    }
-    .row-head .mute.on { background: var(--color-danger, #ef4444); color: #fff; border-color: transparent; }
-    .row-head .solo.on { background: #fbbf24; color: #000; border-color: transparent; }
-    .row-head .label {
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      color: var(--color-text);
-    }
-    .body.pitched .row-head { padding: 2px 8px; }
-    .body.pitched .row-head .mute, .body.pitched .row-head .solo { display: none; }
-    .body.pitched .row-head.black-key { background: color-mix(in oklab, var(--color-surface-elevated) 55%, #000 45%); }
-    .body.pitched .row-head.c-row { border-top: 1px solid var(--color-accent, #7c5cff); }
-    .body.pitched .row-head .label { font-size: 10px; color: var(--color-text-muted); }
-    .body.pitched .grid-row.black-key { background: rgba(0, 0, 0, 0.18); }
-
-    .grid {
-      grid-area: grid;
-      position: relative;
-      background: var(--color-surface);
-      overflow: auto;
-    }
-    .grid-row {
-      display: grid;
-      border-bottom: 1px solid var(--color-border);
-      height: var(--row-h);
-      /* box-sizing inherits from the :host border-box rule, so
-         --row-h is the *total* row height including the bottom
-         border — matches .row-head's border-box height exactly. */
-    }
-    .cell {
-      border-right: 1px solid rgba(255, 255, 255, 0.10);
-      cursor: pointer;
-      position: relative;
-    }
-    .cell.beat { border-right-color: rgba(255, 255, 255, 0.32); }
-    .cell:hover { background: rgba(255, 255, 255, 0.06); }
-    .cell.on { background: var(--row-color, var(--color-accent, #7c5cff)); }
-    .cell.on:hover { filter: brightness(1.15); }
-    .cell.on .vel {
-      position: absolute; inset: 2px;
-      border-radius: 2px;
-      background: rgba(255, 255, 255, 0.18);
-      pointer-events: none;
-    }
-    /* Right-edge resize grip for pitched-mode cells — drag to
-       extend a note across multiple steps without needing to
-       switch to a separate editor. */
-    .cell.on .resize-r {
-      position: absolute;
-      top: 0; right: 0; bottom: 0;
-      width: 6px;
-      cursor: ew-resize;
-      z-index: 2;
-    }
-    .cell.on .resize-r:hover {
-      background: rgba(255, 255, 255, 0.35);
-    }
-
-    .velocity {
-      flex: 0 0 auto;
-      height: 70px;
-      display: grid;
-      align-items: flex-end;
-      background: var(--color-surface-muted);
-      border-top: 1px solid var(--color-border);
-      padding-top: 6px;
-      /* 180px spacer mirrors the rows column above so velocity
-         bars line up with the pattern cells. The velocity lane
-         is a sibling of .body (not inside it) so it stays pinned
-         to the bottom when the body scrolls vertically. */
-      padding-left: 180px;
-      overflow: hidden;
-      flex: 0 0 76px;
-    }
-    .vel-col {
-      height: 100%;
-      display: flex; align-items: flex-end; justify-content: center;
-      gap: 1px;
-      border-right: 1px solid rgba(255, 255, 255, 0.03);
-    }
-    .vel-col .bar {
-      flex: 1;
-      background: var(--color-accent, #7c5cff);
-      border-radius: 2px 2px 0 0; min-height: 1px;
-      max-width: 10px;
-    }
-
-    .hint {
-      padding: 4px 10px;
-      font-size: 10px;
-      color: var(--color-text-muted);
-      border-top: 1px solid var(--color-border);
-      background: var(--color-surface-elevated);
-    }
-
-    .tb label.chk {
-      display: inline-flex; align-items: center; gap: 4px;
-      color: var(--color-text-muted); cursor: pointer;
-      user-select: none;
-    }
-    .tb label.chk input { accent-color: var(--color-accent, #7c5cff); }
-
-    /* Archived-layout banner — mirror of the piano-roll banner so
-       both directions of the conversion read as the same amber
-       "not-the-authoritative-view" cue. */
-    .archived-banner {
-      flex: 0 0 auto;
-      display: flex; align-items: center; gap: 10px;
-      padding: 6px 12px;
-      background: color-mix(in oklab, #fbbf24 22%, var(--color-surface-elevated));
-      border-bottom: 1px solid color-mix(in oklab, #fbbf24 40%, var(--color-border));
-      color: var(--color-text);
-      font-size: 11px;
-    }
-    .archived-banner .icon { font-size: 14px; }
-    .archived-banner .text { flex: 1; }
-    .archived-banner .text strong { color: #fbbf24; }
-    .archived-banner button {
-      background: #fbbf24;
-      border: 1px solid #fbbf24;
-      color: #000;
-      font: inherit; font-weight: 600; font-size: 11px;
-      padding: 3px 10px; border-radius: 4px;
-      cursor: pointer;
-    }
-    .archived-banner button:hover { filter: brightness(1.1); }
-
-    /* "+ Drum" row at bottom of row-head column, drum mode only. */
-    .add-drum-row {
-      height: var(--row-h);
-      display: flex; align-items: center; justify-content: center;
-      color: var(--color-text-muted);
-      border-bottom: 1px solid var(--color-border);
-      background: var(--color-surface-elevated);
-      font-size: 10px; letter-spacing: 0.06em;
-      cursor: pointer;
-    }
-    .add-drum-row:hover { color: var(--color-accent); }
-
-    /* modal shim — reused by drum picker and preset manager */
-    .modal {
-      position: fixed; inset: 0; z-index: 2000;
-      background: rgba(0,0,0,0.45);
-      display: flex; align-items: center; justify-content: center;
-    }
-    .modal .panel {
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      border-radius: 6px;
-      min-width: 320px; max-width: 480px;
-      padding: 14px 16px;
-      display: flex; flex-direction: column; gap: 10px;
-      color: var(--color-text);
-      box-shadow: 0 10px 40px rgba(0,0,0,0.55);
-    }
-    .modal h3 { margin: 0; font-size: 13px; font-weight: 600; }
-    .modal .row-f {
-      display: flex; align-items: center; gap: 8px;
-      font-size: 11px; color: var(--color-text-muted);
-    }
-    .modal input[type="text"], .modal select, .modal input[type="number"] {
-      flex: 1;
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      color: var(--color-text);
-      padding: 4px 8px; border-radius: 4px;
-      font: inherit; font-size: 11px;
-    }
-    .modal .actions {
-      display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;
-    }
-    .modal button {
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      color: var(--color-text);
-      padding: 4px 10px; border-radius: 4px;
-      font: inherit; font-size: 11px; cursor: pointer;
-    }
-    .modal button.primary {
-      background: var(--color-accent);
-      border-color: var(--color-accent);
-      color: #fff;
-    }
-    .modal button:hover { filter: brightness(1.1); }
-
-    .preset-list {
-      display: flex; flex-direction: column; gap: 2px;
-      max-height: 240px; overflow: auto;
-      border: 1px solid var(--color-border);
-      border-radius: 4px;
-      background: var(--color-surface-elevated);
-    }
-    .preset-list .empty { padding: 12px; color: var(--color-text-muted); font-size: 11px; text-align: center; }
-    .preset-list .item {
-      display: grid; grid-template-columns: 1fr auto auto auto;
-      gap: 6px; align-items: center;
-      padding: 6px 8px;
-      border-bottom: 1px solid rgba(255,255,255,0.04);
-      font-size: 11px;
-    }
-    .preset-list .item:last-child { border-bottom: 0; }
-    .preset-list .item button { padding: 2px 8px; font-size: 10px; }
-  `;
+  static styles = sequencerStyles;
 
   constructor() {
     super();
@@ -735,6 +257,15 @@ export class BeatSequencer extends LitElement {
     this.regionName = "";
     this.trackId = "";
     this.layout = null;
+    // True only after `this.layout` has been seeded from a backend
+    // source (the `.layout` property assigned externally, or a
+    // `foyer:sequencer-layout-changed` event carrying a layout). When
+    // false, we're rendering against a local fallback that
+    // `_currentLayout()` synthesized — auto-persisting that one would
+    // clobber whatever the agent / another client just set. Set true
+    // in the property accessor below + in the sequencer-layout-changed
+    // listener; checked by the tempo-change re-persist path.
+    this._layoutFromBackend = false;
     this.notes = [];
     this.trackRegions = [];
     this._tick = 0;
@@ -744,6 +275,10 @@ export class BeatSequencer extends LitElement {
     this._selectedPatternId = "";
     this._arrCols = 16;
     this._arrH = Number(localStorage.getItem(ARR_HEIGHT_KEY)) || 200;
+    // Last arrangement bar the user clicked. Shift-click on a second
+    // bar uses this as the loop anchor (matches the timeline ruler
+    // shift-click-to-extend-selection pattern).
+    this._lastArrBar = -1;
     this._preview = localStorage.getItem(PREVIEW_PREF_KEY) === "1";
     this._addDrum = false;
     this._drumPitch = 36;
@@ -780,7 +315,16 @@ export class BeatSequencer extends LitElement {
       // grid.  Without this, step counts are fixed but the tick→
       // sample conversion changes silently, making the notes drift
       // relative to the visual ruler until the user edits the grid.
-      if (ev.detail === "transport.tempo" && this.layout?.active) {
+      // Only re-persist when the layout was actually loaded from the
+      // backend. Lazy local defaults from `_currentLayout()` should
+      // not be written back — that's the read-on-mount → echo-as-write
+      // bug that clobbered MCP-authored patterns the moment a tab
+      // opened the sequencer view.
+      if (
+        ev.detail === "transport.tempo"
+        && this.layout?.active
+        && this._layoutFromBackend
+      ) {
         this._persistLayout();
       }
     };
@@ -788,6 +332,11 @@ export class BeatSequencer extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Focusable so the global tile-tree navigation can land here and
+    // local keys (Ctrl+Z / Ctrl+Y, chord digits, future arrow nav)
+    // route correctly when the user lands on the sequencer surface.
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
+    this.setAttribute("data-foyer-focus-domain", "sequencer");
     window.__foyer?.store?.addEventListener("control", this._onStoreControl);
     window.__foyer?.store?.addEventListener("change", this._onStoreControl);
     // Listen for convert/restore broadcasts from the piano roll so
@@ -798,6 +347,7 @@ export class BeatSequencer extends LitElement {
       if (!d.regionId || d.regionId !== this.regionId) return;
       if (!d.layout) return;
       this.layout = d.layout;
+      this._layoutFromBackend = true;
       this._tick++;
       this.requestUpdate();
     };
@@ -909,6 +459,29 @@ export class BeatSequencer extends LitElement {
   }
 
   updated(changed) {
+    if (changed.has("regionId") && this.regionId && !this.layout) {
+      // Tile-leaf mounts pass only `regionId` / `trackId` — no
+      // `.layout`. Look up the region in the live snapshot and
+      // adopt its persisted sequencer layout. Without this, the
+      // component falls through to `defaultLayout()` in
+      // `_currentLayout()` and any MCP-authored pattern reads as
+      // an empty fresh starter to the user (and to the next
+      // re-persist).
+      try {
+        const byTrack = window.__foyer?.store?.state?.regionsByTrack;
+        if (byTrack && typeof byTrack.entries === "function") {
+          for (const [tid, list] of byTrack.entries()) {
+            const found = (list || []).find((r) => r.id === this.regionId);
+            if (found?.foyer_sequencer) {
+              this.layout = found.foyer_sequencer;
+              this._layoutFromBackend = true;
+              this.trackId = this.trackId || tid;
+              break;
+            }
+          }
+        }
+      } catch {}
+    }
     if (changed.has("layout") || changed.has("regionId")) {
       // Always route incoming layouts through migrateToV2 so both
       // v1 and v2 get normalized (resolution clamped, pattern_steps
@@ -1136,6 +709,100 @@ export class BeatSequencer extends LitElement {
       if (idx >= 0) L.arrangement.splice(idx, 1);
       else L.arrangement.push({ pattern_id: patternId, bar, arrangement_row: row });
     });
+  }
+
+  /** Look up the host region in the live region cache. Returns
+   *  `{start_samples, length_samples}` so the navigation/loop math
+   *  can map bar indices onto timeline samples. */
+  _findRegionRecord() {
+    const byTrack = window.__foyer?.store?.state?.regionsByTrack;
+    if (!byTrack?.entries) return null;
+    for (const [, list] of byTrack.entries()) {
+      const r = (list || []).find((x) => x.id === this.regionId);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  /** Samples-per-bar at the current session tempo + time signature.
+   *  Pattern length math falls back to the layout's own
+   *  pattern_steps/resolution when the session doesn't expose a
+   *  time-signature numerator (stub/legacy backends). */
+  _samplesPerBar() {
+    const session = window.__foyer?.store?.state?.session;
+    const sr = Number(session?.sample_rate) || 48_000;
+    const tempo = Number(session?.transport?.tempo?.value) || 120;
+    // Use the layout's beats-per-bar (pattern_steps / resolution)
+    // since that's what the host engine uses when expanding the
+    // layout into MIDI notes. Falls back to 4 if math is degenerate.
+    const L = this._currentLayout();
+    const steps = Math.max(1, Number(L?.pattern_steps) || 16);
+    const res = Math.max(1, Number(L?.resolution) || 4);
+    const beatsPerBar = Math.max(1, steps / res);
+    return Math.round((60 / tempo) * beatsPerBar * sr);
+  }
+
+  /** Timeline-absolute sample position where `bar` (in the
+   *  arrangement) begins. Returns `null` when the region hasn't
+   *  hydrated yet. */
+  _barToTimelineSamples(bar) {
+    const r = this._findRegionRecord();
+    if (!r) return null;
+    const start = Number(r.start_samples) || 0;
+    return start + Math.max(0, bar) * this._samplesPerBar();
+  }
+
+  /** Navigate the engine's transport to the start of `bar`. */
+  _navigateToBar(bar) {
+    const samples = this._barToTimelineSamples(bar);
+    if (samples == null) return;
+    window.__foyer?.ws?.send?.({ type: "locate", samples });
+  }
+
+  /** Set the engine's loop range to cover `[barStart, barEnd]`
+   *  inclusive and enable looping. */
+  _loopBarRange(barStart, barEnd) {
+    const a = Math.min(barStart, barEnd);
+    const b = Math.max(barStart, barEnd);
+    const startSamples = this._barToTimelineSamples(a);
+    const endSamples = this._barToTimelineSamples(b + 1);
+    if (startSamples == null || endSamples == null) return;
+    window.__foyer?.ws?.send?.({
+      type: "set_loop_range",
+      start_samples: startSamples,
+      end_samples: endSamples,
+      enabled: true,
+    });
+  }
+
+  /** Loop the full populated arrangement (bar 0 → max+1). */
+  _loopArrangement() {
+    const L = this._currentLayout();
+    const maxBar = L.arrangement.reduce((m, s) => Math.max(m, s.bar), -1);
+    if (maxBar < 0) return;
+    this._loopBarRange(0, maxBar);
+    this._navigateToBar(0);
+  }
+
+  /** Click on an arrangement cell.
+   *   - plain click: navigate + toggle pattern in slot
+   *   - shift-click: extend loop selection from the last-clicked bar
+   *   - alt-click: loop just this bar
+   *   - right-click: handled separately via context menu (TBD) */
+  _onArrCellClick(ev, patternId, bar) {
+    if (ev.shiftKey && this._lastArrBar >= 0) {
+      this._loopBarRange(this._lastArrBar, bar);
+      return;
+    }
+    if (ev.altKey) {
+      this._loopBarRange(bar, bar);
+      this._navigateToBar(bar);
+      this._lastArrBar = bar;
+      return;
+    }
+    this._toggleArrCell(patternId, bar);
+    this._navigateToBar(bar);
+    this._lastArrBar = bar;
   }
   _addPattern() {
     this._commit((L) => {
@@ -1956,6 +1623,10 @@ export class BeatSequencer extends LitElement {
           <button class="add add-pattern" title="Add a new empty pattern"
                   @click=${() => this._addPattern()}>+ Pattern</button>
           <span>Arrangement · ${L.patterns.length} pattern${L.patterns.length === 1 ? "" : "s"} · ${maxBar + 1} bar${maxBar + 1 === 1 ? "" : "s"}</span>
+          <button class="add"
+                  title="Loop the full populated arrangement on the transport"
+                  ?disabled=${maxBar < 0}
+                  @click=${() => this._loopArrangement()}>Loop arr</button>
           <button class="add bars" title="Show more bars in the arrangement"
                   @click=${() => { this._arrCols = Math.min(cols + 8, 256); }}>+ 8 bars</button>
         </div>
@@ -1980,8 +1651,8 @@ export class BeatSequencer extends LitElement {
                 return html`
                   <div class="arr-cell ${on ? "on" : ""} ${(b + 1) % 4 === 0 ? "beat-edge" : ""}"
                        style=${on ? `--cell-color:${p.color || pickPatternColor(0)}` : ""}
-                       title="bar ${b + 1}"
-                       @click=${() => this._toggleArrCell(p.id, b)}></div>
+                       title="bar ${b + 1} — click navigates the transport; shift-click loops from the last bar; alt-click loops just this bar"
+                       @click=${(ev) => this._onArrCellClick(ev, p.id, b)}></div>
                 `;
               })}
             `)}

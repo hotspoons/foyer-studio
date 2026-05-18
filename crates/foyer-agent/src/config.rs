@@ -26,6 +26,12 @@ pub struct AgentConfig {
     /// runs (CI, batch transcription, etc.) where the output
     /// shouldn't depend on whether a human has a tab open.
     pub prefer_headless_render: bool,
+    /// BCP-47 code of the language the most-recently-active UI client
+    /// is set to (`en`, `es`, `ja`, …). The engine appends a one-line
+    /// directive to the system prompt so the assistant answers in the
+    /// same language the user is reading the rest of the UI in. None
+    /// (or `en`) leaves the system prompt alone.
+    pub ui_locale: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -36,6 +42,7 @@ impl Default for AgentConfig {
             api_key: None,
             autonomy: AgentAutonomy::default(),
             prefer_headless_render: false,
+            ui_locale: None,
         }
     }
 }

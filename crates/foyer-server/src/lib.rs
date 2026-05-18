@@ -12,6 +12,10 @@
 #![forbid(unsafe_code)]
 
 mod agent_render;
+mod session_director;
+mod spectrum;
+mod spectrum_director;
+mod ui_director;
 
 /// Public re-export so the CLI can fire the chromium boot probe.
 /// Keeps the rest of `agent_render` private (its `pub fn`s take
@@ -80,6 +84,7 @@ mod ingress_latency;
 mod ingress_ws;
 mod jail;
 mod midi_latency;
+mod openai_proxy;
 pub mod orphans;
 mod plugin_gui_ws;
 mod recents;
@@ -177,6 +182,15 @@ pub trait BackendSpawner: Send + Sync + 'static {
 pub struct LaunchedBackend {
     pub backend: Arc<dyn Backend>,
     pub process: Option<Box<dyn ProcessHandle>>,
+    /// HTTP URL of the upstream DAW's MCP endpoint, when one is
+    /// available for this specific session. `None` means either the
+    /// spawned DAW build doesn't ship an MCP surface (Ardour 9.2 and
+    /// older) or the spawner didn't try to pin a port (stub backends,
+    /// reattach to an orphan shim Foyer didn't fork).
+    /// Populated by the spawner; consumed by `swap_backend` which
+    /// stashes it on the session registry entry so the `daw_proxy`
+    /// agent tool can route per-session calls to the right port.
+    pub mcp_endpoint: Option<String>,
 }
 
 impl LaunchedBackend {
@@ -184,6 +198,7 @@ impl LaunchedBackend {
         Self {
             backend,
             process: None,
+            mcp_endpoint: None,
         }
     }
 
@@ -191,7 +206,14 @@ impl LaunchedBackend {
         Self {
             backend,
             process: Some(p),
+            mcp_endpoint: None,
         }
+    }
+
+    /// Tag the launch with the upstream MCP URL. Chainable.
+    pub fn with_mcp_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.mcp_endpoint = Some(endpoint.into());
+        self
     }
 }
 
@@ -259,7 +281,9 @@ pub struct TlsConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen: "127.0.0.1:3838".parse().unwrap(),
+            listen: "127.0.0.1:3838"
+                .parse()
+                .expect("hardcoded default socket addr is statically valid"),
             web_root: None,
             web_overlays: Vec::new(),
             jail_root: None,
@@ -409,6 +433,12 @@ pub(crate) struct AppState {
     /// `stream_id`; the `/ws/audio/:stream_id` route subscribes to
     /// its broadcasts. Shared across all connections.
     pub(crate) audio_hub: Arc<audio::AudioHub>,
+    /// Server-side spectrum analyser. Used as a fallback when the
+    /// active backend advertises `spectrum.available = false` (the
+    /// Ardour shim today) — we tap its audio egress and run the FFT
+    /// in Rust so the FE / agent get usable spectrum frames without
+    /// waiting on the shim's native pipeline.
+    pub(crate) spectrum_svc: spectrum::SpectrumService,
     /// M6b ingress senders. Keyed by `stream_id`; browser pushes
     /// binary PCM to `/ws/ingress/:stream_id`, and the task there
     /// forwards frames into this sink. Dropping the entry
@@ -489,6 +519,13 @@ pub(crate) struct AppState {
     /// persisted across sidecar restarts; the host re-assigns per
     /// session.
     pub(crate) track_browser_sources: RwLock<HashMap<foyer_schema::EntityId, String>>,
+    /// Static `mcp_proxies:` from config.yaml — upstream MCP servers
+    /// Foyer didn't spawn (e.g. a Reaper instance the user started
+    /// separately). The `daw_proxy` agent tool merges these with
+    /// per-session entries (from `Session.mcp_endpoint`) at query
+    /// time. Held in a RwLock so a hot-reload of config could update
+    /// it without restarting the runtime.
+    pub(crate) mcp_proxies: RwLock<Vec<foyer_config::McpProxyConfig>>,
     /// Broadcast for PTT binary frames. Separate channel from the
     /// JSON envelope bus so the writer loop can forward it as a
     /// `Message::Binary` without re-encoding. Each connection
@@ -610,6 +647,18 @@ pub(crate) struct AppState {
     /// FE-attached renderer for the `visualize` agent tool.
     /// `None` until `attach_agent()` runs.
     pub(crate) fe_renderer: RwLock<Option<std::sync::Arc<agent_render::FeRendererImpl>>>,
+
+    /// FE-attached UI director for the `ui` agent tool. Round-trips
+    /// `Event::UiAction` / `Command::UiActionResult` against any
+    /// attached browser tab.
+    pub(crate) ui_director: RwLock<Option<std::sync::Arc<ui_director::UiDirectorImpl>>>,
+
+    /// API key required on the OpenAI-compatible endpoint exposed at
+    /// `/v1/*`. `None` = open (no auth). When set, every `/v1/*`
+    /// request must carry `Authorization: Bearer <key>` or it's
+    /// rejected with `401`. Seeded by `foyer-cli` from the CLI flag
+    /// / env var / `config.yaml` chain.
+    pub(crate) openai_proxy_api_key: RwLock<Option<String>>,
 }
 
 /// Tracking state for the sequencer SetSequencerLayout coalescer.
@@ -739,6 +788,7 @@ impl AppState {
         session_id: Option<EntityId>,
         session_name: Option<String>,
         process: Option<Box<dyn ProcessHandle>>,
+        mcp_endpoint: Option<String>,
     ) {
         self.install_active_backend(next.clone()).await;
         *self.active_backend_id.write().await = Some(backend_id.clone());
@@ -797,7 +847,15 @@ impl AppState {
             .unwrap_or_default();
         self.sessions
             .clone()
-            .add(sid.clone(), backend_id.clone(), next, path, name, process)
+            .add(
+                sid.clone(),
+                backend_id.clone(),
+                next,
+                path,
+                name,
+                process,
+                mcp_endpoint,
+            )
             .await;
         // Newly-opened session automatically becomes the focus
         // target so untagged commands flow to it. User can switch
@@ -883,6 +941,7 @@ impl Server {
             listen_port: std::sync::atomic::AtomicU16::new(0),
             tls_enabled: std::sync::atomic::AtomicBool::new(false),
             audio_hub: Arc::new(audio::AudioHub::new(calibration.clone())),
+            spectrum_svc: spectrum::SpectrumService::new(),
             ingress_senders: Mutex::new(HashMap::new()),
             ingress_latency,
             fake_ingress_latency_ms: std::sync::atomic::AtomicU32::new(
@@ -906,6 +965,7 @@ impl Server {
             drift_integral: Mutex::new(HashMap::new()),
             chat: chat::ChatState::new(),
             track_browser_sources: RwLock::new(HashMap::new()),
+            mcp_proxies: RwLock::new(Vec::new()),
             ptt_tx,
             sessions,
             orphans: RwLock::new(Vec::new()),
@@ -931,6 +991,8 @@ impl Server {
             mcp: RwLock::new(None),
             webllm_bridge: std::sync::Arc::new(webllm_bridge::WebLlmBridge::new()),
             fe_renderer: RwLock::new(None),
+            ui_director: RwLock::new(None),
+            openai_proxy_api_key: RwLock::new(None),
         });
         Self { state }
     }
@@ -938,11 +1000,21 @@ impl Server {
     /// Attach the agent runtime. Called by foyer-cli after the
     /// AppState is constructed so the agent's filesystem store has a
     /// chance to fail gracefully without blocking the rest of the
-    /// server from coming up.
+    /// server from coming up. `mcp_proxies` is the list of upstream
+    /// MCP backends the agent's `daw_proxy` tool will speak to;
+    /// usually fed from `foyer_config::Config.mcp_proxies`.
     pub async fn attach_agent(
         &self,
+        mcp_proxies: Vec<foyer_config::McpProxyConfig>,
     ) -> Result<std::sync::Arc<foyer_agent::AgentRuntime>, foyer_agent::store::StoreError> {
-        let runtime = foyer_agent::AgentRuntime::new().await?;
+        // Stash the static proxy list on AppState so the SessionDirector
+        // can merge it with per-session live entries when the agent
+        // queries `daw_proxy.list_backends`. Runtime gets it too as a
+        // boot-time fallback for thin dispatch paths that don't have a
+        // director attached.
+        *self.state.mcp_proxies.write().await = mcp_proxies.clone();
+        let store = std::sync::Arc::new(foyer_agent::store::AgentStore::open_default().await?);
+        let runtime = foyer_agent::AgentRuntime::with_store_and_proxies(store, mcp_proxies).await?;
         let backend = self.state.backend.read().await.clone();
         runtime
             .attach_backend(std::sync::Arc::downgrade(&backend))
@@ -1002,6 +1074,42 @@ impl Server {
             headless_renderer as std::sync::Arc<dyn foyer_agent::tools::HeadlessRenderer>,
         )
         .await;
+
+        // Same shape for the UI director: build it once, stash on
+        // AppState (so the WS dispatcher can resolve UiActionResult
+        // replies), and hand it to the agent runtime.
+        let ui_director = ui_director::UiDirectorImpl::new(std::sync::Arc::downgrade(&self.state));
+        *self.state.ui_director.write().await = Some(ui_director.clone());
+        agent
+            .set_ui_director(Some(
+                ui_director as std::sync::Arc<dyn foyer_agent::tools::UiDirector>,
+            ))
+            .await;
+
+        // Session director — gives the `session` agent tool access to
+        // open / new / close / list_open / recents / browse / backends.
+        // No AppState slot needed (the impl holds Weak<AppState> and
+        // doesn't need a correlation table like the UI director's),
+        // so we only hand it to the runtime.
+        let session_dir =
+            session_director::SessionDirectorImpl::new(std::sync::Arc::downgrade(&self.state));
+        agent
+            .set_session_director(Some(
+                session_dir as std::sync::Arc<dyn foyer_agent::tools::SessionDirector>,
+            ))
+            .await;
+
+        // Spectrum director — lets `spectrum.capture_at` /
+        // `capture_window` drive transport for offline FFT capture.
+        // Same pattern as session director: weak ref to AppState, no
+        // correlation table.
+        let spectrum_dir =
+            spectrum_director::SpectrumDirectorImpl::new(std::sync::Arc::downgrade(&self.state));
+        agent
+            .set_spectrum_director(Some(
+                spectrum_dir as std::sync::Arc<dyn foyer_agent::tools::SpectrumDirector>,
+            ))
+            .await;
     }
 
     /// Load tunnel configuration from the parsed config.yaml so WS handlers
@@ -1017,6 +1125,22 @@ impl Server {
                 "no"
             }
         );
+    }
+
+    /// Seed the API key gating the OpenAI-compatible endpoint at
+    /// `/v1/*`. `None` (or an empty string) leaves the endpoint open;
+    /// any non-empty value requires `Authorization: Bearer <key>` on
+    /// every `/v1/*` request. Called by `foyer-cli` once it has
+    /// resolved the CLI/env/config precedence chain.
+    pub async fn set_openai_proxy_api_key(&self, key: Option<String>) {
+        let normalized = key.filter(|k| !k.is_empty());
+        let was_set = normalized.is_some();
+        *self.state.openai_proxy_api_key.write().await = normalized;
+        if was_set {
+            tracing::info!("/v1/* OpenAI proxy: API key required");
+        } else {
+            tracing::info!("/v1/* OpenAI proxy: open (no API key)");
+        }
     }
 
     /// Install the RBAC policy. CLI calls this at startup with the
@@ -1224,6 +1348,17 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
             "/llm/v1/responses",
             axum::routing::post(webllm_bridge::responses_unsupported),
         )
+        // OpenAI-compatible surface for the in-process agent. Lets
+        // external apps (Cursor, OpenWebUI, ad-hoc Python clients,
+        // …) point at Foyer like any other OpenAI endpoint and
+        // inherit the full agent — tool registry, system prompt,
+        // skills/memory. Auth is `Authorization: Bearer <key>` when
+        // `openai_proxy_api_key` is set on AppState; open otherwise.
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(openai_proxy::chat_completions),
+        )
+        .route("/v1/models", get(openai_proxy::list_models))
         .route("/files/*path", get(files::serve_file))
         // Project archive surface: upload accepts a zip or tar.gz body
         // and extracts under the jail; export tar.gz's a project

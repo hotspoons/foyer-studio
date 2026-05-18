@@ -21,8 +21,9 @@
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
 import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
-import { openWindow, registerWindowKind } from "foyer-ui-core/widgets/window.js";
+import { openWindow, registerWindowKind, spawnWindowKind } from "foyer-ui-core/widgets/window.js";
 import { findRegion as _findRegionInCache } from "foyer-core/region-cache.js";
+import { isAllowed } from "foyer-core/rbac.js";
 
 // Persistence factories: replayed on reload by `rehydrateWindows()` so
 // Console + Diagnostics come back exactly the way `_floating` used to
@@ -67,10 +68,66 @@ const _spawnSoftKeyboard = () => {
     viewProps: {},
   });
 };
-registerWindowKind("console", _spawnConsole);
-registerWindowKind("diagnostics", _spawnDiagnostics);
-registerWindowKind("midi-devices", _spawnMidiDevices);
-registerWindowKind("soft-keyboard", _spawnSoftKeyboard);
+// Spectrum analyser. Same "single floater per kind" rule as the
+// other workspace widgets — re-opening returns the existing window.
+// The tile-class registration in widget-tile-views.js still works
+// for dragging it into the tile grid; this registration just adds
+// the "+ launcher" / docked-window codepath.
+const _spawnSpectrum = (props = {}) => {
+  import("./spectrum-tile.js").then(() => {
+    const el = document.createElement("foyer-spectrum-tile");
+    if (props.target) el.target = props.target;
+    openWindow({
+      title: "Spectrum",
+      icon: "chart-bar",
+      storageKey: "spectrum-widget",
+      content: el,
+      width: 760,
+      height: 520,
+      persist: { kind: "spectrum", id: "spectrum", props: {} },
+      viewKind: "spectrum",
+      viewProps: {},
+    });
+  });
+};
+// Lazy-import the scripts view so the hljs + grammar bundle stays out
+// of the boot path. Users who never open the Scripts panel don't pay.
+const _spawnScripts = () => {
+  import("./scripts-view.js").then(() => {
+    const el = document.createElement("foyer-scripts-view");
+    openWindow({
+      title: "Scripts", icon: "document-text", storageKey: "scripts-widget",
+      content: el, width: 900, height: 600,
+      persist: { kind: "scripts", id: "scripts", props: {} },
+      viewKind: "scripts",
+      viewProps: {},
+    });
+  });
+};
+registerWindowKind("console", _spawnConsole, {
+  label: "Console",
+  description: "Logs + diagnostic output. No viz fallback.",
+});
+registerWindowKind("diagnostics", _spawnDiagnostics, {
+  label: "Diagnostics",
+  description: "Engine / WS / RBAC live state. No viz fallback.",
+});
+registerWindowKind("midi-devices", _spawnMidiDevices, {
+  label: "MIDI devices",
+  description: "Connected MIDI in/out ports + monitor.",
+});
+registerWindowKind("soft-keyboard", _spawnSoftKeyboard, {
+  label: "Soft keyboard",
+  description: "On-screen piano keyboard for MIDI input.",
+});
+registerWindowKind("scripts", _spawnScripts, {
+  label: "Scripts",
+  description: "Host-script editor (Lua under Ardour).",
+});
+registerWindowKind("spectrum", _spawnSpectrum, {
+  label: "Spectrum",
+  description: "Real-time FFT analyser + waterfall. Per-target picker for master / monitor / individual tracks.",
+});
 
 // Track Editor / MIDI Editor / Beat Sequencer factories. The heavy
 // editor modules are lazy-imported at rehydrate time so we don't drag
@@ -81,6 +138,10 @@ registerWindowKind("track-editor", (props) => {
   import("./track-editor-modal.js").then((m) => {
     m.openTrackEditor(props.trackId, { tab: props.tab || "" });
   });
+}, {
+  label: "Track editor",
+  description: "Per-track inspector + plugin chain editor.",
+  viz_fallback: "mixer",
 });
 
 function _findRegion(regionId) {
@@ -108,6 +169,9 @@ registerWindowKind("plugin", (props) => {
   const p = props?.pluginId ? _findPlugin(props.pluginId) : null;
   if (!p) return;
   import("foyer-ui-core/layout/plugin-layer.js").then((m) => m.openPluginFloat(p));
+}, {
+  label: "Plugin panel",
+  description: "One plugin's params + native-GUI button. Use for plugins whose params aren't exposed over the schema (xpra native-GUI passthrough).",
 });
 
 function _retargetMidiEditor(editor, found) {
@@ -141,6 +205,10 @@ registerWindowKind("midi-editor", (props) => {
       onReuse: (existing) => _retargetMidiEditor(existing, found),
     });
   });
+}, {
+  label: "Piano roll",
+  description: "Per-region MIDI note editor. Variants without this kind support `visualize.midi_roll` as a read-only fallback.",
+  viz_fallback: "midi_roll",
 });
 
 function _retargetBeatSequencer(seq, found) {
@@ -149,6 +217,7 @@ function _retargetBeatSequencer(seq, found) {
   seq.regionName = found.region.name || "";
   seq.notes = Array.isArray(found.region.notes) ? found.region.notes : [];
   seq.layout = found.region.foyer_sequencer || null;
+  seq._layoutFromBackend = !!found.region.foyer_sequencer;
   seq.trackId = found.trackId || "";
 }
 
@@ -173,6 +242,10 @@ registerWindowKind("beat-sequencer", (props) => {
       onReuse: (existing) => _retargetBeatSequencer(existing, found),
     });
   });
+}, {
+  label: "Beat sequencer",
+  description: "Cell-grid drum / pattern authoring. Variants without this kind support `visualize.beat_sequencer` as a read-only fallback.",
+  viz_fallback: "beat_sequencer",
 });
 
 const PANEL_KEY = "foyer.rightdock.v1";
@@ -212,6 +285,7 @@ const VIEW_ICON = {
   track_editor: "wrench-screwdriver",
   beat_sequencer: "musical-note",
   piano_roll: "musical-note",
+  scripts: "document-text",
 };
 
 // Spawnable widget types — surfaced through the dock's "+" menu so
@@ -221,9 +295,44 @@ const VIEW_ICON = {
 // widgets layer's visibility / sticky / dock controls. Tile-class
 // views (Mixer, Timeline) stay in the top "+ New" menu and are
 // handled by the tile grid, not this dock.
+// The + launcher catalog. Sections render as visual groups with a
+// header label in the menu. Each entry either:
+//   · names a `view` registered via `registerWindowKind` (Console,
+//     Diagnostics, Scripts, MIDI Devices, On-screen Keyboard) — these
+//     spawn a foyer-window, persist across reload, and dock-icon when
+//     minimized; OR
+//   · provides an `open()` callback (modals like Audio Pool,
+//     Preferences, Group Manager, Remote Access). Modals are one-
+//     shot — they don't persist, don't dock, don't show up in the
+//     widgets dock.
+//
+// `requires(state)` is the optional gate. Returns falsy to suppress
+// the row — used for capability gating (Scripts only when the
+// backend advertises a scripting surface) and RBAC gating (audio
+// pool needs `list_audio_pool`, Remote Access needs
+// `tunnel_create_token`).
 const SPAWNABLE_WIDGETS = [
-  { view: "console",     label: "Console",     icon: "command-line" },
-  { view: "diagnostics", label: "Diagnostics", icon: "check-circle" },
+  { group: "Workspace", view: "console",     label: "Console",     icon: "command-line" },
+  { group: "Workspace", view: "diagnostics", label: "Diagnostics", icon: "check-circle" },
+  { group: "Workspace", view: "spectrum",    label: "Spectrum",    icon: "chart-bar" },
+  { group: "Workspace", view: "scripts",     label: "Scripts",     icon: "document-text",
+    requires: (state) => !!state?.session?.scripting },
+
+  { group: "Devices",   view: "midi-devices",  label: "MIDI Devices",      icon: "musical-note",
+    requires: () => isAllowed("list_audio_pool") },
+  { group: "Devices",   view: "soft-keyboard", label: "On-screen Keyboard", icon: "musical-note",
+    requires: () => isAllowed("list_audio_pool") },
+  { group: "Devices",   view: "audio-pool",    label: "Audio Pool",         icon: "musical-note",
+    requires: () => isAllowed("list_audio_pool"),
+    open: () => import("./audio-pool-modal.js").then((m) => m.openAudioPoolModal()) },
+
+  { group: "Session",   view: "group-manager", label: "Group Manager",  icon: "users",
+    open: () => import("./group-manager-modal.js").then((m) => m.openGroupManager()) },
+  { group: "Session",   view: "remote-access", label: "Remote Access",  icon: "globe-alt",
+    requires: () => isAllowed("tunnel_create_token") || isAllowed("tunnel_admin"),
+    open: () => import("./tunnel-manager-modal.js").then((m) => m.openTunnelManager()) },
+  { group: "Session",   view: "preferences",   label: "Preferences",    icon: "cog-6-tooth",
+    open: () => import("./settings-modal.js").then((m) => m.openSettings()) },
 ];
 
 export class RightDock extends LitElement {
@@ -287,6 +396,27 @@ export class RightDock extends LitElement {
     :host([drop-ready]) .rail {
       outline: 2px dashed color-mix(in oklab, var(--color-accent) 60%, transparent);
       outline-offset: -2px;
+    }
+    /* Ghost FAB at the top of the rail — concrete "you'll land here"
+     * target. The user drags toward this; releasing anywhere over
+     * the rail (already widened via DOCK_HIT_SLACK_PX in QuadrantFab)
+     * triggers the dock. Only shown while a drag is highlighting
+     * the dock. Pointer-events: none so it doesn't intercept the
+     * pointerup that the QuadrantFab listens for. */
+    .dock-ghost {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      border: 2px dashed var(--color-accent);
+      background: color-mix(in oklab, var(--color-accent) 18%, transparent);
+      display: flex; align-items: center; justify-content: center;
+      color: color-mix(in oklab, var(--color-accent) 70%, var(--color-text));
+      pointer-events: none;
+      animation: dock-ghost-pulse 1.2s ease-in-out infinite;
+      flex: 0 0 auto;
+    }
+    @keyframes dock-ghost-pulse {
+      0%, 100% { transform: scale(1.0); opacity: 0.85; }
+      50%      { transform: scale(1.08); opacity: 1.0; }
     }
 
     /* Divider between dock-icons (minimized floats) and primary rail buttons. */
@@ -356,6 +486,13 @@ export class RightDock extends LitElement {
     }
     .spawn-menu button {
       display: flex; align-items: center; gap: 8px;
+      /* Explicit justify-content so the icon + label sit flush against
+         the left padding instead of being centered by an inherited
+         justify-content: center from a parent flex context (the rail
+         buttons use that for their square icon tiles; without an
+         explicit override these column-style buttons inherit the
+         look). */
+      justify-content: flex-start;
       width: 100%; height: auto;
       padding: 6px 10px;
       font: inherit; font-size: 12px;
@@ -366,8 +503,25 @@ export class RightDock extends LitElement {
       cursor: pointer;
       text-align: left;
     }
+    .spawn-menu .spawn-header {
+      text-align: left;
+    }
     .spawn-menu button:hover {
       background: color-mix(in oklab, var(--color-accent) 16%, var(--color-surface-elevated));
+    }
+    .spawn-header {
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+      padding: 4px 10px 2px;
+    }
+    .spawn-sep {
+      height: 1px;
+      background: var(--color-border);
+      margin: 4px 0;
+      opacity: 0.6;
     }
     .spawn-anchor { position: relative; }
 
@@ -620,6 +774,11 @@ export class RightDock extends LitElement {
         </div>
       ` : null}
       <div class="rail">
+        ${this._dropHighlight ? html`
+          <div class="dock-ghost" title="Release here to dock">
+            ${icon("arrow-down", 16)}
+          </div>
+        ` : null}
         ${this._renderWidgetsDock({ leadingSep: false })}
         <div class="rail-spacer"></div>
         ${this._renderDockedFabs({ leadingSep: false })}
@@ -845,30 +1004,55 @@ export class RightDock extends LitElement {
   }
 
   _renderSpawnMenu() {
-    const layout = window.__foyer?.layout;
+    const state = window.__foyer?.store?.state;
+    const visible = SPAWNABLE_WIDGETS.filter((s) => !s.requires || s.requires(state));
+    // Group entries while preserving the catalog order. A `null` group
+    // is rendered ungrouped (no header) for back-compat with any future
+    // entry that doesn't opt in.
+    const byGroup = new Map();
+    for (const s of visible) {
+      const k = s.group || "";
+      if (!byGroup.has(k)) byGroup.set(k, []);
+      byGroup.get(k).push(s);
+    }
     return html`
       <div class="spawn-menu" @click=${(ev) => ev.stopPropagation()}>
-        ${SPAWNABLE_WIDGETS.map((s) => html`
-          <button @click=${() => this._spawnWidget(s.view)}>
-            ${icon(s.icon, 14)} ${s.label}
-          </button>
+        ${[...byGroup.entries()].map(([groupLabel, items], idx) => html`
+          ${groupLabel && idx > 0 ? html`<div class="spawn-sep"></div>` : null}
+          ${groupLabel ? html`<div class="spawn-header">${groupLabel}</div>` : null}
+          ${items.map((s) => html`
+            <button @click=${() => this._spawnWidget(s)}>
+              ${icon(s.icon, 14)} ${s.label}
+            </button>
+          `)}
         `)}
       </div>
     `;
   }
 
-  _spawnWidget(view) {
+  _spawnWidget(entry) {
     this._spawnOpen = false;
-    // Console + Diagnostics go through openWindow so they get the
-    // SAME chrome as Track editor / MIDI editor / Beat sequencer
-    // (foyer-window) instead of the floating-tiles tile-class chrome
-    // (slot tag, dock-back button, double title). The shared
-    // storageKey keeps the open-set idempotent — clicking "+ Console"
-    // twice focuses the existing window instead of stacking
-    // duplicates. (Rich, 2026-04-25.)
+    // Modal-style entries provide their own `open()` (Audio Pool,
+    // Preferences, Group Manager, Remote Access). Window-style entries
+    // (Console, Diagnostics, Scripts, MIDI Devices, On-screen
+    // Keyboard) name a registered `view` and go through
+    // `spawnWindowKind` so they inherit foyer-window chrome + the
+    // shared storageKey idempotency (clicking the row twice focuses
+    // the existing window instead of stacking).
+    if (typeof entry === "string") entry = { view: entry };
+    if (typeof entry?.open === "function") {
+      Promise.resolve(entry.open()).catch((e) =>
+        console.warn("spawn-menu open failed", entry?.view, e));
+      return;
+    }
+    const view = entry?.view;
+    if (!view) return;
     if (view === "console")     { _spawnConsole();     return; }
     if (view === "diagnostics") { _spawnDiagnostics(); return; }
-    // Fallback for any other future widget views — legacy openWidget.
+    if (view === "scripts")     { _spawnScripts();     return; }
+    if (view === "midi-devices")  { spawnWindowKind("midi-devices");  return; }
+    if (view === "soft-keyboard") { spawnWindowKind("soft-keyboard"); return; }
+    // Fallback for any future view we haven't special-cased — legacy openWidget.
     const layout = window.__foyer?.layout;
     if (!layout) return;
     if (typeof layout.openWidget === "function") layout.openWidget(view);

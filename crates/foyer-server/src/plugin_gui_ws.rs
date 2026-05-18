@@ -92,7 +92,20 @@ async fn handle(socket: WebSocket, _state: Arc<AppState>) {
             }
         }
     }
-    let tcp = tcp.unwrap();
+    // Loop above either assigns `tcp = Some(s)` on success and breaks,
+    // or returns early on terminal error. If we got here without
+    // returning, tcp must be Some.
+    let tcp = match tcp {
+        Some(t) => t,
+        None => {
+            tracing::error!(
+                "/ws/plugin-gui xpra reachable check exited the retry loop with no socket — \
+                 closing browser side"
+            );
+            let _ = socket.close().await;
+            return;
+        }
+    };
     if let Err(e) = tcp.set_nodelay(true) {
         tracing::warn!("/ws/plugin-gui set_nodelay failed: {} — continuing", e);
     }

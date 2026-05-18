@@ -53,7 +53,10 @@ impl IngressLatencyTracker {
     /// after offset correction (clock-probe noise; the median
     /// absorbs it).
     pub fn record(&self, stream_id: u32, latency_ns: i64) {
-        let mut g = self.streams.lock().unwrap();
+        let mut g = self
+            .streams
+            .lock()
+            .expect("ingress latency streams mutex not poisoned");
         let r = g.entry(stream_id).or_default();
         if r.samples_ns.len() < RING_CAP {
             r.samples_ns.push(latency_ns);
@@ -71,7 +74,10 @@ impl IngressLatencyTracker {
     /// GC / network jitter without skewing the result the way a
     /// mean would.
     pub fn median_ms(&self, stream_id: u32) -> Option<f32> {
-        let g = self.streams.lock().unwrap();
+        let g = self
+            .streams
+            .lock()
+            .expect("ingress latency streams mutex not poisoned");
         let r = g.get(&stream_id)?;
         if r.filled < 8 {
             return None;
@@ -86,7 +92,10 @@ impl IngressLatencyTracker {
     /// stale samples don't bleed into the next stream that happens
     /// to reuse the same id.
     pub fn drop_stream(&self, stream_id: u32) {
-        let mut g = self.streams.lock().unwrap();
+        let mut g = self
+            .streams
+            .lock()
+            .expect("ingress latency streams mutex not poisoned");
         g.remove(&stream_id);
     }
 }

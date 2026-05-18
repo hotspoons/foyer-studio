@@ -24,6 +24,15 @@ import "./components/transport.js";
 import "./components/track-row.js";
 import "./components/session-sheet.js";
 import "./components/track-advanced-sheet.js";
+// Cross-variant import — `foyer-agent-panel` is the SAME chat surface
+// ui-full ships. The three-tier rule says variants should be siblings,
+// but the agent panel is a fully self-contained Lit element with
+// only foyer-core / foyer-ui-core deps in its own tree, so the
+// long-term cleanup is to move it to ui-core. Documented in docs/
+// TODO.md as "Phone variant: factor agent-panel to ui-core". Until
+// then, this single import is the cheapest path to expose the agent
+// on the phone without duplicating ~2k lines of chat UI.
+import "../ui-full/components/agent-panel.js";
 // Chat FAB + push-to-talk panel — same component the desktop UI uses,
 // promoted to ui-core so both variants share it. The FAB is draggable
 // and clamps to the viewport, so a phone screen gets the same
@@ -252,6 +261,19 @@ export class PhoneApp extends LitElement {
         viewport on its own; we just need it in the DOM.
       -->
       <foyer-chat-panel></foyer-chat-panel>
+      ${isAllowed("agent_send") ? html`
+        <!--
+          AI agent FAB. Speech-to-text into the chat lets the user
+          drive transport / record / sequencing from the phone
+          without touching the phone screen.  Gated on the
+          `agent_send` RBAC tag — LAN connections + admin +
+          session_controller see it; performers and viewers don't.
+          Same role mask `foyer-server`'s WS dispatch already
+          enforces, so the gate is UX sugar (the server is still
+          the security boundary).
+        -->
+        <foyer-agent-panel></foyer-agent-panel>
+      ` : null}
     `;
   }
 }

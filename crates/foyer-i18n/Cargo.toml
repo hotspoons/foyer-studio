@@ -1,0 +1,20 @@
+[package]
+name = "foyer-i18n"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Drupal-style runtime i18n shared by every Foyer crate that emits user-facing text."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+foyer-schema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+include_dir = "0.7"
+once_cell = "1"

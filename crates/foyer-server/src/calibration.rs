@@ -147,7 +147,10 @@ impl CalibrationManager {
         clicks: Option<u32>,
     ) -> u32 {
         let target = clicks.unwrap_or(DEFAULT_CLICKS).clamp(2, 20);
-        let mut g = self.runs.lock().unwrap();
+        let mut g = self
+            .runs
+            .lock()
+            .expect("calibration runs mutex not poisoned");
         g.insert(
             egress_stream_id,
             CalibrationRun {
@@ -168,7 +171,10 @@ impl CalibrationManager {
 
     /// Stop a run, returning the partial result if any.
     pub fn stop_run(&self, egress_stream_id: u32) -> Option<CalibrationResult> {
-        let mut g = self.runs.lock().unwrap();
+        let mut g = self
+            .runs
+            .lock()
+            .expect("calibration runs mutex not poisoned");
         let run = g.remove(&egress_stream_id)?;
         Some(finalize(&run))
     }
@@ -180,7 +186,7 @@ impl CalibrationManager {
     pub fn egress_for_ingress(&self, ingress_stream_id: u32) -> Option<u32> {
         self.runs
             .lock()
-            .unwrap()
+            .expect("calibration runs mutex not poisoned")
             .iter()
             .find(|(_, r)| r.ingress_stream_id == ingress_stream_id)
             .map(|(eid, _)| *eid)
@@ -205,7 +211,10 @@ impl CalibrationManager {
         sample_rate: u32,
         now_mono_ns: u64,
     ) -> Option<u64> {
-        let mut g = self.runs.lock().unwrap();
+        let mut g = self
+            .runs
+            .lock()
+            .expect("calibration runs mutex not poisoned");
         let run = g.get_mut(&egress_stream_id)?;
         // Step 1: ALWAYS silence the chunk while a run is active.
         // Even between clicks the egress should be quiet so the
@@ -280,7 +289,10 @@ impl CalibrationManager {
         recv_mono_ns: u64,
     ) -> Vec<(f32, u32, u32)> {
         let mut hits: Vec<(f32, u32, u32)> = Vec::new();
-        let mut g = self.runs.lock().unwrap();
+        let mut g = self
+            .runs
+            .lock()
+            .expect("calibration runs mutex not poisoned");
         let egress_id = match g
             .iter()
             .find(|(_, r)| r.ingress_stream_id == ingress_stream_id)
@@ -397,7 +409,10 @@ impl CalibrationManager {
     /// Finalise and remove a completed run. Returns `None` if no run
     /// exists for this id.
     pub fn take_result(&self, egress_stream_id: u32) -> Option<CalibrationResult> {
-        let mut g = self.runs.lock().unwrap();
+        let mut g = self
+            .runs
+            .lock()
+            .expect("calibration runs mutex not poisoned");
         let run = g.remove(&egress_stream_id)?;
         Some(finalize(&run))
     }

@@ -230,6 +230,7 @@ add_library(foyer_shim SHARED
   src/session_uuid.cc
   src/crash_dialog_handler.cc
   src/missing_plugin_dialog_handler.cc
+  src/spectrum_pipeline.cc
 )
 
 # Match the wscript: PACKAGE macro + DLL-export define for portability

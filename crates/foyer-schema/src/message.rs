@@ -13,6 +13,7 @@ use crate::{
     audio::{AudioPoolSource, AudioTransport, IceCandidate, SdpPayload},
     midi::{MidiNote, MidiNotePatch, MidiPatchNames},
     session::{Group, GroupPatch, Track, TrackPatch},
+    spectrum::{SpectrumFrame, SpectrumOpts, SpectrumTarget},
     Action, AudioFormat, AudioSource, ControlValue, EnginePort, EntityId, LatencyReport,
     PathListing, PluginCatalogEntry, PluginInstance, PluginPreset, Region, RegionPatch, Session,
     TimelineMeta, WaveformPeaks,
@@ -169,6 +170,33 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         transport_pos_samples: Option<u64>,
     },
+    /// One FFT analysis frame produced by the shim's spectrogram
+    /// pipeline. Streamed at the subscription's hop rate; clients
+    /// render each frame as a column in a waterfall display OR as
+    /// the latest bar plot in an instantaneous view. Tagged by
+    /// `target` so a multiplexed connection can subscribe to several
+    /// scopes (master + per-track) and demultiplex on the FE.
+    SpectrumFrame {
+        frame: Box<SpectrumFrame>,
+    },
+    /// Subscription confirmation — the shim acknowledges the
+    /// requested `SpectrumOpts` and reports what it actually applied
+    /// after clamping. Lets the FE update its UI hints without
+    /// re-deriving the clamped values from the first frame.
+    SpectrumSubscribed {
+        target: SpectrumTarget,
+        applied: SpectrumOpts,
+    },
+    /// Subscription closed — emitted in response to
+    /// `Command::UnsubscribeSpectrum` or when the backend decides to
+    /// tear it down (target gone, host overloaded, …).
+    SpectrumUnsubscribed {
+        target: SpectrumTarget,
+        /// `None` = clean unsubscribe; `Some(_)` = host-initiated
+        /// teardown with a reason for the FE to surface.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reason: Option<String>,
+    },
     /// Server → browser: reply to `RequestIngressLatency` and also
     /// broadcast whenever the server-side empirical roundtrip median
     /// shifts past the apply threshold (i.e. whenever the server is
@@ -234,9 +262,19 @@ pub enum Event {
     /// other guests don't see denial banners flash by.
     Error {
         code: String,
+        /// English (pre-localized) message. Always populated so older
+        /// clients that don't grok `localized` still show something
+        /// readable. New emit sites set BOTH fields via the
+        /// `loc!(...)` macro from `foyer-i18n`.
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_peer_id: Option<String>,
+        /// Structured translation key + placeholder map. Clients
+        /// prefer this when present so multi-locale collab sessions
+        /// can render the same error in each viewer's own language.
+        /// `None` is the legacy shape — `message` is rendered as-is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        localized: Option<crate::LocalizedString>,
     },
     /// Reply to `Command::ProbeSessionRecovery`. `artifacts` is empty
     /// when the project has nothing to recover and the launch can
@@ -759,6 +797,71 @@ pub enum Event {
         id: String,
         title: String,
     },
+
+    // ───── DAW scripting (shim-declared, host-agnostic) ─────
+    /// Full current list of persisted scripts. Sent on connect and
+    /// after any structural change so a freshly attached client gets
+    /// the whole set without having to diff.
+    ScriptList {
+        scripts: Vec<crate::scripting::Script>,
+    },
+    /// A script was added or modified. `script` carries the post-
+    /// mutation state (id stamped if the save was a create).
+    ScriptSaved {
+        script: crate::scripting::Script,
+    },
+    /// A script was deleted.
+    ScriptRemoved {
+        id: EntityId,
+    },
+    /// Result of a manual `RunScript` invocation.
+    ScriptRunResult {
+        result: crate::scripting::ScriptRunResult,
+    },
+    /// Backend scripting capabilities changed (typically on backend
+    /// swap — different shim advertises a different surface). The
+    /// authoritative copy still lives on the session snapshot; this
+    /// event lets already-connected clients refresh without forcing a
+    /// full resync.
+    ScriptingCapabilitiesChanged {
+        capabilities: Option<crate::scripting::ScriptingCapabilities>,
+    },
+
+    /// Server → attached browser: dispatch a UI directive (open a
+    /// window, focus a leaf, swap the tile tree, …). The first FE to
+    /// reply with `Command::UiActionResult` wins; other peers ignore.
+    /// Mirrors the AgentRenderRequest correlation shape — `request_id`
+    /// uniquely correlates the reply to the awaiting oneshot.
+    UiAction {
+        request_id: String,
+        /// JSON-encoded `UiAction` so the schema stays additive: a
+        /// newer shim/agent can ship an action shape the FE on the
+        /// other end of the wire doesn't understand yet, and the FE
+        /// can reply with an error rather than rejecting the whole
+        /// envelope at the decoder.
+        action_json: String,
+    },
+}
+
+impl Event {
+    /// Build an `Event::Error` from a structured [`LocalizedString`].
+    /// Renders the English source as the legacy `message` field so
+    /// pre-i18n clients still see something readable, AND stashes the
+    /// structured form so new clients can translate at receive time.
+    /// Most callers should reach for this instead of building the
+    /// struct literal by hand.
+    pub fn error_localized(
+        code: impl Into<String>,
+        loc: crate::LocalizedString,
+        target_peer_id: Option<String>,
+    ) -> Self {
+        Event::Error {
+            code: code.into(),
+            message: loc.render_english(),
+            target_peer_id,
+            localized: Some(loc),
+        }
+    }
 }
 
 /// One chat message as stored in the server's in-memory ring.
@@ -854,6 +957,16 @@ pub struct SessionInfo {
     /// `Event::SessionDirtyChanged` for convenience in the UI.
     #[serde(default)]
     pub dirty: bool,
+    /// HTTP URL of the upstream DAW's MCP endpoint for this specific
+    /// session, when one is available. Populated by the launcher when
+    /// it pins a per-session port (Ardour 9.4+ `mcp_http` surface);
+    /// `None` means either the DAW build doesn't ship an MCP surface
+    /// (Ardour 9.2 and older), the spawner didn't try (stub backends,
+    /// reattach to an orphan shim), or the post-spawn probe didn't
+    /// answer. Read by the `daw_proxy` agent tool to enumerate the
+    /// MCP-capable sessions and route per-session calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_endpoint: Option<String>,
 }
 
 /// One entry in the server-tracked "recently opened projects" list.
@@ -1215,6 +1328,21 @@ pub enum Command {
     AudioEgressStop {
         stream_id: u32,
     },
+    /// Open a spectrogram subscription on the named target. The shim
+    /// starts a per-subscription analyser ring + FFT pipeline and
+    /// emits `Event::SpectrumFrame` at the configured hop rate. The
+    /// FE multiplexes by `target`; multiple subscriptions on the
+    /// same connection don't interfere.
+    SubscribeSpectrum {
+        target: SpectrumTarget,
+        #[serde(default)]
+        opts: SpectrumOpts,
+    },
+    /// Tear down a spectrum subscription. The shim emits
+    /// `Event::SpectrumUnsubscribed` once the pipeline is drained.
+    UnsubscribeSpectrum {
+        target: SpectrumTarget,
+    },
     /// Open an ingress sink (subscriber → DAW) bound to a host input.
     ///
     /// `format.sample_rate` is the **client capture rate** (e.g. browser
@@ -1498,6 +1626,35 @@ pub enum Command {
     ClearRecents,
 
     // ───── track / group / plugin lifecycle ─────────────────────────────
+    /// Create a new track. `kind` selects audio / midi / bus (master
+    /// and monitor are not user-creatable). `color` is an optional CSS
+    /// hex; `after_id` places the new track immediately after the
+    /// given existing track (omit to append at the end).
+    ///
+    /// The remaining fields wire up plugins on the new track in one
+    /// atomic step (wrapped in the same undo group as the track
+    /// creation). Resolution order (first non-empty wins):
+    /// 1. `copy_from_track_id` — duplicate the named track's plugin
+    ///    chain (URIs + current params + active presets) onto the new
+    ///    track. Use for "another track like X".
+    /// 2. `plugins` — explicit URIs to insert in order.
+    /// 3. `instrument_uri` — single-plugin shorthand. For MIDI tracks
+    ///    the agent typically asks the user which instrument; this
+    ///    field is the answer.
+    CreateTrack {
+        name: String,
+        kind: crate::TrackKind,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        color: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        after_id: Option<EntityId>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        instrument_uri: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        plugins: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        copy_from_track_id: Option<EntityId>,
+    },
     /// Mutate a track. Fields in `patch` that are `None` stay unchanged.
     /// Emits `Event::TrackUpdated` on success.
     UpdateTrack {
@@ -1933,6 +2090,12 @@ pub enum Command {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_key: Option<String>,
+        /// BCP-47 code of the UI's current locale (`en`, `es`, `ja`).
+        /// The agent uses this to bias its replies toward the user's
+        /// chosen language (system-prompt directive). `None` leaves
+        /// the current value alone; an explicit `Some("")` clears it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ui_locale: Option<String>,
     },
     /// Approve or reject a tool call that's parked in
     /// `AwaitingConfirm`. Ignored when the call's status is
@@ -2012,6 +2175,64 @@ pub enum Command {
     AgentSessionRename {
         id: String,
         title: String,
+    },
+
+    // ─── DAW scripting (shim-declared, host-agnostic) ────────────
+    /// Request the current list of persisted scripts. Replied with
+    /// `Event::ScriptList`. Optional — clients normally receive a
+    /// list at connect-time from the session snapshot's follow-up,
+    /// but a fresh `ScriptList` is the canonical resync path.
+    ListScripts,
+    /// Insert or update a script. Empty `id` means create — the
+    /// backend allocates an id, stamps `updated_at`, and echoes
+    /// `Event::ScriptSaved` with the canonical post-save shape. The
+    /// shim is responsible for translating special types (e.g.
+    /// `dsp` → a luaproc plugin source) at save time.
+    SaveScript {
+        script: crate::scripting::Script,
+    },
+    /// Delete a script by id. Idempotent; unknown ids are a no-op.
+    DeleteScript {
+        id: EntityId,
+    },
+    /// Flip the enabled flag without touching the body. Also used to
+    /// confirm a `disabled_on_upload` script after the user has
+    /// audited the source.
+    EnableScript {
+        id: EntityId,
+        enabled: bool,
+    },
+    /// Manually invoke a script. Result returned in
+    /// `Event::ScriptRunResult`. `args_override` lets a caller bind
+    /// fresh args without modifying the persisted script's args
+    /// table — handy for editor "Run with these inputs…" UIs.
+    RunScript {
+        id: EntityId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args_override: Option<std::collections::BTreeMap<String, String>>,
+    },
+    /// Scan the backing project file for scripts that were stripped
+    /// to disabled state on upload (the base64 payload is still in
+    /// the file). Returns recovered scripts via the normal
+    /// `Event::ScriptList` / `ScriptSaved` channel with
+    /// `disabled_on_upload` set so the UI can flag them for review.
+    /// No-op when the backend's caps don't set
+    /// `features.can_recover_disabled`.
+    RecoverDisabledScripts,
+
+    /// FE → server: reply to an `Event::UiAction` dispatch. `state_json`
+    /// is a structured snapshot of the FE's current UI (open windows,
+    /// tile tree, available window kinds) when the action included a
+    /// query; otherwise empty. `ok` flags whether the FE applied the
+    /// action successfully. `error` carries a human-readable message
+    /// the agent can surface to the user when something failed.
+    UiActionResult {
+        request_id: String,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        state_json: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 

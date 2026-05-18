@@ -19,10 +19,21 @@ use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 use crate::config::AgentConfig;
 use crate::conversation::Conversation;
 use crate::engine::{AgentEngine, EngineError, EngineSink};
-use crate::llm::OpenAiHttpClient;
+use crate::llm::{LlmClient, OpenAiHttpClient};
 use crate::store::AgentStore;
 use crate::tools::welcome::{WelcomeContext, WelcomeTool};
 use crate::tools::{ToolContext, ToolRegistry};
+
+/// What the OpenAI proxy needs to build a transient `AgentEngine`
+/// against a fresh conversation. Returned by
+/// [`AgentRuntime::external_engine_parts`].
+pub struct ExternalEngineParts {
+    pub llm: Arc<dyn LlmClient>,
+    pub model: String,
+    pub tools: ToolRegistry,
+    pub ctx: ToolContext,
+    pub system_prompt: String,
+}
 
 /// Events the runtime broadcasts. Subscribers translate these into
 /// `foyer_schema::Event` over their own transport (WS, stdio, etc.).
@@ -64,10 +75,28 @@ surface for the Ardour DAW. The user is producing music and you can \
 directly read AND modify the live session — they expect you to act, \
 not narrate. Be concise; they're mid-session.\n\
 \n\
+SKILL-FIRST: the harness ships task-oriented playbooks under \
+`scripts.skills` (list) / `scripts.skill { name }` (body). For ANY \
+non-trivial request involving `plugins`, `midi`, `sequencer`, \
+`automation`, `ui`, `visualize`, `session`, or `scripts` — load the \
+relevant playbook FIRST. The playbooks document exact call shapes, \
+the batch-vs-loop tradeoffs that matter for latency, and the gotchas \
+(silent failures, jail-path stripping, solo hygiene) that are easy to \
+trip on a cold start. The `welcome` payload's `skills` index lists \
+every available playbook by name + one-line summary. ONE skill read \
+saves several round-trip mistakes — especially on smaller models.\n\
+\n\
 Tools are polymorphic — one tool per domain with a `subcommand` \
 field selecting the operation. Current surface (selected highlights, \
 schema is authoritative):\n\
-  * session — summary, full\n\
+  * session — summary, full, save, save_as, open, new, close, \
+list_open, recents, forget_recent, browse, backends. Save/save_as act \
+on the currently-loaded project; open/new spawn / focus a project via \
+the sidecar's backend launcher (same path as the user's project \
+picker); browse lists directories inside the filesystem jail. If you \
+need to know what backend ids the user has configured, call \
+`backends` before `open`/`new` (`backend_id: \"auto\"` resolves to \
+the currently-active one)\n\
   * transport — play, stop, record, locate, loop, get\n\
   * tracks — list, describe\n\
   * mixer — set_gain_db, set_mute, set_solo, set_pan, get\n\
@@ -83,12 +112,46 @@ patterns use the sequencer tool below)\n\
   * sequencer — show, set_layout, set_cells, add_pattern, arrange, \
 clear, show_viz (Hydrogen / Fruity-Loops-style cell + pattern + \
 arrangement authoring — first-class in Foyer)\n\
+  * scripts — capabilities, list, get, save, delete, enable, run, \
+recover_disabled (host scripts — Lua under Ardour. Call `capabilities` \
+FIRST to learn what types/languages/hooks the shim advertises). ALSO \
+the agent-skill surface: `skills` (manifest of all enabled \
+playbooks) + `skill { name }` (fetch one playbook body). Lua-authoring \
+playbooks live there too — `ardour-lua-dsp`, `ardour-lua-action`, \
+`ardour-lua-hook`, `ardour-lua-snippet` — load them BEFORE drafting a \
+script so you don't trip the silent-instantiation-failure traps.\n\
+  * ui — query, open, close, focus, set_tile_tree (drive the user's \
+browser layout: spawn missing windows on their behalf, focus a \
+buried panel, swap the tile tree to a preset. Always `query` first \
+to learn what's open + the available window kinds. Pair with \
+`visualize.screen` to confirm the change visually)\n\
   * visualize — timeline / mixer / waveform / spectrogram / \
 automation_lane / event_heatmap / midi_roll\n\
+  * spectrum — capabilities (probe what the host's FFT pipeline \
+supports), snapshot (one-shot FFT frame on master / monitor / a \
+specific track, returned as per-channel dBFS bins). Pair with \
+`visualize.spectrogram` for a temporal waterfall PNG\n\
 \n\
 Operating principles:\n\
   * Always survey state first when the request is vague — \
 session.summary + tracks.list / regions.list are cheap.\n\
+  * **Batch whenever you can.** Each tool call is a WS round-trip; \
+firing 30 of them sequentially is observable user latency. Prefer:\n\
+      - `plugins.set_params { plugin_id, params: [{control_id, value}…] }` \
+when programming a synth patch (one call instead of 30+ set_param calls).\n\
+      - `mixer.apply { changes: [{track_id, gain_db?, muted?, soloed?, pan?}…] }` \
+when tweaking the mix across multiple tracks.\n\
+      - `tracks.describe_many { track_ids: [...] }` instead of N \
+`tracks.describe` calls when surveying many tracks at once.\n\
+      - `regions.list` with NO `track_id` to enumerate every region \
+across every track in one call (the FE was firing 8 sequential per-track \
+list calls — one call returns everything).\n\
+      - `automation.draw { lane_id, points: [...] }` to swap a whole \
+lane atomically instead of point-by-point.\n\
+      - `midi.region_replace_notes` for bulk note edits — much cheaper \
+than note-by-note `note_add` calls.\n\
+    The model gets the same outcome and the user sees the change land \
+in one beat instead of thirty.\n\
   * Beat / drum / repetitive patterns: use the `sequencer` tool, \
 not hand-written note arrays. Define rows (one per drum or pitch), \
 add patterns of cells (`{row, step, velocity}`), and slot patterns \
@@ -131,8 +194,17 @@ pub struct AgentRuntime {
     welcome_ctx: Arc<RwLock<WelcomeContext>>,
     store: Arc<AgentStore>,
     backend: tokio::sync::RwLock<Option<std::sync::Weak<dyn Backend>>>,
+    /// Live, shareable mirror of `backend`. Cloned into every
+    /// `ToolContext` so tools read the *current* Weak — fixes the
+    /// "session swap mid-turn → subsequent tools hit the previous
+    /// shim" bug where `ToolContext.backend` used to be a one-shot
+    /// snapshot captured at engine-build time.
+    backend_ref: crate::tools::BackendRef,
     fe_render: tokio::sync::RwLock<Option<Arc<dyn crate::tools::FeRenderer>>>,
     headless_render: tokio::sync::RwLock<Option<Arc<dyn crate::tools::HeadlessRenderer>>>,
+    ui_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::UiDirector>>>,
+    session_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::SessionDirector>>>,
+    spectrum_director: tokio::sync::RwLock<Option<Arc<dyn crate::tools::SpectrumDirector>>>,
     /// Active session id. Every record produced by the conversation
     /// is queued for batched JSONL append against this session.
     active_session_id: tokio::sync::RwLock<String>,
@@ -147,6 +219,14 @@ pub struct AgentRuntime {
     /// trips it so the engine can finalize the partial assistant
     /// content and return.
     current_cancel: tokio::sync::RwLock<Option<tokio_util::sync::CancellationToken>>,
+    /// Serialises run_turn so a "stop + send" gesture waits for the
+    /// prior turn to fully unwind before the new turn's
+    /// `inner.busy = true` flips. Without this, two `send_user_message`
+    /// tasks can run concurrently — the new one acquires the slot,
+    /// the old one's deferred busy=false then clears the new turn's
+    /// busy flag mid-flight and the UI shows the agent as idle while
+    /// it's still working.
+    turn_lock: tokio::sync::Mutex<()>,
 }
 
 const FLUSH_INTERVAL_MS: u64 = 1500;
@@ -162,10 +242,23 @@ struct RuntimeInner {
 impl AgentRuntime {
     pub async fn new() -> Result<Arc<Self>, crate::store::StoreError> {
         let store = Arc::new(AgentStore::open_default().await?);
-        Self::with_store(store).await
+        Self::with_store_and_proxies(store, Vec::new()).await
     }
 
     pub async fn with_store(store: Arc<AgentStore>) -> Result<Arc<Self>, crate::store::StoreError> {
+        Self::with_store_and_proxies(store, Vec::new()).await
+    }
+
+    /// Build a runtime that's aware of upstream MCP proxies (the
+    /// configured backend DAWs Foyer's `daw_proxy` tool can reach).
+    /// Pass `Vec::new()` to disable the proxy surface — the tool
+    /// stays registered but reports "no backends configured" on
+    /// every subcommand. Read from `foyer-config::Config.mcp_proxies`
+    /// by the launcher; tests / in-process callers usually pass empty.
+    pub async fn with_store_and_proxies(
+        store: Arc<AgentStore>,
+        mcp_proxies: Vec<foyer_config::McpProxyConfig>,
+    ) -> Result<Arc<Self>, crate::store::StoreError> {
         let mut config = AgentConfig::default();
         // Rehydrate any prior LLM transport / autonomy settings. Lets
         // a server restart pick up the operator's last-saved endpoint
@@ -194,9 +287,21 @@ impl AgentRuntime {
         let welcome_ctx = Arc::new(RwLock::new(WelcomeContext::default()));
         let mut tools_vec: Vec<Arc<dyn crate::tools::Tool>> =
             vec![Arc::new(WelcomeTool::new(welcome_ctx.clone()))];
-        for t in crate::tools::default_registry().iter() {
+        // Pass a weak ref to the agent store so the scripts tool's
+        // `skills` / `skill` subcommands can load playbooks from the
+        // harness's skill directory on demand.
+        let store_weak = Arc::downgrade(&store);
+        for t in crate::tools::default_registry_with_store(Some(store_weak)).iter() {
             tools_vec.push(t.clone());
         }
+        // The DAW MCP proxy tool is constructed with the configured
+        // upstream list. We register it unconditionally so the agent
+        // always sees the single `daw_proxy` slot — even when no
+        // backends are configured the subcommands give an actionable
+        // "set `mcp_proxies:` in config.yaml" message.
+        tools_vec.push(Arc::new(crate::tools::daw_proxy::DawProxyTool::new(
+            mcp_proxies,
+        )));
         let tools = ToolRegistry::from_tools(tools_vec);
         // Pick the active session: prefer the persisted one, else
         // create a fresh empty session so first-boot has something
@@ -230,11 +335,16 @@ impl AgentRuntime {
             welcome_ctx: welcome_ctx.clone(),
             store: store.clone(),
             backend: tokio::sync::RwLock::new(None),
+            backend_ref: crate::tools::BackendRef::default(),
             fe_render: tokio::sync::RwLock::new(None),
             headless_render: tokio::sync::RwLock::new(None),
+            ui_director: tokio::sync::RwLock::new(None),
+            session_director: tokio::sync::RwLock::new(None),
+            spectrum_director: tokio::sync::RwLock::new(None),
             active_session_id: tokio::sync::RwLock::new(active_id),
             pending_writes: Arc::new(Mutex::new(Default::default())),
             current_cancel: tokio::sync::RwLock::new(None),
+            turn_lock: tokio::sync::Mutex::new(()),
         });
         WelcomeTool::refresh_from_store(&welcome_ctx, &store, DEFAULT_SYSTEM_PROMPT.to_string())
             .await;
@@ -322,7 +432,16 @@ impl AgentRuntime {
     }
 
     pub async fn attach_backend(&self, backend: std::sync::Weak<dyn Backend>) {
-        *self.backend.write().await = Some(backend);
+        // Keep the tokio-locked field around for the
+        // `external_engine_parts` early-bail check; the shared
+        // `backend_ref` is what every in-flight ToolContext actually
+        // reads, so update it too. The shared write is sync (std
+        // RwLock); the contention window is microsecond-scale.
+        *self.backend.write().await = Some(backend.clone());
+        *self
+            .backend_ref
+            .write()
+            .expect("agent backend_ref poisoned") = Some(backend);
     }
 
     /// Install (or replace) the visualize renderers. The runtime
@@ -348,6 +467,49 @@ impl AgentRuntime {
     /// Read the currently installed headless renderer (if any).
     pub async fn headless_renderer(&self) -> Option<Arc<dyn crate::tools::HeadlessRenderer>> {
         self.headless_render.read().await.clone()
+    }
+
+    /// Install (or replace) the UI director — the broker the `ui`
+    /// tool uses to dispatch window-manager directives to an attached
+    /// FE. Wired in `attach_agent` on the server side.
+    pub async fn set_ui_director(&self, ui: Option<Arc<dyn crate::tools::UiDirector>>) {
+        *self.ui_director.write().await = ui;
+    }
+
+    /// Read the currently installed UI director (if any). Used by
+    /// the MCP server when building a `ToolContext` for an external
+    /// client.
+    pub async fn ui_director(&self) -> Option<Arc<dyn crate::tools::UiDirector>> {
+        self.ui_director.read().await.clone()
+    }
+
+    /// Install (or replace) the session director — the broker the
+    /// `session` tool uses for multi-session ops (open/new/close/list/
+    /// browse/recents). Wired in `attach_agent`.
+    pub async fn set_session_director(
+        &self,
+        director: Option<Arc<dyn crate::tools::SessionDirector>>,
+    ) {
+        *self.session_director.write().await = director;
+    }
+
+    /// Read the currently installed session director (if any).
+    pub async fn session_director(&self) -> Option<Arc<dyn crate::tools::SessionDirector>> {
+        self.session_director.read().await.clone()
+    }
+
+    /// Install the spectrum director (drives transport for offline
+    /// capture). See `SpectrumDirector` in `tools/mod.rs`.
+    pub async fn set_spectrum_director(
+        &self,
+        director: Option<Arc<dyn crate::tools::SpectrumDirector>>,
+    ) {
+        *self.spectrum_director.write().await = director;
+    }
+
+    /// Read the currently installed spectrum director (if any).
+    pub async fn spectrum_director(&self) -> Option<Arc<dyn crate::tools::SpectrumDirector>> {
+        self.spectrum_director.read().await.clone()
     }
 
     /// Read the current "prefer headless renderer" flag — surfaced to
@@ -442,6 +604,101 @@ impl AgentRuntime {
         inner.config.prefer_headless_render = prefer;
     }
 
+    /// Apply boot-time overrides from CLI / env / config.yaml WITHOUT
+    /// writing them to the persisted store. Keeps the FAB's saved
+    /// config intact so a temporary env-var override doesn't quietly
+    /// rewrite the user's last "Save" in the settings modal — they'd
+    /// have no way to undo it once the env var vanishes. Each `Some`
+    /// replaces the live value (and rebuilds the LLM client when
+    /// transport-shape fields move); `None` leaves the post-store
+    /// value alone.
+    pub async fn apply_boot_overrides(
+        &self,
+        endpoint: Option<String>,
+        model: Option<String>,
+        api_key: Option<String>,
+    ) {
+        let mut transport_dirty = false;
+        {
+            let mut inner = self.inner.lock().await;
+            if let Some(e) = endpoint {
+                inner.config.endpoint = e;
+                transport_dirty = true;
+            }
+            if let Some(m) = model {
+                inner.config.model = m;
+            }
+            if let Some(k) = api_key {
+                inner.config.api_key = if k.is_empty() { None } else { Some(k) };
+                transport_dirty = true;
+            }
+            if transport_dirty {
+                inner.llm = Arc::new(OpenAiHttpClient::new(
+                    inner.config.endpoint.clone(),
+                    inner.config.api_key.clone(),
+                ));
+            }
+        }
+        let _ = self.events_tx.send(self.snapshot_state().await);
+    }
+
+    /// Public snapshot of the live LLM-transport config. The HTTP
+    /// proxy uses this to know which upstream model id to inject
+    /// when an incoming OpenAI request specifies `foyer-agent`.
+    pub async fn config_snapshot(&self) -> AgentConfigPublic {
+        let inner = self.inner.lock().await;
+        inner.config.public()
+    }
+
+    /// Borrow the welcome context for external surfaces (OpenAI
+    /// proxy, MCP) that want the same skills/memory snapshot the
+    /// in-process agent loads. Returns an `Arc` so the caller can
+    /// hold it across awaits without contesting the runtime lock.
+    pub fn welcome_context(&self) -> Arc<RwLock<WelcomeContext>> {
+        self.welcome_ctx.clone()
+    }
+
+    /// Pull the parts the OpenAI proxy needs to build a transient
+    /// `AgentEngine` without touching the persistent conversation.
+    /// Returns `None` when no backend is attached — caller surfaces a
+    /// 503 to the HTTP client.
+    pub async fn external_engine_parts(&self) -> Option<ExternalEngineParts> {
+        let inner = self.inner.lock().await;
+        let llm = inner.llm.clone();
+        let model = inner.config.model.clone();
+        let prefer_headless = inner.config.prefer_headless_render;
+        drop(inner);
+        // Gate on "is a backend currently attached?" via the existing
+        // tokio field, but pass the shared `backend_ref` so swaps
+        // mid-turn (HTTP requests typically don't trigger them, but
+        // the same fix shape applies) are picked up by every tool
+        // call.
+        self.backend.read().await.clone()?;
+        let backend = self.backend_ref.clone();
+        let fe_render = self.fe_render.read().await.clone();
+        let headless_render = self.headless_render.read().await.clone();
+        let ui_director = self.ui_director.read().await.clone();
+        let session_director = self.session_director.read().await.clone();
+        let spectrum_director = self.spectrum_director.read().await.clone();
+        Some(ExternalEngineParts {
+            llm,
+            model,
+            tools: self.tools.clone(),
+            ctx: ToolContext {
+                backend,
+                fe_attached: fe_render.is_some(),
+                fe_render,
+                headless_render,
+                ui_director,
+                session_director,
+                spectrum_director,
+                prefer_headless_render: prefer_headless,
+                turn_budget: None,
+            },
+            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+        })
+    }
+
     pub async fn confirm_tool(&self, call_id: &str, approve: bool) {
         let mut map = self.confirms.lock().await;
         if let Some(tx) = map.remove(call_id) {
@@ -454,6 +711,24 @@ impl AgentRuntime {
         body: String,
         attachments: Vec<foyer_schema::agent::AgentAttachment>,
     ) -> Result<(), EngineError> {
+        // Trip any prior turn's cancellation FIRST, BEFORE waiting on
+        // the turn lock. Stop+Send works by firing `agent_stop`
+        // followed immediately by `agent_send`; the stop alone cancels
+        // the token but the send_user_message still has to wait for
+        // the prior task to release the turn lock. Tripping cancel
+        // here makes that wait short — the prior task's tool loop +
+        // LLM stream both check the token and bail out quickly.
+        if let Some(prev) = self.current_cancel.read().await.clone() {
+            prev.cancel();
+        }
+        // Serialise concurrent turns. Without this, the second send's
+        // `inner.busy = true` and the first send's
+        // `inner.busy = false` race; the UI ends up flicking the busy
+        // indicator off mid-turn. The lock is dropped at function end,
+        // after the new turn finishes — so the next `send` only
+        // proceeds once we're fully unwound.
+        let _turn_guard = self.turn_lock.lock().await;
+
         let Some((engine, ctx)) = self.build_engine_and_ctx().await else {
             return Err(EngineError::Tool(crate::tools::ToolError::BackendGone));
         };
@@ -464,14 +739,13 @@ impl AgentRuntime {
         });
         // Install a fresh cancellation token so `stop_current_turn`
         // can interrupt a runaway / unwanted stream while we're mid-
-        // turn. Holding the token across the run_turn means the
-        // existing token from the previous turn (if any was left
-        // behind by a panic etc.) gets dropped and reset.
+        // turn.
         let cancel = tokio_util::sync::CancellationToken::new();
         {
             let mut slot = self.current_cancel.write().await;
-            // Cancel any orphan token before swapping (defensive — a
-            // healthy turn lifecycle clears it below).
+            // Belt-and-braces: cancel any token that snuck in between
+            // our prior cancel call and acquiring the slot. Healthy
+            // turn lifecycle clears it below.
             if let Some(prev) = slot.take() {
                 prev.cancel();
             }
@@ -513,30 +787,81 @@ impl AgentRuntime {
         let model = inner.config.model.clone();
         let autonomy = inner.config.autonomy;
         let conversation = inner.conversation.clone();
+        let ui_locale = inner.config.ui_locale.clone();
         drop(inner);
-        let backend = self.backend.read().await.clone()?;
+        // Gate engine construction on "a backend is currently
+        // attached" but pass the SHARED `backend_ref` into ToolContext
+        // so every tool call inside the turn reads the LIVE Weak —
+        // this is what lets a mid-turn `session.new` flow into
+        // subsequent `tracks.list` against the NEW shim. Without this
+        // the ctx held a one-shot snapshot and the agent kept hitting
+        // the previously-active session even after a swap.
+        self.backend.read().await.clone()?;
+        let backend = self.backend_ref.clone();
         let fe_render = self.fe_render.read().await.clone();
         let headless_render = self.headless_render.read().await.clone();
+        let ui_director = self.ui_director.read().await.clone();
+        let session_director = self.session_director.read().await.clone();
         let prefer_headless = {
             let inner = self.inner.lock().await;
             inner.config.prefer_headless_render
         };
+        let spectrum_director = self.spectrum_director.read().await.clone();
         let ctx = ToolContext {
             backend,
             fe_attached: fe_render.is_some(),
             fe_render,
             headless_render,
+            ui_director,
+            session_director,
+            spectrum_director,
             prefer_headless_render: prefer_headless,
+            // `run_turn` overwrites this with the live per-turn
+            // budget handle so `continue_working` can extend the
+            // round cap mid-turn.
+            turn_budget: None,
         };
+        // The locale directive is short and goes at the *end* of the
+        // system prompt so it overrides any baseline assumption about
+        // English-default output. We deliberately don't translate the
+        // directive itself — the model will recognize the language
+        // name and respond in kind. `en` (or unset) skips the
+        // directive entirely so English deployments stay identical.
+        let mut system_prompt = DEFAULT_SYSTEM_PROMPT.to_string();
+        if let Some(code) = ui_locale.as_deref() {
+            let normalized = code.trim().to_ascii_lowercase();
+            if !normalized.is_empty() && !normalized.starts_with("en") {
+                let language_name = language_name_for(&normalized).unwrap_or(&normalized);
+                system_prompt.push_str(&format!(
+                    "\n\nUI LOCALE: the user's Foyer interface is set to {language_name} ({normalized}). \
+                     Respond to the user in {language_name} unless they explicitly write in a different \
+                     language; tool arguments and identifiers stay in their canonical form (English / \
+                     code) regardless of conversation language."
+                ));
+            }
+        }
         let engine = AgentEngine {
             conversation,
             tools: self.tools.clone(),
             llm: llm as Arc<dyn crate::llm::LlmClient>,
             model,
             autonomy,
-            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            system_prompt,
         };
         Some((engine, ctx))
+    }
+
+    /// Update the live UI locale (BCP-47 code: `en`, `es`, `ja-JP`, …).
+    /// Called from the WS handler when a client sends
+    /// `Command::AgentSetConfig` with `ui_locale`. Persists alongside
+    /// the rest of the agent config so a server restart keeps the
+    /// last-set value.
+    pub async fn set_ui_locale(&self, code: Option<String>) {
+        {
+            let mut inner = self.inner.lock().await;
+            inner.config.ui_locale = code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+        }
+        self.persist_config().await;
     }
 
     // ─── Filesystem stores ─────────────────────────────────────────
@@ -770,5 +1095,25 @@ impl EngineSink for RuntimeSink {
         if let Err(e) = rt.store.append_trace(&sid, &line).await {
             tracing::debug!("agent trace append failed: {e}");
         }
+    }
+}
+
+/// Map a BCP-47 code (or its language root) to the English display
+/// name of the language. Used by the locale-aware system-prompt
+/// directive — every supported locale gets a hand-curated mapping so
+/// the model sees an unambiguous language name instead of a code it
+/// might mis-parse. Falls back to None when we don't ship a catalog
+/// for the locale (the caller then uses the raw code).
+fn language_name_for(code: &str) -> Option<&'static str> {
+    let root = code.split('-').next().unwrap_or(code);
+    match root {
+        "en" => Some("English"),
+        "de" => Some("German"),
+        "es" => Some("Spanish"),
+        "it" => Some("Italian"),
+        "ja" => Some("Japanese"),
+        "ko" => Some("Korean"),
+        "zh" => Some("Chinese"),
+        _ => None,
     }
 }

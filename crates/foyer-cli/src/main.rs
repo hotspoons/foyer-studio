@@ -19,8 +19,13 @@ use foyer_config::{self as cfg, BackendKind, Config};
 use foyer_schema::BackendInfo;
 use foyer_server::{BackendSpawner, Config as ServerConfig, Server};
 
+mod ardour_xml;
 mod docker_cmd;
 mod shim_install;
+
+use ardour_xml::{
+    ardour_had_existing_session, ensure_foyer_shim_active, patch_ardour_session_sample_rate,
+};
 
 #[derive(Parser)]
 #[command(name = "foyer", version, about = "Foyer Studio runtime")]
@@ -130,6 +135,33 @@ enum Command {
         /// Ignored when `--backend stub`.
         #[arg(long, value_name = "BIN")]
         ardour_path: Option<PathBuf>,
+
+        /// Upstream OpenAI-compatible endpoint base for the agent
+        /// (no trailing `/chat/completions`). Wins over
+        /// `FOYER_AGENT_UPSTREAM_ENDPOINT`, `agent.upstream_endpoint`
+        /// in `config.yaml`, and the persisted store. Non-persisting —
+        /// the FAB-saved value is restored on the next boot when this
+        /// flag is dropped.
+        #[arg(long, value_name = "URL")]
+        agent_upstream_endpoint: Option<String>,
+
+        /// Upstream model id for the agent. Same precedence chain as
+        /// `--agent-upstream-endpoint`.
+        #[arg(long, value_name = "ID")]
+        agent_upstream_model: Option<String>,
+
+        /// API key for the agent's upstream endpoint. Prefer the
+        /// `FOYER_AGENT_UPSTREAM_API_KEY` env var so the secret
+        /// doesn't end up in shell history.
+        #[arg(long, value_name = "KEY")]
+        agent_upstream_api_key: Option<String>,
+
+        /// API key REQUIRED on Foyer's exposed OpenAI-compatible
+        /// endpoint at `/v1/*`. Leave unset (and unset the env /
+        /// config field) to leave the surface open. Same precedence
+        /// chain as the upstream fields.
+        #[arg(long, value_name = "KEY")]
+        agent_api_key: Option<String>,
     },
     /// Run Foyer Studio in a container. Wraps docker / podman /
     /// nerdctl behind a single command with audio-mode presets.
@@ -244,12 +276,20 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                // Default: info for our crates, but mute symphonia's
-                // chatty per-chunk announcements ("ignoring unknown
-                // chunk: tag=JUNK") which fire at WARN-rate during a
-                // multi-region zoom and drown the actually-useful
-                // log output.
-                "info,symphonia_format_riff=warn,symphonia_core=warn".into()
+                // Default: info for our crates, but mute the chatty
+                // upstream libraries that flood the log without
+                // surfacing anything actionable:
+                //   - symphonia: "ignoring unknown chunk: tag=JUNK"
+                //     fires at WARN per-chunk on multi-region zoom.
+                //   - chromiumoxide: "WS Invalid message: data did
+                //     not match any variant of untagged enum Message"
+                //     — fires on every CDP event variant the SDK
+                //     doesn't recognise. Harmless, just noise from
+                //     headless-render's chromium driver.
+                "info,symphonia_format_riff=warn,symphonia_core=warn,\
+                 chromiumoxide::handler=error,\
+                 chromiumoxide::conn=error"
+                    .into()
             }),
         )
         .init();
@@ -356,6 +396,10 @@ async fn main() -> Result<()> {
             stub_test_tone,
             sample_rate,
             ardour_path,
+            agent_upstream_endpoint,
+            agent_upstream_model,
+            agent_upstream_api_key,
+            agent_api_key,
         } => {
             if list_shims {
                 return list_available_shims();
@@ -386,7 +430,9 @@ async fn main() -> Result<()> {
                     .parse::<SocketAddr>()
                     .with_context(|| format!("config.yaml server.listen = {cfg_listen:?}"))?
             } else {
-                "127.0.0.1:3838".parse().unwrap()
+                "127.0.0.1:3838"
+                    .parse()
+                    .expect("hardcoded default socket addr is statically valid")
             };
             serve(
                 config,
@@ -401,6 +447,10 @@ async fn main() -> Result<()> {
                 stub_test_tone,
                 sample_rate,
                 ardour_path,
+                agent_upstream_endpoint,
+                agent_upstream_model,
+                agent_upstream_api_key,
+                agent_api_key,
             )
             .await
         }
@@ -568,6 +618,10 @@ async fn serve(
     stub_test_tone: bool,
     sample_rate_override: Option<u32>,
     ardour_path_override: Option<PathBuf>,
+    agent_upstream_endpoint_cli: Option<String>,
+    agent_upstream_model_cli: Option<String>,
+    agent_upstream_api_key_cli: Option<String>,
+    agent_api_key_cli: Option<String>,
 ) -> Result<()> {
     // Resolve backend: CLI override wins, then config default.
     let backend = match backend_override.as_deref() {
@@ -800,14 +854,49 @@ async fn serve(
     // `$XDG_DATA_HOME/foyer/agent/`; if that path is unwritable we
     // surface a warning but keep the server up — the rest of Foyer
     // works without the agent.
-    match server.attach_agent().await {
+    // Resolve agent config overrides: CLI > env > config.yaml. The
+    // FAB-saved store value (loaded inside `attach_agent`) is the
+    // baseline these layer ON TOP of via `apply_boot_overrides`, which
+    // does NOT write back — pulling a flag or env var the next boot
+    // restores the FAB-saved values.
+    let agent_upstream_endpoint = agent_upstream_endpoint_cli
+        .or_else(|| std::env::var("FOYER_AGENT_UPSTREAM_ENDPOINT").ok())
+        .or_else(|| config.agent.upstream_endpoint.clone());
+    let agent_upstream_model = agent_upstream_model_cli
+        .or_else(|| std::env::var("FOYER_AGENT_UPSTREAM_MODEL").ok())
+        .or_else(|| config.agent.upstream_model.clone());
+    let agent_upstream_api_key = agent_upstream_api_key_cli
+        .or_else(|| std::env::var("FOYER_AGENT_UPSTREAM_API_KEY").ok())
+        .or_else(|| config.agent.upstream_api_key.clone());
+    let agent_api_key = agent_api_key_cli
+        .or_else(|| std::env::var("FOYER_AGENT_API_KEY").ok())
+        .or_else(|| config.agent.api_key.clone());
+
+    // Gate the exposed `/v1/*` surface regardless of whether the
+    // agent runtime attached — the auth check needs to run even if
+    // we end up serving a 503 inside.
+    server.set_openai_proxy_api_key(agent_api_key.clone()).await;
+
+    match server.attach_agent(config.mcp_proxies.clone()).await {
         Ok(runtime) => {
             runtime
                 .set_prefer_headless_render(config.agent.prefer_headless_render)
                 .await;
+            // Apply the CLI/env/config-yaml chain — non-persisting so
+            // a per-launch env-var override doesn't quietly rewrite
+            // what the FAB user saved last.
+            runtime
+                .apply_boot_overrides(
+                    agent_upstream_endpoint.clone(),
+                    agent_upstream_model.clone(),
+                    agent_upstream_api_key.clone(),
+                )
+                .await;
             tracing::info!(
-                "agent runtime attached (prefer_headless_render={})",
-                config.agent.prefer_headless_render
+                "agent runtime attached (prefer_headless_render={}, upstream={}, model={})",
+                config.agent.prefer_headless_render,
+                agent_upstream_endpoint.as_deref().unwrap_or("<from store>"),
+                agent_upstream_model.as_deref().unwrap_or("<from store>"),
             );
             // When the operator has opted into headless rendering as
             // the preferred path, probe the host for chromium NOW so
@@ -945,7 +1034,7 @@ impl BackendSpawner for CliSpawner {
                     project.to_path_buf()
                 };
                 let sr_hint = sample_rate.or(cfg_backend.sample_rate);
-                let (socket, child) = launch_and_wait_for_shim(
+                let launch = launch_and_wait_for_shim(
                     &exec,
                     &cfg_backend.args,
                     &cfg_backend.env,
@@ -954,13 +1043,35 @@ impl BackendSpawner for CliSpawner {
                     recover_crash,
                 )
                 .await?;
-                let host = HostBackend::connect(socket.clone())
+                let host = HostBackend::connect(launch.socket.clone())
                     .await
-                    .with_context(|| format!("connect to shim at {}", socket.display()))?;
-                Ok(foyer_server::LaunchedBackend::with_process(
+                    .with_context(|| format!("connect to shim at {}", launch.socket.display()))?;
+                let mut launched = foyer_server::LaunchedBackend::with_process(
                     Arc::new(host),
-                    Box::new(ChildProcess::new(child)),
-                ))
+                    Box::new(ChildProcess::new(launch.child)),
+                );
+                // MCP probe — fire-and-wait briefly. The MCPHttp surface
+                // (Ardour ≥ post-9.2) starts its HTTP listener during
+                // session-load, so the port is available within a few
+                // seconds of the shim advertising. Builds that don't ship
+                // mcp_http never bind the port; the probe times out and
+                // we leave `mcp_endpoint = None`, which hides this
+                // session from the `daw_proxy` tool's enumeration.
+                if let Some(port) = launch.mcp_port {
+                    let probe_timeout = std::time::Duration::from_secs(8);
+                    if probe_mcp_http(port, probe_timeout).await {
+                        let endpoint = format!("http://127.0.0.1:{port}/mcp");
+                        tracing::info!("foyer: MCPHttp confirmed live at {endpoint}");
+                        launched = launched.with_mcp_endpoint(endpoint);
+                    } else {
+                        tracing::info!(
+                            "foyer: MCPHttp on port {port} didn't answer within {}s — \
+                             treating this Ardour build as MCP-incapable",
+                            probe_timeout.as_secs(),
+                        );
+                    }
+                }
+                Ok(launched)
             }
         }
     }
@@ -1013,6 +1124,16 @@ impl BackendSpawner for CliSpawner {
 /// `sample-rate="…"` attribute **only if** both `.ardour` paths were
 /// absent before bootstrap (brand-new session). Matches `LaunchProject`
 /// + optional per-backend config from the sidecar.
+/// Result of [`launch_and_wait_for_shim`] — the shim socket + child
+/// handle (as before), plus the MCPHttp port we pinned this session
+/// to (when one was successfully claimed) so callers can probe it
+/// and stash the resulting endpoint on the session registry entry.
+pub(crate) struct ShimLaunch {
+    pub socket: PathBuf,
+    pub child: tokio::process::Child,
+    pub mcp_port: Option<u16>,
+}
+
 async fn launch_and_wait_for_shim(
     exec: &std::path::Path,
     extra_args: &[String],
@@ -1020,8 +1141,104 @@ async fn launch_and_wait_for_shim(
     project: &std::path::Path,
     sample_rate_hint: Option<u32>,
     recover_crash: Option<bool>,
-) -> Result<(PathBuf, tokio::process::Child)> {
+) -> Result<ShimLaunch> {
     use std::time::Duration;
+
+    // Pre-allocate the MCPHttp listen port we'll pin this session to.
+    // Each spawn gets its own free port so multiple Ardour instances
+    // (e.g. two open sessions, or Foyer + a user-launched Ardour) don't
+    // collide on the upstream default of 4820. The XML edit happens
+    // inside `preflight_session`; the agent's `daw_proxy` tool reads
+    // this back as the per-session MCP endpoint.
+    let mcp_port = alloc_free_mcp_port();
+    if let Some(p) = mcp_port {
+        tracing::info!("foyer: allocated MCPHttp port {p} for this Ardour spawn");
+    } else {
+        tracing::warn!(
+            "foyer: couldn't find a free TCP port in the MCPHttp range — \
+             skipping per-session MCP enablement (daw_proxy will fall back to \
+             whatever the session file already pins, if anything)"
+        );
+    }
+
+    // Clean Ardour's atomic-save tempfiles BEFORE spawning the shim.
+    // A previous foyer crash mid-save leaves `<name>.pending` /
+    // `<name>.tmp` next to `<name>.ardour`; on the next open, Ardour
+    // pops a recovery dialog (which our auto-dispatcher doesn't
+    // always catch) or just stalls trying to disambiguate, blocking
+    // the shim's advertisement past the spawn deadline. Wipe them
+    // proactively — `.ardour` is the canonical state, the tempfiles
+    // are intermediate save states that should never outlive the
+    // process that wrote them.
+    if let Some(parent) = project.parent() {
+        let dir = if project.is_dir() { project } else { parent };
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let Some(ext) = p.extension().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if ext == "pending" || ext == "tmp" {
+                    if let Err(e) = std::fs::remove_file(&p) {
+                        tracing::debug!(
+                            "spawn pre-flight: couldn't unlink stale {}: {e}",
+                            p.display()
+                        );
+                    } else {
+                        tracing::info!(
+                            "spawn pre-flight: cleaned stale {} (half-completed save)",
+                            p.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Reuse an already-running shim for the SAME project if we have
+    // one — otherwise the user's "open this existing project" gesture
+    // would spawn a second Ardour that races the first one for the
+    // session lock + then dies. The shim writes its project path in
+    // the advert; we match on it before falling through to spawn.
+    if let Some(ad) = discovery::find_for_project(project) {
+        // Probe-connect once to be sure the shim is still reachable
+        // (the JSON advert can outlive an unclean exit). On success,
+        // hand the existing socket back to the caller — they'll wrap
+        // it in a HostBackend and proceed as if we'd just spawned.
+        if let Ok(stream) = std::os::unix::net::UnixStream::connect(&ad.socket) {
+            drop(stream);
+            tracing::info!(
+                "reusing live shim at {} for already-open project {}",
+                ad.socket.display(),
+                project.display(),
+            );
+            // We didn't spawn a child for this — the caller's
+            // `ProcessHandle` slot needs to be optional. Synthesize a
+            // dummy child that's already dead so the existing
+            // signature stays the same. (`tokio::process::Child` has
+            // no public default constructor, so we keep the return
+            // shape but document the gotcha at the call site.)
+            // Spawn a /bin/true with kill_on_drop=false so the
+            // returned Child is a real handle but exits instantly.
+            // This lets the caller's existing teardown path (which
+            // expects a Child) work without conditional logic. The
+            // already-running Ardour is owned by whoever spawned it
+            // first; closing the new session doesn't kill it.
+            let dummy = tokio::process::Command::new("/bin/true")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?;
+            // Reuse path: we didn't fork this Ardour and don't know
+            // which MCP port (if any) it picked. Caller probes via
+            // the discovery cache if it needs it.
+            return Ok(ShimLaunch {
+                socket: ad.socket,
+                child: dummy,
+                mcp_port: None,
+            });
+        }
+    }
 
     let before: std::collections::HashSet<PathBuf> =
         discovery::scan().into_iter().map(|s| s.socket).collect();
@@ -1240,7 +1457,7 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
         // Mirrors what the dev-build bash branch above does inline.
         // Shadowing here keeps the dev-build path's bindings intact.
         let (session_dir, snapshot_name) =
-            preflight_session(&resolved_exec, &session_dir, &snapshot_name);
+            preflight_session(&resolved_exec, &session_dir, &snapshot_name, mcp_port);
         if let Some(sr) = sample_rate_hint {
             if !had_session {
                 let session_file = session_dir.join(format!("{snapshot_name}.ardour"));
@@ -1341,7 +1558,19 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
         .spawn()
         .with_context(|| format!("spawn {}", resolved_exec.display()))?;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // Ardour startup against an EXISTING session loads every plugin
+    // instance + waveform peakfile + automation lane on the way to
+    // `set_active(true)` (which is when the shim writes its advert).
+    // On a Codespaces VM (shared CPU / network-backed disk) this can
+    // easily exceed the old 30 s deadline for a session with a
+    // half-dozen plugins. 90 s covers the slow path; the override env
+    // lets fast hosts (or load-test rigs that don't want to babysit a
+    // hung shim) tune it down.
+    let timeout_secs: u64 = std::env::var("FOYER_SHIM_SPAWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(90);
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
     // The helper invocation runs the shim with `FOYER_SHIM_NO_IPC=1`
     // (see `bootstrap_session_if_missing` and the bash branch above) so
     // it never advertises — the only advert we'll see is from the real
@@ -1357,7 +1586,11 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
                 Ok(stream) => {
                     drop(stream);
                     tracing::info!("shim advertised at {}", s.socket.display());
-                    return Ok((s.socket, child));
+                    return Ok(ShimLaunch {
+                        socket: s.socket,
+                        child,
+                        mcp_port,
+                    });
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -1521,65 +1754,6 @@ fn daw_log_path() -> Result<PathBuf> {
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     Ok(base.join("foyer").join("daw.log"))
-}
-
-fn ardour_had_existing_session(session_dir: &Path, snapshot_name: &str) -> bool {
-    session_dir
-        .join(format!("{snapshot_name}.ardour"))
-        .is_file()
-        || session_dir
-            .join(snapshot_name)
-            .join(format!("{snapshot_name}.ardour"))
-            .is_file()
-}
-
-/// Rewrite the first `sample-rate="…"` attribute (Ardour root `<Session>` tag).
-/// Returns `Ok(None)` when the attribute is absent or already matches `sr`.
-fn patch_session_xml_sample_rate_content(xml: &str, sr: u32) -> Result<Option<String>> {
-    const RANGE: std::ops::RangeInclusive<u32> = 8000..=384_000;
-    if !RANGE.contains(&sr) {
-        anyhow::bail!("sample rate {sr} is outside supported range {RANGE:?}");
-    }
-    let needle = "sample-rate=\"";
-    let Some(pos) = xml.find(needle) else {
-        tracing::warn!("foyer: session XML has no sample-rate attribute — leaving file unchanged");
-        return Ok(None);
-    };
-    let start = pos + needle.len();
-    let Some(end_rel) = xml[start..].find('"') else {
-        anyhow::bail!("session XML sample-rate attribute is malformed");
-    };
-    let end = start + end_rel;
-    let prev = &xml[start..end];
-    if prev == sr.to_string() {
-        return Ok(None);
-    }
-    let mut out = xml.to_string();
-    out.replace_range(start..end, &sr.to_string());
-    Ok(Some(out))
-}
-
-fn patch_ardour_session_sample_rate(session_file: &Path, sr: u32) -> Result<()> {
-    let meta = std::fs::symlink_metadata(session_file)
-        .with_context(|| format!("stat session file {}", session_file.display()))?;
-    if !meta.file_type().is_file() {
-        anyhow::bail!(
-            "session file {} is not a regular file — refusing to patch sample-rate",
-            session_file.display(),
-        );
-    }
-    let original = std::fs::read_to_string(session_file)
-        .with_context(|| format!("read session file {}", session_file.display()))?;
-    let Some(updated) = patch_session_xml_sample_rate_content(&original, sr)? else {
-        return Ok(());
-    };
-    write_atomic(session_file, &updated)
-        .with_context(|| format!("write session file {}", session_file.display()))?;
-    tracing::info!(
-        "foyer: patched session sample-rate to {sr} in {}",
-        session_file.display(),
-    );
-    Ok(())
 }
 
 /// Normalize a picked project path into Ardour's expected
@@ -1867,6 +2041,7 @@ fn preflight_session(
     resolved_exec: &Path,
     session_dir: &Path,
     snapshot_name: &str,
+    mcp_port: Option<u16>,
 ) -> (PathBuf, String) {
     let (dir, name) = bootstrap_session_if_missing(resolved_exec, session_dir, snapshot_name);
     let session_file = dir.join(format!("{name}.ardour"));
@@ -1883,6 +2058,18 @@ fn preflight_session(
                     session_file.display(),
                 );
             }
+            // Pin the MCPHttp port if we allocated one. Idempotent on
+            // a repeat open against the same session — same port stays
+            // pinned, the XML doesn't get rewritten when it already
+            // matches.
+            if let Some(port) = mcp_port {
+                if let Err(e) = crate::ardour_xml::ensure_mcp_http_on_port(&session_file, port) {
+                    tracing::warn!(
+                        "foyer: failed to pin MCPHttp port {port} in {}: {e:#}",
+                        session_file.display(),
+                    );
+                }
+            }
         } else {
             tracing::warn!(
                 "foyer: session file {} is not a regular file — skipping shim activation",
@@ -1897,6 +2084,70 @@ fn preflight_session(
     // path injects that env via `BackendSpawner::launch` based on a
     // pre-launch probe (see the `launch()` call in `start_command`).
     (dir, name)
+}
+
+/// Allocate a free TCP port for an MCPHttp listener. We bias the
+/// search to the [4820, 4900) range (4820 is Ardour's published
+/// default; staying close keeps firewall rules and dev-tooling
+/// muscle memory aligned) but fall through to a free ephemeral
+/// port if every slot is taken.
+///
+/// Returns `None` if the OS can't hand us a port at all — extremely
+/// unusual; the caller logs and skips the per-session pin in that
+/// case (the session still works, the `daw_proxy` tool just doesn't
+/// see this session as MCP-capable until the next open).
+fn alloc_free_mcp_port() -> Option<u16> {
+    use std::net::TcpListener;
+    for port in 4820u16..4900 {
+        // bind-then-close gives us a port we can hand to Ardour with
+        // the (small) risk of a race against another process. The MCP
+        // surface re-binds on session-load, so we accept that window.
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Some(port);
+        }
+    }
+    // Fall through: let the kernel pick anything free.
+    TcpListener::bind("127.0.0.1:0")
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|addr| addr.port())
+}
+
+/// Probe an MCPHttp endpoint to see if it's up. Used post-spawn to
+/// decide whether to register this session as MCP-capable. Returns
+/// `true` when the endpoint answers an `initialize` within `deadline`.
+/// Older Ardour builds without `mcp_http` compiled in just never bind
+/// the port — the probe will time out and the session reports no MCP.
+async fn probe_mcp_http(port: u16, deadline: std::time::Duration) -> bool {
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let client = match reqwest::Client::builder().timeout(deadline).build() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "foyer-mcp-probe", "version": "0.1" }
+        }
+    });
+    let deadline_at = tokio::time::Instant::now() + deadline;
+    while tokio::time::Instant::now() < deadline_at {
+        let r = client
+            .post(&url)
+            .header("Accept", "application/json, text/event-stream")
+            .json(&body)
+            .send()
+            .await;
+        if matches!(r, Ok(ref resp) if resp.status().is_success()) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    false
 }
 
 /// Step 1 of `preflight_session`: if the session file is missing,
@@ -2013,303 +2264,4 @@ fn find_new_empty_session_helper(resolved_exec: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// Step 2 of `preflight_session`: read the session XML, apply the
-/// Foyer Studio Shim activation rule, write the result back atomically
-/// when something changed.
-///
-/// Refuses to follow symlinks. The session_file path comes from the
-/// CLI args / launcher and is supposed to live inside the configured
-/// session_dir. If an attacker (or stale state) plants a symlink at
-/// that path, the previous version would happily read /etc/passwd or
-/// any other readable file and might write a temp sibling next to it.
-/// `symlink_metadata` ensures we only operate on a regular file at
-/// `session_file` itself.
-fn ensure_foyer_shim_active(session_file: &Path) -> Result<()> {
-    let meta = std::fs::symlink_metadata(session_file)
-        .with_context(|| format!("stat session file {}", session_file.display()))?;
-    if !meta.file_type().is_file() {
-        anyhow::bail!(
-            "session file {} is not a regular file (symlink or special file?) — \
-             refusing to follow",
-            session_file.display(),
-        );
-    }
-    let original = std::fs::read_to_string(session_file)
-        .with_context(|| format!("read session file {}", session_file.display()))?;
-    match apply_foyer_shim_edit(&original) {
-        FoyerShimEdit::AlreadyActive => {}
-        FoyerShimEdit::FlippedToActive { updated } => {
-            tracing::info!(
-                "foyer: flipping Foyer Studio Shim to active=\"1\" in {}",
-                session_file.display(),
-            );
-            write_atomic(session_file, &updated)
-                .with_context(|| format!("write session file {}", session_file.display()))?;
-        }
-        FoyerShimEdit::Inserted { updated } => {
-            tracing::info!(
-                "foyer: inserting Foyer Studio Shim into {}",
-                session_file.display(),
-            );
-            write_atomic(session_file, &updated)
-                .with_context(|| format!("write session file {}", session_file.display()))?;
-        }
-        FoyerShimEdit::ListedButUnknownShape => {
-            tracing::warn!(
-                "foyer: Foyer Studio Shim already listed in {} but in a non-canonical shape — leaving alone",
-                session_file.display(),
-            );
-        }
-        FoyerShimEdit::NoControlProtocolsBlock => {
-            tracing::warn!(
-                "foyer: WARNING no <ControlProtocols> block found in {} — add Foyer Studio Shim by hand",
-                session_file.display(),
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Outcome of one pass of the Foyer Studio Shim activation rule over
-/// a session XML blob. Pure value — `apply_foyer_shim_edit` does no
-/// I/O, so the rule is unit-testable without an Ardour install.
-#[derive(Debug, PartialEq, Eq)]
-enum FoyerShimEdit {
-    /// Already listed with `active="1"`. No-op.
-    AlreadyActive,
-    /// Element was listed with `active="0"` in the canonical attr
-    /// order; flipped to `active="1"` in place.
-    FlippedToActive { updated: String },
-    /// Element wasn't listed at all but `</ControlProtocols>` exists;
-    /// inserted a fresh `<Protocol …/>` line just before the closer.
-    Inserted { updated: String },
-    /// Listed but in an attr ordering / shape we don't recognize.
-    /// Don't insert (would duplicate) and don't flip (don't know how
-    /// to do it safely). Caller logs a warning and leaves the file
-    /// alone.
-    ListedButUnknownShape,
-    /// No `<ControlProtocols>` block at all — extremely old session
-    /// or a manual hand-edit. Caller logs a warning.
-    NoControlProtocolsBlock,
-}
-
-/// Apply the Foyer Studio Shim activation rule to a session XML blob.
-/// Mirrors the dev-build bash sed patterns at the top of
-/// [`launch_and_wait_for_shim`]. Priority order:
-///   1. Already-active substring present → AlreadyActive.
-///   2. Element listed with canonical `name="…" active="0"` ordering
-///      → flip in place.
-///   3. Listed in some other shape → ListedButUnknownShape (warn, no
-///      edit). This case is hit when Ardour writes attrs in a
-///      different order than the bash sed expects; trying to flip it
-///      heuristically risks corrupting the XML.
-///   4. Not listed but `</ControlProtocols>` present → insert.
-///   5. None of the above → NoControlProtocolsBlock.
-fn apply_foyer_shim_edit(input: &str) -> FoyerShimEdit {
-    if input.contains(r#"name="Foyer Studio Shim" active="1""#) {
-        return FoyerShimEdit::AlreadyActive;
-    }
-    if input.contains(r#"name="Foyer Studio Shim""#) {
-        let start_anchor = r#"<Protocol name="Foyer Studio Shim" active="0""#;
-        if let Some(anchor) = input.find(start_anchor) {
-            // Bound the rewrite to the matching void element so we
-            // never reach across into another `<Protocol .../>`.
-            if let Some(rel_end) = input[anchor..].find("/>") {
-                let abs_end = anchor + rel_end + 2;
-                let mut new = String::with_capacity(input.len());
-                new.push_str(&input[..anchor]);
-                new.push_str(r#"<Protocol name="Foyer Studio Shim" active="1""#);
-                new.push_str(&input[anchor + start_anchor.len()..abs_end]);
-                new.push_str(&input[abs_end..]);
-                return FoyerShimEdit::FlippedToActive { updated: new };
-            }
-        }
-        return FoyerShimEdit::ListedButUnknownShape;
-    }
-    if let Some(idx) = input.find("</ControlProtocols>") {
-        // Match the indentation the bash version emits — four spaces
-        // for the inserted protocol, two before the closer. Ardour
-        // re-indents on save anyway, so absolute fidelity isn't
-        // required, but matching makes the diff readable.
-        let insertion = "    <Protocol name=\"Foyer Studio Shim\" active=\"1\"/>\n  ";
-        let mut new = String::with_capacity(input.len() + insertion.len());
-        new.push_str(&input[..idx]);
-        new.push_str(insertion);
-        new.push_str(&input[idx..]);
-        return FoyerShimEdit::Inserted { updated: new };
-    }
-    FoyerShimEdit::NoControlProtocolsBlock
-}
-
-/// Write `contents` to `path` atomically: stage in a sibling temp
-/// file, then rename. Avoids leaving a half-written `.ardour` behind
-/// if the process is killed mid-write — Ardour treats a truncated
-/// session file as unrecoverable.
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("session");
-    let tmp = dir.join(format!(".{stem}.foyer-tmp"));
-    std::fs::write(&tmp, contents)?;
-    std::fs::rename(&tmp, path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn xml_already_active_is_noop() {
-        let input = r#"<Session>
-  <ControlProtocols>
-    <Protocol name="Foyer Studio Shim" active="1"/>
-    <Protocol name="OSC" active="0"/>
-  </ControlProtocols>
-</Session>"#;
-        assert_eq!(apply_foyer_shim_edit(input), FoyerShimEdit::AlreadyActive);
-    }
-
-    #[test]
-    fn xml_listed_inactive_gets_flipped() {
-        let input = r#"<Session>
-  <ControlProtocols>
-    <Protocol name="OSC" active="0"/>
-    <Protocol name="Foyer Studio Shim" active="0"/>
-  </ControlProtocols>
-</Session>"#;
-        match apply_foyer_shim_edit(input) {
-            FoyerShimEdit::FlippedToActive { updated } => {
-                assert!(updated.contains(r#"<Protocol name="Foyer Studio Shim" active="1"/>"#));
-                // Other elements left intact.
-                assert!(updated.contains(r#"<Protocol name="OSC" active="0"/>"#));
-                // No stray active="0" remains on the Foyer element.
-                assert!(!updated.contains(r#"name="Foyer Studio Shim" active="0""#));
-            }
-            other => panic!("expected FlippedToActive, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn xml_listed_inactive_with_extra_attrs_preserved() {
-        // Ardour writes additional attrs (feedback, strict-id, etc.) on
-        // each Protocol. The flip must preserve them — we only touch
-        // active="0" → active="1", nothing else inside the element.
-        let input = r#"<Protocol name="Foyer Studio Shim" active="0" feedback="0"/>"#;
-        match apply_foyer_shim_edit(input) {
-            FoyerShimEdit::FlippedToActive { updated } => {
-                assert_eq!(
-                    updated,
-                    r#"<Protocol name="Foyer Studio Shim" active="1" feedback="0"/>"#
-                );
-            }
-            other => panic!("expected FlippedToActive, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn xml_not_listed_gets_inserted() {
-        let input = r#"<Session>
-  <ControlProtocols>
-    <Protocol name="OSC" active="0"/>
-  </ControlProtocols>
-</Session>"#;
-        match apply_foyer_shim_edit(input) {
-            FoyerShimEdit::Inserted { updated } => {
-                assert!(updated.contains(r#"<Protocol name="Foyer Studio Shim" active="1"/>"#));
-                assert!(updated.contains(r#"<Protocol name="OSC" active="0"/>"#));
-                let shim_idx = updated.find("Foyer Studio Shim").unwrap();
-                let close_idx = updated.find("</ControlProtocols>").unwrap();
-                assert!(
-                    shim_idx < close_idx,
-                    "insertion must sit before </ControlProtocols>",
-                );
-            }
-            other => panic!("expected Inserted, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn xml_listed_in_unknown_shape_is_left_alone() {
-        // Attrs in a non-canonical order — bash sed wouldn't flip this
-        // either. We refuse rather than risk a duplicate-insert.
-        let input = r#"<Protocol active="0" name="Foyer Studio Shim"/>"#;
-        assert_eq!(
-            apply_foyer_shim_edit(input),
-            FoyerShimEdit::ListedButUnknownShape,
-        );
-    }
-
-    #[test]
-    fn patch_sample_rate_rewrites_first_hit() {
-        let xml = r#"<Session version="9" sample-rate="48000" name="x">"#;
-        let out = patch_session_xml_sample_rate_content(xml, 96_000)
-            .unwrap()
-            .unwrap();
-        assert!(out.contains(r#"sample-rate="96000""#));
-        assert!(!out.contains(r#"sample-rate="48000""#));
-    }
-
-    #[test]
-    fn patch_sample_rate_noop_when_missing_attr() {
-        let xml = "<Session>";
-        assert!(patch_session_xml_sample_rate_content(xml, 48_000)
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn patch_sample_rate_noop_when_already_matches() {
-        let xml = r#"<Session sample-rate="48000">"#;
-        assert!(patch_session_xml_sample_rate_content(xml, 48_000)
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn ardour_had_session_detects_flat_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "foyer-test-flat-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("mysession.ardour"), "<Session/>").unwrap();
-        assert!(ardour_had_existing_session(&dir, "mysession"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn ardour_had_session_detects_nested_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "foyer-test-nested-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let nested = dir.join("news");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("news.ardour"), "<Session/>").unwrap();
-        assert!(ardour_had_existing_session(&dir, "news"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn xml_no_control_protocols_block_is_warn() {
-        let input = r#"<Session>
-  <Other/>
-</Session>"#;
-        assert_eq!(
-            apply_foyer_shim_edit(input),
-            FoyerShimEdit::NoControlProtocolsBlock,
-        );
-    }
 }

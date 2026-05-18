@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use foyer_backend::BackendError;
 use foyer_schema::{
     AutomationLane, AutomationMode, AutomationPoint, ControlUpdate, ControlValue, EntityId, Group,
-    GroupPatch, Parameter, Session, Track, TrackKind, TrackPatch,
+    GroupPatch, IoDirection, IoPort, Parameter, Script, ScriptRunResult, Session, Track, TrackKind,
+    TrackPatch,
 };
 
 /// Enumerates the track-level controls that participate in group
@@ -52,6 +53,11 @@ pub(crate) struct StubState {
     /// `None` if the message was a shared-port broadcast. Lets
     /// tests verify per-track routing decisions made client-side.
     pub(crate) last_midi_input_track: Option<EntityId>,
+    /// Persisted scripts. Stub keeps them in memory; the real shim
+    /// rides on the `<Script>` node in the .ardour XML.
+    pub(crate) scripts: Vec<Script>,
+    /// Monotonic counter for auto-generated script ids.
+    pub(crate) next_script_seq: u64,
 }
 
 impl StubState {
@@ -67,6 +73,8 @@ impl StubState {
             midi_input_count: 0,
             last_midi_input: None,
             last_midi_input_track: None,
+            scripts: fixtures::seed_scripts(),
+            next_script_seq: 1,
         }
     }
 
@@ -79,6 +87,8 @@ impl StubState {
             midi_input_count: 0,
             last_midi_input: None,
             last_midi_input_track: None,
+            scripts: fixtures::seed_scripts(),
+            next_script_seq: 1,
         }
     }
 
@@ -91,6 +101,85 @@ impl StubState {
     /// reaches the snapshot consumers, not just the cached atomic.
     pub(crate) fn set_sample_rate(&mut self, sr: u32) {
         self.session.sample_rate = sr;
+    }
+
+    pub(crate) fn list_scripts(&self) -> Vec<Script> {
+        self.scripts.clone()
+    }
+
+    /// Upsert by id; allocates a fresh id when empty. Stamps
+    /// `updated_at` and returns the canonical post-save shape.
+    pub(crate) fn save_script(&mut self, mut script: Script) -> Result<Script, BackendError> {
+        if script.id.as_str().is_empty() {
+            self.next_script_seq += 1;
+            script.id = EntityId::new(format!("script-{}", self.next_script_seq));
+        }
+        script.updated_at = current_epoch_ms();
+        match self.scripts.iter().position(|s| s.id == script.id) {
+            Some(i) => self.scripts[i] = script.clone(),
+            None => self.scripts.push(script.clone()),
+        }
+        Ok(script)
+    }
+
+    pub(crate) fn delete_script(&mut self, id: &EntityId) -> bool {
+        let before = self.scripts.len();
+        self.scripts.retain(|s| &s.id != id);
+        self.scripts.len() != before
+    }
+
+    pub(crate) fn enable_script(
+        &mut self,
+        id: &EntityId,
+        enabled: bool,
+    ) -> Result<Script, BackendError> {
+        let Some(s) = self.scripts.iter_mut().find(|s| &s.id == id) else {
+            return Err(BackendError::Other(format!(
+                "unknown script: {}",
+                id.as_str()
+            )));
+        };
+        s.enabled = enabled;
+        if enabled {
+            s.disabled_on_upload = false;
+        }
+        s.updated_at = current_epoch_ms();
+        Ok(s.clone())
+    }
+
+    /// Stub execution — no real Lua runtime here; we echo the script's
+    /// metadata as stdout. The FE iteration loop only needs a result
+    /// shape, and the real shim will overwrite the stdout/error fields
+    /// with the actual VM output.
+    pub(crate) fn run_script_stub(
+        &mut self,
+        id: &EntityId,
+        args_override: Option<std::collections::BTreeMap<String, String>>,
+    ) -> ScriptRunResult {
+        let Some(s) = self.scripts.iter().find(|s| &s.id == id) else {
+            return ScriptRunResult {
+                id: id.clone(),
+                ok: false,
+                stdout: String::new(),
+                error: Some(format!("unknown script: {}", id.as_str())),
+                elapsed_ms: Some(0),
+            };
+        };
+        let args = args_override.unwrap_or_else(|| s.args.clone());
+        let mut stdout = format!("[stub] would run {} ({})\n", s.name, s.script_type);
+        if !args.is_empty() {
+            stdout.push_str("[stub] with args:\n");
+            for (k, v) in args.iter() {
+                stdout.push_str(&format!("  {k} = {v}\n"));
+            }
+        }
+        ScriptRunResult {
+            id: id.clone(),
+            ok: true,
+            stdout,
+            error: None,
+            elapsed_ms: Some(1),
+        }
     }
 
     pub(crate) fn set_control(
@@ -448,6 +537,70 @@ impl StubState {
     /// name/color changes update immediately; `group_id` is stored
     /// verbatim; `bus_assign` is a no-op in the stub until we model
     /// routing.
+    /// Create a new audio / MIDI / bus track. Refuses to create master
+    /// or monitor (those are seeded once at session boot). The new
+    /// track lands after `after_id` if given, otherwise at the end.
+    /// Returns the freshly-minted `Track` so callers can broadcast.
+    pub(crate) fn create_track(
+        &mut self,
+        name: String,
+        kind: TrackKind,
+        color: Option<String>,
+        after_id: Option<&EntityId>,
+    ) -> Result<Track, foyer_backend::BackendError> {
+        match kind {
+            TrackKind::Audio | TrackKind::Midi | TrackKind::Bus => {}
+            other => {
+                return Err(foyer_backend::BackendError::Other(format!(
+                    "cannot create track of kind {other:?} (master/monitor are immutable)"
+                )));
+            }
+        }
+        // Slug from name + uniqueness counter (mirrors create_group).
+        let mut slug: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if slug.is_empty() {
+            slug.push_str("track");
+        }
+        let mut id_str = format!("track.{slug}");
+        // Deduplicate by extending the slug itself, not just the id —
+        // every parameter `fixtures::track` builds (gain/pan/mute/solo/
+        // record_arm) embeds the slug in its EntityId. If we only
+        // rewrote the track.id and left the param ids on the original
+        // slug, `find_param_mut` would route ControlSet on the new
+        // track to the FIRST track's parameter, silently misrouting
+        // record-arm / mute / gain edits. Bumping the slug keeps every
+        // id in lock-step.
+        let mut effective_slug = slug.clone();
+        let mut suffix = 2;
+        while self.session.tracks.iter().any(|t| t.id.as_str() == id_str) {
+            effective_slug = format!("{slug}_{suffix}");
+            id_str = format!("track.{effective_slug}");
+            suffix += 1;
+        }
+        let track = crate::fixtures::track(&effective_slug, &name, kind, color.as_deref());
+        let insert_at = match after_id {
+            Some(after) => self
+                .session
+                .tracks
+                .iter()
+                .position(|t| &t.id == after)
+                .map(|i| i + 1)
+                .unwrap_or(self.session.tracks.len()),
+            None => self.session.tracks.len(),
+        };
+        self.session.tracks.insert(insert_at, track.clone());
+        Ok(track)
+    }
+
     pub(crate) fn update_track(&mut self, id: &EntityId, patch: &TrackPatch) -> Option<Track> {
         let t = self.session.tracks.iter_mut().find(|t| &t.id == id)?;
         if let Some(name) = patch.name.as_ref() {
@@ -468,9 +621,45 @@ impl StubState {
                 Some(group_id.clone())
             };
         }
-        // bus_assign is intentionally not modeled in the stub — the real
-        // shim does the routing; this backend is only about making the
-        // UI repaint.
+        // Routing fields. The stub now models these as state (the
+        // shim has its own audio routing on top, which has to match
+        // these values when both are present). Empty string clears
+        // back to the default (master output / auto input / auto
+        // monitoring).
+        if let Some(bus) = patch.bus_assign.as_ref() {
+            t.bus_assign = if bus.as_str().is_empty() {
+                None
+            } else {
+                Some(bus.clone())
+            };
+        }
+        if let Some(monitor) = patch.monitoring.as_ref() {
+            t.monitoring = if monitor.is_empty() {
+                None
+            } else {
+                Some(monitor.clone())
+            };
+        }
+        // input_port routing — the Ardour shim talks to JACK; we
+        // approximate by stashing the assigned port as a single
+        // synthetic IoPort on `track.inputs[0]` so the agent can
+        // verify the routing took effect via `tracks.describe`.
+        // `is_midi` follows the track's kind so a MIDI track routed
+        // to `system:midi/capture_1` reads back as a MIDI input.
+        if let Some(port) = patch.input_port.as_ref() {
+            if port.is_empty() {
+                t.inputs.clear();
+            } else {
+                t.inputs = vec![IoPort {
+                    id: EntityId::new(format!("{}.input.0", t.id.as_str())),
+                    name: port.clone(),
+                    direction: IoDirection::Input,
+                    channels: 1,
+                    bound_peer: None,
+                    is_midi: matches!(t.kind, TrackKind::Midi),
+                }];
+            }
+        }
         Some(t.clone())
     }
 
@@ -668,4 +857,11 @@ impl StubState {
         lane.points = points;
         Ok(())
     }
+}
+
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

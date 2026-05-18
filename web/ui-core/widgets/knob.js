@@ -55,6 +55,12 @@ export class Knob extends LitElement {
       user-select: none;
       color: var(--color-text);
       font-family: var(--font-sans);
+      outline: none;
+      border-radius: 4px;
+    }
+    :host(:focus-visible) {
+      outline: 2px solid var(--color-accent, #7c5cff);
+      outline-offset: 2px;
     }
     .label {
       font-size: 9px;
@@ -93,6 +99,68 @@ export class Knob extends LitElement {
     this._dragging = false;
     this._startY = 0;
     this._startNorm = 0;
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    // Tabbable so keyboard users can adjust gain / pan / plugin
+    // params without a mouse. ArrowUp/Right = increase, Down/Left =
+    // decrease, Shift = fine; Home/End jump to min/max; Enter (with
+    // a default) resets.
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
+    this.setAttribute("role", "slider");
+    this._onKey = (ev) => this._onKeyDown(ev);
+    this.addEventListener("keydown", this._onKey);
+  }
+  disconnectedCallback() {
+    if (this._onKey) this.removeEventListener("keydown", this._onKey);
+    super.disconnectedCallback();
+  }
+
+  _onKeyDown(ev) {
+    let nudge = 0;
+    if (ev.key === "ArrowUp" || ev.key === "ArrowRight") nudge = 1;
+    else if (ev.key === "ArrowDown" || ev.key === "ArrowLeft") nudge = -1;
+    if (nudge !== 0) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const rng = this.range?.length === 2 ? this.range : [0, 1];
+      const step = ev.shiftKey ? 0.005 : 0.02;
+      const n0 = clamp(toNorm(this.value, rng, this.scale), 0, 1);
+      const n = clamp(n0 + nudge * step, 0, 1);
+      const raw = fromNorm(n, rng, this.scale);
+      this.value = raw;
+      this._emit(raw, n);
+      // Mirror the pointer-up "change" emit so subscribers that
+      // commit on settle (the mixer's gain WS write, etc.) fire on
+      // every arrow press.
+      this.dispatchEvent(new CustomEvent("change", {
+        detail: { value: raw },
+        bubbles: true,
+        composed: true,
+      }));
+      return;
+    }
+    if (ev.key === "Home" || ev.key === "End") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const rng = this.range?.length === 2 ? this.range : [0, 1];
+      const raw = ev.key === "Home" ? rng[0] : rng[1];
+      this.value = raw;
+      const n = clamp(toNorm(raw, rng, this.scale), 0, 1);
+      this._emit(raw, n);
+      this.dispatchEvent(new CustomEvent("change", {
+        detail: { value: raw },
+        bubbles: true,
+        composed: true,
+      }));
+      return;
+    }
+    if (ev.key === "Enter" && this.defaultValue !== undefined) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this._reset();
+    }
   }
 
   updated(changed) {

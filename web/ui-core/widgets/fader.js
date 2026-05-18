@@ -25,6 +25,12 @@ export class Fader extends LitElement {
       flex: 0 0 22px;
       padding-bottom: 18px;
       user-select: none;
+      outline: none;
+      border-radius: 4px;
+    }
+    :host(:focus-visible) {
+      outline: 2px solid var(--color-accent, #7c5cff);
+      outline-offset: 2px;
     }
     .track {
       width: 20px;
@@ -90,6 +96,54 @@ export class Fader extends LitElement {
     this.value = 0;
     this.label = "";
     this.dragging = false;
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
+    this.setAttribute("role", "slider");
+    this._onKey = (ev) => this._onKeyDown(ev);
+    this.addEventListener("keydown", this._onKey);
+  }
+  disconnectedCallback() {
+    if (this._onKey) this.removeEventListener("keydown", this._onKey);
+    super.disconnectedCallback();
+  }
+
+  _onKeyDown(ev) {
+    let nudge = 0;
+    if (ev.key === "ArrowUp" || ev.key === "ArrowRight") nudge = 1;
+    else if (ev.key === "ArrowDown" || ev.key === "ArrowLeft") nudge = -1;
+    if (nudge !== 0) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const step = ev.shiftKey ? 0.005 : 0.02;
+      const v = Math.max(0, Math.min(1, (this.value || 0) + nudge * step));
+      this.value = v;
+      this.dispatchEvent(new CustomEvent("input", {
+        detail: { value: v },
+        bubbles: true,
+        composed: true,
+      }));
+      return;
+    }
+    if (ev.key === "Home" || ev.key === "End") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const v = ev.key === "Home" ? 0 : 1;
+      this.value = v;
+      this.dispatchEvent(new CustomEvent("input", {
+        detail: { value: v },
+        bubbles: true,
+        composed: true,
+      }));
+      return;
+    }
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this._reset();
+    }
   }
 
   render() {

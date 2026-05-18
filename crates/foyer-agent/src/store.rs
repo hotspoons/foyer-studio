@@ -22,6 +22,88 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+/// Built-in skill files seeded into a fresh `skills/` directory on
+/// first store open. Each entry is `(filename, body)`. The seeded
+/// files are markdown with the same `enabled: true` frontmatter
+/// shape user-authored skills use, so `list_skills` picks them up
+/// without special-casing. New defaults can be added without
+/// breaking existing user data — only filenames that aren't
+/// already on disk get written.
+const DEFAULT_SKILL_SEEDS: &[(&str, &str)] = &[
+    // Lua-authoring playbooks (already on disk for early adopters).
+    (
+        "ardour-lua-dsp.md",
+        include_str!("skills_seed/ardour-lua-dsp.md"),
+    ),
+    (
+        "ardour-lua-action.md",
+        include_str!("skills_seed/ardour-lua-action.md"),
+    ),
+    (
+        "ardour-lua-hook.md",
+        include_str!("skills_seed/ardour-lua-hook.md"),
+    ),
+    (
+        "ardour-lua-snippet.md",
+        include_str!("skills_seed/ardour-lua-snippet.md"),
+    ),
+    // Task-oriented playbooks. Each one walks a smaller model through
+    // the common gotchas for a single domain. Loaded on demand via
+    // `scripts.skill { name }` so they don't bloat every welcome.
+    (
+        "adding-plugins.md",
+        include_str!("skills_seed/adding-plugins.md"),
+    ),
+    (
+        "midi-track-setup.md",
+        include_str!("skills_seed/midi-track-setup.md"),
+    ),
+    (
+        "drum-pattern-authoring.md",
+        include_str!("skills_seed/drum-pattern-authoring.md"),
+    ),
+    (
+        "melodic-region-authoring.md",
+        include_str!("skills_seed/melodic-region-authoring.md"),
+    ),
+    (
+        "regions-operations.md",
+        include_str!("skills_seed/regions-operations.md"),
+    ),
+    (
+        "mixer-balancing.md",
+        include_str!("skills_seed/mixer-balancing.md"),
+    ),
+    (
+        "automation-curves.md",
+        include_str!("skills_seed/automation-curves.md"),
+    ),
+    (
+        "ui-automation.md",
+        include_str!("skills_seed/ui-automation.md"),
+    ),
+    (
+        "visualization-cheatsheet.md",
+        include_str!("skills_seed/visualization-cheatsheet.md"),
+    ),
+    (
+        "session-lifecycle.md",
+        include_str!("skills_seed/session-lifecycle.md"),
+    ),
+    (
+        "solo-and-mute-hygiene.md",
+        include_str!("skills_seed/solo-and-mute-hygiene.md"),
+    ),
+    (
+        "spectrum-analysis.md",
+        include_str!("skills_seed/spectrum-analysis.md"),
+    ),
+    (
+        "groups-and-busses.md",
+        include_str!("skills_seed/groups-and-busses.md"),
+    ),
+];
+
 /// Persisted shape of the agent's LLM transport config. The
 /// runtime's full `AgentConfig` carries deployment knobs that come
 /// from `config.yaml` instead (`prefer_headless_render`); those are
@@ -64,6 +146,20 @@ impl AgentStore {
     pub async fn open_at(root: PathBuf) -> Result<Self, StoreError> {
         for sub in ["skills", "memory", "templates", "sessions", "trace"] {
             fs::create_dir_all(root.join(sub)).await?;
+        }
+        // Drop the built-in skill seeds into `skills/` unless the
+        // user has already written a file by the same name. Lets a
+        // fresh install ship useful agent knowledge (Lua DSP,
+        // editor action / hook / snippet authoring) without
+        // overwriting anything the user has tuned. New skills
+        // added in future versions land automatically — the user
+        // can re-seed by deleting the file.
+        let skills_dir = root.join("skills");
+        for (name, body) in DEFAULT_SKILL_SEEDS {
+            let path = skills_dir.join(name);
+            if fs::metadata(&path).await.is_err() {
+                let _ = fs::write(&path, body).await;
+            }
         }
         Ok(Self { root })
     }
@@ -186,6 +282,14 @@ impl AgentStore {
         let new_body = rewrite_enabled(&body, enabled);
         fs::write(&path, new_body).await?;
         Ok(())
+    }
+
+    /// Read one skill's full body by name. Used by the `scripts.skill`
+    /// tool to load a playbook on demand. Returns an error if the name
+    /// is invalid or the file doesn't exist.
+    pub async fn read_skill_body(&self, name: &str) -> Result<String, StoreError> {
+        let path = self.skills_dir().join(format!("{}.md", safe_name(name)?));
+        Ok(fs::read_to_string(&path).await?)
     }
 
     /// Write a new skill file (or overwrite an existing one). The

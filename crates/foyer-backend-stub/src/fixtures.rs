@@ -94,6 +94,14 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
             automation_lanes.push(empty_lane(&param.id));
         }
     }
+    // record_arm only exists on audio/midi tracks — buses + master +
+    // monitor don't record. Mirrors Ardour's IO model. The agent
+    // checks for `Some(...)` on this when `tracks.set_arm` fires and
+    // returns a clear error if the chosen track is a bus.
+    let record_arm = match kind {
+        TrackKind::Audio | TrackKind::Midi => Some(toggle(&format!("track.{slug}.rec"), "Rec")),
+        _ => None,
+    };
     Track {
         id: track_id,
         name: name.into(),
@@ -103,7 +111,7 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
         pan: pan_ctl,
         mute,
         solo,
-        record_arm: Some(toggle(&format!("track.{slug}.rec"), "Rec")),
+        record_arm,
         monitoring: Some("auto".into()),
         sends: vec![],
         plugins,
@@ -663,7 +671,148 @@ pub(crate) fn initial_session() -> Session {
         sample_rate: foyer_schema::DEFAULT_SAMPLE_RATE,
         ppqn: Some(1920),
         meta: serde_json::json!({ "project": "demo" }),
+        scripting: Some(stub_scripting_capabilities()),
+        spectrum: Some(foyer_schema::SpectrumCapabilities::stub()),
     }
+}
+
+/// Scripting surface the stub advertises. Mirrors Ardour's
+/// `LuaScriptInfo::ScriptType` taxonomy so a FE built against the stub
+/// is wire-compatible with the shim when it lands. Real backends
+/// override this in their own impl.
+pub(crate) fn stub_scripting_capabilities() -> foyer_schema::ScriptingCapabilities {
+    use foyer_schema::{
+        ScriptLanguage, ScriptTypeDescriptor, ScriptingCapabilities, ScriptingFeatures,
+    };
+    ScriptingCapabilities {
+        languages: vec![ScriptLanguage {
+            id: "lua".into(),
+            label: "Lua 5.4".into(),
+            highlight: "lua".into(),
+        }],
+        script_types: vec![
+            ScriptTypeDescriptor {
+                id: "snippet".into(),
+                label: "Snippet".into(),
+                description: "One-shot script run from the Script Manager. \
+                              Best for quick edits and experiments."
+                    .into(),
+                hookable: false,
+                hooks: vec![],
+                runnable: true,
+                takes_args: false,
+            },
+            ScriptTypeDescriptor {
+                id: "editor_action".into(),
+                label: "Editor Action".into(),
+                description: "Reusable action invocable from the agent, \
+                              FAB, or a key binding. Accepts a typed arg \
+                              table."
+                    .into(),
+                hookable: false,
+                hooks: vec![],
+                runnable: true,
+                takes_args: true,
+            },
+            ScriptTypeDescriptor {
+                id: "editor_hook".into(),
+                label: "Editor Hook".into(),
+                description: "Runs in response to a host signal — session \
+                              load, transport start/stop, region added, \
+                              etc."
+                    .into(),
+                hookable: true,
+                hooks: vec![
+                    "transport_state_changed".into(),
+                    "selection_changed".into(),
+                    "region_property_changed".into(),
+                    "punch_changed".into(),
+                    "session_loaded".into(),
+                ],
+                runnable: false,
+                takes_args: false,
+            },
+            ScriptTypeDescriptor {
+                id: "session".into(),
+                label: "Session Script".into(),
+                description: "Runs every N audio frames inside the engine. \
+                              Use sparingly — this is the RT-safe slot."
+                    .into(),
+                hookable: false,
+                hooks: vec![],
+                runnable: false,
+                takes_args: true,
+            },
+            ScriptTypeDescriptor {
+                id: "session_init".into(),
+                label: "Session Init".into(),
+                description: "Fires once when the session loads. Good for \
+                              setting up macros and bindings."
+                    .into(),
+                hookable: false,
+                hooks: vec![],
+                runnable: false,
+                takes_args: false,
+            },
+            ScriptTypeDescriptor {
+                id: "dsp".into(),
+                label: "DSP Plugin".into(),
+                description: "A Lua-authored audio plugin. Once saved, \
+                              instantiate it on a track like any other \
+                              plugin."
+                    .into(),
+                hookable: false,
+                hooks: vec![],
+                runnable: false,
+                takes_args: true,
+            },
+        ],
+        features: ScriptingFeatures {
+            can_disable: true,
+            can_recover_disabled: false,
+            can_run_oneshot: true,
+        },
+    }
+}
+
+/// A small seed set so the FE has something to render against the
+/// stub on first boot. Mirrors the demo-data philosophy of
+/// `initial_session()`. Real backends populate from the project file.
+pub(crate) fn seed_scripts() -> Vec<foyer_schema::Script> {
+    use foyer_schema::{EntityId, Script};
+    vec![
+        Script {
+            id: EntityId::new("script-hello"),
+            name: "Hello Foyer".into(),
+            description: "Prints a greeting to the console — try it.".into(),
+            script_type: "snippet".into(),
+            language: "lua".into(),
+            enabled: true,
+            body: "-- A first-touch script. Run me from the Script Manager.\n\
+                   print(\"Hello from a Foyer script!\")\n"
+                .into(),
+            args: Default::default(),
+            hook: None,
+            disabled_on_upload: false,
+            updated_at: 0,
+        },
+        Script {
+            id: EntityId::new("script-transport-log"),
+            name: "Log transport changes".into(),
+            description: "Prints whenever the user starts or stops playback.".into(),
+            script_type: "editor_hook".into(),
+            language: "lua".into(),
+            enabled: false,
+            body: "function on_transport(state)\n  \
+                       print(\"transport now:\", state)\n\
+                   end\nreturn on_transport\n"
+                .into(),
+            args: Default::default(),
+            hook: Some("transport_state_changed".into()),
+            disabled_on_upload: false,
+            updated_at: 0,
+        },
+    ]
 }
 
 /// Session with no tracks/plugins/regions — only the transport stub. Used
@@ -674,6 +823,8 @@ pub(crate) fn empty_session() -> Session {
     let mut s = initial_session();
     s.tracks.clear();
     s.meta = serde_json::json!({ "project": null, "launcher": true });
+    // Keep the scripting cap so the manager panel still works in
+    // launcher mode (it doesn't need any tracks to be useful).
     s
 }
 

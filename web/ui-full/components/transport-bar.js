@@ -1,4 +1,5 @@
 import { LitElement, html, css } from "lit";
+import { t, onLocaleChange } from "/core/i18n.js";
 
 import "foyer-ui-core/widgets/toggle.js";
 import "foyer-ui-core/widgets/number-scrub.js";
@@ -272,6 +273,7 @@ export class TransportBar extends LitElement {
     store.addEventListener("track-browser-sources", this._onSourceChange);
     store.addEventListener("peers", this._onSourceChange);
     store.addEventListener("greeting", this._onSourceChange);
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     const store = window.__foyer?.store;
@@ -280,6 +282,7 @@ export class TransportBar extends LitElement {
     store?.removeEventListener("peers", this._onSourceChange);
     store?.removeEventListener("greeting", this._onSourceChange);
     this._offRbac?.();
+    this._i18nDispose?.();
     if (this._rafHandle) {
       cancelAnimationFrame(this._rafHandle);
       this._rafHandle = null;
@@ -457,22 +460,22 @@ export class TransportBar extends LitElement {
     return html`
       ${canControl ? html`
         <div class="row transport">
-          <div class="btn locate" title="Go to start (Home)" @click=${this._gotoStart}>${icon("backward-step", 16)}</div>
-          <div class="btn scrub"  title="Rewind 5 s" @click=${this._rewind}>${icon("backward", 16)}</div>
+          <div class="btn locate" title=${t("Go to start (Home)")} @click=${this._gotoStart}>${icon("backward-step", 16)}</div>
+          <div class="btn scrub"  title=${t("Rewind 5 s")} @click=${this._rewind}>${icon("backward", 16)}</div>
           <div class="btn stop ${this._stopping ? "stopping" : ""}"
-               title=${this._stopping ? "Stopping — draining ingress buffer…" : "Stop"}
+               title=${this._stopping ? t("Stopping — draining ingress buffer…") : t("Stop")}
                @click=${this._stop}>${icon("stop", 16)}</div>
           <div class="btn play ${play ? "on" : ""}"
-               title="${play ? "Pause" : "Play"} (Space)"
+               title=${play ? t("Pause (Space)") : t("Play (Space)")}
                @click=${() => this._setPlay(!play)}>${icon(play ? "pause" : "play", 16)}</div>
           <div class="btn rec ${rec ? "on" : ""}"
-               title="Record arm (R)"
+               title=${t("Record arm (R)")}
                @click=${() => this._set("transport.recording", !rec)}>${icon("record", 16)}</div>
            <div class="btn loop ${loop ? "on" : ""}"
-                title="Toggle loop (L)"
+                title=${t("Toggle loop (L)")}
                 @click=${() => this._set("transport.looping", !loop)}>${icon("loop", 16)}</div>
-          <div class="btn scrub"  title="Fast forward 5 s" @click=${this._fastForward}>${icon("forward", 16)}</div>
-          <div class="btn locate" title="Go to end (End)" @click=${this._gotoEnd}>${icon("forward-step", 16)}</div>
+          <div class="btn scrub"  title=${t("Fast forward 5 s")} @click=${this._fastForward}>${icon("forward", 16)}</div>
+          <div class="btn locate" title=${t("Go to end (End)")} @click=${this._gotoEnd}>${icon("forward-step", 16)}</div>
         </div>
         <div class="btn return-mode"
              title=${RETURN_MODE_TITLES[returnMode] + " — click to cycle"}
@@ -482,13 +485,13 @@ export class TransportBar extends LitElement {
       ${canEdit ? html`
         <div class="row">
           <div class="btn edit"
-               title="Undo (${this._metaChord()}+Z)"
+               title=${t("Undo (%{chord}+Z)", { chord: this._metaChord() })}
                @click=${this._undo}>${icon("arrow-uturn-left", 14)}</div>
           <div class="btn edit"
-               title="Redo (${this._metaChord()}+Shift+Z)"
+               title=${t("Redo (%{chord}+Shift+Z)", { chord: this._metaChord() })}
                @click=${this._redo}>${icon("arrow-uturn-right", 14)}</div>
           <div class="btn save ${this._isDirty() ? "dirty" : ""}"
-               title="${this._isDirty() ? "Save session (unsaved changes)" : "Save session"}"
+               title=${this._isDirty() ? t("Save session (unsaved changes)") : t("Save session")}
                @click=${this._save}>${icon("document-save", 14)}</div>
         </div>
         <div class="sep"></div>
@@ -497,11 +500,11 @@ export class TransportBar extends LitElement {
       ${this._showMeta ? html`
         <div class="meta-cluster">
           <div class="clock"
-               title="Playhead — top: time · bottom: bar.beat.16th">
+               title=${t("Playhead — top: time · bottom: bar.beat.16th")}>
             <span>${this._formatClockTime()}</span>
             <span class="bbt">${this._formatBarBeat()}</span>
           </div>
-          <div class="ts" title="Time signature (numerator / denominator)">
+          <div class="ts" title=${t("Time signature (numerator / denominator)")}>
             <label>TS</label>
             <input type="number" min="1" max="32" step="1"
                    .value=${String(Number(this._tsNumCtl?.value ?? 4))}
@@ -514,8 +517,8 @@ export class TransportBar extends LitElement {
                    @change=${canControl ? this._onTsDen : null}>
           </div>
           <foyer-number
-            label="Tempo"
-            unit="BPM"
+            label=${t("Tempo")}
+            unit=${t("BPM")}
             .value=${tempo}
             .min=${20}
             .max=${300}
@@ -531,7 +534,7 @@ export class TransportBar extends LitElement {
         </div>
       ` : null}
       <button class="meta-toggle ${this._showMeta ? "" : "hidden"}"
-              title="${this._showMeta ? "Hide" : "Show"} clock / time-sig / tempo"
+              title=${this._showMeta ? t("Hide clock / time-sig / tempo") : t("Show clock / time-sig / tempo")}
               @click=${this._toggleMetaCluster}>
         ${icon(this._showMeta ? "eye" : "eye-slash", 14)}
       </button>

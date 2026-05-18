@@ -8,14 +8,21 @@
 //! tool names that have to be re-vetted on every prompt.
 
 pub mod automation;
+pub mod continue_working;
+pub mod daw_proxy;
+pub mod groups;
+pub mod io;
 pub mod midi;
 pub mod mixer;
 pub mod plugins;
 pub mod regions;
+pub mod scripts;
 pub mod sequencer;
 pub mod session;
+pub mod spectrum;
 pub mod tracks;
 pub mod transport;
+pub mod ui;
 pub mod visualize;
 pub mod welcome;
 
@@ -67,21 +74,83 @@ impl ToolResult {
     }
 }
 
+/// Live, shared handle to the *current* backend Weak ref. Wrapped in
+/// a `std::sync::RwLock<Option<Weak>>` so the in-process agent's
+/// `ToolContext` reads the LIVE value on every `backend()` call —
+/// without this indirection, a session swap mid-turn (e.g. `session.new`
+/// followed by `tracks.list` in the same turn) would leave subsequent
+/// tool calls pointing at the previous session's shim. The runtime
+/// owns one of these Arcs and clones it into every ToolContext it
+/// builds; `attach_backend` updates the inner Weak so every active
+/// ctx sees the new ref immediately.
+pub type BackendRef = std::sync::Arc<std::sync::RwLock<Option<std::sync::Weak<dyn Backend>>>>;
+
+/// Convenience constructor — builds a `BackendRef` seeded with the
+/// given Weak. External call sites (MCP per-call, tests) can also
+/// pass `BackendRef::default()` and update it post-construction.
+pub fn make_backend_ref(weak: std::sync::Weak<dyn Backend>) -> BackendRef {
+    std::sync::Arc::new(std::sync::RwLock::new(Some(weak)))
+}
+
+/// Shared, per-turn budget handle. The `continue_working` tool grabs
+/// this to extend the round cap mid-turn. Use `Arc<std::sync::Mutex>`
+/// (not tokio's) so tools that don't touch async can read/write it
+/// freely. Set by `AgentEngine::run_turn` on the ToolContext it
+/// receives, so every flow that funnels through `run_turn` —
+/// in-process FAB, `/v1/chat/completions` proxy, MCP `tools/call` —
+/// shares the same per-turn budget machinery. `None` only on the
+/// rare paths that dispatch a tool *outside* run_turn (mostly tests).
+pub type TurnBudgetHandle = std::sync::Arc<std::sync::Mutex<crate::engine::TurnBudget>>;
+
 /// Per-invocation context the tools receive.
 pub struct ToolContext {
-    pub backend: std::sync::Weak<dyn Backend>,
+    pub backend: BackendRef,
     pub fe_attached: bool,
     pub fe_render: Option<Arc<dyn FeRenderer>>,
     pub headless_render: Option<Arc<dyn HeadlessRenderer>>,
+    /// Round-trips UI directives through any attached browser tab.
+    /// Wired in `attach_agent` (foyer-server) when the FE WS is up.
+    /// None when there's no FE (TUI-only MCP sessions); the `ui`
+    /// tool reports that to the agent so it can fall back to
+    /// explaining the layout in text.
+    pub ui_director: Option<Arc<dyn UiDirector>>,
+    /// Sidecar-state ops for `session.{open,new,close,list_open,
+    /// recents,browse,...}`. The active-backend Save/Save-As path
+    /// goes through `Backend::save_session` instead so it works
+    /// without a director attached (in-process tests, etc.).
+    pub session_director: Option<Arc<dyn SessionDirector>>,
+    /// Server-side spectrum analyser. Lets the `spectrum` agent tool
+    /// drive transport and capture FFT frames offline when the
+    /// backend's native spectrum is unavailable. None during the
+    /// stub-MCP tests and the in-process agent's first turn (the
+    /// director is attached during `attach_agent`).
+    pub spectrum_director: Option<Arc<dyn SpectrumDirector>>,
     /// Snapshot of `AgentConfig.prefer_headless_render` at the
     /// moment this turn started. Read by the `visualize` tool to
     /// flip the renderer priority.
     pub prefer_headless_render: bool,
+    /// Live per-turn round budget. The hidden `continue_working`
+    /// tool grabs this to extend the round cap mid-turn. Populated
+    /// by `AgentEngine::run_turn` for every caller — FAB,
+    /// `/v1/chat/completions`, MCP. `None` is only seen on the
+    /// thin dispatch paths used in tests.
+    pub turn_budget: Option<TurnBudgetHandle>,
 }
 
 impl ToolContext {
     pub fn backend(&self) -> Result<Arc<dyn Backend>, ToolError> {
-        let backend = self.backend.upgrade().ok_or(ToolError::BackendGone)?;
+        // Read the LIVE Weak each call so a session swap mid-turn is
+        // picked up by every subsequent tool call. `expect`: the lock
+        // only poisons if a panic occurred while it was held; we hold
+        // it for a single clone so that's effectively impossible.
+        let weak = {
+            let guard = self
+                .backend
+                .read()
+                .expect("ToolContext backend ref poisoned");
+            guard.as_ref().ok_or(ToolError::BackendGone)?.clone()
+        };
+        let backend = weak.upgrade().ok_or(ToolError::BackendGone)?;
         // The Weak upgraded, but the underlying IPC may have died
         // since (Ardour crash, shim killed, network blip). Probe
         // before handing back the Arc so callers get a clean
@@ -142,6 +211,253 @@ pub trait FeRenderer: Send + Sync {
 #[async_trait]
 pub trait HeadlessRenderer: Send + Sync {
     async fn render(&self, request: Value) -> Result<Vec<u8>, ToolError>;
+}
+
+/// Server-side broker for UI actions. The `ui` agent tool calls
+/// `dispatch(action_json)`; the implementation broadcasts an
+/// `Event::UiAction` over the control plane, awaits the first FE
+/// reply via `Command::UiActionResult`, and returns the JSON
+/// payload back (state snapshot on a `query`, empty on mutations).
+#[async_trait]
+pub trait UiDirector: Send + Sync {
+    async fn dispatch(&self, action_json: String) -> Result<String, UiDirectorError>;
+}
+
+/// Error type for `UiDirector::dispatch`. Mirrors `ToolError::Execution`
+/// shape but lives in its own type so a future director impl can
+/// distinguish "no FE attached" from "FE rejected the action".
+#[derive(Debug, thiserror::Error)]
+pub enum UiDirectorError {
+    #[error("{0}")]
+    Execution(String),
+}
+
+/// Server-side spectrum analyser surface. Lets the agent's
+/// `spectrum.capture_at` / `spectrum.capture_window` subcommands
+/// drive transport, mute master, and aggregate FFT bins without
+/// needing the backend to implement an offline spectrum natively.
+#[async_trait]
+pub trait SpectrumDirector: Send + Sync {
+    /// One FFT window at `at_samples`. Locates transport, plays
+    /// briefly, captures, and restores prior state. Returns the
+    /// frame as JSON-able SpectrumFrame.
+    async fn capture_at(
+        &self,
+        target: serde_json::Value,
+        opts: serde_json::Value,
+        at_samples: u64,
+        mute_master: bool,
+    ) -> Result<serde_json::Value, SpectrumDirectorError>;
+    /// Time-slice EMA capture across [start, end]. Same restore
+    /// semantics. `decay` 0..1 weights the running average.
+    async fn capture_window(
+        &self,
+        target: serde_json::Value,
+        opts: serde_json::Value,
+        start_samples: u64,
+        end_samples: u64,
+        decay: f32,
+        mute_master: bool,
+    ) -> Result<serde_json::Value, SpectrumDirectorError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SpectrumDirectorError {
+    #[error("{0}")]
+    Execution(String),
+}
+
+impl From<SpectrumDirectorError> for ToolError {
+    fn from(e: SpectrumDirectorError) -> Self {
+        match e {
+            SpectrumDirectorError::Execution(m) => ToolError::Execution(m),
+        }
+    }
+}
+
+impl From<UiDirectorError> for ToolError {
+    fn from(e: UiDirectorError) -> Self {
+        match e {
+            UiDirectorError::Execution(m) => ToolError::Execution(m),
+        }
+    }
+}
+
+/// Sidecar session-management surface. Distinct from the `Backend`
+/// trait (which acts on the CURRENTLY-OPEN session) — this is the
+/// agent's hook into the sidecar's multi-session registry, the project
+/// launcher, recents, and filesystem browsing inside the jail.
+///
+/// Implemented by `foyer-server::session_director::SessionDirectorImpl`.
+/// Tools call through here; the impl reaches back into `AppState` to
+/// invoke the same launch + close + recents helpers the WS dispatcher
+/// uses, so the agent's "open this project" goes through the same
+/// pipeline as a click on the project picker.
+#[async_trait]
+pub trait SessionDirector: Send + Sync {
+    /// Sessions currently open in the sidecar registry.
+    async fn list_open(&self) -> Result<Vec<foyer_schema::SessionInfo>, SessionDirectorError>;
+    /// Close (and quit shim of) a session by id.
+    async fn close(&self, session_id: &str) -> Result<(), SessionDirectorError>;
+    /// Launch a project. `backend_id` of "" / "auto" resolves to the
+    /// currently-active backend (or the default if none is up yet).
+    /// `project_path` of None launches a fresh in-memory project (stub
+    /// backends only; Ardour requires a path).
+    async fn launch_project(
+        &self,
+        backend_id: &str,
+        project_path: Option<&str>,
+        sample_rate: Option<u32>,
+    ) -> Result<LaunchOutcome, SessionDirectorError>;
+    /// Recents list (canonical order: most-recently-touched first).
+    async fn list_recents(&self) -> Result<Vec<foyer_schema::RecentEntry>, SessionDirectorError>;
+    /// Forget a single recents entry (jail-relative path).
+    async fn forget_recent(&self, path: &str) -> Result<(), SessionDirectorError>;
+    /// Directory listing inside the jail. `path = ""` lists the jail root.
+    async fn browse_path(
+        &self,
+        path: &str,
+        show_hidden: bool,
+    ) -> Result<foyer_schema::PathListing, SessionDirectorError>;
+    /// Configured backend adapters + which is currently live.
+    async fn list_backends(&self) -> Result<BackendsListing, SessionDirectorError>;
+    /// Switch the sidecar's focused session. Subsequent untagged
+    /// commands (transport, tracks, regions, …) route to this
+    /// session's backend. Default impl errors out; the
+    /// server-side `SessionDirectorImpl` overrides.
+    async fn focus(&self, _session_id: &str) -> Result<(), SessionDirectorError> {
+        Err(SessionDirectorError::Unsupported(
+            "session.focus not wired in this director".into(),
+        ))
+    }
+
+    /// Arm a track to receive browser-sourced audio — the same
+    /// server-side handshake the "I" / Take chip runs when a user
+    /// clicks it (browser-side mic capture still needs a real user
+    /// gesture; the agent's job ends at preparing the track).
+    /// Specifically: records the track→browser-source claim in
+    /// `track_browser_sources`, forces `monitoring=off` (otherwise
+    /// the 100-300 ms browser round-trip is audible as slap-back),
+    /// and broadcasts `TrackBrowserSourceChanged` so any connected
+    /// surfaces light up the affordance.
+    ///
+    /// `peer_id`:
+    ///   - `Some(<peer>)`: lock the track to that specific peer
+    ///     (their browser tab auto-engages when the user clicks).
+    ///   - `None`: leave the assignee open — the next browser peer
+    ///     to claim the track wins.
+    ///
+    /// Default impl errors out; server-side `SessionDirectorImpl`
+    /// overrides with the real handshake.
+    async fn arm_track_for_browser_audio(
+        &self,
+        _track_id: &str,
+        _peer_id: Option<&str>,
+    ) -> Result<ArmIngressOutcome, SessionDirectorError> {
+        Err(SessionDirectorError::Unsupported(
+            "arm_track_for_browser_audio not wired in this director".into(),
+        ))
+    }
+
+    /// Release a prior `arm_track_for_browser_audio` claim — clears
+    /// the browser-source assignment + lets monitoring fall back to
+    /// the user's choice (no automatic re-enable; the agent can call
+    /// `tracks.update(monitoring=…)` separately if it wants live
+    /// monitoring back).
+    async fn release_track_browser_audio(
+        &self,
+        _track_id: &str,
+    ) -> Result<(), SessionDirectorError> {
+        Err(SessionDirectorError::Unsupported(
+            "release_track_browser_audio not wired in this director".into(),
+        ))
+    }
+
+    /// Enumerate the MCP proxy targets the `daw_proxy` agent tool
+    /// should consider. Two sources merge here:
+    ///   1. **Live sessions** — every open session whose backend
+    ///      registered an `mcp_endpoint` at spawn time
+    ///      (Ardour ≥ 9.4 with `mcp_http` compiled in). Each session
+    ///      gets a unique id derived from its session entry so the
+    ///      agent can target a specific Ardour instance when more
+    ///      than one is open.
+    ///   2. **Static config** — `mcp_proxies:` entries from
+    ///      config.yaml for upstream MCP servers Foyer didn't spawn
+    ///      (e.g. a Reaper instance the operator manually started).
+    ///
+    /// Default impl returns an empty list — the in-process tool
+    /// dispatchers used by tests don't have a session registry to
+    /// read from.
+    async fn list_mcp_proxies(&self) -> Result<Vec<McpProxyEntry>, SessionDirectorError> {
+        Ok(Vec::new())
+    }
+}
+
+/// One row returned by [`SessionDirector::list_mcp_proxies`]. Renamed
+/// `McpProxyEntry` rather than reusing `foyer_config::McpProxyConfig`
+/// so the runtime version (which knows about live sessions) doesn't
+/// pretend to be a config-file record.
+#[derive(Debug, Clone)]
+pub struct McpProxyEntry {
+    /// Stable id the agent passes back as `backend:` in subsequent
+    /// `daw_proxy` calls. Either the config-file `id` for static
+    /// entries or `session.<short-id>` for live sessions.
+    pub id: String,
+    /// Human-readable label shown in `daw_proxy.list_backends`.
+    pub label: String,
+    pub endpoint: String,
+    pub enabled: bool,
+    /// "session" for live-session entries, "config" for static.
+    /// Surfaced so the agent + operator can tell which sessions
+    /// support MCP vs. which are configured externally.
+    pub source: &'static str,
+    /// Optional API key (env-var override applied before this point).
+    /// Not serialized out of the proxy registry — used by the client
+    /// directly.
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArmIngressOutcome {
+    pub track_id: String,
+    /// The peer that's been bound — same string the WS layer broadcasts
+    /// in `TrackBrowserSourceChanged.peer_id`. Empty string means
+    /// "claimable by any peer".
+    pub peer_id: String,
+    /// Connected browser peers as of arm-time. Useful for the agent's
+    /// reply ("waiting for a browser tab to open" vs. "peer XYZ is
+    /// connected, ask them to click Take").
+    pub connected_peer_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct LaunchOutcome {
+    pub session_id: String,
+    pub backend_id: String,
+    pub project_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackendsListing {
+    pub backends: Vec<foyer_schema::BackendInfo>,
+    pub active: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionDirectorError {
+    #[error("{0}")]
+    Execution(String),
+    #[error("not supported in this deployment: {0}")]
+    Unsupported(String),
+}
+
+impl From<SessionDirectorError> for ToolError {
+    fn from(e: SessionDirectorError) -> Self {
+        match e {
+            SessionDirectorError::Execution(m) => ToolError::Execution(m),
+            SessionDirectorError::Unsupported(m) => ToolError::Execution(m),
+        }
+    }
 }
 
 #[async_trait]
@@ -233,6 +549,21 @@ impl ToolRegistry {
 }
 
 pub fn default_registry() -> ToolRegistry {
+    default_registry_with_store(None)
+}
+
+/// Build the registry threading an `AgentStore` weak ref through the
+/// scripts tool so its `skills` / `skill` subcommands can read the
+/// harness's playbook library. Pass `None` from tests / external MCP
+/// runners that don't have an agent store; those callers will see
+/// "agent skill store is not attached" when calling the skill ops.
+pub fn default_registry_with_store(
+    store: Option<std::sync::Weak<crate::store::AgentStore>>,
+) -> ToolRegistry {
+    let scripts_tool = match store {
+        Some(s) => scripts::ScriptsTool::with_store(s),
+        None => scripts::ScriptsTool::without_store(),
+    };
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(transport::TransportTool),
         Arc::new(mixer::MixerTool),
@@ -242,8 +573,14 @@ pub fn default_registry() -> ToolRegistry {
         Arc::new(plugins::PluginsTool),
         Arc::new(midi::MidiTool),
         Arc::new(sequencer::SequencerTool),
+        Arc::new(scripts_tool),
         Arc::new(session::SessionTool),
+        Arc::new(spectrum::SpectrumTool),
+        Arc::new(ui::UiTool),
         Arc::new(visualize::VisualizeTool),
+        Arc::new(groups::GroupsTool),
+        Arc::new(io::IoTool),
+        Arc::new(continue_working::ContinueWorkingTool),
     ];
     ToolRegistry::from_tools(tools)
 }

@@ -1222,6 +1222,8 @@ dependencies = [
  "dirs 5.0.1",
  "eventsource-stream",
  "foyer-backend",
+ "foyer-backend-stub",
+ "foyer-config",
  "foyer-schema",
  "futures",
  "reqwest 0.12.28",
@@ -1322,6 +1324,8 @@ dependencies = [
  "foyer-snapshot",
  "include_dir",
  "libc",
+ "reqwest 0.12.28",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1358,6 +1362,18 @@ dependencies = [
  "tracing-subscriber",
  "webkit2gtk",
  "wry",
+]
+
+[[package]]
+name = "foyer-i18n"
+version = "0.0.0"
+dependencies = [
+ "foyer-schema",
+ "include_dir",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -1417,6 +1433,7 @@ dependencies = [
  "foyer-backend-stub",
  "foyer-capabilities",
  "foyer-config",
+ "foyer-i18n",
  "foyer-mcp",
  "foyer-schema",
  "futures",
@@ -1441,6 +1458,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
+ "tokio-util",
  "tower-http",
  "tracing",
  "url",

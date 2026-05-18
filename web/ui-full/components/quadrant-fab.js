@@ -21,6 +21,13 @@ import { icon } from "foyer-ui-core/icons.js";
 
 const FAB_SIZE = 48;
 const GAP = 8;
+// Extra hitbox margin to the LEFT of the right-rail when computing
+// "is the cursor over the dock?". The rail itself is only ~32 px wide,
+// which is a brutally tight target — especially with wobble enabled,
+// where the deformed visual makes the user aim at the FAB's apparent
+// position rather than the cursor. Adding margin makes drag-to-dock
+// reliable without changing where the dashed drop-zone hint paints.
+const DOCK_HIT_SLACK_PX = 80;
 
 const DEFAULTS = {
   fabRight: 24,
@@ -233,6 +240,19 @@ export class QuadrantFab extends LitElement {
     window.__foyer?.layout?.addEventListener("change", this._layoutHandler);
     window.__foyer?.layout?.registerFab(this.storageKey, this._dockMeta(), this);
     this._clamp();
+    // Compiz-style wobble — opt-in via viz pref. Both the FAB
+    // button (drag from anywhere) and the panel (drag from the
+    // grip header) get their own spring mesh. The wobble module's
+    // attach/detach is a no-op when the pref is off, so we can
+    // call it unconditionally and just respond to the global
+    // enable/disable events.
+    this._wobbleEnable = () => this._installWobbles();
+    this._wobbleDisable = () => this._uninstallWobbles();
+    window.addEventListener("foyer:wobbly-enabled", this._wobbleEnable);
+    window.addEventListener("foyer:wobbly-disabled", this._wobbleDisable);
+    // First mount: try to attach. Lit hasn't rendered children yet
+    // so we defer via rAF; once renderRoot has a `.fab` we wire up.
+    requestAnimationFrame(() => this._installWobbles());
   }
   disconnectedCallback() {
     window.removeEventListener("pointermove", this._onPointerMove);
@@ -241,7 +261,69 @@ export class QuadrantFab extends LitElement {
     window.removeEventListener("resize", this._onWindowResize);
     window.__foyer?.layout?.removeEventListener("change", this._layoutHandler);
     window.__foyer?.layout?.unregisterFab(this.storageKey);
+    window.removeEventListener("foyer:wobbly-enabled", this._wobbleEnable);
+    window.removeEventListener("foyer:wobbly-disabled", this._wobbleDisable);
+    this._uninstallWobbles();
     super.disconnectedCallback();
+  }
+
+  async _installWobbles() {
+    const mod = await import("foyer-core/wobbly-windows.js");
+    if (!mod.wobblyEnabled()) return;
+    const fab = this.renderRoot?.querySelector?.(".fab");
+    const panel = this.renderRoot?.querySelector?.(".panel");
+    // FAB + panel are right/bottom-anchored, so a positive cursor
+    // delta moves the right/bottom edges closer to the cursor —
+    // `_fabRight -= dx`, `_fabBottom -= dy`. Both surfaces share
+    // `_fabRight/_fabBottom`, so a single commit moves the pair.
+    // After committing, run the same end-of-drag checks the
+    // native handler would have done: dock-zone detection +
+    // drop-highlight cleanup. Without those, the dragged FAB
+    // never reaches the rail and the "drag back to dock"
+    // gesture is broken.
+    // Wobble runs in `visualOnly: true` mode: it applies matrix3d
+    // (panel deform) + follower translate (FAB rides along) for
+    // the visual effect, but the host's native pointer handlers
+    // (`_onFabDown` / `_onMove` / `_onUp`) keep owning drag state,
+    // dock-zone highlight, and the final `dockFab` call. The drop
+    // logic is therefore IDENTICAL between jiggle and non-jiggle
+    // modes — it always operates on the cursor's clientX/Y, never
+    // on the wobble's pin or the FAB's transformed visual position.
+    if (panel) {
+      const grip = panel.querySelector?.(".grip") || panel;
+      const handles = fab ? [grip, fab] : [grip];
+      mod.attachWobble(panel, handles, {
+        followers: fab ? [fab] : [],
+        passthroughClick: true,
+        visualOnly: true,
+      });
+    } else if (fab) {
+      // Panel closed — wobble the FAB itself so a drag-from-dock-
+      // out gesture still has visible feedback.
+      mod.attachWobble(fab, undefined, {
+        passthroughClick: true,
+        visualOnly: true,
+      });
+    }
+    this._wobbleAttached = { fab, panel };
+  }
+
+  async _uninstallWobbles() {
+    if (!this._wobbleAttached) return;
+    const mod = await import("foyer-core/wobbly-windows.js");
+    const { fab, panel } = this._wobbleAttached;
+    if (fab) mod.detachWobble(fab);
+    if (panel) mod.detachWobble(panel);
+    this._wobbleAttached = null;
+  }
+
+  updated(changed) {
+    super.updated?.(changed);
+    // The .panel only renders when `_open` is true. Re-attach after
+    // each render so a freshly-opened panel picks up its wobble.
+    if (this._wobbleAttached || this._open) {
+      this._installWobbles();
+    }
   }
 
   _isDocked() {
@@ -251,7 +333,15 @@ export class QuadrantFab extends LitElement {
   _isOverRail(x, y) {
     const rd = window.__foyer?.rightDock;
     const r = rd?.railRect?.();
-    return !!(r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
+    if (!r) return false;
+    // Expand the hit area LEFTWARD by DOCK_HIT_SLACK_PX. The right
+    // edge stays anchored to the actual rail (clamp on the right
+    // edge of the viewport already prevents a sloppy throw past the
+    // screen edge). Vertical bounds match the rail exactly — we
+    // don't want the user to dock while aiming at, say, the
+    // timeline below it.
+    const leftEdge = r.left - DOCK_HIT_SLACK_PX;
+    return x >= leftEdge && x <= r.right && y >= r.top && y <= r.bottom;
   }
 
   _persist() {
@@ -542,11 +632,17 @@ export class QuadrantFab extends LitElement {
       const dx = ev.clientX - ds.startX;
       const dy = ev.clientY - ds.startY;
       if (ds.kind === "fab" && !ds.moved && Math.hypot(dx, dy) > 4) ds.moved = true;
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      this._fabRight = Math.max(0, Math.min(vw - FAB_SIZE, ds.origRight - dx));
-      this._fabBottom = Math.max(0, Math.min(vh - FAB_SIZE, ds.origBottom - dy));
-      // Rail hover highlight so the user can see the drop target.
+      // When a wobble has taken this drag over, it owns the
+      // position math from here. Skip _fabRight/_fabBottom updates
+      // — leaving them flat for the wobble's snapshot to read on
+      // commit. We still drive the dock highlight so the user
+      // gets feedback during the <4 px pre-takeover phase too.
+      if (!this._wobbleAttached) {
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        this._fabRight = Math.max(0, Math.min(vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(vh - FAB_SIZE, ds.origBottom - dy));
+      }
       const over = this._isOverRail(ev.clientX, ev.clientY);
       window.__foyer?.rightDock?.setDropHighlight?.(over);
       this.requestUpdate();
@@ -566,13 +662,26 @@ export class QuadrantFab extends LitElement {
 
   _onUp(ev) {
     if (this._dragState?.kind === "fab") {
-      const wasMoved = this._dragState.moved;
+      const ds = this._dragState;
+      const wasMoved = ds.moved;
+      // When wobble is on, `_onMove` skipped the per-tick position
+      // update (the wobble's matrix3d/follower transforms were
+      // making the FAB appear to follow the cursor visually). Now
+      // that we have the release coords, commit the FINAL position
+      // from cursor delta — identical math to the non-jiggle path,
+      // just deferred to release.
+      if (this._wobbleAttached && ev && wasMoved) {
+        const dx = ev.clientX - ds.startX;
+        const dy = ev.clientY - ds.startY;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        this._fabRight = Math.max(0, Math.min(vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(vh - FAB_SIZE, ds.origBottom - dy));
+      }
       this._dragState = null;
       if (!wasMoved) {
-        // Tap: toggle.
         this._toggle();
       } else if (ev && this._isOverRail(ev.clientX, ev.clientY)) {
-        // Drop over the right-dock rail → dock.
         window.__foyer?.rightDock?.setDropHighlight?.(false);
         window.__foyer?.layout?.dockFab(this.storageKey);
         this._open = false;
@@ -582,6 +691,17 @@ export class QuadrantFab extends LitElement {
       this._persist();
       this.requestUpdate();
     } else if (this._dragState?.kind === "panel") {
+      const ds = this._dragState;
+      // Same deferred-commit math for grip drags under wobble.
+      if (this._wobbleAttached && ev) {
+        const dx = ev.clientX - ds.startX;
+        const dy = ev.clientY - ds.startY;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        this._fabRight = Math.max(0, Math.min(vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(vh - FAB_SIZE, ds.origBottom - dy));
+        this.requestUpdate();
+      }
       this._dragState = null;
       this._persist();
     } else if (this._resizeState) {

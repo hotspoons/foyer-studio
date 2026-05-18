@@ -18,8 +18,9 @@ use async_trait::async_trait;
 use foyer_schema::{
     Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EnginePort, EntityId, Event,
     LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch,
-    PathListing, PluginCatalogEntry, PluginPreset, Region, RegionPatch, SequencerLayout, Session,
-    TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    PathListing, PluginCatalogEntry, PluginPreset, Region, RegionPatch, Script, ScriptRunResult,
+    ScriptingCapabilities, SequencerLayout, Session, SpectrumCapabilities, SpectrumFrame,
+    SpectrumOpts, SpectrumTarget, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -373,6 +374,88 @@ pub trait Backend: Send + Sync + 'static {
     /// backend returns the updated `Track` so the server can rebroadcast
     /// it — that's authoritative even if the shim applies the change
     /// asynchronously (e.g. after clamping).
+    /// Create a new track. `kind` is restricted to user-creatable
+    /// kinds (audio / midi / bus); attempts to create a master or
+    /// monitor track should be rejected by the backend. `after_id`
+    /// places the new track immediately after that existing track;
+    /// `None` appends at the end. Returns the canonical `Track`
+    /// record the backend assigned (id, default plugin chain, etc.).
+    async fn create_track(
+        &self,
+        _name: String,
+        _kind: foyer_schema::TrackKind,
+        _color: Option<String>,
+        _after_id: Option<EntityId>,
+    ) -> Result<Track, BackendError> {
+        Err(BackendError::Other("create_track not supported".into()))
+    }
+
+    /// Convenience helper used by the WS dispatcher: open an undo
+    /// group, create the track, then either copy a source track's
+    /// plugin chain OR insert each `plugins[*]` URI in order, then
+    /// close the undo group. Returns the created track AND the list
+    /// of plugin ids that landed (in order) so the WS layer can echo
+    /// canonical `Event::TrackUpdated` and `Event::PluginsUpdated`.
+    ///
+    /// Default impl wires together the existing trait methods so
+    /// concrete backends that override `create_track`/`add_plugin`
+    /// get the undo-group behavior for free. Backends with their own
+    /// transactional create-with-plugins primitive can override this.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_track_full(
+        &self,
+        name: String,
+        kind: foyer_schema::TrackKind,
+        color: Option<String>,
+        after_id: Option<EntityId>,
+        instrument_uri: Option<String>,
+        plugins: Vec<String>,
+        copy_from_track_id: Option<EntityId>,
+    ) -> Result<Track, BackendError> {
+        // Coalesce the plugin sources by precedence.
+        let plugin_uris: Vec<String> = if let Some(source) = copy_from_track_id.as_ref() {
+            let snap = self.snapshot().await?;
+            snap.tracks
+                .iter()
+                .find(|t| &t.id == source)
+                .map(|t| t.plugins.iter().filter_map(|p| p.uri.clone()).collect())
+                .unwrap_or_default()
+        } else if !plugins.is_empty() {
+            plugins
+        } else if let Some(uri) = instrument_uri {
+            vec![uri]
+        } else {
+            vec![]
+        };
+
+        // Wrap the create + plugin inserts in one undo group so the
+        // user gets a single Ctrl-Z that unwinds the whole setup.
+        let undo_label = format!("Create track \"{name}\"");
+        self.undo_group_begin(undo_label).await?;
+        let result: Result<Track, BackendError> = async {
+            let track = self.create_track(name, kind, color, after_id).await?;
+            for uri in plugin_uris {
+                // Best-effort: a plugin URI the host can't find shouldn't
+                // unwind the whole create. The agent surface gets the
+                // final plugin list back via the re-snapshot below and
+                // can report whatever landed.
+                let _ = self.add_plugin(track.id.clone(), uri, None, None).await;
+            }
+            // Re-snapshot so the returned Track carries the inserted
+            // plugins (the bare `create_track` impl returned the
+            // pre-insert shape).
+            let snap = self.snapshot().await?;
+            Ok(snap
+                .tracks
+                .into_iter()
+                .find(|t| t.id == track.id)
+                .unwrap_or(track))
+        }
+        .await;
+        // Always close the undo group, even on partial failure.
+        let _ = self.undo_group_end().await;
+        result
+    }
     async fn update_track(&self, _id: EntityId, _patch: TrackPatch) -> Result<Track, BackendError> {
         Err(BackendError::Other("update_track not supported".into()))
     }
@@ -784,6 +867,95 @@ pub trait Backend: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Spectrum / FFT capability the backend advertises in the session
+    /// snapshot's `spectrum` field. Default returns `None` (no
+    /// spectrogram pipeline) — backends that ship one override.
+    async fn spectrum_capabilities(&self) -> Result<Option<SpectrumCapabilities>, BackendError> {
+        Ok(None)
+    }
+
+    /// Open a spectrogram subscription. The backend starts an
+    /// FFT pipeline against `target` and streams `Event::SpectrumFrame`
+    /// to all listeners at the configured hop rate; the returned
+    /// `applied` value reflects any clamping the backend performed
+    /// (out-of-range fft_size etc.). Default errors out; backends
+    /// without an FFT pipeline don't need to override.
+    async fn subscribe_spectrum(
+        &self,
+        _target: SpectrumTarget,
+        _opts: SpectrumOpts,
+    ) -> Result<SpectrumOpts, BackendError> {
+        Err(BackendError::Other(
+            "spectrum subscription not supported by this backend".into(),
+        ))
+    }
+
+    /// Tear down a subscription opened with `subscribe_spectrum`.
+    /// Default is a no-op so backends without the pipeline can
+    /// receive an unsubscribe cleanly during teardown.
+    async fn unsubscribe_spectrum(&self, _target: SpectrumTarget) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// One-shot snapshot helper: open a subscription, wait for the
+    /// FIRST `SpectrumFrame` matching `target`, close. Used by the MCP
+    /// `spectrum.snapshot` path where the agent wants an instantaneous
+    /// FFT frame rather than a stream.
+    ///
+    /// Default impl wires `subscribe_spectrum` → `subscribe`'s event
+    /// stream → `unsubscribe_spectrum` so every backend that supports
+    /// subscriptions gets snapshots for free. Backends without a
+    /// spectrum pipeline still bail at the `subscribe_spectrum` call.
+    async fn snapshot_spectrum(
+        &self,
+        target: SpectrumTarget,
+        opts: SpectrumOpts,
+    ) -> Result<SpectrumFrame, BackendError> {
+        use foyer_schema::Event;
+        // Open the event stream FIRST so we don't race against the
+        // shim's `SpectrumSubscribed` ack + first frame.
+        let mut stream = self.subscribe().await?;
+        // Kick off the subscription. The `applied` opts come back via
+        // an `Event::SpectrumSubscribed`; we don't need them for the
+        // one-shot return.
+        self.subscribe_spectrum(target.clone(), opts).await?;
+        let unsub_target = target.clone();
+        // Race the first matching frame against a wallclock cap. The
+        // shim's FFT pipeline takes 40 ms per tick and needs at least
+        // one full `fft_size` window to come through the audio path
+        // before the first non-silent frame fires (silent frames at
+        // `min_db` come out immediately). 12 s covers a 4096-sample
+        // FFT @ 48 kHz with one slow-startup cycle even on a busy
+        // Codespaces VM.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+            use futures::StreamExt;
+            loop {
+                let Some(event) = stream.next().await else {
+                    return Err(BackendError::Other(
+                        "event stream ended before spectrum frame arrived".into(),
+                    ));
+                };
+                if let Event::SpectrumFrame { frame } = event {
+                    if frame.target == target {
+                        return Ok(*frame);
+                    }
+                }
+            }
+        })
+        .await;
+        // Always release the subscription, even on timeout — leaking
+        // an FFT pipeline would chew CPU until the next session
+        // teardown.
+        let _ = self.unsubscribe_spectrum(unsub_target).await;
+        match result {
+            Ok(Ok(frame)) => Ok(frame),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(BackendError::Other(
+                "spectrum snapshot timed out waiting for the first frame".into(),
+            )),
+        }
+    }
+
     /// Route a track's audio input to a named port (e.g. "foyer:ingress-123").
     /// `port_name = None` restores default auto-connect. Emits `TrackUpdated`
     /// so clients see the new `inputs` list.
@@ -869,6 +1041,60 @@ pub trait Backend: Send + Sync + 'static {
         _samples: u32,
     ) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    // ── DAW scripting ──────────────────────────────────────────────
+    //
+    // Backends that have no scripting layer leave the defaults below,
+    // which advertise an empty surface and reject mutations. The Ardour
+    // shim advertises its real `LuaScriptInfo::ScriptType` enum + the
+    // hook taxonomy, and `register_lua_function` / `unregister_lua_function`
+    // ride underneath.
+
+    /// Capabilities the active backend advertises — types, languages,
+    /// and feature flags. Default returns `None`, which signals the
+    /// FE to hide the script-manager affordance entirely.
+    async fn scripting_capabilities(&self) -> Result<Option<ScriptingCapabilities>, BackendError> {
+        Ok(None)
+    }
+
+    /// Full current list of persisted scripts.
+    async fn list_scripts(&self) -> Result<Vec<Script>, BackendError> {
+        Ok(Vec::new())
+    }
+
+    /// Insert or update a script. Backend stamps `id` (when empty) +
+    /// `updated_at` and returns the canonical post-save shape.
+    async fn save_script(&self, _script: Script) -> Result<Script, BackendError> {
+        Err(BackendError::Other("scripting not supported".into()))
+    }
+
+    /// Delete a script. Idempotent; unknown ids are a no-op.
+    async fn delete_script(&self, _id: EntityId) -> Result<(), BackendError> {
+        Err(BackendError::Other("scripting not supported".into()))
+    }
+
+    /// Flip the enabled flag without touching the body. Also used to
+    /// confirm a `disabled_on_upload` script after audit.
+    async fn enable_script(&self, _id: EntityId, _enabled: bool) -> Result<Script, BackendError> {
+        Err(BackendError::Other("scripting not supported".into()))
+    }
+
+    /// Manually invoke a script. The backend captures the script's
+    /// stdout + any raised error; result is wrapped in `ScriptRunResult`.
+    async fn run_script(
+        &self,
+        _id: EntityId,
+        _args_override: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<ScriptRunResult, BackendError> {
+        Err(BackendError::Other("scripting not supported".into()))
+    }
+
+    /// Scan the project file for disabled-on-upload scripts and
+    /// surface them via the normal save channel with the flag set.
+    /// Returns the list it just recovered (may be empty). Default no-op.
+    async fn recover_disabled_scripts(&self) -> Result<Vec<Script>, BackendError> {
+        Ok(Vec::new())
     }
 }
 

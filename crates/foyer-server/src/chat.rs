@@ -160,6 +160,7 @@ pub(crate) async fn handle_clear(
                 code: "forbidden".into(),
                 message: "chat_clear requires admin role".into(),
                 target_peer_id: None,
+                localized: None,
             },
         )
         .await;
@@ -204,6 +205,7 @@ pub(crate) async fn handle_snapshot(
                 code: "forbidden".into(),
                 message: "chat_snapshot requires admin role".into(),
                 target_peer_id: None,
+                localized: None,
             },
         )
         .await;
@@ -219,6 +221,7 @@ pub(crate) async fn handle_snapshot(
                     code: "chat_snapshot_failed".into(),
                     message: format!("chat dir unavailable: {e}"),
                     target_peer_id: None,
+                    localized: None,
                 },
             )
             .await;
@@ -232,6 +235,7 @@ pub(crate) async fn handle_snapshot(
                 code: "chat_snapshot_failed".into(),
                 message: format!("create chat dir: {e}"),
                 target_peer_id: None,
+                localized: None,
             },
         )
         .await;
@@ -271,6 +275,7 @@ pub(crate) async fn handle_snapshot(
                 code: "chat_snapshot_failed".into(),
                 message: format!("write {}: {}", path.display(), e),
                 target_peer_id: None,
+                localized: None,
             },
         )
         .await;
@@ -319,6 +324,7 @@ pub(crate) async fn handle_ptt_start(state: &Arc<AppState>, peer_id: &str, peer_
                     code: "ptt_conflict".into(),
                     message: format!("{label} is already speaking"),
                     target_peer_id: None,
+                    localized: None,
                 },
             )
             .await;

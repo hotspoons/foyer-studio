@@ -20,6 +20,7 @@ import { DIR } from "./tile-tree.js";
 import { isTypingTarget, hasActiveTextSelection } from "../typing-guard.js";
 import { isActionAllowed } from "foyer-core/rbac.js";
 import { stopTransportWithIngressTailDelay } from "foyer-core/audio/record-stop.js";
+import { matchKey } from "foyer-core/keymap/index.js";
 
 const STORAGE_MOD = "foyer.keymap.mod";
 
@@ -143,49 +144,17 @@ export class Keybinds {
           return;
         }
       }
-      // Mute toggle: bare M, region selection required. Skip if any
-      // modifier is held so M-with-modifier stays free for other use.
-      if (lower === "m" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-        const tl = queryDeep("foyer-timeline-view");
-        if (tl?.getSelectedRegionIds?.()?.length) {
-          e.preventDefault();
-          tl.toggleMuteRegionSelection?.();
-          return;
-        }
-      }
-      // Split at playhead: bare S. Runs in document capture so a preceding
-      // window handler can use stopImmediatePropagation without blocking us,
-      // yet `defaultPrevented` still suppresses split when that handler owned
-      // the key (e.g. a user layout chord on `S`).
-      if (
-        (e.code === "KeyS" || lower === "s")
-        && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
-      ) {
-        if (e.defaultPrevented || e.repeat) return;
-        const tl = queryTimelineFromKeyEvent(e);
-        if (!tl?.splitSelectedRegionsAtPlayhead) return;
-        e.preventDefault();
-        tl.splitSelectedRegionsAtPlayhead();
-        return;
-      }
-      // Arrow-key region nudge:
-      //   bare ←/→        nudge by 1 grid step
-      //   Shift+←/→       nudge by 1 beat
-      //   Ctrl/Cmd+←/→    nudge by 1 sample (fine)
-      // Alt is the existing tile-focus chord — leave it alone so the
-      // layout shortcuts still resolve.
-      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !e.altKey) {
-        const tl = queryTimelineFromKeyEvent(e);
-        const hasSel = !!tl?.getSelectedRegionIds?.()?.length;
-        if (!hasSel) return;
-        const fine = !!(e.ctrlKey || e.metaKey);
-        const beat = !!e.shiftKey && !fine;
-        const dir = e.key === "ArrowLeft" ? "left" : "right";
-        if (tl?.nudgeSelectedRegions?.(dir, { fine, beat })) {
-          e.preventDefault();
-          return;
-        }
-      }
+      // Mute (region.mute_toggle) + split (edit.split_at_playhead) are
+      // routed through the keymap profile via `_dispatchKeymap` further
+      // down, so each DAW profile can rebind them (Pro Tools / Cubase
+      // disagree on what S does, etc.). No handler needed here.
+      // Arrow-key region nudge USED to live as a global capture here;
+      // it now lives on `foyer-timeline-view` itself (host-level
+      // keydown), so an arrow press only nudges regions when the
+      // timeline is actually focused. That keeps the mixer / agent
+      // panel / sessions list arrow behaviour intact. The
+      // component-level handler delegates to `nudgeSelectedRegions`
+      // with the same fine/beat semantics that used to live here.
     }
 
     // Delete key (no modifiers) → delete regions in the current
@@ -239,88 +208,24 @@ export class Keybinds {
       }
     }
 
-    // Global transport shortcuts:
-    //   Space      → toggle play/pause (DAW convention)
-    //   Ctrl+Space → toggle record
-    //
-    // These run OUTSIDE the Ctrl+Alt chord family so they work regardless of
-    // focus.
-    if ((e.key === " " || e.code === "Space") && !e.altKey && !e.metaKey) {
-      const ws = window.__foyer?.ws;
-      if (!ws) return;
-      // RBAC gate: read-only / performer roles can't drive transport
-      // (server rejects `invoke_action`). Skip the keystroke entirely
-      // — DON'T preventDefault — so spacebar falls through to native
-      // page-scroll / button-press behavior. Without this gate the
-      // user mashes space, sees nothing happen, and the WS server
-      // emits a forbidden_for_role error toast for every press, which
-      // was breaking remote sessions (TODO 31).
-      const wantId = e.ctrlKey ? "transport.record" : null;
-      if (wantId) {
-        if (!isActionAllowed(wantId)) return;
-      } else {
-        if (!isActionAllowed("transport.play")
-            && !isActionAllowed("transport.stop")) return;
-      }
-      e.preventDefault();
-      if (e.ctrlKey) {
-        ws.send({ type: "invoke_action", id: "transport.record" });
-      } else {
-        // Toggle playing: if currently playing, stop; else play.
-        const store = window.__foyer?.store;
-        const st = store?.state?.controls;
-        const playing = !!(st && st.get("transport.playing"));
-        if (playing) {
-          // Route the stop through the shared helper so a recording-
-          // tail delay is applied if a browser ingress is open. The
-          // helper handles the no-ingress case by sending the stop
-          // immediately — same behavior as before for everyone not
-          // actively recording. Return-on-stop semantics live in
-          // transport-return.js and react to the store transition,
-          // so this stays a single send.
-          stopTransportWithIngressTailDelay({ ws, store, commandKind: "action" })
-            .catch((err) => {
-              console.warn("[keybinds] stop-with-tail-delay failed:", err);
-              // Best-effort fallback so a bug in the helper doesn't
-              // strand a recording user with a live transport.
-              ws.send({ type: "invoke_action", id: "transport.stop" });
-            });
-        } else {
-          ws.send({ type: "invoke_action", id: "transport.play" });
-        }
-      }
-      return;
-    }
+    // Profile-driven actions (Preferences → Editor conventions).
+    // Each `matchKey(actionId, e)` consults the active DAW profile so
+    // e.g. Reaper users get +/- as zoom while Cubase users get G/H, all
+    // routed through the same Foyer call sites.
+    if (this._dispatchKeymap(e)) return;
 
-    // Edit chords — Ctrl/Cmd + Z/Y/X/C/V. These route to the backend's
+    // Edit chords — Ctrl/Cmd + X/C/V. These route to the backend's
     // `edit.*` action catalog entries so whatever the DAW would do for
     // those menu items fires. Gated off the same input-focus check at
     // the top: if the user is typing into a text field, we bail so
-    // native editing still works.
+    // native editing still works. (Undo/redo + zoom shortcuts live in
+    // `_dispatchKeymap` above — they vary per profile.)
     const cmdOrCtrl = e.ctrlKey || e.metaKey;
     if (cmdOrCtrl && !e.altKey) {
       const ws = window.__foyer?.ws;
       const key = e.key.toLowerCase();
-
-      // Ctrl+Shift+E  → zoom time-range selection to fill the viewport.
-      // Ctrl+Shift+Backspace → pop the zoom stack.
-      // Both operate locally on the timeline, no backend round-trip.
-      if (e.shiftKey && key === "e") {
-        e.preventDefault();
-        queryDeep("foyer-timeline-view")?.zoomToSelection?.();
-        return;
-      }
-      if (e.shiftKey && (key === "backspace" || key === "delete")) {
-        e.preventDefault();
-        queryDeep("foyer-timeline-view")?.zoomPrevious?.();
-        return;
-      }
-
       let action = null;
-      if (key === "z" && !e.shiftKey)      action = "edit.undo";
-      else if (key === "z" && e.shiftKey)  action = "edit.redo";
-      else if (key === "y" && !e.shiftKey) action = "edit.redo";
-      else if (key === "x" && !e.shiftKey) action = "edit.cut";
+      if (key === "x" && !e.shiftKey) action = "edit.cut";
       else if (key === "c" && !e.shiftKey) action = "edit.copy";
       else if (key === "v" && !e.shiftKey) action = "edit.paste";
       // If the user has highlighted plain text (e.g. credentials in
@@ -361,6 +266,106 @@ export class Keybinds {
       case "]":                    e.preventDefault(); return this._resizeFocused(+0.05);
       default:
     }
+  }
+
+  /**
+   * Profile-driven action dispatch. Returns `true` when the event was
+   * consumed; the caller should bail out of further processing.
+   * Bindings come from `core/keymap/profiles.js` and the user's pick
+   * (Preferences → Editor conventions).
+   */
+  _dispatchKeymap(e) {
+    const ws = window.__foyer?.ws;
+
+    if (matchKey("transport.play_toggle", e)) {
+      if (!ws) return false;
+      if (!isActionAllowed("transport.play") && !isActionAllowed("transport.stop")) return false;
+      e.preventDefault();
+      const store = window.__foyer?.store;
+      const st = store?.state?.controls;
+      const playing = !!(st && st.get("transport.playing"));
+      if (playing) {
+        stopTransportWithIngressTailDelay({ ws, store, commandKind: "action" })
+          .catch((err) => {
+            console.warn("[keybinds] stop-with-tail-delay failed:", err);
+            ws.send({ type: "invoke_action", id: "transport.stop" });
+          });
+      } else {
+        ws.send({ type: "invoke_action", id: "transport.play" });
+      }
+      return true;
+    }
+
+    if (matchKey("transport.record_toggle", e)) {
+      if (!ws) return false;
+      if (!isActionAllowed("transport.record")) return false;
+      e.preventDefault();
+      ws.send({ type: "invoke_action", id: "transport.record" });
+      return true;
+    }
+
+    if (matchKey("transport.return_to_zero", e)) {
+      if (!ws) return false;
+      e.preventDefault();
+      ws.controlSet?.("transport.position", 0);
+      return true;
+    }
+
+    if (matchKey("edit.undo", e) && ws) {
+      e.preventDefault();
+      ws.send({ type: "invoke_action", id: "edit.undo" });
+      return true;
+    }
+    if (matchKey("edit.redo", e) && ws) {
+      e.preventDefault();
+      ws.send({ type: "invoke_action", id: "edit.redo" });
+      return true;
+    }
+
+    if (matchKey("editor.zoom_in", e)) {
+      const tl = queryTimelineFromKeyEvent(e) || queryDeep("foyer-timeline-view");
+      if (tl?.zoomStepH) { e.preventDefault(); tl.zoomStepH(1.25); return true; }
+    }
+    if (matchKey("editor.zoom_out", e)) {
+      const tl = queryTimelineFromKeyEvent(e) || queryDeep("foyer-timeline-view");
+      if (tl?.zoomStepH) { e.preventDefault(); tl.zoomStepH(1 / 1.25); return true; }
+    }
+    if (matchKey("editor.zoom_vertical_in", e)) {
+      const tl = queryTimelineFromKeyEvent(e) || queryDeep("foyer-timeline-view");
+      if (tl?.zoomStepV) { e.preventDefault(); tl.zoomStepV(1.2); return true; }
+    }
+    if (matchKey("editor.zoom_vertical_out", e)) {
+      const tl = queryTimelineFromKeyEvent(e) || queryDeep("foyer-timeline-view");
+      if (tl?.zoomStepV) { e.preventDefault(); tl.zoomStepV(1 / 1.2); return true; }
+    }
+    if (matchKey("editor.zoom_to_selection", e)) {
+      const tl = queryDeep("foyer-timeline-view");
+      if (tl?.zoomToSelection) { e.preventDefault(); tl.zoomToSelection(); return true; }
+    }
+    if (matchKey("editor.zoom_previous", e)) {
+      const tl = queryDeep("foyer-timeline-view");
+      if (tl?.zoomPrevious) { e.preventDefault(); tl.zoomPrevious(); return true; }
+    }
+
+    if (matchKey("edit.split_at_playhead", e)) {
+      if (e.defaultPrevented || e.repeat) return false;
+      const tl = queryTimelineFromKeyEvent(e);
+      if (tl?.splitSelectedRegionsAtPlayhead) {
+        e.preventDefault();
+        tl.splitSelectedRegionsAtPlayhead();
+        return true;
+      }
+    }
+    if (matchKey("region.mute_toggle", e)) {
+      const tl = queryDeep("foyer-timeline-view");
+      if (tl?.getSelectedRegionIds?.()?.length) {
+        e.preventDefault();
+        tl.toggleMuteRegionSelection?.();
+        return true;
+      }
+    }
+
+    return false;
   }
 
   _current() {

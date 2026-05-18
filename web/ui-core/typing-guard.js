@@ -26,15 +26,27 @@ export function hasActiveTextSelection() {
   // Top-level document selection — covers most cases.
   const sel = typeof window !== "undefined" ? window.getSelection?.() : null;
   if (sel && !sel.isCollapsed && sel.toString().length > 0) return true;
-  // Selections inside a shadow root don't appear in document.getSelection
-  // on all browsers; check the active element's shadow root too.
-  // (Chromium ≥ 53 + Safari handle shadow selection via the document
-  // method but this catches edge cases like nested shadow roots.)
-  let node = typeof document !== "undefined" ? document.activeElement : null;
-  while (node && node.shadowRoot) {
-    const inner = node.shadowRoot.getSelection?.();
-    if (inner && !inner.isCollapsed && inner.toString().length > 0) return true;
-    node = node.shadowRoot.activeElement;
+  // Selections inside a shadow root often DON'T surface in
+  // `window.getSelection()` — Chromium returns the top-level
+  // selection only. Walk every open shadow root in the page to
+  // find a selection that lives entirely inside one. Without this
+  // pass, Cmd+C on selected text inside the chat panel /
+  // foyer-window / FAB panel falls through to the DAW
+  // `edit.copy` action and the native clipboard never fires.
+  if (typeof document === "undefined") return false;
+  const stack = [document];
+  while (stack.length) {
+    const root = stack.pop();
+    const rootSel = root.getSelection?.();
+    if (rootSel && !rootSel.isCollapsed && rootSel.toString().length > 0) {
+      return true;
+    }
+    // Enumerate every element with an open shadow root reachable
+    // from this root.
+    const all = root.querySelectorAll?.("*") || [];
+    for (const el of all) {
+      if (el.shadowRoot) stack.push(el.shadowRoot);
+    }
   }
   return false;
 }

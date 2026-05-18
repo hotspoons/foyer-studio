@@ -105,7 +105,15 @@ impl Tool for SequencerTool {
          set_cells(region_id, pattern_id, cells=[{row,step,velocity,length_steps?}]), \
          add_pattern(region_id, name, cells?, id?, color?), \
          arrange(region_id, slots=[{pattern_id,bar,arrangement_row?}]), \
-         clear(region_id), show_viz(track_id, region_id)."
+         clear(region_id), show_viz(track_id, region_id). \
+         INSTRUMENT CONTEXT MATTERS: a sequencer layout doesn't choose \
+         the sound — the track's instrument plugin does. Before writing \
+         drum cells, call `tracks.describe { track_id }` and inspect \
+         `instrument_summary.instrument` + `active_patches`. On gmsynth \
+         (GM-compatible synths) drums require channel 9 cells AND a \
+         drum-kit program; on melodic synths your kicks/snares will \
+         sound pitched. Read the `drum-pattern-authoring` skill for \
+         the full pre-flight."
     }
 
     fn schema(&self) -> Value {
@@ -218,10 +226,7 @@ impl Tool for SequencerTool {
                     .iter()
                     .map(|p| p.cells.len() + p.free_notes.len())
                     .sum();
-                backend
-                    .set_sequencer_layout(EntityId::new(region_id.clone()), layout)
-                    .await
-                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                apply_layout(&backend, &region_id, layout).await?;
                 Ok(ToolResult::ok(format!(
                     "set sequencer layout on {region_id} ({events} cell+note events)"
                 )))
@@ -244,10 +249,7 @@ impl Tool for SequencerTool {
                     })?;
                 let count = cells.len();
                 pat.cells = cells;
-                backend
-                    .set_sequencer_layout(EntityId::new(region_id.clone()), layout)
-                    .await
-                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                apply_layout(&backend, &region_id, layout).await?;
                 Ok(ToolResult::ok(format!(
                     "set {count} cells on pattern '{pattern_id}' of {region_id}"
                 )))
@@ -283,10 +285,7 @@ impl Tool for SequencerTool {
                     cells,
                     free_notes: Vec::new(),
                 });
-                backend
-                    .set_sequencer_layout(EntityId::new(region_id.clone()), layout)
-                    .await
-                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                apply_layout(&backend, &region_id, layout).await?;
                 Ok(ToolResult::ok(format!(
                     "added pattern '{name}' ({pid}) with {cell_count} cells on {region_id}"
                 ))
@@ -307,10 +306,7 @@ impl Tool for SequencerTool {
                 }
                 let n = slots.len();
                 layout.arrangement = slots;
-                backend
-                    .set_sequencer_layout(EntityId::new(region_id.clone()), layout)
-                    .await
-                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                apply_layout(&backend, &region_id, layout).await?;
                 Ok(ToolResult::ok(format!(
                     "set arrangement on {region_id} ({n} slots)"
                 )))
@@ -345,6 +341,45 @@ impl Tool for SequencerTool {
             }
         }
     }
+}
+
+/// Persist a layout AND regenerate the region's notes from it. The
+/// WS-side `SetSequencerLayout` dispatcher in `foyer-server` does
+/// both, but it's gated by a 180 ms debounce designed for the FE
+/// editor's rapid-fire cell-drag mutations — and the agent's tool
+/// calls bypass the WS path entirely (they're already server-side).
+/// Without this helper, `sequencer.set_layout` lands the XML but
+/// the subsequent `sequencer.show` reads `note_count: 0` because
+/// nobody expanded the layout into notes on the region.
+///
+/// Mirrors the dispatcher's logic in `ws.rs` (`SetSequencerLayout`):
+/// persist via `set_sequencer_layout`, then — when `layout.active`
+/// is true — expand into `MidiNote`s at Ardour's 1920 PPQN and
+/// `replace_region_notes`. Same ticks_per_quarter constant the
+/// dispatcher uses, so playback math stays consistent across the
+/// FE / WS / agent paths.
+async fn apply_layout(
+    backend: &std::sync::Arc<dyn foyer_backend::Backend>,
+    region_id: &str,
+    layout: SequencerLayout,
+) -> Result<(), ToolError> {
+    let is_active = layout.active;
+    let notes = if is_active {
+        Some(foyer_schema::expand_sequencer_layout(&layout, 1920))
+    } else {
+        None
+    };
+    backend
+        .set_sequencer_layout(EntityId::new(region_id.to_string()), layout)
+        .await
+        .map_err(|e| ToolError::Execution(e.to_string()))?;
+    if let Some(notes) = notes {
+        backend
+            .replace_region_notes(EntityId::new(region_id.to_string()), notes)
+            .await
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Walk the snapshot for `region_id` and return its current layout —

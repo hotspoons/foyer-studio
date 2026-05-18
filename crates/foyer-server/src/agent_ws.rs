@@ -118,6 +118,7 @@ pub async fn handle_agent_send(
                     code: "agent_unavailable".into(),
                     message: "agent runtime not attached".into(),
                     target_peer_id: None,
+                    localized: None,
                 },
             )
             .await;
@@ -135,6 +136,7 @@ pub async fn handle_agent_send(
                     code: "agent_turn_failed".into(),
                     message: e.to_string(),
                     target_peer_id: None,
+                    localized: None,
                 },
             )
             .await;

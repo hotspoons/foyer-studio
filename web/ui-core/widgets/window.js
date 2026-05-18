@@ -284,8 +284,27 @@ export class FoyerWindow extends LitElement {
       if (!path.includes(this)) return;
       const top = path[0];
       if (top?.classList?.contains?.("backdrop")) return;
+      // Skip the bump when we're already the topmost foyer-window —
+      // otherwise every click into an already-focused panel inflates
+      // the global stack counter (Rich, 2026-05-16).
+      if (this._isTopMostWindow()) return;
       this._bumpGlobalZIndex();
     };
+  }
+
+  /** True when no visible peer foyer-window currently sits at a
+   *  higher z than us. Read from inline `style.zIndex` (set by
+   *  `_bumpGlobalZIndex` whenever a window raises) with a fallback
+   *  to the CSS-default 1000 for windows that have never bumped. */
+  _isTopMostWindow() {
+    const myZ = parseInt(this.style.zIndex || "1000", 10);
+    for (const el of document.querySelectorAll("foyer-window")) {
+      if (el === this) continue;
+      if (el.hasAttribute("hidden-by-layer") || el.minimized) continue;
+      const z = parseInt(el.style.zIndex || "1000", 10);
+      if (z > myZ) return false;
+    }
+    return true;
   }
 
   _bumpGlobalZIndex() {
@@ -742,15 +761,36 @@ function _recordClose(persist) {
   _savePersisted(_loadPersisted().filter((e) => _persistKey(e) !== key));
 }
 
+// Metadata for each registered kind — `{label, description,
+// viz_fallback}` keyed by the same kind string the FACTORIES map
+// uses. The agent reads this through `listWindowKindsWithMeta()` so
+// it can pick a meaningful subcommand without guessing labels OR
+// fall back to a `visualize.<subcommand>` PNG when a kind isn't
+// shipped by the active variant (think: phone UI without a piano
+// roll — the agent reaches for `visualize.midi_roll` instead of
+// telling the user "I can't help here").
+const KIND_META = new Map();
+
 /**
  * Register a factory for a window kind. Called once at module load by
  * each spawn site (`right-dock.js` for console + diagnostics,
  * `track-editor-modal.js` for track editor, etc.). The factory
  * receives the `props` saved alongside the entry and is expected to
  * call `openWindow` itself (which idempotently dedupes by storageKey).
+ *
+ * The optional metadata bag (`label`, `description`, `viz_fallback`)
+ * surfaces through the `ui` agent tool's query action so the agent
+ * sees per-kind capability information instead of opaque ids.
  */
-export function registerWindowKind(kind, factory) {
+export function registerWindowKind(kind, factory, meta = null) {
   if (typeof factory === "function") FACTORIES.set(kind, factory);
+  if (meta && typeof meta === "object") {
+    KIND_META.set(kind, {
+      label: typeof meta.label === "string" ? meta.label : kind,
+      description: typeof meta.description === "string" ? meta.description : "",
+      viz_fallback: typeof meta.viz_fallback === "string" ? meta.viz_fallback : null,
+    });
+  }
 }
 
 /**
@@ -764,6 +804,59 @@ export function spawnWindowKind(kind, props = {}) {
   if (!fn) return false;
   try { fn(props); } catch (e) { console.warn("spawnWindowKind failed", kind, e); }
   return true;
+}
+
+/// Sorted list of every kind currently registered. Used by the
+/// `ui` agent tool's `query` action so the LLM learns the
+/// concrete vocabulary instead of guessing names. The set is
+/// populated by side-effect imports of each UI variant's
+/// `registerWindowKind` calls, so what's available here matches
+/// what's actually instantiable.
+export function listWindowKinds() {
+  return Array.from(FACTORIES.keys()).sort();
+}
+
+/// Sorted list of registered kinds enriched with the metadata each
+/// site declared at register time. Entries look like
+/// `{id, label, description, viz_fallback}`. The agent prefers this
+/// to the bare-id list — `viz_fallback` lets it answer "user is on
+/// the phone and can't open the piano roll; show the rendered MIDI
+/// roll instead" without round-tripping for instructions.
+export function listWindowKindsWithMeta() {
+  return Array.from(FACTORIES.keys())
+    .sort()
+    .map((id) => {
+      const m = KIND_META.get(id) || {};
+      return {
+        id,
+        label: m.label || id,
+        description: m.description || "",
+        viz_fallback: m.viz_fallback || null,
+      };
+    });
+}
+
+/// Canonical catalog of window kinds Foyer recognizes regardless of
+/// which variant is mounted. The agent diffs this against
+/// `listWindowKinds()` to know whether a kind is "missing from this
+/// variant but valid Foyer vocabulary" (use the `viz_fallback` viz
+/// instead) vs "an id the agent invented" (refuse). Order matches
+/// rough discovery order in the agent UI.
+const CANONICAL_KINDS = [
+  { id: "console",        label: "Console",         description: "Logs + diagnostic output.",                 viz_fallback: null },
+  { id: "diagnostics",    label: "Diagnostics",     description: "Engine / WS / RBAC live state.",            viz_fallback: null },
+  { id: "midi-devices",   label: "MIDI devices",    description: "Live MIDI in/out devices + monitor.",       viz_fallback: null },
+  { id: "soft-keyboard",  label: "Soft keyboard",   description: "On-screen piano keyboard.",                 viz_fallback: null },
+  { id: "scripts",        label: "Scripts",         description: "Host-script editor (Lua under Ardour).",    viz_fallback: null },
+  { id: "track-editor",   label: "Track editor",    description: "Per-track inspector + plugin chain.",       viz_fallback: "mixer" },
+  { id: "plugin",         label: "Plugin panel",    description: "One plugin's params + native-GUI button.",  viz_fallback: null },
+  { id: "midi-editor",    label: "Piano roll",      description: "Per-region MIDI note editor.",              viz_fallback: "midi_roll" },
+  { id: "beat-sequencer", label: "Beat sequencer",  description: "Cell-grid drum / pattern authoring.",       viz_fallback: "beat_sequencer" },
+  { id: "automation-editor", label: "Automation",   description: "Multi-lane automation editor.",             viz_fallback: "automation_lane" },
+];
+
+export function canonicalWindowKinds() {
+  return CANONICAL_KINDS.map((k) => ({ ...k }));
 }
 
 // Re-entry guard. Some factories are async (dynamic-import the heavy

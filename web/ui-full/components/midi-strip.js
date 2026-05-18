@@ -51,6 +51,22 @@ export class MidiStrip extends LitElement {
     this.region = null;
     this._ro = null;
     this._onPrefs = () => this._draw();
+    // Tempo / time-signature changes don't touch our reactive props
+    // (`notes`, `region`) — the region's length_samples is invariant
+    // under a tempo change, but the tick-density INSIDE the region
+    // does change, so the note dots need to re-position. Listen on
+    // the store directly and filter so we only redraw on tempo / TS
+    // events, not every fader nudge.
+    this._onStoreControl = (ev) => {
+      const id = typeof ev?.detail === "string" ? ev.detail : "";
+      if (
+        id === "transport.tempo"
+        || id === "transport.ts.num"
+        || id === "transport.ts.den"
+      ) {
+        this._draw();
+      }
+    };
   }
 
   firstUpdated() {
@@ -58,6 +74,7 @@ export class MidiStrip extends LitElement {
     this._ro = new ResizeObserver(() => this._draw());
     this._ro.observe(this);
     window.addEventListener("foyer:viz-prefs-changed", this._onPrefs);
+    globalThis.__foyer?.store?.addEventListener("control", this._onStoreControl);
     this._draw();
   }
 
@@ -66,6 +83,7 @@ export class MidiStrip extends LitElement {
   disconnectedCallback() {
     this._ro?.disconnect();
     window.removeEventListener("foyer:viz-prefs-changed", this._onPrefs);
+    globalThis.__foyer?.store?.removeEventListener("control", this._onStoreControl);
     super.disconnectedCallback();
   }
 

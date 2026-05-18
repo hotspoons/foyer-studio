@@ -180,16 +180,24 @@ IpcServer::start ()
 
 	// Write the advertisement file so sidecars can discover us by scanning
 	// the directory. Best-effort — a failure here is not fatal.
+	// `project_path` is included so the sidecar can detect an
+	// already-running shim for a project the user just asked to open
+	// (avoids a second Ardour racing the first one for the project
+	// lock — the cause of the 30 s "shim advertisement timeout" Rich
+	// hit when reopening previously-loaded projects).
 	if (!_advert_path.empty ()) {
 		std::string session_name;
 		try { session_name = _shim.session ().snap_name (); } catch (...) {}
+		std::string project_path;
+		try { project_path = _shim.session ().path (); } catch (...) {}
 		std::ofstream out (_advert_path);
 		if (out) {
 			out << "{\n"
-			    << "  \"socket\":  \"" << json_escape (_socket_path) << "\",\n"
-			    << "  \"pid\":     " << ::getpid () << ",\n"
-			    << "  \"session\": \"" << json_escape (session_name) << "\",\n"
-			    << "  \"started\": \"" << iso8601_now () << "\"\n"
+			    << "  \"socket\":       \"" << json_escape (_socket_path) << "\",\n"
+			    << "  \"pid\":          " << ::getpid () << ",\n"
+			    << "  \"session\":      \"" << json_escape (session_name) << "\",\n"
+			    << "  \"project_path\": \"" << json_escape (project_path) << "\",\n"
+			    << "  \"started\":      \"" << iso8601_now () << "\"\n"
 			    << "}\n";
 		}
 	}

@@ -36,6 +36,7 @@ import { getWebMidiService } from "./midi/web-midi.js";
 import { pickUiVariant, sniffEnv, getUiVariant } from "./registry/ui-variants.js";
 import { setFeatures } from "./registry/features.js";
 import { setActiveVariant } from "./registry/widgets.js";
+import { installI18n, currentLocale, onLocaleChange } from "./i18n.js";
 
 /** @typedef {import("./registry/ui-variants.js").VariantBootResult} VariantBootResult */
 
@@ -72,6 +73,41 @@ export function bootFoyerCore(opts = {}) {
   import("./viz-capture.js")
     .then(({ installVizCapture }) => installVizCapture())
     .catch((e) => console.warn("[bootstrap] viz-capture install failed:", e));
+  // FE-side listener for the `ui` agent tool. Subscribes to
+  // `ui_action` envelopes and dispatches against window.__foyer.layout
+  // + spawnWindowKind, replying with `ui_action_result`.
+  import("./ui-director.js")
+    .then(({ installUiDirector }) => installUiDirector())
+    .catch((e) => console.warn("[bootstrap] ui-director install failed:", e));
+  // i18n: pick up the user's preferred locale (localStorage > browser
+  // language > English) and prefetch its catalog. Fire-and-forget —
+  // English is the identity path so any component that runs before
+  // the catalog lands still sees the source strings, just not
+  // translated yet. The `foyer:locale-changed` event re-renders
+  // components once the catalog arrives.
+  installI18n().catch((e) => console.warn("[bootstrap] i18n install failed:", e));
+  // Push the active UI locale to the server-side agent so it can
+  // bias its replies (system-prompt directive) toward the user's
+  // chosen language. Sent on initial connect AND on every locale
+  // flip — the runtime persists the value so a server restart
+  // doesn't lose it.
+  const pushLocaleToAgent = () => {
+    try {
+      ws?.send({ type: "agent_set_config", ui_locale: currentLocale() });
+    } catch {}
+  };
+  // Fire once the WS is open (the greeting handshake guarantees the
+  // agent runtime is attached by then).
+  store.addEventListener("connection", (ev) => {
+    if (ev?.detail?.status === "open") pushLocaleToAgent();
+  });
+  onLocaleChange(() => pushLocaleToAgent());
+  // Compiz-style wobbly windows — viz-pref gated, defaults off.
+  // When enabled, auto-attaches a spring-mass mesh to every
+  // foyer-window and any component that opts in via attachWobble().
+  import("./wobbly-windows.js")
+    .then(({ installWobbly }) => installWobbly())
+    .catch((e) => console.warn("[bootstrap] wobbly install failed:", e));
   // Headless-viz mode: when the URL carries `?subcommand=...` (the
   // chromiumoxide-driven renderer hits this), swap to a single
   // full-window tile + signal ready for the screenshot.

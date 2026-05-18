@@ -10,14 +10,16 @@
 // round-trips. For now the transcript echoes what you type so the UX is
 // exercised end-to-end.
 
-import { LitElement, html, css, nothing } from "lit";
+import { LitElement, html, nothing } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { icon } from "foyer-ui-core/icons.js";
 import "./agent-settings-modal.js";
-import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
 import { renderMarkdown, ensureMarkdownReady } from "foyer-core/markdown.js";
-
-const FAB_SIZE = 48;
+import { panelStyles, FAB_SIZE } from "./agent-panel.styles.js";
+// `t` is shadowed in this file by transcript-row variables (e.g. the
+// `_renderMsg(t)` lambdas), so alias the i18n function as `tr` to
+// dodge the collision.
+import { t as tr, tn, onLocaleChange } from "/core/i18n.js";
 const GAP = 8;
 const LS_KEY = "foyer.agent.panel.v1";
 const DEFAULT_STATE = {
@@ -162,6 +164,13 @@ export class AgentPanel extends LitElement {
     _pendingDeleteId: { state: true, type: String },
     _attachments: { state: true, type: Array },
     _dropHover: { state: true, type: Boolean },
+    /// Click-to-raise z-index for the panel + FAB pair. Both elements
+    /// position:fixed in the document stacking context and need to
+    /// raise together over peer floating layers (foyer-window stack,
+    /// plugin panels). Bumped via the global stack counter on each
+    /// pointerdown into either element so they win against the most
+    /// recent foyer-window raise.
+    _zOverride: { state: true, type: Number },
     /// Text composer's current pixel height; persisted between
     /// reloads via `_persist()`. Updated on `mouseup`/`blur` of the
     /// textarea (after the user drags the SE resize grip).
@@ -220,767 +229,7 @@ export class AgentPanel extends LitElement {
     this.requestUpdate();
   }
 
-  static styles = css`
-    ${scrollbarStyles}
-    :host { display: contents; }
-
-    /* FAB — gradient accent, always on top, draggable. */
-    .fab {
-      position: fixed;
-      width: ${FAB_SIZE}px;
-      height: ${FAB_SIZE}px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
-      color: #fff;
-      border: none;
-      cursor: grab;
-      box-shadow: var(--shadow-fab);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 1000;
-      transition: box-shadow 0.15s ease, transform 0.15s ease;
-      touch-action: none;
-      user-select: none;
-    }
-    .fab:hover {
-      box-shadow: var(--shadow-fab-hover);
-      transform: scale(1.04);
-    }
-    .fab.dragging { cursor: grabbing; transition: none; }
-    .fab.open {
-      background: linear-gradient(135deg, var(--color-accent-2), var(--color-accent-3));
-    }
-    .fab svg {
-      width: 22px; height: 22px; stroke: currentColor; fill: none;
-      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
-    }
-
-    /* Panel — position set via inline style, bounded by viewport. */
-    .panel {
-      position: fixed;
-      min-width: 320px;
-      min-height: 280px;
-      max-width: calc(100vw - 2.5rem);
-      max-height: calc(100vh - 5rem);
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-lg);
-      box-shadow: var(--shadow-panel);
-      display: flex;
-      flex-direction: column;
-      z-index: 999;
-      color: var(--color-text);
-      overflow: hidden;
-    }
-
-    .panel header {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      padding: 4px 6px;
-      border-bottom: 1px solid var(--color-border);
-      cursor: grab;
-      background: var(--color-surface-elevated);
-      font-family: var(--font-sans);
-      font-size: 10px;
-      color: var(--color-text-muted);
-    }
-    .panel header.dragging { cursor: grabbing; }
-    .panel header .title {
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--color-text);
-    }
-    .panel header .spacer { flex: 1; }
-    .panel header button {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      background: transparent;
-      color: var(--color-text-muted);
-      border: 1px solid transparent;
-      border-radius: var(--radius-sm);
-      padding: 2px 6px;
-      font: inherit;
-      font-size: 10px;
-      cursor: pointer;
-      transition: all 0.12s ease;
-    }
-    .panel header button:hover {
-      color: var(--color-text);
-      border-color: var(--color-border);
-      background: var(--color-surface);
-    }
-
-    .transcript {
-      flex: 1;
-      overflow-y: auto;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      font-size: 12px;
-      line-height: 1.5;
-      scrollbar-width: thin;
-      scrollbar-color: var(--color-border) transparent;
-      /* Highlight + copy must work inside chat messages. The panel
-         container above suppresses selection so the drag-handle isn't
-         accidentally selecting; we re-enable it here so users can grab
-         text, code, and tool-call args/results. */
-      user-select: text;
-      -webkit-user-select: text;
-    }
-    /* Flex children default to flex-shrink:1, which squeezes every
-       message progressively as the column fills up — that's what
-       turned tool cards into hairlines once the transcript grew long.
-       Pin all transcript items to their natural height and let the
-       transcript's own overflow-y:auto handle scroll. NB: keep
-       backticks out of this comment; they close the css template. */
-    .transcript > * { flex-shrink: 0; }
-    .msg {
-      max-width: 80%;
-      padding: 8px 10px;
-      border-radius: var(--radius-md);
-      white-space: pre-wrap;
-      word-wrap: break-word;
-    }
-    .msg.user {
-      align-self: flex-end;
-      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
-      color: #fff;
-      border-bottom-right-radius: 2px;
-      max-width: 80%;
-    }
-    .msg.assistant,
-    .msg.system {
-      align-self: stretch;
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-md);
-      color: var(--color-text);
-      max-width: none;
-    }
-    .msg.system { opacity: 0.7; font-style: italic; }
-    /* Markdown rendered inside assistant messages */
-    .msg.assistant .md > :first-child { margin-top: 0; }
-    .msg.assistant .md > :last-child  { margin-bottom: 0; }
-    .msg.assistant .md p { margin: 0.4em 0; }
-    .msg.assistant .md ul,
-    .msg.assistant .md ol { margin: 0.4em 0; padding-left: 1.4em; }
-    .msg.assistant .md code {
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      border-radius: 3px;
-      padding: 0 4px;
-      font-family: var(--font-mono, monospace);
-      font-size: 11px;
-    }
-    .msg.assistant .md pre {
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-      padding: 8px 10px;
-      overflow-x: auto;
-      margin: 0.4em 0;
-    }
-    .msg.assistant .md pre code { background: transparent; border: 0; padding: 0; }
-
-    /* Reasoning trace — collapsible block emitted by models that expose
-       chain-of-thought (DeepSeek-R1, QwQ, OpenAI o-series). Kept dim
-       and italic so it doesn't compete with the final reply. */
-    .thinking {
-      align-self: stretch;
-      font-size: 11px;
-      color: var(--color-text-muted);
-      margin: 2px 0;
-    }
-    .thinking summary {
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      list-style: none;
-      user-select: none;
-      padding: 2px 0;
-      opacity: 0.75;
-    }
-    .thinking summary::-webkit-details-marker { display: none; }
-    .thinking summary .caret {
-      display: inline-block;
-      transition: transform 0.15s ease;
-      font-size: 9px;
-    }
-    .thinking[open] summary .caret { transform: rotate(90deg); }
-    .thinking .body {
-      margin-top: 2px;
-      padding: 6px 8px;
-      border-left: 2px solid var(--color-border);
-      white-space: pre-wrap;
-      font-family: var(--font-mono, monospace);
-      font-size: 11px;
-      line-height: 1.45;
-      opacity: 0.85;
-      user-select: text;
-      -webkit-user-select: text;
-      /* No internal scroll: the transcript already scrolls, and a
-         nested scroller hides the report text that follows the
-         thinking block. Long reasoning just grows the row — the
-         user collapses it via the disclosure caret if they don't
-         want it taking space. */
-    }
-    .thinking.live summary { opacity: 1; }
-    .thinking.live summary .spinner {
-      width: 10px; height: 10px;
-      border: 1.5px solid currentColor;
-      border-top-color: transparent;
-      border-radius: 50%;
-      animation: foyer-agent-spin 0.8s linear infinite;
-    }
-    @keyframes foyer-agent-spin { to { transform: rotate(360deg); } }
-
-    /* Tool call cards (patapsco-style) */
-    .tool-card {
-      align-self: stretch;
-      display: block;
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-md);
-      font-size: 12px;
-      overflow: hidden;
-    }
-    .tool-card > summary {
-      display: flex; align-items: center; gap: 6px;
-      padding: 6px 10px;
-      cursor: pointer;
-      list-style: none;
-      color: var(--color-text);
-      user-select: none;
-    }
-    .tool-card > summary::-webkit-details-marker { display: none; }
-    .tool-card .tool-name { font-weight: 600; flex-shrink: 0; }
-    /* Truncated inline result summary — keeps the closed card useful
-       so the user doesn't have to expand every call to see what it
-       returned. */
-    .tool-card .tool-inline-summary {
-      color: var(--color-text-muted);
-      font-size: 11px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      min-width: 0;
-      flex: 1 1 auto;
-    }
-    .tool-card .tool-status {
-      margin-left: auto;
-      color: var(--color-text-muted);
-      font-size: 11px;
-      flex-shrink: 0;
-    }
-    .tool-card.done    { border-color: color-mix(in oklab, var(--color-accent) 50%, var(--color-border)); }
-    .tool-card.error   { border-color: var(--color-danger, #ef4444); }
-    .tool-card.running { border-color: var(--color-accent); }
-    .tool-card.awaiting_confirm { border-color: var(--color-warning, #d49b1c); }
-    .tool-details {
-      border-top: 1px solid var(--color-border);
-      padding: 6px 10px;
-      display: flex; flex-direction: column; gap: 6px;
-      background: var(--color-surface-elevated);
-    }
-    .tool-block {
-      font-family: var(--font-mono, monospace);
-      font-size: 11px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: var(--color-text);
-      user-select: text;
-      -webkit-user-select: text;
-    }
-    .tool-block-expand {
-      align-self: flex-start;
-      background: transparent;
-      border: 1px solid var(--color-border);
-      color: var(--color-text-muted);
-      font: inherit;
-      font-size: 10px;
-      padding: 2px 8px;
-      border-radius: var(--radius-sm);
-      cursor: pointer;
-    }
-    .tool-block-expand:hover { color: var(--color-text); }
-    .tool-view-toggle {
-      display: inline-flex;
-      gap: 2px;
-      align-self: flex-end;
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-      padding: 2px;
-    }
-    .tool-view-toggle button {
-      background: transparent;
-      border: 0;
-      color: var(--color-text-muted);
-      font: inherit;
-      font-size: 10px;
-      padding: 2px 8px;
-      cursor: pointer;
-      border-radius: 3px;
-    }
-    .tool-view-toggle button.active {
-      background: var(--color-surface-elevated);
-      color: var(--color-text);
-    }
-    .tool-section-label {
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--color-text-muted);
-      margin-top: 2px;
-    }
-    .tool-section-label + .tool-block,
-    .tool-section-label + .tool-kv,
-    .tool-section-label + .tool-kv-list,
-    .tool-section-label + .tool-kv-scalar {
-      margin-top: -2px;
-    }
-    /* Pretty K/V default view: two-column dl with terms left, values
-       right. Stays compact even for moderately wide cards. */
-    .tool-kv {
-      display: grid;
-      grid-template-columns: max-content 1fr;
-      column-gap: 10px;
-      row-gap: 2px;
-      margin: 0;
-      font-size: 11px;
-    }
-    .tool-kv dt {
-      color: var(--color-text-muted);
-      font-family: var(--font-mono, monospace);
-    }
-    .tool-kv dd {
-      margin: 0;
-      color: var(--color-text);
-      word-break: break-word;
-      user-select: text;
-    }
-    .tool-kv-list {
-      margin: 0;
-      padding-left: 1.4em;
-      font-size: 11px;
-    }
-    .tool-kv-scalar {
-      font-size: 11px;
-      color: var(--color-text);
-      user-select: text;
-    }
-    .tool-kv-str { color: var(--color-text); }
-    .tool-kv-num { color: color-mix(in oklab, var(--color-accent) 60%, var(--color-text)); }
-    .tool-kv-bool { color: color-mix(in oklab, var(--color-warning, #d49b1c) 70%, var(--color-text)); }
-    .tool-kv-json {
-      font-family: var(--font-mono, monospace);
-      font-size: 10px;
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      border-radius: 3px;
-      padding: 1px 4px;
-      color: var(--color-text-muted);
-    }
-    .muted { color: var(--color-text-muted); opacity: 0.7; }
-
-    /* Inline media thumbnail (24px tall by spec) — click opens
-       full-resolution zoom modal mounted at the panel root. */
-    .tool-media-thumb {
-      background: transparent;
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-      padding: 2px;
-      cursor: zoom-in;
-      align-self: flex-start;
-      transition: border-color 0.12s ease;
-    }
-    .tool-media-thumb:hover { border-color: var(--color-accent); }
-    .tool-media-thumb img {
-      display: block;
-      height: 24px;
-      width: auto;
-      max-width: 320px;
-      object-fit: contain;
-    }
-
-    /* Zoom modal — full-screen backdrop, image centered, click outside
-       (or X / Escape) to close. Lives at the top of the panel so it
-       overlays everything including the composer. */
-    .media-zoom-backdrop {
-      position: fixed;
-      inset: 0;
-      z-index: 9000;
-      background: rgba(0,0,0,0.72);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
-      cursor: zoom-out;
-    }
-    .media-zoom-image {
-      max-width: 100%;
-      max-height: 100%;
-      object-fit: contain;
-      cursor: default;
-      box-shadow: 0 12px 48px rgba(0,0,0,0.55);
-      border-radius: var(--radius-md);
-    }
-    .media-zoom-close {
-      position: absolute;
-      top: 16px;
-      right: 16px;
-      background: rgba(0,0,0,0.4);
-      color: white;
-      border: 1px solid rgba(255,255,255,0.2);
-      border-radius: var(--radius-sm);
-      padding: 4px;
-      cursor: pointer;
-    }
-    .media-zoom-close:hover { background: rgba(0,0,0,0.6); }
-    .tool-confirm-row {
-      display: flex; gap: 6px; padding: 6px 10px;
-      border-top: 1px solid var(--color-border);
-      background: var(--color-surface-elevated);
-    }
-    .tool-confirm-row button { flex: 1; font-size: 11px; padding: 4px 8px; }
-
-    /* Chat sessions overlay (Claude-Code-style picker). Mounted
-       inside the panel so it lives next to the FAB even when the
-       panel is floating somewhere off-screen. */
-    .sessions-backdrop {
-      position: absolute; inset: 0;
-      background: rgba(0, 0, 0, 0.55);
-      display: flex; align-items: center; justify-content: center;
-      z-index: 50;
-    }
-    .sessions-modal {
-      width: 92%; max-width: 380px; max-height: 90%;
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-md);
-      display: flex; flex-direction: column;
-      overflow: hidden;
-    }
-    .sessions-modal > header {
-      display: flex; align-items: center; gap: 6px;
-      padding: 6px 8px;
-      border-bottom: 1px solid var(--color-border);
-      background: var(--color-surface-elevated);
-      font-size: 10px;
-      color: var(--color-text-muted);
-    }
-    .sessions-modal > header .title {
-      font-size: 10px; font-weight: 600;
-      letter-spacing: 0.08em; text-transform: uppercase;
-      color: var(--color-text);
-    }
-    .sessions-modal > header .spacer { flex: 1; }
-    .sessions-modal > header button {
-      display: inline-flex; align-items: center; gap: 4px;
-      background: transparent;
-      color: var(--color-text-muted);
-      border: 1px solid transparent;
-      border-radius: var(--radius-sm);
-      padding: 2px 6px;
-      font: inherit; font-size: 10px;
-      cursor: pointer;
-    }
-    .sessions-modal > header button:hover {
-      color: var(--color-text);
-      border-color: var(--color-border);
-      background: var(--color-surface);
-    }
-    .sessions-body {
-      flex: 1; overflow-y: auto;
-      padding: 6px;
-      display: flex; flex-direction: column; gap: 4px;
-    }
-    .sessions-empty {
-      padding: 16px;
-      text-align: center;
-      color: var(--color-text-muted);
-      font-size: 11px;
-    }
-    .session-row {
-      display: flex; align-items: stretch; gap: 4px;
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-    }
-    .session-row.active {
-      border-color: var(--color-accent);
-    }
-    .session-pick {
-      flex: 1;
-      text-align: left;
-      background: transparent;
-      border: 0;
-      padding: 8px 10px;
-      cursor: pointer;
-      color: var(--color-text);
-    }
-    .session-pick:hover { background: var(--color-surface-elevated); }
-    .session-title { font-size: 12px; font-weight: 600; }
-    .session-meta { font-size: 10px; color: var(--color-text-muted); margin-top: 2px; }
-    .session-action {
-      background: transparent;
-      border: 0;
-      color: var(--color-text-muted);
-      cursor: pointer;
-      padding: 0 8px;
-    }
-    .session-action:hover { color: var(--color-text); }
-    .session-action.danger:hover { color: var(--color-danger, #ef4444); }
-    .sessions-confirm {
-      padding: 8px 10px;
-      border-top: 1px solid var(--color-border);
-      background: var(--color-surface);
-      font-size: 11px;
-      color: var(--color-text);
-      display: flex; align-items: center; gap: 10px;
-    }
-    .sessions-confirm span { flex: 1; }
-    .sessions-confirm button {
-      font: inherit;
-      font-size: 11px;
-      padding: 4px 10px;
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--color-border);
-      background: var(--color-surface-elevated);
-      color: var(--color-text);
-      cursor: pointer;
-    }
-    .sessions-confirm button.danger {
-      background: var(--color-danger, #ef4444);
-      border-color: var(--color-danger, #ef4444);
-      color: #fff;
-    }
-    .welcome,
-    .empty {
-      color: var(--color-text-muted);
-      font-size: 12px;
-      padding: 24px 12px;
-      text-align: center;
-    }
-    .welcome strong,
-    .empty strong {
-      display: block;
-      margin-bottom: 4px;
-      color: var(--color-text);
-      font-weight: 600;
-    }
-
-    .composer {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 6px;
-      padding: 10px 12px;
-      border-top: 1px solid var(--color-border);
-      background: var(--color-surface);
-    }
-    .composer textarea {
-      background: var(--color-surface-elevated);
-      color: var(--color-text);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-      padding: 6px 8px;
-      font-family: var(--font-sans);
-      font-size: 12px;
-      /* User-resizable: drag the SE grip to grow vertically (and
-         a little horizontally, capped by the column). Height is
-         sticky via _composerHeight saved into localStorage. */
-      resize: vertical;
-      min-height: 36px;
-      max-height: 360px;
-      width: 100%;
-      box-sizing: border-box;
-    }
-    .composer textarea:focus {
-      outline: none;
-      border-color: var(--color-accent);
-      box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-accent) 30%, transparent);
-    }
-    .composer button {
-      width: 36px; height: 36px;
-      display: inline-flex; align-items: center; justify-content: center;
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-      background: var(--color-surface-elevated);
-      color: var(--color-text);
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-    .composer button:hover:not(:disabled) {
-      filter: brightness(1.1);
-      transform: translateY(-1px);
-    }
-    .composer button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .composer.drop-hover {
-      outline: 2px dashed var(--color-accent);
-      outline-offset: -2px;
-    }
-    /* Send button switches to a stop/interrupt affordance when the
-       agent is busy AND the user has typed something — clicking it
-       cancels the current turn and dispatches the new message. */
-    .composer button.send-stop {
-      background: var(--color-danger, #ef4444);
-      color: white;
-      border-color: var(--color-danger, #ef4444);
-    }
-    /* Queued-message banner above the textarea. Visible only while
-       the user has parked a message and the agent is still busy. */
-    .queued-banner {
-      grid-column: 1 / -1;
-      display: flex;
-      gap: 6px;
-      align-items: center;
-      justify-content: space-between;
-      padding: 4px 6px;
-      margin-bottom: 4px;
-      border: 1px dashed var(--color-warning, #d49b1c);
-      border-radius: var(--radius-sm);
-      background: color-mix(in oklab, var(--color-warning, #d49b1c) 6%, var(--color-surface));
-      font-size: 11px;
-    }
-    .queued-banner-body {
-      display: flex;
-      gap: 6px;
-      min-width: 0;
-      flex: 1;
-      align-items: center;
-    }
-    .queued-banner strong {
-      color: var(--color-text-muted);
-      flex-shrink: 0;
-    }
-    .queued-text {
-      color: var(--color-text);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      min-width: 0;
-    }
-    .queued-banner-actions { display: inline-flex; gap: 4px; flex-shrink: 0; }
-    .queued-banner-actions button {
-      background: transparent;
-      color: var(--color-text);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-      padding: 2px 8px;
-      font: inherit;
-      font-size: 11px;
-      cursor: pointer;
-    }
-    .queued-banner-actions .queued-stop {
-      background: var(--color-warning, #d49b1c);
-      color: black;
-      border-color: var(--color-warning, #d49b1c);
-      font-weight: 600;
-    }
-    .queued-banner-actions .queued-stop:hover { filter: brightness(1.05); }
-    .queued-banner-actions .queued-restore:hover,
-    .queued-banner-actions .queued-cancel:hover { background: var(--color-surface-elevated); }
-    .queued-banner-actions .queued-cancel {
-      width: 22px; height: 22px; padding: 0;
-      display: inline-flex; align-items: center; justify-content: center;
-    }
-    .attachments {
-      grid-column: 1 / -1;
-      display: flex; flex-wrap: wrap; gap: 4px;
-      align-items: center;
-      margin-bottom: 4px;
-    }
-    .attachments .chip {
-      display: inline-flex; align-items: center; gap: 4px;
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      border-radius: 999px;
-      padding: 2px 4px 2px 8px;
-      font-size: 11px;
-      color: var(--color-text);
-    }
-    .attachments .chip button {
-      width: 16px; height: 16px;
-      display: inline-flex; align-items: center; justify-content: center;
-      background: transparent;
-      border: 0;
-      color: var(--color-text-muted);
-      cursor: pointer;
-      padding: 0;
-    }
-    .attachments .chip button:hover { color: var(--color-text); }
-    .attachments .attach-note {
-      font-size: 10px; color: var(--color-text-muted);
-      margin-left: 4px;
-    }
-
-    .input-area {
-      display: flex;
-      gap: 6px;
-      padding: 10px 12px;
-      border-top: 1px solid var(--color-border);
-      background: var(--color-surface);
-    }
-    .input-area textarea {
-      flex: 1;
-      background: var(--color-surface-elevated);
-      color: var(--color-text);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-      padding: 6px 8px;
-      font-family: var(--font-sans);
-      font-size: 12px;
-      resize: none;
-      min-height: 36px;
-      max-height: 140px;
-      transition: border-color 0.15s ease;
-    }
-    .input-area textarea:focus {
-      outline: none;
-      border-color: var(--color-accent);
-      box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-accent) 30%, transparent);
-    }
-    .input-area button {
-      width: 36px;
-      height: 36px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
-      color: #fff;
-      border: none;
-      border-radius: var(--radius-sm);
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-    .input-area button:hover:not(:disabled) {
-      filter: brightness(1.12);
-      transform: translateY(-1px);
-    }
-    .input-area button:disabled { opacity: 0.45; cursor: not-allowed; }
-    .input-area button svg {
-      width: 16px; height: 16px; stroke: currentColor; fill: none;
-      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
-    }
-
-    /* Resize handle (single corner, opposite the FAB). */
-    .resize {
-      position: absolute;
-      width: 14px; height: 14px;
-      z-index: 2;
-    }
-    .resize.nw { top: 0; left: 0;   cursor: nw-resize; }
-    .resize.ne { top: 0; right: 0;  cursor: ne-resize; }
-    .resize.sw { bottom: 0; left: 0; cursor: sw-resize; }
-    .resize.se { bottom: 0; right: 0; cursor: se-resize; }
-  `;
+  static styles = panelStyles;
 
   constructor() {
     super();
@@ -1006,6 +255,7 @@ export class AgentPanel extends LitElement {
     this._pendingDeleteId = "";
     this._attachments = [];
     this._dropHover = false;
+    this._zOverride = 0;
     this._dragState = null;
     this._resizeState = null;
     this._pinnedToBottom = true;
@@ -1045,7 +295,7 @@ export class AgentPanel extends LitElement {
     window.__foyer?.layout?.registerFab(
       this.storageKey,
       {
-        label: "Agent",
+        label: tr("Agent"),
         icon: "chat-bubble-left-right",
         accent: "accent",
         expandsRail: true,
@@ -1066,6 +316,13 @@ export class AgentPanel extends LitElement {
     // assistant messages that rendered in <pre>-fallback mode pick
     // up the real markdown output.
     ensureMarkdownReady().then(() => this.requestUpdate()).catch(() => {});
+    // Wobbly windows: same opt-in pattern QuadrantFab uses.
+    this._wobbleEnable = () => this._installWobbles();
+    this._wobbleDisable = () => this._uninstallWobbles();
+    window.addEventListener("foyer:wobbly-enabled", this._wobbleEnable);
+    window.addEventListener("foyer:wobbly-disabled", this._wobbleDisable);
+    requestAnimationFrame(() => this._installWobbles());
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._onEnvelope);
@@ -1075,7 +332,47 @@ export class AgentPanel extends LitElement {
     window.removeEventListener("resize", this._onWindowResize);
     window.__foyer?.layout?.removeEventListener("change", this._onLayoutChange);
     window.__foyer?.layout?.unregisterFab(this.storageKey);
+    window.removeEventListener("foyer:wobbly-enabled", this._wobbleEnable);
+    window.removeEventListener("foyer:wobbly-disabled", this._wobbleDisable);
+    this._uninstallWobbles();
+    this._i18nDispose?.();
+    this._i18nDispose = null;
     super.disconnectedCallback();
+  }
+
+  async _installWobbles() {
+    const mod = await import("foyer-core/wobbly-windows.js");
+    if (!mod.wobblyEnabled()) return;
+    const fab = this.renderRoot?.querySelector?.(".fab");
+    const panel = this.renderRoot?.querySelector?.(".panel");
+    // `visualOnly: true` — wobble is decoration only. The host's
+    // native pointer handlers own drag state, position, and any
+    // drop detection. Drop / position math is therefore identical
+    // to the non-jiggle code path.
+    if (panel) {
+      const header = panel.querySelector?.("header") || panel;
+      const handles = fab ? [header, fab] : [header];
+      mod.attachWobble(panel, handles, {
+        followers: fab ? [fab] : [],
+        passthroughClick: true,
+        visualOnly: true,
+      });
+    } else if (fab) {
+      mod.attachWobble(fab, undefined, {
+        passthroughClick: true,
+        visualOnly: true,
+      });
+    }
+    this._wobbleAttached = { fab, panel };
+  }
+
+  async _uninstallWobbles() {
+    if (!this._wobbleAttached) return;
+    const mod = await import("foyer-core/wobbly-windows.js");
+    const { fab, panel } = this._wobbleAttached;
+    if (fab) mod.detachWobble(fab);
+    if (panel) mod.detachWobble(panel);
+    this._wobbleAttached = null;
   }
 
   firstUpdated() {
@@ -1097,6 +394,14 @@ export class AgentPanel extends LitElement {
   }
 
   updated(changed) {
+    // Reattach wobble after a Lit re-render: the `.panel` only
+    // exists when `_open` is true, so a fresh open needs a fresh
+    // attach. The wobble module's attach is idempotent — it bails
+    // when the element already has a wobble — so calling on every
+    // updated() is cheap.
+    if (this._wobbleAttached || this._open) {
+      this._installWobbles();
+    }
     // Mirror the `console-view.js` pattern: attach a scroll listener
     // ONCE per transcript element, sync-apply `scrollTop=scrollHeight`
     // when the user is currently "following" (within slack of the
@@ -1184,22 +489,22 @@ export class AgentPanel extends LitElement {
     return html`
       <div style="display:flex;flex-direction:column;height:100%;min-height:0;gap:6px;padding:4px 6px">
         <div style="display:flex;align-items:center;gap:6px;padding:4px 2px">
-          <div style="font-weight:600;font-size:12px;color:var(--color-text)">Agent</div>
+          <div style="font-weight:600;font-size:12px;color:var(--color-text)">${tr("Agent")}</div>
           <div style="flex:1"></div>
           <button style="background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);padding:3px 6px;color:var(--color-text-muted);cursor:pointer;line-height:1"
                   @click=${() => { this._settingsOpen = true; }}
-                  title="Settings">
+                  title=${tr("Settings")}>
             ${icon("cog", 14)}
           </button>
         </div>
         <div style="flex:1;overflow-y:auto;padding:6px;background:var(--color-surface-elevated);border:1px solid var(--color-border);border-radius:var(--radius-sm);min-height:0">
           ${this._transcript.length === 0
-            ? html`<div style="color:var(--color-text-muted);font-size:11px;text-align:center;padding:20px 10px"><strong>Foyer Agent</strong><br>Ask to move faders, arm tracks, or explain the mix.</div>`
+            ? html`<div style="color:var(--color-text-muted);font-size:11px;text-align:center;padding:20px 10px"><strong>${tr("Foyer Agent")}</strong><br>${tr("Ask to move faders, arm tracks, or explain the mix.")}</div>`
             : this._transcript.map((m) => this._renderMsg(m))}
         </div>
         <div style="display:flex;gap:4px">
           <textarea
-            placeholder="Ask the agent…"
+            placeholder=${tr("Ask the agent…")}
             style="flex:1;background:var(--color-surface-elevated);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text);font:inherit;font-size:12px;padding:6px 8px;resize:none;min-height:60px"
             .value=${this._input}
             @input=${(e) => { this._input = e.target.value; }}
@@ -1252,7 +557,29 @@ export class AgentPanel extends LitElement {
 
   // ─── FAB drag / toggle ─────────────────────────────────────────────────
 
+  /// Bump our z-index above peer floating layers (foyer-window stack,
+  /// plugin float layer) using the layout store's global stack counter.
+  /// Idempotent — skips the bump when no visible foyer-window outranks
+  /// us already, so a click into a focused agent panel doesn't inflate
+  /// the global stack counter on every interaction (Rich, 2026-05-16).
+  _raise() {
+    const layout = window.__foyer?.layout;
+    if (!layout?.bumpGlobalStackZ) return;
+    // Highest z among visible foyer-windows. We want to outrank that
+    // value; if we already do, leave the counter alone.
+    let peerMax = 0;
+    for (const el of document.querySelectorAll("foyer-window")) {
+      if (el.hasAttribute("hidden-by-layer") || el.minimized) continue;
+      const z = parseInt(el.style.zIndex || "1000", 10);
+      if (z > peerMax) peerMax = z;
+    }
+    if (this._zOverride > peerMax) return;
+    const z = layout.bumpGlobalStackZ();
+    if (Number.isFinite(z)) this._zOverride = z;
+  }
+
   _onFabDown(ev) {
+    this._raise();
     ev.preventDefault();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -1276,21 +603,27 @@ export class AgentPanel extends LitElement {
       const dx = ev.clientX - ds.startX;
       const dy = ev.clientY - ds.startY;
       if (!ds.moved && Math.hypot(dx, dy) > 4) ds.moved = true;
-      this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
-      this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
-      // Hint the dock that a drop here would dock the agent.
+      // Skip per-tick position updates when a wobble is attached —
+      // its matrix3d / follower-translate transforms are providing
+      // the visual movement, and updating _fabRight here would
+      // double-shift the FAB. The final position is committed
+      // from cursor delta in _onWindowPointerUp.
+      if (!this._wobbleAttached) {
+        this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
+      }
       window.__foyer?.rightDock
         ?.setDropHighlight?.(this._isOverRail(ev.clientX, ev.clientY));
       this.requestUpdate();
     } else if (this._dragState?.kind === "panel-header") {
-      // Panel drag actually moves the FAB (since panel position is derived
-      // from FAB quadrant). Update fab position directly.
       const ds = this._dragState;
       const dx = ev.clientX - ds.startX;
       const dy = ev.clientY - ds.startY;
-      this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
-      this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
-      this.requestUpdate();
+      if (!this._wobbleAttached) {
+        this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
+        this.requestUpdate();
+      }
     } else if (this._resizeState) {
       const rs = this._resizeState;
       const dx = ev.clientX - rs.startX;
@@ -1307,18 +640,34 @@ export class AgentPanel extends LitElement {
     if (this._dragState?.kind === "fab") {
       const ds = this._dragState;
       const wasMoved = ds.moved;
+      // Deferred commit: native onMove skipped the position update
+      // while a wobble was attached. Now that we have the release
+      // coords, set the final FAB position from cursor delta.
+      if (this._wobbleAttached && ev && wasMoved) {
+        const dx = ev.clientX - ds.startX;
+        const dy = ev.clientY - ds.startY;
+        this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
+      }
       this._dragState = null;
       window.__foyer?.rightDock?.setDropHighlight?.(false);
       if (!wasMoved) {
         this._toggle();
       } else if (ev && this._isOverRail(ev.clientX, ev.clientY)) {
-        // Dock to the right rail and close the floating presentation.
         window.__foyer?.layout?.dockFab(this.storageKey);
         this._open = false;
       }
       this._persist();
       this.requestUpdate();
     } else if (this._dragState?.kind === "panel-header") {
+      const ds = this._dragState;
+      if (this._wobbleAttached && ev) {
+        const dx = ev.clientX - ds.startX;
+        const dy = ev.clientY - ds.startY;
+        this._fabRight = Math.max(0, Math.min(ds.vw - FAB_SIZE, ds.origRight - dx));
+        this._fabBottom = Math.max(0, Math.min(ds.vh - FAB_SIZE, ds.origBottom - dy));
+        this.requestUpdate();
+      }
       this._dragState = null;
       this._persist();
     } else if (this._resizeState) {
@@ -1484,7 +833,7 @@ export class AgentPanel extends LitElement {
     if (!text && this._attachments.length === 0) return;
     const ws = window.__foyer?.ws;
     if (!ws) {
-      this._appendLocal("system", "control WS not ready");
+      this._appendLocal("system", tr("control WS not ready"));
       return;
     }
     // Encode any attached files to base64 — only image/* travels to
@@ -1559,23 +908,23 @@ export class AgentPanel extends LitElement {
         ${queued ? html`
           <div class="queued-banner">
             <div class="queued-banner-body">
-              <strong>Queued:</strong>
+              <strong>${tr("Queued:")}</strong>
               <span class="queued-text" title=${queued.body}>${queued.body}</span>
             </div>
             <div class="queued-banner-actions">
               <button class="queued-stop"
                       @click=${this._stopAndSendQueued}
-                      title="Interrupt the agent and send this message now">
-                Stop & send
+                      title=${tr("Interrupt the agent and send this message now")}>
+                ${tr("Stop & send")}
               </button>
               <button class="queued-restore"
                       @click=${this._restoreQueuedToInput}
-                      title="Pull the queued message back into the composer">
-                Edit
+                      title=${tr("Pull the queued message back into the composer")}>
+                ${tr("Edit")}
               </button>
               <button class="queued-cancel"
                       @click=${() => { this._queuedMessage = null; }}
-                      title="Discard the queued message">
+                      title=${tr("Discard the queued message")}>
                 ${icon("x-mark", 12)}
               </button>
             </div>
@@ -1583,7 +932,7 @@ export class AgentPanel extends LitElement {
         ` : nothing}
         ${this._renderAttachments()}
         <textarea
-          placeholder=${busy ? "Type to queue while the agent works…" : "Ask the agent…"}
+          placeholder=${busy ? tr("Type to queue while the agent works…") : tr("Ask the agent…")}
           style=${`height: ${this._composerHeight}px`}
           .value=${this._input}
           @input=${(e) => { this._input = e.target.value; }}
@@ -1597,8 +946,8 @@ export class AgentPanel extends LitElement {
           @click=${busy && this._input.trim().length > 0 ? this._sendInterrupting : this._send}
           ?disabled=${!busy && !this._input.trim() && this._attachments.length === 0}
           title=${busy && this._input.trim().length > 0
-            ? "Stop the agent and send this message"
-            : "Send"}>
+            ? tr("Stop the agent and send this message")
+            : tr("Send")}>
           ${busy && this._input.trim().length > 0
             ? icon("x-circle", 14)
             : icon("paper-airplane", 14)}
@@ -1660,7 +1009,7 @@ export class AgentPanel extends LitElement {
     this._sessionsOpen = false;
   }
   _renameSession(id, currentTitle) {
-    const next = prompt("Rename session", currentTitle || "");
+    const next = prompt(tr("Rename session"), currentTitle || "");
     if (next == null) return;
     const title = next.trim();
     if (!title || title === currentTitle) return;
@@ -1692,33 +1041,33 @@ export class AgentPanel extends LitElement {
       <div class="sessions-backdrop" @click=${(e) => { if (e.target === e.currentTarget) this._closeSessions(); }}>
         <div class="sessions-modal" @click=${(e) => e.stopPropagation()}>
           <header>
-            <div class="title">Chat Sessions</div>
+            <div class="title">${tr("Chat Sessions")}</div>
             <div class="spacer"></div>
-            <button @click=${this._newSession} title="New session">
-              ${icon("plus", 14)} New
+            <button @click=${this._newSession} title=${tr("New session")}>
+              ${icon("plus", 14)} ${tr("New")}
             </button>
             <button
               class="danger"
               ?disabled=${this._sessions.length === 0}
               @click=${this._askDeleteAllSessions}
-              title="Delete every saved session">
-              ${icon("trash", 14)} Delete all
+              title=${tr("Delete every saved session")}>
+              ${icon("trash", 14)} ${tr("Delete all")}
             </button>
-            <button @click=${this._closeSessions} title="Close">
+            <button @click=${this._closeSessions} title=${tr("Close")}>
               ${icon("x-mark", 14)}
             </button>
           </header>
           <div class="sessions-body">
             ${this._sessions.length === 0
-              ? html`<div class="sessions-empty">No saved sessions yet.</div>`
+              ? html`<div class="sessions-empty">${tr("No saved sessions yet.")}</div>`
               : this._sessions.map((s) => this._renderSessionRow(s))}
           </div>
           ${confirmingAll ? html`
             <div class="sessions-confirm">
-              <span>Delete ALL ${this._sessions.length} session(s)? This can't be undone.</span>
+              <span>${tr("Delete ALL %{count} session(s)? This can't be undone.", { count: this._sessions.length })}</span>
               <div style="display:flex; gap:6px;">
-                <button @click=${this._cancelDeleteSession}>Cancel</button>
-                <button class="danger" @click=${this._confirmDeleteAllSessions}>Delete all</button>
+                <button @click=${this._cancelDeleteSession}>${tr("Cancel")}</button>
+                <button class="danger" @click=${this._confirmDeleteAllSessions}>${tr("Delete all")}</button>
               </div>
             </div>
           ` : nothing}
@@ -1734,14 +1083,14 @@ export class AgentPanel extends LitElement {
         <button class="session-pick" @click=${() => this._loadSession(s.id)}>
           <div class="session-title">${s.title}${active ? " ·" : ""}</div>
           <div class="session-meta">
-            ${s.message_count} msg · ${new Date(s.updated_ms).toLocaleString()}
+            ${tn("%{count} msg", "%{count} msg", s.message_count, { count: s.message_count })} · ${new Date(s.updated_ms).toLocaleString()}
           </div>
         </button>
-        <button class="session-action" title="Rename"
+        <button class="session-action" title=${tr("Rename")}
                 @click=${() => this._renameSession(s.id, s.title)}>
           ${icon("cog", 12)}
         </button>
-        <button class="session-action danger" title="Delete"
+        <button class="session-action danger" title=${tr("Delete")}
                 @click=${() => this._deleteSession(s.id)}>
           ${icon("trash", 12)}
         </button>
@@ -1775,7 +1124,7 @@ export class AgentPanel extends LitElement {
         ${visible ? html`<div class="msg assistant"><div class="md">${md}</div></div>` : nothing}
         ${calls}
         ${stillThinking && thinkingSegments.length === 0
-          ? this._renderThinking("Thinking…", true, `${m.id}-live`)
+          ? this._renderThinking(tr("Thinking…"), true, `${m.id}-live`)
           : nothing}
       `;
     }
@@ -1793,8 +1142,8 @@ export class AgentPanel extends LitElement {
       <details class=${cls} ?open=${live} data-key=${key || ""}>
         <summary>
           ${live
-            ? html`<span class="spinner"></span><span>Thinking…</span>`
-            : html`<span class="caret">▶</span><span>Thinking</span>`}
+            ? html`<span class="spinner"></span><span>${tr("Thinking…")}</span>`
+            : html`<span class="caret">▶</span><span>${tr("Thinking")}</span>`}
         </summary>
         <div class="body">${text}</div>
       </details>
@@ -1807,13 +1156,26 @@ export class AgentPanel extends LitElement {
     if (this._attachments.length === 0) return nothing;
     return html`
       <div class="attachments">
-        ${this._attachments.map((a, i) => html`
-          <div class="chip" title=${`${a.kind} · ${formatBytes(a.bytes)}`}>
-            <span>${a.name}</span>
-            <button @click=${() => this._removeAttachment(i)} title="Remove">${icon("x-mark", 10)}</button>
-          </div>
-        `)}
-        <div class="attach-note">media isn't shipped to the LLM yet — listed only</div>
+        ${this._attachments.map((a, i) => {
+          const isImage = typeof a.kind === "string" && a.kind.startsWith("image/");
+          const src = isImage && a.bytes_b64
+            ? `data:${a.kind};base64,${a.bytes_b64}`
+            : null;
+          return html`
+            <div class="chip" title=${tr("%{kind} · %{size} · forwarded to the model on send", { kind: a.kind, size: formatBytes(a.bytes) })}>
+              ${src ? html`
+                <button
+                  class="thumb"
+                  title=${tr("Click to expand")}
+                  @click=${(e) => { e.preventDefault(); this._zoomImage = { src, alt: a.name }; }}>
+                  <img src=${src} alt=${a.name} />
+                </button>
+              ` : nothing}
+              <span class="name">${a.name}</span>
+              <button @click=${() => this._removeAttachment(i)} title=${tr("Remove")}>${icon("x-mark", 10)}</button>
+            </div>
+          `;
+        })}
       </div>
     `;
   }
@@ -1922,27 +1284,27 @@ export class AgentPanel extends LitElement {
               <button
                 class=${showRaw ? "" : "active"}
                 @click=${(e) => { e.preventDefault(); this._setToolCardRaw(c.call_id, false); }}
-              >Pretty</button>
+              >${tr("Pretty")}</button>
               <button
                 class=${showRaw ? "active" : ""}
                 @click=${(e) => { e.preventDefault(); this._setToolCardRaw(c.call_id, true); }}
-              >Raw</button>
+              >${tr("Raw")}</button>
             </div>
             ${showRaw
               ? html`
-                ${argsText ? html`<div class="tool-section-label">Input</div>
+                ${argsText ? html`<div class="tool-section-label">${tr("Input")}</div>
                                    ${this._renderToolBlock(c.call_id, "input", argsText)}` : nothing}
-                ${resultText ? html`<div class="tool-section-label">Output</div>
+                ${resultText ? html`<div class="tool-section-label">${tr("Output")}</div>
                                      ${this._renderToolBlock(c.call_id, "output", resultText)}` : nothing}
-                ${media ? html`<div class="tool-section-label">Media</div>
+                ${media ? html`<div class="tool-section-label">${tr("Media")}</div>
                                 ${this._renderToolMedia(media, inlineLabel)}` : nothing}
               `
               : html`
                 ${parsedArgs && Object.keys(parsedArgs).length
-                  ? html`<div class="tool-section-label">Input</div>
+                  ? html`<div class="tool-section-label">${tr("Input")}</div>
                           ${this._renderKvBlock(parsedArgs)}` : nothing}
                 ${parsedResult !== null
-                  ? html`<div class="tool-section-label">Output</div>
+                  ? html`<div class="tool-section-label">${tr("Output")}</div>
                           ${this._renderKvBlock(stripMedia(parsedResult))}` : nothing}
                 ${media ? this._renderToolMedia(media, inlineLabel) : nothing}
               `}
@@ -1950,8 +1312,8 @@ export class AgentPanel extends LitElement {
         ` : nothing}
         ${isAwaiting ? html`
           <div class="tool-confirm-row">
-            <button @click=${() => this._confirmTool(c.call_id, true)}>Approve</button>
-            <button @click=${() => this._confirmTool(c.call_id, false)}>Reject</button>
+            <button @click=${() => this._confirmTool(c.call_id, true)}>${tr("Approve")}</button>
+            <button @click=${() => this._confirmTool(c.call_id, false)}>${tr("Reject")}</button>
           </div>
         ` : nothing}
       </details>
@@ -1987,8 +1349,8 @@ export class AgentPanel extends LitElement {
               this._expandedToolBlocks = next;
             }}
           >${expanded
-            ? html`Collapse`
-            : html`See full · ${text.length.toLocaleString()} chars`}
+            ? html`${tr("Collapse")}`
+            : html`${tr("See full · %{count} chars", { count: text.length.toLocaleString() })}`}
           </button>
         `
         : nothing}
@@ -2001,14 +1363,14 @@ export class AgentPanel extends LitElement {
   /// typically deep, but `session.full` would otherwise sprawl).
   _renderKvBlock(value, depth = 0) {
     if (value === null || value === undefined) {
-      return html`<div class="tool-block muted">(empty)</div>`;
+      return html`<div class="tool-block muted">${tr("(empty)")}</div>`;
     }
     if (typeof value !== "object") {
       return html`<div class="tool-kv-scalar">${String(value)}</div>`;
     }
     if (Array.isArray(value)) {
       if (value.length === 0) {
-        return html`<div class="tool-block muted">(empty list)</div>`;
+        return html`<div class="tool-block muted">${tr("(empty list)")}</div>`;
       }
       return html`
         <ol class="tool-kv-list">
@@ -2018,7 +1380,7 @@ export class AgentPanel extends LitElement {
     }
     const entries = Object.entries(value);
     if (entries.length === 0) {
-      return html`<div class="tool-block muted">(empty)</div>`;
+      return html`<div class="tool-block muted">${tr("(empty)")}</div>`;
     }
     return html`
       <dl class="tool-kv">
@@ -2049,7 +1411,7 @@ export class AgentPanel extends LitElement {
   /// src. Clicking opens the modal lightbox bound to `_zoomImage`.
   _renderToolMedia(media, label) {
     const src = `data:${media.mime};base64,${media.b64}`;
-    const alt = label || "tool output image";
+    const alt = label || tr("tool output image");
     return html`
       <button
         class="tool-media-thumb"
@@ -2057,7 +1419,7 @@ export class AgentPanel extends LitElement {
           e.preventDefault();
           this._zoomImage = { src, alt };
         }}
-        title="Click to expand"
+        title=${tr("Click to expand")}
       >
         <img src=${src} alt=${alt} />
       </button>
@@ -2080,7 +1442,7 @@ export class AgentPanel extends LitElement {
           alt=${this._zoomImage.alt}
           @click=${(e) => e.stopPropagation()}
         />
-        <button class="media-zoom-close" @click=${close} title="Close">
+        <button class="media-zoom-close" @click=${close} title=${tr("Close")}>
           ${icon("x-mark", 18)}
         </button>
       </div>
@@ -2213,6 +1575,7 @@ export class AgentPanel extends LitElement {
         <foyer-agent-settings-modal
           ?open=${this._settingsOpen}
           @save=${() => { this._settingsOpen = false; }}
+          @close=${() => { this._settingsOpen = false; }}
         ></foyer-agent-settings-modal>
         ${this._renderZoomModal()}
       `;
@@ -2226,12 +1589,14 @@ export class AgentPanel extends LitElement {
         <foyer-agent-settings-modal
           ?open=${this._settingsOpen}
           @save=${() => { this._settingsOpen = false; }}
+          @close=${() => { this._settingsOpen = false; }}
         ></foyer-agent-settings-modal>
         ${this._renderZoomModal()}
       `;
     }
 
-    const fabStyle = `right: ${this._fabRight}px; bottom: ${this._fabBottom}px`;
+    const zSuffix = this._zOverride > 0 ? `; z-index: ${this._zOverride + 1}` : "";
+    const fabStyle = `right: ${this._fabRight}px; bottom: ${this._fabBottom}px${zSuffix}`;
     const fabClasses = [
       "fab",
       this._open ? "open" : "",
@@ -2243,8 +1608,8 @@ export class AgentPanel extends LitElement {
         class=${fabClasses}
         style=${fabStyle}
         @pointerdown=${this._onFabDown}
-        aria-label=${this._open ? "Close agent" : "Open agent"}
-        title=${this._open ? "Close agent" : "Open agent"}
+        aria-label=${this._open ? tr("Close agent") : tr("Open agent")}
+        title=${this._open ? tr("Close agent") : tr("Open agent")}
       >
         ${icon("chat-bubble-left-right", 22)}
       </button>
@@ -2253,6 +1618,7 @@ export class AgentPanel extends LitElement {
       <foyer-agent-settings-modal
         ?open=${this._settingsOpen}
         @save=${() => { this._settingsOpen = false; }}
+        @close=${() => { this._settingsOpen = false; }}
       ></foyer-agent-settings-modal>
       ${this._renderZoomModal()}
     `;
@@ -2267,34 +1633,32 @@ export class AgentPanel extends LitElement {
   _renderSlidePanel() {
     return html`
       <div class="panel" style="position:relative;width:100%;height:100%;border-radius:0;box-shadow:none;border:0"
-           role="dialog" aria-label="Foyer agent">
+           role="dialog" aria-label=${tr("Foyer agent")}>
         <header style="cursor:default">
-          <div class="title">Agent</div>
+          <div class="title">${tr("Agent")}</div>
           <div class="spacer"></div>
-          <button @click=${this._newSession} title="New session">
+          <button @click=${this._newSession} title=${tr("New session")}>
             ${icon("plus", 14)}
           </button>
-          <button @click=${this._openSessions} title="Chat history">
+          <button @click=${this._openSessions} title=${tr("Chat history")}>
             ${icon("clock", 14)}
           </button>
-          <button @click=${() => { this._settingsOpen = true; }} title="Settings">
+          <button @click=${() => { this._settingsOpen = true; }} title=${tr("Settings")}>
             ${icon("cog", 14)}
           </button>
           <button @click=${() => this._tearOutToFloating()}
-                  title="Tear out — return to floating FAB">
+                  title=${tr("Tear out — return to floating FAB")}>
             ${icon("arrow-top-right-on-square", 14)}
           </button>
-          <button @click=${this.closeFromDock} title="Close">
+          <button @click=${this.closeFromDock} title=${tr("Close")}>
             ${icon("x-mark", 14)}
           </button>
         </header>
         <div class="transcript">
           ${this._transcript.length === 0
             ? html`<div class="empty">
-                <strong>Foyer Agent</strong>
-                Ask the agent to move faders, arm tracks, or explain
-                the mix. Configure the LLM endpoint in settings;
-                WebLLM runs locally in this tab.
+                <strong>${tr("Foyer Agent")}</strong>
+                ${tr("Ask the agent to move faders, arm tracks, or explain the mix. Configure the LLM endpoint in settings; WebLLM runs locally in this tab.")}
               </div>`
             : this._transcript.map((m) => this._renderMsg(m))}
         </div>
@@ -2317,24 +1681,24 @@ export class AgentPanel extends LitElement {
     // The resize corner has no meaningful direction in docked mode, so we
     // just omit it — docked width is controlled by the rail.
     return html`
-      <div class="panel" role="dialog" aria-label="Foyer agent" style=${style}>
+      <div class="panel" role="dialog" aria-label=${tr("Foyer agent")} style=${style}>
         <header>
-          <div class="title">Agent</div>
+          <div class="title">${tr("Agent")}</div>
           <div class="spacer"></div>
-          <button @click=${() => { this._settingsOpen = true; }} title="Settings">
+          <button @click=${() => { this._settingsOpen = true; }} title=${tr("Settings")}>
             ${icon("cog", 14)}
           </button>
           <button @click=${() => this._tearOutToFloating()}
-                  title="Undock">
+                  title=${tr("Undock")}>
             ${icon("arrow-top-right-on-square", 14)}
           </button>
-          <button @click=${this.closeFromDock} title="Close">
+          <button @click=${this.closeFromDock} title=${tr("Close")}>
             ${icon("x-mark", 14)}
           </button>
         </header>
         <div class="transcript">
           ${this._transcript.length === 0
-            ? html`<div class="empty">Docked agent — conversation will appear here.</div>`
+            ? html`<div class="empty">${tr("Docked agent — conversation will appear here.")}</div>`
             : this._transcript.map((t) => this._renderMsg(t))}
         </div>
         ${this._renderComposer()}
@@ -2347,36 +1711,38 @@ export class AgentPanel extends LitElement {
     const { style, isTop, isLeft } = this._panelStyle();
     // The resize corner is the one pointing AWAY from the FAB.
     const corner = `${isTop ? "s" : "n"}${isLeft ? "e" : "w"}`;
+    const styleZ = this._zOverride > 0 ? `${style}; z-index: ${this._zOverride}` : style;
     return html`
-      <div class="panel" role="dialog" aria-label="Foyer agent" style=${style}>
+      <div class="panel" role="dialog" aria-label=${tr("Foyer agent")} style=${styleZ}
+           @pointerdown=${() => this._raise()}>
         <div class="resize ${corner}" @pointerdown=${(e) => this._onResizeDown(e, corner)}></div>
         <header @pointerdown=${this._onPanelHeaderDown}>
-          <div class="title">Agent</div>
+          <div class="title">${tr("Agent")}</div>
           <div class="spacer"></div>
           <button @pointerdown=${(e) => e.stopPropagation()}
                   @click=${this._newSession}
-                  title="New session">
+                  title=${tr("New session")}>
             ${icon("plus", 14)}
           </button>
           <button @pointerdown=${(e) => e.stopPropagation()}
                   @click=${this._openSessions}
-                  title="Chat history">
+                  title=${tr("Chat history")}>
             ${icon("clock", 14)}
           </button>
           <button @pointerdown=${(e) => e.stopPropagation()}
                   @click=${() => { this._settingsOpen = true; }}
-                  title="Settings">
+                  title=${tr("Settings")}>
             ${icon("cog", 14)}
           </button>
           <button @pointerdown=${(e) => e.stopPropagation()}
                   @click=${() => { this._open = false; this._persist(); this.requestUpdate(); }}
-                  title="Close">
+                  title=${tr("Close")}>
             ${icon("x-mark", 14)}
           </button>
         </header>
         <div class="transcript">
           ${this._transcript.length === 0
-            ? html`<div class="welcome"><strong>Foyer Agent</strong>Ask the agent to move faders, arm tracks, or explain the mix. Configure the LLM endpoint in settings; WebLLM runs locally in this tab.</div>`
+            ? html`<div class="welcome"><strong>${tr("Foyer Agent")}</strong>${tr("Ask the agent to move faders, arm tracks, or explain the mix. Configure the LLM endpoint in settings; WebLLM runs locally in this tab.")}</div>`
             : this._transcript.map((m) => this._renderMsg(m))}
         </div>
         <div class="input-area ${this._dropHover ? "drop-hover" : ""}"
@@ -2385,7 +1751,7 @@ export class AgentPanel extends LitElement {
              @drop=${this._onComposerDrop}>
           ${this._renderAttachments()}
           <textarea
-            placeholder="Ask the agent…"
+            placeholder=${tr("Ask the agent…")}
             style=${`height: ${this._composerHeight}px`}
             .value=${this._input}
             @input=${(e) => { this._input = e.target.value; }}
@@ -2394,7 +1760,7 @@ export class AgentPanel extends LitElement {
             @mouseup=${this._onComposerResize}
             @blur=${this._onComposerResize}
           ></textarea>
-          <button @click=${this._send} ?disabled=${!this._input.trim() && this._attachments.length === 0} title="Send">
+          <button @click=${this._send} ?disabled=${!this._input.trim() && this._attachments.length === 0} title=${tr("Send")}>
             <svg viewBox="0 0 24 24"><path d="M4 12l16-8-8 16-2-7-6-1z"/></svg>
           </button>
         </div>

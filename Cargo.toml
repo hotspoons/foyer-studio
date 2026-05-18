@@ -15,6 +15,7 @@ members = [
     "crates/foyer-cli",
     "crates/foyer-desktop",
     "crates/foyer-config",
+    "crates/foyer-i18n",
     "crates/foyer-snapshot",
 ]
 
@@ -49,6 +50,7 @@ foyer-server        = { path = "crates/foyer-server" }
 foyer-cli           = { path = "crates/foyer-cli" }
 foyer-desktop       = { path = "crates/foyer-desktop" }
 foyer-config        = { path = "crates/foyer-config" }
+foyer-i18n          = { path = "crates/foyer-i18n" }
 foyer-snapshot      = { path = "crates/foyer-snapshot" }
 
 # serde stack

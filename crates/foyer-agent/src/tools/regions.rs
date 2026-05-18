@@ -17,8 +17,17 @@ pub struct RegionsTool;
 #[serde(tag = "subcommand", rename_all = "snake_case")]
 enum Op {
     List {
+        /// Single-track filter. Omit to enumerate regions on EVERY
+        /// track in one call (preferred when surveying — Rich's
+        /// transcript showed an agent firing 8 sequential
+        /// `regions.list { track_id }` calls instead of one
+        /// `regions.list` with no filter).
         #[serde(default)]
         track_id: Option<String>,
+        /// Multi-track filter. Cheaper than calling `list` once per
+        /// id when you only want a subset.
+        #[serde(default)]
+        track_ids: Option<Vec<String>>,
     },
     /// Spawn a new region. `kind` is `"audio"` or `"midi"`; audio
     /// regions also need `source_path` (an existing pool entry) — see
@@ -101,7 +110,9 @@ impl Tool for RegionsTool {
 
     fn description(&self) -> &'static str {
         "Inspect AND edit regions. Subcommands: \
-         list(track_id?), create(track_id, at_samples, length_samples?, kind, name?, source_path?), \
+         list(track_id?, track_ids?) — omit both for ALL tracks (single round-trip — \
+         prefer this when surveying); pass `track_ids` for a subset, \
+         create(track_id, at_samples, length_samples?, kind, name?, source_path?), \
          delete(region_id), move(region_id, start_samples, target_track_id?), \
          trim(region_id, length_samples, source_offset_samples?), \
          set_fade(region_id, which='in'|'out', samples, shape?), \
@@ -120,6 +131,7 @@ impl Tool for RegionsTool {
                     "reverse", "set_gain", "split", "duplicate"
                 ]},
                 "track_id": { "type": "string" },
+                "track_ids": { "type": "array", "items": { "type": "string" } },
                 "region_id": { "type": "string" },
                 "at_samples": { "type": "integer", "minimum": 0 },
                 "length_samples": { "type": "integer", "minimum": 0 },
@@ -154,7 +166,10 @@ impl Tool for RegionsTool {
             _ => ctx.backend_with_loaded_session().await?,
         };
         match op {
-            Op::List { track_id } => {
+            Op::List {
+                track_id,
+                track_ids,
+            } => {
                 let snap = backend
                     .snapshot()
                     .await
@@ -166,13 +181,25 @@ impl Tool for RegionsTool {
                             continue;
                         }
                     }
+                    if let Some(ref ids) = track_ids {
+                        if !ids.iter().any(|x| x == t.id.as_str()) {
+                            continue;
+                        }
+                    }
                     let (_meta, regions) = backend
                         .list_regions(t.id.clone())
                         .await
                         .map_err(|e| ToolError::Execution(e.to_string()))?;
                     for r in regions {
+                        // Include `track_name` alongside `track_id` so the
+                        // model can group regions by track without having
+                        // to cross-reference the tracks.list output by
+                        // ID. Observed in the Kimi e2e drive: the agent
+                        // got confused trying to match opaque numeric IDs
+                        // and reported a phantom region/track swap.
                         all.push(json!({
                             "track_id": t.id.as_str(),
+                            "track_name": t.name,
                             "id": r.id.as_str(),
                             "name": r.name,
                             "start_samples": r.start_samples,

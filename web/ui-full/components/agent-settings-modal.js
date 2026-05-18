@@ -481,7 +481,7 @@ export class AgentSettingsModal extends LitElement {
       <div class="modal" @click=${(e) => e.stopPropagation()}>
         <div class="modal-header">
           <h2 class="modal-title">Agent Settings</h2>
-          <button class="close" @click=${() => { this.open = false; }} title="Close">
+          <button class="close" @click=${() => { this.open = false; this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true })); }} title="Close">
             ${icon("x-mark", 14)}
           </button>
         </div>
@@ -497,7 +497,7 @@ export class AgentSettingsModal extends LitElement {
                                        this._renderAgent()}
         </div>
         <div class="modal-actions">
-          <button class="btn" @click=${() => { this.open = false; }}>Cancel</button>
+          <button class="btn" @click=${() => { this.open = false; this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true })); }}>Cancel</button>
           <button class="btn primary" @click=${this._save}>Save</button>
         </div>
       </div>
@@ -708,7 +708,10 @@ export class AgentSettingsModal extends LitElement {
 
   firstUpdated() {
     this.addEventListener("click", (e) => {
-      if (e.target === this) this.open = false;
+      if (e.target === this) {
+        this.open = false;
+        this.dispatchEvent(new CustomEvent("close", { bubbles: true, composed: true }));
+      }
     });
   }
 }

@@ -383,7 +383,15 @@ fn scrub_xml_bytes(input: &[u8]) -> Result<ScrubXmlOk, ScrubXmlError> {
                 Event::End(_) => {
                     q.depth -= 1;
                     if q.depth == 0 {
-                        let q = quarantine.take().unwrap();
+                        // Loop invariant: we entered the quarantine
+                        // branch only AFTER `quarantine` was set to
+                        // Some(_) on the matching Start event, and the
+                        // outer scope never replaces it before depth
+                        // returns to 0. take() therefore must yield
+                        // Some — the unwrap encodes that invariant.
+                        let q = quarantine
+                            .take()
+                            .expect("quarantine state must be Some at depth-zero end");
                         emit_quarantine_comment(&mut writer, &q.tag, &q.sidecar.into_inner())?;
                         scripts_removed += 1;
                     }

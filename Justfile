@@ -395,6 +395,29 @@ test:
 e2e:
     ./scripts/dev/shim.sh e2e
 
+# Smoke-check the /v1 OpenAI-compat endpoint against a running foyer
+# (default 127.0.0.1:3838). Verifies /v1/models advertises foyer-agent,
+# non-streaming completion uses a tool, and streaming emits [DONE].
+# Set FOYER_BASE=http://other-host:3838 to target a different host.
+agent-v1-smoke:
+    python3 ./scripts/dev/agent-v1-smoke.py
+
+# Deep multi-turn drive of the /v1 endpoint — runs an 8-turn music-making
+# workflow that exercises session lifecycle (new/close/reopen), heavy
+# visualization-tool use (compaction stress), and the drum-vs-piano
+# regression (drums must use GM drum MIDI, not piano-range notes).
+# Takes 5–15 minutes against a working LLM upstream. Set FOYER_BASE /
+# FOYER_SESSION to override defaults.
+agent-v1-e2e:
+    python3 ./scripts/dev/agent-v1-e2e.py
+
+# Hardware I/O smoke test over MCP: enumerate engine ports, route a track
+# input, arm record. No LLM in the loop — direct tools/call. Works against
+# stub (synthetic ports) or Ardour (real JACK ports). Set SESSION=… to
+# pick the project session.open should target.
+agent-io-record-arm:
+    python3 ./scripts/dev/agent-io-record-arm.py
+
 # Run the Playwright UI smoke suite. By default assumes a server is
 # already on 127.0.0.1:3838 — quick to iterate when you're already
 # running `just run`. Pass `--auto-serve` (or set FOYER_AUTO_SERVE=1)
@@ -480,6 +503,15 @@ verify: fmt-check clippy test test-ui-ci
 #   just ui-probe click 'foyer-main-menu button'
 ui-probe *args='':
     ./scripts/dev/ui-probe.sh {{args}}
+
+# Walk every t() / tn() / tr!() / tn!() / loc!() call site, harvest
+# the source-language keys, and write them to
+# `web/locales/_template.json`. Per-locale catalogs (`es.json`, …)
+# are checked against this template; missing keys + orphaned keys
+# are reported but never auto-deleted. Run after wrapping new
+# strings to surface them to translators.
+i18n-extract:
+    ./scripts/dev/i18n-extract.sh
 
 config-reset:
     #!/usr/bin/env bash

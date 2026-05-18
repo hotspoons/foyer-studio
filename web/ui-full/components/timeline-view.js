@@ -17,15 +17,24 @@
 // All sample-math uses `sample_rate` from the TimelineMeta payload so
 // different sessions with different rates render correctly.
 
-import { LitElement, html, css } from "lit";
+import { LitElement, html, css, svg } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { WaveformCache } from "foyer-ui-core/layout/waveform-cache.js";
 import "foyer-ui-core/viz/waveform-gl.js";
 import "./midi-strip.js";
 import "./automation-lane.js";
+// `t` is shadowed all over this file as the per-track lambda param —
+// import the translator under `tr` to avoid the collision.
+import { t as tr, onLocaleChange } from "/core/i18n.js";
 import "foyer-ui-core/viz/viz-picker.js";
 import { getVizPref, getVizPrefs, setVizPref } from "foyer-ui-core/viz/viz-settings.js";
-import { scrollbarStyles } from "foyer-ui-core/shared-styles.js";
+import { resolveWheel, zoomFactorFromWheel } from "foyer-core/keymap/index.js";
+import {
+  timelineStyles,
+  RULER_HEIGHT,
+  HEAD_WIDTH,
+  EDGE_GRAB,
+} from "./timeline-view.styles.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { toast } from "foyer-ui-core/widgets/toast.js";
 import { promptText } from "foyer-ui-core/widgets/prompt-modal.js";
@@ -35,9 +44,6 @@ import { sessionScopedKey } from "foyer-core/session-scope.js";
 const LANE_HEIGHT_DEFAULT = 52;
 const LANE_HEIGHT_MIN = 28;
 const LANE_HEIGHT_MAX = 240;
-const RULER_HEIGHT = 26;
-const HEAD_WIDTH = 140;
-const EDGE_GRAB = 6;
 // Sample-level detail at extreme zoom requires finer waveform tiers; see
 // WaveformCache / waveform-gl for decoding resolution.
 
@@ -101,885 +107,17 @@ export class TimelineView extends LitElement {
      *  "events on track X over time" presentation. `null` = no
      *  overlay (default). */
     _eventHeatmapTrackId: { state: true, type: String },
+    /** Live mirror of `.scroll.scrollLeft` and `.scroll.clientWidth`
+     *  for the overview-strip's viewport rectangle. Updated from a
+     *  `scroll` listener + a one-shot read in `firstUpdated`. */
+    _scrollX: { state: true, type: Number },
+    _scrollViewW: { state: true, type: Number },
+    /** In-flight strip height during a top-edge resize. Persisted
+     *  to viz prefs on drag end (overviewStripHeight). */
+    _overviewHeight: { state: true, type: Number },
   };
 
-  static styles = css`
-    ${scrollbarStyles}
-    :host { display: flex; flex-direction: column; flex: 1; overflow: hidden; background: var(--color-surface); }
-    .toolbar {
-      display: flex; align-items: center; gap: 8px;
-      padding: 6px 14px;
-      background: var(--color-surface);
-      border-bottom: 1px solid var(--color-border);
-      color: var(--color-text-muted);
-      font-size: 11px;
-      flex-wrap: wrap;
-      min-width: 0;
-    }
-    /* Toolbar chips — match tb-menu summaries + viz-picker (same padding/weight). */
-    .toolbar button,
-    .toolbar select {
-      font: inherit; font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.05em;
-      color: var(--color-text-muted);
-      background: var(--color-surface);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-sm);
-      padding: 4px 8px;
-      cursor: pointer;
-      display: inline-flex; align-items: center;
-      gap: 4px;
-      min-height: 22px;
-      box-sizing: border-box;
-      transition: color 0.1s ease, border-color 0.1s ease;
-    }
-    .zoom-toolbar {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      flex: 0 0 auto;
-    }
-    .zoom-toolbar .zoom-label {
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      color: var(--color-text-muted);
-    }
-    .toolbar input.zoom-range {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 120px;
-      height: 6px;
-      border-radius: var(--radius-sm);
-      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
-      cursor: pointer;
-    }
-    .toolbar input.zoom-range:focus-visible {
-      outline: 2px solid color-mix(in oklab, var(--color-accent) 50%, transparent);
-      outline-offset: 2px;
-    }
-    .toolbar input.zoom-range::-webkit-slider-runnable-track {
-      height: 6px;
-      border-radius: var(--radius-sm);
-      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
-    }
-    .toolbar input.zoom-range::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 14px;
-      height: 14px;
-      margin-top: -4px;
-      border-radius: 50%;
-      background: var(--color-accent);
-      border: 2px solid var(--color-surface-elevated);
-      box-shadow: 0 1px 3px rgba(0,0,0,0.35);
-    }
-    .toolbar input.zoom-range::-moz-range-track {
-      height: 6px;
-      border-radius: var(--radius-sm);
-      background: color-mix(in oklab, var(--color-border) 70%, var(--color-surface));
-    }
-    .toolbar input.zoom-range::-moz-range-thumb {
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      background: var(--color-accent);
-      border: 2px solid var(--color-surface-elevated);
-      box-shadow: 0 1px 3px rgba(0,0,0,0.35);
-    }
-    .toolbar button:hover,
-    .toolbar select:hover { color: var(--color-text); border-color: var(--color-accent); }
-    .toolbar select { padding-right: 4px; }
-    .toolbar label {
-      display: inline-flex; align-items: center; gap: 4px;
-      font-size: 10px; color: var(--color-text-muted);
-    }
-    .toolbar details.tb-menu {
-      position: relative;
-      border: none;
-      background: transparent;
-    }
-    .toolbar details.tb-menu > summary {
-      list-style: none;
-      cursor: pointer;
-      font-family: var(--font-sans);
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.05em;
-      padding: 4px 8px;
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--color-border);
-      background: var(--color-surface);
-      color: var(--color-text-muted);
-      user-select: none;
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      min-height: 22px;
-      box-sizing: border-box;
-      transition: color 0.1s ease, border-color 0.1s ease;
-    }
-    .toolbar details.tb-menu > summary:hover {
-      color: var(--color-text);
-      border-color: var(--color-accent);
-    }
-    .toolbar details.tb-menu > summary::-webkit-details-marker { display: none; }
-    .toolbar details.tb-menu > summary::after {
-      content: "▾";
-      font-size: 9px;
-      opacity: 0.75;
-      margin-left: 2px;
-      font-weight: 400;
-      letter-spacing: normal;
-    }
-    .toolbar details.tb-menu[open] > summary {
-      color: var(--color-text);
-      border-color: var(--color-accent);
-    }
-    .toolbar .tb-panel {
-      position: absolute;
-      top: calc(100% + 4px);
-      right: 0;
-      z-index: 40;
-      min-width: 200px;
-      max-width: 280px;
-      padding: 8px;
-      background: var(--color-surface-elevated);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-md);
-      box-shadow: var(--shadow-panel);
-      font-size: 10px;
-      color: var(--color-text);
-    }
-    .toolbar .tb-panel .tb-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin: 4px 0;
-    }
-    .toolbar .tb-panel .tb-row input { accent-color: var(--color-accent); }
-    .toolbar .tb-panel .tb-hint {
-      margin-top: 8px;
-      padding-top: 6px;
-      border-top: 1px solid var(--color-border);
-      font-size: 9px;
-      color: var(--color-text-muted);
-      line-height: 1.35;
-    }
-    .toolbar .tb-panel button.mi {
-      display: block;
-      width: 100%;
-      text-align: left;
-      margin: 2px 0;
-      padding: 4px 6px;
-      font-size: 10px;
-      border-radius: var(--radius-sm);
-      border: 1px solid transparent;
-      background: transparent;
-      color: var(--color-text);
-      cursor: pointer;
-    }
-    .toolbar .tb-panel button.mi:hover {
-      background: color-mix(in oklab, var(--color-accent) 14%, transparent);
-    }
-    .toolbar .tb-panel button.mi:disabled {
-      opacity: 0.45;
-      cursor: default;
-    }
-    /* Force border-box throughout this component. Tailwind sets it
-       globally on the document, but Lit shadow DOM doesn't inherit
-       that — so width:140px + padding + border was producing a
-       163px-wide lane-head while regions positioned at 140px got
-       covered by its opaque background. */
-    :host, *, *::before, *::after { box-sizing: border-box; }
-    .scroll { flex: 1; overflow: auto; }
-    .grid { position: relative; min-width: 100%; }
-    .ruler {
-      position: sticky; top: 0; z-index: 3;
-      height: ${RULER_HEIGHT}px;
-      background: var(--color-surface-elevated);
-      border-bottom: 1px solid var(--color-border);
-      cursor: crosshair;
-    }
-    .ruler .tick {
-      position: absolute;
-      top: 0; bottom: 0;
-      color: var(--color-text-muted);
-      font-family: var(--font-mono);
-      font-size: 10px;
-      pointer-events: none;
-    }
-    .ruler .tick.major { border-left: 1px solid var(--color-border); padding-left: 4px; }
-    .ruler .tick.minor { border-left: 1px solid color-mix(in oklab, var(--color-border) 50%, transparent); }
-    .lane-gridlines {
-      position: absolute;
-      left: ${HEAD_WIDTH}px;
-      top: ${RULER_HEIGHT}px;
-      bottom: 0;
-      pointer-events: none;
-    }
-    .lane-gridlines .gl {
-      position: absolute; top: 0; bottom: 0;
-      /* --foyer-time-grid is set on the host from viz prefs (Viz
-       * menu → Timeline grid colors). Falls back to the prior
-       * border-mix if unset. */
-      border-left: 1px solid var(--foyer-time-grid, color-mix(in oklab, var(--color-border) 30%, transparent));
-    }
-    .lane-gridlines .gl.major {
-      border-left-color: var(--foyer-time-grid-major, color-mix(in oklab, var(--color-border) 60%, transparent));
-    }
-    .lane {
-      position: relative;
-      border-bottom: 1px solid var(--color-border);
-    }
-    .lane-resize {
-      position: absolute;
-      left: 0; right: 0;
-      bottom: -3px;
-      height: 6px;
-      cursor: ns-resize;
-      z-index: 5;
-    }
-    .lane-resize:hover {
-      background: color-mix(in oklab, var(--color-accent) 40%, transparent);
-    }
-    .lane-head {
-      /* z-index 10 keeps the sticky lane-head above the crossfade
-       * overlay (z:5), crossfade badge (z:6), and automation
-       * overlay (z:6). Otherwise a wide crossfade badge or a long
-       * automation polyline paints into the lane-head's column at
-       * the scroll origin. */
-      position: sticky; left: 0; z-index: 10;
-      width: ${HEAD_WIDTH}px; height: 100%;
-      display: flex; flex-direction: column; justify-content: center;
-      padding: 0 10px;
-      background: var(--color-surface-elevated);
-      border-right: 1px solid var(--color-border);
-      border-left: 3px solid transparent;
-      gap: 3px;
-      cursor: pointer;
-      transition: background 0.1s ease, border-left-color 0.1s ease;
-    }
-    .lane-head:hover {
-      background: color-mix(in oklab, var(--color-accent) 6%, var(--color-surface-elevated));
-    }
-    .lane.selected .lane-head {
-      background: color-mix(in oklab, var(--color-accent) 14%, var(--color-surface-elevated));
-      border-left-color: var(--color-accent);
-    }
-    .lane-name { font-size: 11px; font-weight: 600; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .lane-kind {
-      font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
-      color: var(--color-text-muted);
-      display: inline-flex; align-items: center; gap: 5px;
-    }
-    .seq-chip {
-      font-size: 8px;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      padding: 1px 4px;
-      border-radius: var(--radius-sm);
-      background: color-mix(in oklab, var(--color-accent) 24%, transparent);
-      color: var(--color-accent);
-    }
-    .lane-controls {
-      display: flex;
-      gap: 3px;
-      margin-top: 2px;
-    }
-    .lane-ctl-btn {
-      flex: 1;
-      font-family: var(--font-sans);
-      font-size: 9px;
-      font-weight: 700;
-      padding: 2px 0;
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--color-border);
-      background: var(--color-surface);
-      color: var(--color-text-muted);
-      cursor: pointer;
-      user-select: none;
-      transition: all 0.1s ease;
-      text-align: center;
-    }
-    .lane-ctl-btn:hover {
-      border-color: var(--color-accent);
-      color: var(--color-text);
-    }
-    .lane-ctl-btn.on.mute {
-      background: color-mix(in oklab, var(--color-warning) 35%, transparent);
-      border-color: var(--color-warning);
-      color: var(--color-warning);
-    }
-    .lane-ctl-btn.on.solo {
-      background: color-mix(in oklab, #dece5c 35%, transparent);
-      border-color: #dece5c;
-      color: #dece5c;
-    }
-    .lane-ctl-btn.on.rec {
-      background: color-mix(in oklab, var(--color-danger, #d04040) 35%, transparent);
-      border-color: var(--color-danger, #d04040);
-      color: var(--color-danger, #d04040);
-    }
-    .lane-ctl-btn.on.auto {
-      background: color-mix(in oklab, var(--color-accent-2, #22d3ee) 35%, transparent);
-      border-color: var(--color-accent-2, #22d3ee);
-      color: var(--color-accent-2, #22d3ee);
-    }
-    /* Slot-keeper for tracks that don't have a record-arm or
-     * automation control (master, busses, etc.). Same flex weight as
-     * a real button but invisible — keeps M/S/●/A aligned across
-     * every track in the lane head. Non-interactive. */
-    .lane-ctl-btn.placeholder {
-      background: transparent;
-      border-color: transparent;
-      pointer-events: none;
-      cursor: default;
-    }
-    .lane-ctl-btn.placeholder:hover { border-color: transparent; }
-    /* The record-arm button uses "●" as its label to match the
-     * mixer. Bump the glyph size so it reads visually similar to
-     * "M" / "S" / "A" at the same 9px font size. */
-    .lane-ctl-btn.rec { font-size: 11px; line-height: 1; }
-    .automation-stack {
-      position: absolute;
-      right: 0;
-      bottom: 0;
-      display: flex;
-      flex-direction: column;
-      pointer-events: auto;
-      z-index: 1;
-    }
-    .automation-stack foyer-automation-lane { width: 100%; }
-    .region {
-      position: absolute;
-      top: 4px; bottom: 4px;
-      border-radius: 4px;
-      background: color-mix(in oklab, var(--color-accent) 28%, var(--color-surface-elevated) 72%);
-      border: 1px solid color-mix(in oklab, var(--color-accent-2) 60%, transparent);
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-      overflow: hidden;
-      cursor: grab;
-      transition: filter 0.1s ease;
-      /* Force a new stacking context per region. Without this, the
-       * z-indexed handles + gain strip live in the LANE's stacking
-       * context and pop through the body of a later-DOM neighboring
-       * region in the overlap zone — producing the visual flicker
-       * Rich saw with overlapping clips. Isolated, each region's
-       * handles are confined to that region's z-space, so the
-       * front region's body cleanly covers the back region's
-       * controls in the overlap. */
-      isolation: isolate;
-    }
-    .region.dragging { cursor: grabbing; filter: brightness(1.15); }
-    /* Visible hint while the cursor is over a foreign lane during a
-     * move drag — the region will be relocated to that lane on
-     * pointer-up. A dashed accent outline + soft glow reads as
-     * "this is the drop target" without needing a real DOM reparent
-     * during the drag (we keep the lozenge in its source lane and
-     * commit the move on release). */
-    .region.cross-track-pending {
-      outline: 2px dashed var(--color-accent-2, #22d3ee);
-      outline-offset: 2px;
-      box-shadow: 0 0 14px color-mix(in oklab, var(--color-accent-2, #22d3ee) 60%, transparent);
-    }
-    /* Drop-target ghost shown on the destination lane while a
-     * cross-track region drag is in flight. Sized to match the
-     * source region; positioned at the live drag offset so the
-     * user can sight the landing spot before releasing. Pure
-     * outline (no fill) so the meter/grid behind stays readable. */
-    .cross-track-ghost {
-      position: absolute;
-      top: 4px;
-      bottom: 4px;
-      border: 2px dashed var(--color-accent-2, #22d3ee);
-      border-radius: 4px;
-      background: color-mix(in oklab, var(--color-accent-2, #22d3ee) 12%, transparent);
-      box-shadow: 0 0 14px color-mix(in oklab, var(--color-accent-2, #22d3ee) 50%, transparent);
-      pointer-events: none;
-      z-index: 4;
-    }
-    /* Lane drag-over feedback for an audio-pool drop. Soft accent
-     * tint over the whole lane so the user knows where the dropped
-     * source will land before releasing. */
-    .lane.pool-drop-target {
-      background: color-mix(in oklab, var(--color-accent-2, #22d3ee) 12%, transparent);
-      box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--color-accent-2, #22d3ee) 50%, transparent);
-    }
-    .cross-track-ghost .ghost-label {
-      position: absolute;
-      top: 4px;
-      left: 6px;
-      font-size: 10px;
-      font-weight: 600;
-      color: var(--color-text);
-      background: rgba(0, 0, 0, 0.55);
-      padding: 1px 5px;
-      border-radius: 3px;
-      pointer-events: none;
-      white-space: nowrap;
-    }
-    .region:hover { filter: brightness(1.08); }
-    .region.selected {
-      border-color: color-mix(in oklab, var(--color-accent-3) 75%, #fff 25%);
-      box-shadow:
-        0 0 0 1px color-mix(in oklab, var(--color-accent-3) 45%, transparent),
-        0 1px 3px rgba(0, 0, 0, 0.35);
-      filter: brightness(1.08);
-    }
-    /* Automation overlay — color-coded polylines drawn over the
-     * regions, one per active automation lane on the track. Sits
-     * above region bodies (z-index above .region's stacking context
-     * since .region uses isolation: isolate, which means the SVG
-     * sibling at z-index 6 stays on top of every region). Pointer
-     * events are off by default; individual path children opt in
-     * via pointer-events:stroke so clicking the line opens the
-     * modal but the user can still click regions through the gaps. */
-    .automation-overlay {
-      position: absolute;
-      pointer-events: none;
-      z-index: 6;
-      overflow: visible;
-    }
-    /* Group-membership indicator: a 3 px tinted bar at the very top
-     * of the lozenge, color derived from the group_id so every
-     * sibling reads as one unit at a glance. Sits BEHIND the gain
-     * strip (which is also at top:0) — gain strip's left:12px /
-     * right:12px gap means a sliver of the group bar peeks out at
-     * each corner, which is enough visual signal without arguing
-     * with the gain UI. */
-    .region .group-bar {
-      position: absolute;
-      top: 0; left: 0; right: 0;
-      height: 3px;
-      z-index: 3;
-      pointer-events: none;
-      border-radius: 3px 3px 0 0;
-    }
-    /* Resize-preview placeholder: while a left-edge resize-drag is
-     * extending the region beyond the source bounds we have peaks
-     * for, the new (out-of-bounds) span paints as a striped
-     * neutral-grey scrim. Mirrors the recording-placeholder pattern
-     * but desaturated since this isn't a recording state — it's a
-     * "no decoded data here yet" hint. */
-    .region .resize-preview-placeholder {
-      position: absolute;
-      top: 4px; bottom: 4px;
-      background: repeating-linear-gradient(
-        45deg,
-        rgba(255, 255, 255, 0.04),
-        rgba(255, 255, 255, 0.04) 6px,
-        rgba(255, 255, 255, 0.10) 6px,
-        rgba(255, 255, 255, 0.10) 12px
-      );
-      border-left: 1px dashed rgba(255, 255, 255, 0.35);
-      pointer-events: none;
-      z-index: 1;
-    }
-
-    /* Cut-pending slice overlay: a translucent scrim positioned over
-     * the slice the user has queued for delete-on-paste. For whole-
-     * region cuts the overlay spans 0..100% and looks like the legacy
-     * dim. For time-range slice cuts the overlay covers ONLY the
-     * carved-out portion so the user can see exactly what's leaving
-     * vs. what's staying behind. The dashed border is on the overlay
-     * (not the region) so the lozenge boundary still reads cleanly. */
-    .region .cut-slice-overlay {
-      position: absolute;
-      top: 0; bottom: 0;
-      pointer-events: none;
-      background: rgba(0, 0, 0, 0.55);
-      border: 1px dashed rgba(255, 255, 255, 0.5);
-      box-sizing: border-box;
-      z-index: 2;
-    }
-    .region .name {
-      position: absolute;
-      top: 2px; left: 6px; right: 6px;
-      /* Clip + ellipsize so the region name never spills past the
-       * region container. Without max-width and overflow controls,
-       * a long take name on a narrow region renders past the right
-       * edge — and with absolutely-positioned viz children, that
-       * spillover was visually poking over adjacent track header
-       * strips. */
-      max-width: calc(100% - 12px);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      font-family: var(--font-sans);
-      font-size: 10px;
-      font-weight: 600;
-      color: #fff;
-      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
-      pointer-events: none;
-      z-index: 2;
-    }
-    .region canvas {
-      position: absolute;
-      left: 0; top: 0; width: 100%; height: 100%;
-      pointer-events: none;
-    }
-    .region .viz {
-      position: absolute;
-      left: 0; top: 0; right: 0; bottom: 0;
-      pointer-events: none;
-    }
-    .region .edge {
-      position: absolute;
-      top: 0; bottom: 0;
-      width: ${EDGE_GRAB}px;
-      cursor: ew-resize;
-      z-index: 3;
-    }
-    .region .edge.left  { left: 0; }
-    .region .edge.right { right: 0; }
-
-    /* Fade SVG overlay — covers the lozenge so the curve sits over the
-     * waveform. The path itself is what shows the shape; the fill below
-     * dims the still-attenuated portion so the user reads the fade
-     * envelope at a glance even without the waveform helping. */
-    .region .fade-svg {
-      position: absolute;
-      top: 0; left: 0; right: 0; bottom: 0;
-      width: 100%;
-      height: 100%;
-      pointer-events: none;
-      z-index: 2;
-      overflow: visible;
-    }
-    .region .fade-svg .fade-fill {
-      fill: rgba(0, 0, 0, 0.42);
-      stroke: none;
-    }
-    .region .fade-svg .fade-line {
-      fill: none;
-      stroke: rgba(255, 255, 255, 0.9);
-      stroke-width: 1.25;
-      vector-effect: non-scaling-stroke;
-    }
-    /* Crossfade curves render at the lane level (between regions on
-     * the same track) using their own SVG layer. The overlap zone is
-     * the only place the user can confirm a crossfade is doing
-     * anything, so the visual has to read at a glance even when both
-     * regions are painting opaque waveforms underneath it. Strategy:
-     *   - bright stroked X-curves with a contrasting dark halo
-     *   - diagonal-hatch fill on the overlap rectangle so the band
-     *     itself is recognizable as a crossfade zone, separate from
-     *     either region's body
-     *   - hatch dims when fades fully cover the overlap (clean
-     *     crossfade); brightens when fades don't cover (call-to-
-     *     action: snap fades to overlap). */
-    .crossfade-svg {
-      position: absolute;
-      pointer-events: none;
-      z-index: 5;
-      overflow: visible;
-    }
-    .crossfade-svg .xfade-line-out {
-      fill: none;
-      stroke: #ffd166;
-      stroke-width: 2;
-      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7));
-      vector-effect: non-scaling-stroke;
-    }
-    .crossfade-svg .xfade-line-in {
-      fill: none;
-      stroke: #78dbff;
-      stroke-width: 2;
-      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7));
-      vector-effect: non-scaling-stroke;
-    }
-    /* Hash-pattern overlap-zone band — confirms the user that
-     * "this region is a crossfade zone" even when both regions paint
-     * identical-looking waveforms underneath. Defined via inline SVG
-     * pattern in the renderer (see _renderCrossfadeOverlaysForTrack). */
-    .crossfade-svg .xfade-zone {
-      stroke: rgba(255, 255, 255, 0.32);
-      stroke-width: 1;
-    }
-    .crossfade-svg .xfade-zone.incomplete {
-      stroke: rgba(255, 209, 102, 0.7);
-      stroke-dasharray: 4 3;
-    }
-    /* Small badge at the top of the overlap zone naming both regions
-     * + showing the overlap length. Plain DOM, lives in a sibling
-     * absolutely-positioned div so it can pick up text rendering. */
-    .crossfade-badge {
-      position: absolute;
-      top: 0;
-      transform: translateY(-100%);
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-family: var(--font-sans);
-      font-size: 9px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      background: rgba(0, 0, 0, 0.72);
-      color: #fff;
-      pointer-events: none;
-      z-index: 6;
-      white-space: nowrap;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-    }
-    .crossfade-badge.incomplete {
-      background: rgba(120, 70, 0, 0.85);
-      color: #ffd166;
-    }
-
-    /* Fade-length grab handle — a small triangle anchored to the
-     * inside endpoint of the fade. When no fade exists the handle
-     * sits at the lozenge corner; drag inward to extend. Hold Alt
-     * to rotate the curve shape; Shift+click clears the fade.
-     *
-     * Visibility is INTENTIONALLY stable (no hover transition):
-     * overlapping regions used to flip a :hover rule on/off as the
-     * cursor crossed the boundary, popping each region's handles in
-     * and out and producing a strobe. A constant baseline opacity
-     * makes the handles always discoverable without requiring the
-     * cursor to first claim hover ownership of the right region. */
-    .region .fade-handle {
-      position: absolute;
-      top: 0;
-      width: 10px;
-      height: 14px;
-      cursor: ew-resize;
-      z-index: 5;
-      opacity: 0.85;
-    }
-    .region .fade-handle.dragging,
-    .region .fade-handle.active { opacity: 1; }
-    .region .fade-handle::before {
-      content: "";
-      position: absolute;
-      top: 0;
-      width: 0;
-      height: 0;
-      border-style: solid;
-    }
-    .region .fade-handle.in::before {
-      left: 0;
-      border-width: 14px 10px 0 0;
-      border-color: rgba(255, 255, 255, 0.9) transparent transparent transparent;
-    }
-    .region .fade-handle.out::before {
-      right: 0;
-      border-width: 14px 0 0 10px;
-      border-color: transparent transparent transparent rgba(255, 255, 255, 0.9);
-    }
-    .region .fade-handle.in  { transform: translateX(-2px); }
-    .region .fade-handle.out { transform: translateX(2px); }
-
-    /* Per-region gain strip — a thin bar across the lozenge top
-     * that drags vertically to set gain. Shows the linear-gain dB
-     * label while dragging. Audio-only; MIDI regions don't render
-     * this strip (Ardour's set_scale_amplitude isn't meaningful
-     * for MIDI).
-     *
-     * Always-on baseline (same rationale as .fade-handle above):
-     * hiding the strip behind :hover flickers when two regions
-     * overlap and the cursor oscillates over the boundary. A subtle
-     * resting opacity is enough to advertise it without competing
-     * visually with the waveform underneath. */
-    .region .gain-strip {
-      position: absolute;
-      top: 0; left: 12px; right: 12px;
-      height: 6px;
-      cursor: ns-resize;
-      z-index: 4;
-      background: linear-gradient(180deg,
-        color-mix(in oklab, var(--color-accent-3, #f59e0b) 75%, transparent),
-        color-mix(in oklab, var(--color-accent-3, #f59e0b) 25%, transparent));
-      border-radius: 0 0 3px 3px;
-      opacity: 0.25;
-    }
-    .region .gain-strip.dragging,
-    .region .gain-strip.nonunity { opacity: 0.85; }
-    .region .gain-readout {
-      position: absolute;
-      top: 8px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-family: var(--font-sans);
-      font-size: 9px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      padding: 1px 5px;
-      border-radius: 3px;
-      background: rgba(0, 0, 0, 0.65);
-      color: #fff;
-      pointer-events: none;
-      z-index: 5;
-      white-space: nowrap;
-    }
-    /* Floating label that follows the fade-handle drag, showing the
-     * current fade length and shape so the user has feedback while
-     * they tune the curve. Lives inside the region (not body-level)
-     * so positioning is simple. */
-    .region .fade-readout {
-      position: absolute;
-      top: 18px;
-      font-family: var(--font-sans);
-      font-size: 9px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      padding: 1px 5px;
-      border-radius: 3px;
-      background: rgba(0, 0, 0, 0.65);
-      color: #fff;
-      pointer-events: none;
-      z-index: 6;
-      white-space: nowrap;
-    }
-    .region.stretch-active {
-      outline: 1px dashed color-mix(in oklab, var(--color-accent) 70%, transparent);
-      z-index: 1;
-    }
-    .region.stretch-active::after {
-      content: attr(data-stretch-mode);
-      position: absolute;
-      top: 4px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      padding: 2px 6px;
-      border-radius: 4px;
-      background: color-mix(in oklab, var(--color-accent) 35%, transparent);
-      color: var(--color-text);
-      pointer-events: none;
-      z-index: 4;
-    }
-
-    .playhead {
-      position: absolute;
-      top: 0; bottom: 0;
-      width: 2px;
-      background: linear-gradient(180deg, var(--color-danger), color-mix(in oklab, var(--color-danger) 40%, transparent));
-      z-index: 4;
-      pointer-events: none;
-      box-shadow: 0 0 8px color-mix(in oklab, var(--color-danger) 60%, transparent);
-    }
-    .playhead::before {
-      content: "";
-      position: absolute; top: 0; left: -5px;
-      border: 6px solid transparent;
-      border-top-color: var(--color-danger);
-    }
-
-    /* Recording placeholder - full stack when no track is record-armed */
-    .recording-placeholder {
-      position: absolute;
-      top: ${RULER_HEIGHT}px; bottom: 0;
-      background: color-mix(in oklab, var(--color-danger) 12%, transparent);
-      border-left: 2px solid var(--color-danger);
-      z-index: 2;
-      pointer-events: none;
-      animation: rec-pulse 1s ease-in-out infinite;
-    }
-    /* Per-lane strip while recording into armed tracks */
-    .recording-lane-fill {
-      position: absolute;
-      top: 4px;
-      bottom: 4px;
-      background: color-mix(in oklab, var(--color-danger) 14%, transparent);
-      border-left: 2px solid var(--color-danger);
-      z-index: 1;
-      pointer-events: none;
-      animation: rec-pulse 1s ease-in-out infinite;
-    }
-    @keyframes rec-pulse {
-      0%, 100% { opacity: 0.6; }
-      50% { opacity: 1; }
-    }
-
-    /* Left-click-drag selection range. Drawn in two pieces so the ruler
-     * reads as a bright highlight while the body overlay is just a dim
-     * wash — same pattern as pretty much every DAW's ruler selection. */
-    .selection-body {
-      position: absolute;
-      top: ${RULER_HEIGHT}px;
-      bottom: 0;
-      background: color-mix(in oklab, var(--color-accent) 14%, transparent);
-      border-left: 1px solid color-mix(in oklab, var(--color-accent) 70%, transparent);
-      border-right: 1px solid color-mix(in oklab, var(--color-accent) 70%, transparent);
-      pointer-events: none;
-      z-index: 3;
-    }
-    .selection-ruler {
-      position: absolute;
-      top: 0;
-      height: ${RULER_HEIGHT}px;
-      background: color-mix(in oklab, var(--color-accent) 55%, transparent);
-      border-left: 1px solid var(--color-accent);
-      border-right: 1px solid var(--color-accent);
-      pointer-events: none;
-      z-index: 4;
-    }
-    /* Resize handles for the time-range selection. Visible only on
-     * hover (the band itself stays visually quiet at rest); pointer-
-     * events auto so the cursor flips to ew-resize. Drag mutates
-     * selection.{start,end}Samples and fires a fresh
-     * timeline-selection event on release. (Rich, TODO #51.) */
-    .selection-handle {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      width: 8px;
-      cursor: ew-resize;
-      pointer-events: auto;
-      z-index: 5;
-      background: transparent;
-    }
-    .selection-handle:hover,
-    .selection-handle.dragging {
-      background: color-mix(in oklab, var(--color-accent) 65%, transparent);
-    }
-    .selection-handle.left  { transform: translateX(-4px); }
-    .selection-handle.right { transform: translateX(-4px); }
-    /* Vertical line that follows the mouse pointer across the
-     * timeline, distinct from the playhead so the user can sight a
-     * future seek / region edge without committing. */
-    .cursor-line {
-      position: absolute;
-      top: ${RULER_HEIGHT}px;
-      bottom: 0;
-      width: 1px;
-      background: color-mix(in oklab, var(--color-text-muted) 60%, transparent);
-      pointer-events: none;
-      z-index: 2;
-    }
-    /* BPM-quantized grid lines, drawn over the time-based gridlines.
-     * Beat boundaries are stronger; in-beat subdivisions are lighter. */
-    .quant-line {
-      position: absolute;
-      top: ${RULER_HEIGHT}px;
-      bottom: 0;
-      width: 1px;
-      pointer-events: none;
-      z-index: 1;
-    }
-    .quant-line.bar {
-      /* Bar boundaries are the strongest line. Twice the width of a
-       * beat line so they stand out against the per-beat grid; uses
-       * the same accent color so the user's viz prefs apply. */
-      background: var(--foyer-quant-grid, var(--color-accent-2));
-      width: 2px;
-    }
-    .quant-line.beat {
-      /* --foyer-quant-grid is set from viz prefs as a full rgba() so
-       * the user's chosen alpha is already baked in. Beat lines use
-       * the value as-is; in-beat subdivisions (.sub) drop to 50% of
-       * the user's alpha for a visible hierarchy. */
-      background: var(--foyer-quant-grid, var(--color-accent-2));
-    }
-    .quant-line.sub {
-      background: var(--foyer-quant-grid, var(--color-accent-2));
-      opacity: 0.5;
-    }
-  `;
+  static styles = timelineStyles;
 
   constructor() {
     super();
@@ -1009,6 +147,12 @@ export class TimelineView extends LitElement {
     // Set via `setEventHeatmap(trackId)` from the headless renderer;
     // null in normal interactive use.
     this._eventHeatmapTrackId = null;
+    // Overview strip — live scroll mirror + persisted height.
+    this._scrollX = 0;
+    this._scrollViewW = 1;
+    this._overviewHeight = Number.isFinite(getVizPref("overviewStripHeight"))
+      ? getVizPref("overviewStripHeight")
+      : 90;
     // Viewport back-stack: `zoomToSelection` pushes the prior {zoom,
     // scrollLeft} here so the user can pop back with "Zoom Previous".
     // Bounded so a trigger-happy user can't balloon memory.
@@ -1089,6 +233,16 @@ export class TimelineView extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Keyboard nav lives on the host so the keybinds.js global
+    // handler can gate region-nudge on "is the timeline currently
+    // focused?" via the standard `:focus-within` / `composedPath`
+    // checks instead of guessing from selection state. `tabindex=-1`
+    // would suppress tab-into; 0 keeps it in the natural tab order
+    // so a keyboard-only user can land here without a mouse click.
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
+    this.setAttribute("data-foyer-focus-domain", "timeline");
+    this._onHostKey = (ev) => this._onTimelineKey(ev);
+    this.addEventListener("keydown", this._onHostKey);
     const ws = window.__foyer?.ws;
     if (ws) {
       ws.addEventListener("envelope", this._envelopeHandler);
@@ -1138,6 +292,9 @@ export class TimelineView extends LitElement {
       if (playing && haveAudio) this.requestUpdate();
     };
     this._playheadRaf = requestAnimationFrame(playheadTick);
+    // Re-render on locale change so context-menu labels, tooltips,
+    // and the lane-head chrome flip languages live.
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
 
   _applyGridColors() {
@@ -1180,6 +337,99 @@ export class TimelineView extends LitElement {
     return Math.round(Number(this._playheadSamples) || 0);
   }
 
+  /// Host-level keyboard navigation. Only fires when the timeline (or
+  /// something inside it) actually holds focus — `keybinds.js`'s global
+  /// region-nudge yields to this handler so a left/right press while
+  /// the mixer / agent panel is focused doesn't accidentally move the
+  /// user's regions.
+  ///
+  /// Map (when the timeline is focused):
+  ///   ArrowUp / ArrowDown        — move track selection (channel nav)
+  ///   Shift+Up/Down              — extend selection to that track
+  ///   Enter                      — open the focused track's editor
+  ///   Ctrl/Cmd+Enter             — toggle the focused track in the
+  ///                                multi-selection (additive)
+  ///   ArrowLeft / ArrowRight     — region nudge (delegates to
+  ///                                `nudgeSelectedRegions`); identical
+  ///                                modifier semantics to keybinds.js
+  ///                                so a user who started with the
+  ///                                global binding doesn't relearn it
+  _onTimelineKey(ev) {
+    if (ev.defaultPrevented) return;
+    if (ev.altKey && (ev.key === "ArrowLeft" || ev.key === "ArrowRight"
+                       || ev.key === "ArrowUp" || ev.key === "ArrowDown")) {
+      // Alt+arrow is the tile-focus chord — leave it alone.
+      return;
+    }
+    const tracks = window.__foyer?.store?.state?.session?.tracks || [];
+    const tids = tracks.map((t) => t.id);
+    if (!tids.length) return;
+    const store = window.__foyer?.store;
+    const current = Array.from(store?.state?.selectedTrackIds || []);
+    const anchor = current[current.length - 1] || tids[0];
+    const idx = Math.max(0, tids.indexOf(anchor));
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      const next = ev.key === "ArrowDown"
+        ? Math.min(tids.length - 1, idx + 1)
+        : Math.max(0, idx - 1);
+      if (tids[next] === anchor) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      store?.selectTrack(tids[next], ev.shiftKey ? "extend" : "replace");
+      // Scroll the new selection into view so the user can see what
+      // their arrow just landed on.
+      this._scrollTrackIntoView(tids[next]);
+      return;
+    }
+    if (ev.key === "Enter") {
+      if (!current.length) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.ctrlKey || ev.metaKey) {
+        store?.selectTrack(anchor, "toggle");
+      } else {
+        import("./track-editor-modal.js").then((m) => m.openTrackEditor(anchor));
+      }
+      return;
+    }
+    // ArrowLeft / ArrowRight: region nudge. We re-implement the same
+    // behaviour `keybinds.js` had as a global capture, but scoped to
+    // "timeline is actually focused". Without this any random app
+    // surface (mixer toolbar, agent panel, sessions list) would still
+    // receive ←/→ and nudge regions.
+    if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") {
+      if (!this._selectedRegionIds || !this._selectedRegionIds.size) return;
+      const fine = !!(ev.ctrlKey || ev.metaKey);
+      const beat = !!ev.shiftKey && !fine;
+      const dir = ev.key === "ArrowLeft" ? "left" : "right";
+      if (typeof this.nudgeSelectedRegions === "function"
+          && this.nudgeSelectedRegions(dir, { fine, beat })) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    }
+  }
+
+  /// Scroll the track row for `trackId` into the visible portion of
+  /// the timeline scroller so keyboard navigation doesn't strand the
+  /// user looking at the wrong track. Best-effort — falls back to a
+  /// no-op when the lane element isn't in the DOM yet (e.g. just
+  /// after the track was created and lit hasn't rendered).
+  _scrollTrackIntoView(trackId) {
+    if (!trackId) return;
+    const scroller = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroller) return;
+    const lane = this.renderRoot?.querySelector?.(`[data-track-id="${CSS.escape(trackId)}"]`);
+    if (!lane) return;
+    const laneRect = lane.getBoundingClientRect();
+    const scrollRect = scroller.getBoundingClientRect();
+    if (laneRect.top < scrollRect.top) {
+      scroller.scrollTop -= scrollRect.top - laneRect.top + 8;
+    } else if (laneRect.bottom > scrollRect.bottom) {
+      scroller.scrollTop += laneRect.bottom - scrollRect.bottom + 8;
+    }
+  }
+
   /** Reaper-style: S splits each selected region at `_splitAnchorSamples()`. */
   splitSelectedRegionsAtPlayhead() {
     const ws = window.__foyer?.ws;
@@ -1201,6 +451,8 @@ export class TimelineView extends LitElement {
   }
 
   disconnectedCallback() {
+    if (this._onHostKey) this.removeEventListener("keydown", this._onHostKey);
+    if (this._i18nDispose) { this._i18nDispose(); this._i18nDispose = null; }
     if (this._onVizPrefsChanged) window.removeEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     window.__foyer?.ws?.removeEventListener("transport_seek_request", this._seekHandler);
@@ -1418,51 +670,51 @@ export class TimelineView extends LitElement {
     // the MIDI-specific block.
     if (track.kind === "midi") {
       items.push({
-        label: "Open piano roll…",
+        label: tr("Open piano roll…"),
         icon: "sparkles",
         action: () => this._openMidiEditorForTrack(track),
       });
       items.push({
-        label: "Open beat sequencer…",
+        label: tr("Open beat sequencer…"),
         icon: "queue-list",
         action: () => this._openBeatSequencerForTrack(track),
       });
       items.push({
-        label: "Add region at playhead",
+        label: tr("Add region at playhead"),
         icon: "plus",
         action: () => this._addRegionAtPlayhead(track),
       });
       items.push({
-        label: "MIDI patches & banks…",
+        label: tr("MIDI patches & banks…"),
         icon: "queue-list",
         action: () => this._openMidiManager(track),
       });
       items.push({ separator: true });
     }
     items.push({
-      label: "Track editor…",
+      label: tr("Track editor…"),
       icon: "adjustments-horizontal",
       action: () => import("./track-editor-modal.js")
                       .then((m) => m.openTrackEditor(track.id)),
     });
     items.push({
-      label: "Automation editor…",
+      label: tr("Automation editor…"),
       icon: "chart-bar",
-      title: "Open the full-screen automation editor for this track.",
+      title: tr("Open the full-screen automation editor for this track."),
       action: () => this._openAutomationModal(track.id),
     });
     items.push({
-      label: "Move track up",
+      label: tr("Move track up"),
       icon: "arrow-up",
       action: () => this._moveTrackBy(track.id, -1),
     });
     items.push({
-      label: "Move track down",
+      label: tr("Move track down"),
       icon: "arrow-down",
       action: () => this._moveTrackBy(track.id, 1),
     });
     items.push({
-      label: "Delete track…",
+      label: tr("Delete track…"),
       icon: "trash",
       tone: "danger",
       action: () => this._deleteTracksFromContext(track.id),
@@ -1561,12 +813,12 @@ export class TimelineView extends LitElement {
     // one-click. Audio tracks get straight to paste options.
     if (track.kind === "midi") {
       items.push({
-        label: "Add region here",
+        label: tr("Add region here"),
         icon: "plus",
         action: () => this._createRegionAt(track, atSamples),
       });
       items.push({
-        label: "Add region at playhead",
+        label: tr("Add region at playhead"),
         icon: "play",
         action: () => this._addRegionAtPlayhead(track),
       });
@@ -1586,13 +838,16 @@ export class TimelineView extends LitElement {
       this._lastMouseClientY = ev.clientY;
     };
     items.push({
-      label: "Paste here",
+      label: tr("Paste here"),
       icon: "clipboard",
       shortcut: `${meta}+V`,
       disabled: !this.hasClipboard(),
       title: this.hasClipboard()
-        ? `Paste clipboard contents at ${(atSamples / sr).toFixed(2)}s on ${track.name}.`
-        : "Clipboard is empty — copy or cut a region first.",
+        ? tr("Paste clipboard contents at %{seconds}s on %{track}.", {
+            seconds: (atSamples / sr).toFixed(2),
+            track: track.name,
+          })
+        : tr("Clipboard is empty — copy or cut a region first."),
       action: () => {
         captureAnchor();
         // Explicit dest so cut→paste between same-kind tracks lands
@@ -1603,7 +858,7 @@ export class TimelineView extends LitElement {
       },
     });
     items.push({
-      label: "Paste at playhead",
+      label: tr("Paste at playhead"),
       icon: "clipboard",
       shortcut: `${meta}+Shift+V`,
       disabled: !this.hasClipboard(),
@@ -1811,6 +1066,9 @@ export class TimelineView extends LitElement {
         seq.regionName   = r?.name || "";
         seq.notes        = Array.isArray(r?.notes) ? r.notes : [];
         seq.layout       = r?.foyer_sequencer || null;
+        // Flag layout as backend-sourced so the tempo-change
+        // re-persist path doesn't refuse to fire on real edits.
+        seq._layoutFromBackend = !!r?.foyer_sequencer;
         seq.trackId      = trackId || "";
         seq.trackRegions = this._regionsByTrack[trackId] || [];
       };
@@ -1824,7 +1082,10 @@ export class TimelineView extends LitElement {
         const fresh = list.find((r) => r.id === seq.regionId);
         if (fresh) {
           seq.notes  = Array.isArray(fresh.notes) ? fresh.notes : [];
-          if (fresh.foyer_sequencer) seq.layout = fresh.foyer_sequencer;
+          if (fresh.foyer_sequencer) {
+            seq.layout = fresh.foyer_sequencer;
+            seq._layoutFromBackend = true;
+          }
         }
       };
       this.addEventListener("foyer:regions-updated", onUpdate);
@@ -1853,6 +1114,7 @@ export class TimelineView extends LitElement {
           existingSeq.regionName = seq.regionName;
           existingSeq.notes = seq.notes;
           existingSeq.layout = seq.layout;
+          existingSeq._layoutFromBackend = seq._layoutFromBackend;
           existingSeq.trackId = seq.trackId;
           existingSeq.trackRegions = seq.trackRegions;
         },
@@ -1906,6 +1168,66 @@ export class TimelineView extends LitElement {
       const sc = this.renderRoot.querySelector(".scroll");
       if (sc) sc.scrollLeft = snap.scrollLeft;
     });
+    return true;
+  }
+
+  /**
+   * Horizontal zoom-in/out step driven by a keyboard shortcut. Anchors
+   * around the playhead if it's currently visible (matches what users
+   * mean by "zoom into where I'm playing"), otherwise around the
+   * scrollLeft viewport center.
+   * @param {number} step — multiplicative factor; >1 zooms in, <1 zooms out.
+   */
+  zoomStepH(step) {
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return false;
+    const sr = this._sampleRate();
+    const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
+    // Anchor sample: playhead if visible, else viewport center.
+    const phPx = (this._playheadSamples / sr) * this._zoom;
+    const phVisible =
+      phPx >= scroll.scrollLeft - HEAD_WIDTH
+      && phPx <= scroll.scrollLeft - HEAD_WIDTH + visiblePx;
+    const anchorPx = phVisible
+      ? phPx
+      : (scroll.scrollLeft - HEAD_WIDTH) + visiblePx / 2;
+    const anchorSamples = (anchorPx / this._zoom) * sr;
+    const next = Math.max(2, Math.min(4000, Math.round(this._zoom * step)));
+    if (next === this._zoom) return false;
+    this._zoom = next;
+    this.updateComplete.then(() => {
+      const sc = this.renderRoot.querySelector(".scroll");
+      if (!sc) return;
+      const newAnchorPx = (anchorSamples / sr) * this._zoom;
+      sc.scrollLeft = Math.max(0, newAnchorPx - (anchorPx - (scroll.scrollLeft - HEAD_WIDTH)));
+    });
+    return true;
+  }
+
+  /**
+   * Vertical lane-height zoom step applied uniformly to every track.
+   * Keyboard counterpart of Alt-wheel; resizes the per-track override
+   * map relative to each track's current height.
+   * @param {number} step — multiplicative factor; >1 grows, <1 shrinks.
+   */
+  zoomStepV(step) {
+    const tracks = this.session?.tracks || [];
+    if (!tracks.length) return false;
+    const next = { ...this._laneHeights };
+    let changed = false;
+    for (const t of tracks) {
+      const cur = this._laneHeightFor(t.id);
+      const n = Math.max(LANE_HEIGHT_MIN, Math.min(LANE_HEIGHT_MAX, Math.round(cur * step)));
+      if (n !== cur) {
+        next[t.id] = n;
+        changed = true;
+      }
+    }
+    if (!changed) return false;
+    this._laneHeights = next;
+    this._saveLaneHeights();
+    this.requestUpdate();
+    requestAnimationFrame(() => this._repaintWaveforms());
     return true;
   }
 
@@ -1993,6 +1315,310 @@ export class TimelineView extends LitElement {
   setEventHeatmap(trackId) {
     this._eventHeatmapTrackId = trackId || null;
     this.requestUpdate();
+  }
+
+  // ── overview strip ────────────────────────────────────────────────
+  //
+  // Bottom-pinned summary view: every track rendered as a thin lane
+  // showing region coverage across the whole session, plus a draggable
+  // viewport rectangle mirroring the main `.scroll` container. Drag
+  // the rect to pan; drag its left/right edges to zoom. Double-click
+  // anywhere to recenter on that point. Modeled on Ardour's editor
+  // summary (the bottom strip).
+
+  firstUpdated() {
+    // Seed scroll mirror immediately so the first paint sizes the
+    // viewport rect correctly. Lit only fires `firstUpdated` once,
+    // after the initial render lands.
+    this._syncScrollMirror();
+    // ResizeObserver picks up window / sibling layout changes (the
+    // mixer takes / yields width when the user drags the pane
+    // divider) without us having to wire a global resize listener.
+    if (typeof ResizeObserver === "function") {
+      this._scrollObserver = new ResizeObserver(() => this._syncScrollMirror());
+      const scroll = this.renderRoot?.querySelector?.(".scroll");
+      if (scroll) this._scrollObserver.observe(scroll);
+    }
+    this._onVizPrefsChange = () => {
+      const h = getVizPref("overviewStripHeight");
+      if (Number.isFinite(h) && h !== this._overviewHeight) {
+        this._overviewHeight = h;
+      }
+      this.requestUpdate();
+    };
+    window.addEventListener("foyer:viz-prefs-changed", this._onVizPrefsChange);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._scrollObserver?.disconnect?.();
+    if (this._onVizPrefsChange) {
+      window.removeEventListener("foyer:viz-prefs-changed", this._onVizPrefsChange);
+    }
+  }
+
+  _onScrollChanged() {
+    this._syncScrollMirror();
+  }
+
+  _syncScrollMirror() {
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const x = scroll.scrollLeft;
+    const w = Math.max(1, scroll.clientWidth - HEAD_WIDTH);
+    if (x !== this._scrollX) this._scrollX = x;
+    if (w !== this._scrollViewW) this._scrollViewW = w;
+  }
+
+  _renderOverviewStrip(tracks, totalSec) {
+    if (getVizPref("overviewStripOn") === false) return null;
+    const sr = this._sampleRate();
+    const sessionSamples = Math.max(1, totalSec * sr);
+    const stripHeight = Math.max(40, Math.min(240, this._overviewHeight || 90));
+    // Lane rows fill everything below a 12 px ruler band.
+    const rulerH = 12;
+    const visibleTracks = (tracks || []).filter((t) => t.kind !== "Master");
+    const laneCount = Math.max(1, visibleTracks.length);
+    const lanesH = stripHeight - rulerH;
+    const laneH = Math.max(2, lanesH / laneCount);
+    const stripWidthPx = 1000; // SVG viewBox; the actual width fills via CSS.
+    const xOfSamples = (s) => (s / sessionSamples) * stripWidthPx;
+
+    // Viewport rect — mirror of main timeline's visible range.
+    // scrollLeft is in main-grid px including HEAD_WIDTH; subtract
+    // so we're working in content-px (samples × zoom).
+    const contentX = Math.max(0, this._scrollX - HEAD_WIDTH);
+    const visibleSec0 = contentX / Math.max(1, this._zoom);
+    const visibleSecW = this._scrollViewW / Math.max(1, this._zoom);
+    const vpLeft = (visibleSec0 / totalSec) * stripWidthPx;
+    const vpW = Math.max(2, (visibleSecW / totalSec) * stripWidthPx);
+
+    // Per-track region rectangles.
+    const trackRects = visibleTracks.map((t, idx) => {
+      const y = rulerH + idx * laneH;
+      const regions = this._regionsByTrack?.[t.id] || [];
+      const kindClass = t.kind === "Midi"
+        ? regions.some((r) => r.kind === "sequencer") ? "sequencer" : "midi"
+        : t.kind === "Master" ? "master" : "audio";
+      return svg`
+        <g class="overview-track-row ${kindClass}">
+          ${regions.map((r) => {
+            const start = Number(r.start_samples) || 0;
+            const len = Number(r.length_samples) || 0;
+            const x = xOfSamples(start);
+            const w = Math.max(0.5, xOfSamples(start + len) - x);
+            return svg`<rect x=${x.toFixed(2)} y=${(y + 1).toFixed(2)}
+                              width=${w.toFixed(2)} height=${(laneH - 2).toFixed(2)}
+                              rx="0.5" />`;
+          })}
+        </g>
+      `;
+    });
+
+    // Playhead.
+    const playheadX = xOfSamples(this._playheadSamples || 0);
+
+    // Ruler ticks every nice-second-step.
+    const tickStep = totalSec <= 30 ? 5 : totalSec <= 90 ? 10 : 30;
+    const ticks = [];
+    for (let t = 0; t <= totalSec; t += tickStep) {
+      const x = (t / totalSec) * stripWidthPx;
+      ticks.push(svg`<line x1=${x} y1="0" x2=${x} y2=${rulerH}
+                          stroke="color-mix(in oklab, var(--color-border) 60%, transparent)"
+                          stroke-width="0.5" />`);
+      if (t > 0) {
+        ticks.push(svg`<text x=${x + 2} y="9" font-size="8"
+                          fill="var(--color-text-muted)"
+                          font-family="var(--font-mono)">${t}s</text>`);
+      }
+    }
+
+    return html`
+      <div class="overview-strip" style="height:${stripHeight}px"
+           title="Drag the highlighted viewport to scroll; drag its edges to zoom; wheel to zoom (shift/ctrl-wheel scrolls); double-click to recenter">
+        <div class="overview-resize"
+             @pointerdown=${(e) => this._startOverviewResize(e)}></div>
+        <svg class="overview-svg"
+             viewBox="0 0 ${stripWidthPx} ${stripHeight}"
+             preserveAspectRatio="none"
+             @pointerdown=${(e) => this._onOverviewPointerDown(e, stripWidthPx, totalSec)}
+             @dblclick=${(e) => this._onOverviewDoubleClick(e, stripWidthPx, totalSec)}
+             @wheel=${(e) => this._onOverviewWheel(e, stripWidthPx, totalSec)}>
+          ${ticks}
+          ${trackRects}
+          <line class="overview-playhead"
+                x1=${playheadX.toFixed(2)} y1="0"
+                x2=${playheadX.toFixed(2)} y2=${stripHeight} />
+          <rect class="overview-viewport"
+                x=${vpLeft.toFixed(2)} y="0"
+                width=${vpW.toFixed(2)} height=${stripHeight}
+                rx="2"
+                @pointerdown=${(e) => this._startOverviewDrag(e, "pan", stripWidthPx, totalSec)} />
+          <rect class="overview-viewport-edge"
+                x=${(vpLeft - 4).toFixed(2)} y="0"
+                width="8" height=${stripHeight}
+                @pointerdown=${(e) => this._startOverviewDrag(e, "left", stripWidthPx, totalSec)} />
+          <rect class="overview-viewport-edge"
+                x=${(vpLeft + vpW - 4).toFixed(2)} y="0"
+                width="8" height=${stripHeight}
+                @pointerdown=${(e) => this._startOverviewDrag(e, "right", stripWidthPx, totalSec)} />
+        </svg>
+      </div>
+    `;
+  }
+
+  /** SVG `x` is in viewBox units; convert pointer event to that. */
+  _overviewClientToVbX(ev, stripWidthPx) {
+    const svgEl = ev.currentTarget.closest?.("svg") || ev.currentTarget;
+    const rect = svgEl.getBoundingClientRect();
+    const ratio = stripWidthPx / Math.max(1, rect.width);
+    return (ev.clientX - rect.left) * ratio;
+  }
+
+  _onOverviewPointerDown(ev, stripWidthPx, totalSec) {
+    // Anywhere on the SVG that isn't a viewport rect / edge handle
+    // (those stopPropagation in their own handlers): recenter on the
+    // clicked sample, then continue as a pan drag so the user can
+    // fine-tune without releasing — Ardour summary-strip behavior.
+    ev.preventDefault();
+    const x = this._overviewClientToVbX(ev, stripWidthPx);
+    this._recenterOverview(x, stripWidthPx, totalSec);
+    this._startOverviewDrag(ev, "pan", stripWidthPx, totalSec);
+  }
+
+  _onOverviewDoubleClick(ev, stripWidthPx, totalSec) {
+    ev.preventDefault();
+    const x = this._overviewClientToVbX(ev, stripWidthPx);
+    this._recenterOverview(x, stripWidthPx, totalSec);
+  }
+
+  _recenterOverview(targetVbX, stripWidthPx, totalSec) {
+    const sr = this._sampleRate();
+    const sampleAtX = (targetVbX / stripWidthPx) * totalSec * sr;
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
+    const targetPx = (sampleAtX / sr) * this._zoom;
+    scroll.scrollLeft = Math.max(0, targetPx - visiblePx / 2);
+  }
+
+  _startOverviewDrag(ev, mode, stripWidthPx, totalSec) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    // Cache the SVG's client rect ONCE at gesture start. The window
+    // `pointermove` listener sees `currentTarget === window`, so the
+    // generic _overviewClientToVbX helper (which does .closest("svg"))
+    // fails partway through every drag — every move computed NaN
+    // before this fix, which is why pan/zoom-edge drags appeared dead.
+    const svgEl =
+      ev.currentTarget?.closest?.("svg") ||
+      this.renderRoot?.querySelector?.(".overview-svg");
+    if (!svgEl) return;
+    const svgRect = svgEl.getBoundingClientRect();
+    const clientToVbX = (clientX) =>
+      ((clientX - svgRect.left) / Math.max(1, svgRect.width)) * stripWidthPx;
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
+    const startVbX = clientToVbX(ev.clientX);
+    const startScrollX = scroll.scrollLeft;
+    const startZoom = this._zoom;
+    const startVpLeftSec = (startScrollX - HEAD_WIDTH) / Math.max(1, startZoom);
+    const startVpWSec = visiblePx / Math.max(1, startZoom);
+    const move = (e) => {
+      const vbX = clientToVbX(e.clientX);
+      const deltaSec =
+        ((vbX - startVbX) / stripWidthPx) * totalSec;
+      if (mode === "pan") {
+        const newLeftSec = Math.max(0, startVpLeftSec + deltaSec);
+        scroll.scrollLeft = newLeftSec * this._zoom + HEAD_WIDTH;
+      } else if (mode === "right") {
+        // Right edge: viewport keeps its left anchor; width grows
+        // with drag. New zoom maps visiblePx to the new viewport
+        // width in seconds. Clamp to the engine's zoom range.
+        const newWSec = Math.max(0.05, startVpWSec + deltaSec);
+        const newZoom = Math.max(2, Math.min(4000, visiblePx / newWSec));
+        this._zoom = newZoom;
+        // Lit re-render → scrollLeft must stay anchored to the
+        // viewport's left edge in seconds, recomputed under the
+        // new zoom.
+        this.updateComplete.then(() => {
+          scroll.scrollLeft = startVpLeftSec * this._zoom + HEAD_WIDTH;
+        });
+      } else if (mode === "left") {
+        // Left edge: viewport keeps its right anchor.
+        const startVpRightSec = startVpLeftSec + startVpWSec;
+        const newLeftSec = Math.max(0, startVpLeftSec + deltaSec);
+        const newWSec = Math.max(0.05, startVpRightSec - newLeftSec);
+        const newZoom = Math.max(2, Math.min(4000, visiblePx / newWSec));
+        this._zoom = newZoom;
+        this.updateComplete.then(() => {
+          scroll.scrollLeft = newLeftSec * this._zoom + HEAD_WIDTH;
+        });
+      }
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  // Mouse wheel over the overview strip. The keymap profile decides what
+  // plain/shift/ctrl/alt + wheel means here — default (Foyer/Ardour) is
+  // plain=zoom-at-cursor and shift/ctrl=hscroll, matching Ardour's editor
+  // summary. Pro Tools / Cubase profiles swap to "scroll first, ctrl zooms".
+  _onOverviewWheel(ev, stripWidthPx, totalSec) {
+    const scroll = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroll) return;
+    const op = resolveWheel("timeline_overview", ev);
+    if (op === "hscroll") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const delta = (ev.deltaY || 0) + (ev.deltaX || 0);
+      scroll.scrollLeft = Math.max(0, scroll.scrollLeft + delta);
+      return;
+    }
+    if (op === "vscroll" || op === "none") {
+      return;
+    }
+    // op === "hzoom" — zoom anchored at the strip-x sample under the cursor.
+    ev.preventDefault();
+    ev.stopPropagation();
+    const sr = this._sampleRate();
+    const visiblePx = Math.max(50, scroll.clientWidth - HEAD_WIDTH);
+    const svgEl = ev.currentTarget;
+    const rect = svgEl.getBoundingClientRect();
+    const vbX = ((ev.clientX - rect.left) / Math.max(1, rect.width)) * stripWidthPx;
+    const fraction = Math.max(0, Math.min(1, vbX / stripWidthPx));
+    const sampleAtCursor = fraction * totalSec * sr;
+    const factor = zoomFactorFromWheel(ev.deltaY);
+    this._zoom = Math.max(2, Math.min(4000, this._zoom * factor));
+    this.updateComplete.then(() => {
+      const targetPx = (sampleAtCursor / sr) * this._zoom;
+      scroll.scrollLeft = Math.max(0, targetPx - visiblePx / 2 + HEAD_WIDTH);
+    });
+  }
+
+  _startOverviewResize(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const startY = ev.clientY;
+    const startH = this._overviewHeight;
+    const move = (e) => {
+      // Drag UP shrinks; drag DOWN grows. Inverted from naive math
+      // because the resize handle sits at the strip's TOP edge.
+      const delta = startY - e.clientY;
+      this._overviewHeight = Math.max(40, Math.min(240, startH + delta));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      setVizPref("overviewStripHeight", this._overviewHeight);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   }
 
   _pushZoomSnapshot(scrollEl) {
@@ -2550,6 +2176,7 @@ export class TimelineView extends LitElement {
       <div class="scroll"
            @wheel=${(e) => this._onWheel(e)}
            @pointerdown=${(e) => this._onScrollPointerDown(e)}
+           @scroll=${() => this._onScrollChanged()}
            @auxclick=${(e) => { if (e.button === 1) e.preventDefault(); }}>
         <div class="grid" style="width:${gridWidth}px"
              @pointermove=${(e) => this._onGridHoverMove(e)}
@@ -2580,6 +2207,7 @@ export class TimelineView extends LitElement {
           ${this._renderRecordingPlaceholder()}
         </div>
       </div>
+      ${this._renderOverviewStrip(tracks, totalSec)}
     `;
   }
 
@@ -3628,36 +3256,36 @@ export class TimelineView extends LitElement {
 
     const items = [];
     items.push({
-      label: "Quantize start to grid",
+      label: tr("Quantize start to grid"),
       icon: "bars-3-bottom-left",
       disabled: !this._gridStepSamples(),
       action: () => this._quantizeSelectedRegionsToGrid(),
     });
     items.push({
-      label: "Crop to time selection",
+      label: tr("Crop to time selection"),
       icon: "scissors",
       disabled: !hasTimeSelection || nSel === 0,
       title: !hasTimeSelection
-        ? "Drag a range on the ruler to enable."
-        : "Replace each selected region with the slice inside the time selection.",
+        ? tr("Drag a range on the ruler to enable.")
+        : tr("Replace each selected region with the slice inside the time selection."),
       action: () => this.cropSelectedRegionsToSelection(),
     });
     items.push({
-      label: "Snap fades to overlap (crossfade)",
+      label: tr("Snap fades to overlap (crossfade)"),
       icon: "arrows-pointing-in",
       disabled: !canCrossfade,
       title: canCrossfade
-        ? "Set symmetric fades across every overlap among the selected audio regions."
-        : "Drag two audio regions on the same track so they share time.",
+        ? tr("Set symmetric fades across every overlap among the selected audio regions.")
+        : tr("Drag two audio regions on the same track so they share time."),
       action: () => this._applyCrossfadeToSelection(),
     });
     items.push({
-      label: "Clear fades",
+      label: tr("Clear fades"),
       icon: "x-mark",
       disabled: !anyAudio,
       title: anyAudio
-        ? "Remove fade-in and fade-out from every selected audio region."
-        : "Select at least one audio region.",
+        ? tr("Remove fade-in and fade-out from every selected audio region.")
+        : tr("Select at least one audio region."),
       action: () => {
         const ws = window.__foyer?.ws;
         if (!ws) return;
@@ -3675,12 +3303,12 @@ export class TimelineView extends LitElement {
       },
     });
     items.push({
-      label: "Reset region gain to 0 dB",
+      label: tr("Reset region gain to 0 dB"),
       icon: "speaker-wave",
       disabled: !anyAudio,
       title: anyAudio
-        ? "Restore unity gain (scale_amplitude = 1.0) on selected audio regions."
-        : "Select at least one audio region.",
+        ? tr("Restore unity gain (scale_amplitude = 1.0) on selected audio regions.")
+        : tr("Select at least one audio region."),
       action: () => {
         const ws = window.__foyer?.ws;
         if (!ws) return;
@@ -3700,40 +3328,40 @@ export class TimelineView extends LitElement {
     if (combineSel) {
       items.push({ separator: true });
       items.push({
-        label: "Glue regions",
+        label: tr("Glue regions"),
         icon: "circle-stack",
         disabled: false,
-        title: "Combine selected regions on this track into one (Ardour playlist combine).",
+        title: tr("Combine selected regions on this track into one (Ardour playlist combine)."),
         action: () => this._combineSelectedRegions(),
       });
     }
     items.push({ separator: true });
     items.push({
-      label: "Reverse audio",
+      label: tr("Reverse audio"),
       icon: "arrow-uturn-left",
       disabled: !anyAudio,
       title: anyAudio
-        ? "Reverse each selected audio region in time."
-        : "Select at least one audio region.",
+        ? tr("Reverse each selected audio region in time.")
+        : tr("Select at least one audio region."),
       action: () => this._reverseSelectedAudioRegions(),
     });
     items.push({
-      label: "Strip silence…",
+      label: tr("Strip silence…"),
       icon: "scissors",
       disabled: !anyAudio,
       title: anyAudio
-        ? "Detect silence and remove it (uses default threshold / fade; Ardour strip silence)."
-        : "Select at least one audio region.",
+        ? tr("Detect silence and remove it (uses default threshold / fade; Ardour strip silence).")
+        : tr("Select at least one audio region."),
       action: () => this._stripSilenceSelectedAudioRegions(),
     });
     items.push({
-      label: "Pitch shift…",
+      label: tr("Pitch shift…"),
       icon: "musical-note",
       disabled: nSel === 0,
       title:
         nSel === 0
-          ? "Select a region."
-          : "Shift pitch for audio (Rubber Band) or transpose MIDI notes.",
+          ? tr("Select a region.")
+          : tr("Shift pitch for audio (Rubber Band) or transpose MIDI notes."),
       action: () => this._pitchShiftSelectedRegions(),
     });
     items.push({ separator: true });
@@ -3744,53 +3372,53 @@ export class TimelineView extends LitElement {
         return !!this._groupOf(r);
       });
       items.push({
-        label: anyGrouped ? "Add to group" : "Group regions",
+        label: anyGrouped ? tr("Add to group") : tr("Group regions"),
         icon: "link",
         disabled: nSel < 2,
         title: nSel < 2
-          ? "Pick two or more regions to link them."
+          ? tr("Pick two or more regions to link them.")
           : anyGrouped
-            ? "Extend the existing group with the newly-selected regions."
-            : "Link selected regions so move / trim / fade / delete cascades to siblings.",
+            ? tr("Extend the existing group with the newly-selected regions.")
+            : tr("Link selected regions so move / trim / fade / delete cascades to siblings."),
         action: () => this.groupSelectedRegions(),
       });
       items.push({
-        label: "Ungroup",
+        label: tr("Ungroup"),
         icon: "no-symbol",
         disabled: !anyGrouped,
         title: anyGrouped
-          ? "Dissolve the group(s) the selection belongs to."
-          : "No grouped region in the selection.",
+          ? tr("Dissolve the group(s) the selection belongs to.")
+          : tr("No grouped region in the selection."),
         action: () => this.ungroupSelectedRegions(),
       });
     }
     items.push({ separator: true });
     items.push({
-      label: "Bring to front",
+      label: tr("Bring to front"),
       icon: "arrow-up",
       disabled: nSel === 0,
-      title: "Stack selected regions above every other region on their track.",
+      title: tr("Stack selected regions above every other region on their track."),
       action: () => this._adjustSelectedRegionLayers("front"),
     });
     items.push({
-      label: "Bring forward",
+      label: tr("Bring forward"),
       icon: "chevron-up",
       disabled: nSel === 0,
-      title: "Move selected regions one layer above the next neighbor.",
+      title: tr("Move selected regions one layer above the next neighbor."),
       action: () => this._adjustSelectedRegionLayers("forward"),
     });
     items.push({
-      label: "Send backward",
+      label: tr("Send backward"),
       icon: "chevron-down",
       disabled: nSel === 0,
-      title: "Move selected regions one layer below the previous neighbor.",
+      title: tr("Move selected regions one layer below the previous neighbor."),
       action: () => this._adjustSelectedRegionLayers("backward"),
     });
     items.push({
-      label: "Send to back",
+      label: tr("Send to back"),
       icon: "arrow-down",
       disabled: nSel === 0,
-      title: "Stack selected regions below every other region on their track.",
+      title: tr("Stack selected regions below every other region on their track."),
       action: () => this._adjustSelectedRegionLayers("back"),
     });
     return items;
@@ -4230,7 +3858,7 @@ export class TimelineView extends LitElement {
           return html`
             <div class="region ${regionSelected ? "selected" : ""}" data-id=${r.id}
                  tabindex="0"
-                 style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px;outline:none"
+                 style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px"
                  @pointerdown=${(e) => {
                    if (e.button === 2) {
                      this._onRegionPointerDownSecondary(e, r);
@@ -4240,6 +3868,7 @@ export class TimelineView extends LitElement {
                    this._onRegionPointerDown(e, r);
                    this._startDrag(e, r, "move");
                  }}
+                 @keydown=${(e) => this._onRegionKeydown(e, r)}
                  @dblclick=${(e) => { e.stopPropagation(); this._openRegionEditor(r); }}
                  @contextmenu=${(e) => this._regionContextMenu(e, r)}>
               ${isMidi
@@ -4841,16 +4470,17 @@ export class TimelineView extends LitElement {
   }
 
   /**
-   * Mouse-wheel zoom. Plain wheel adjusts temporal zoom (px/s); Alt- or
-   * Ctrl-wheel adjusts the lane height of whichever track the pointer is
-   * over. Horizontal scroll still works by holding Shift (browser default)
-   * or by scrolling on empty areas — we only preventDefault when we actually
-   * consume the event so normal scroll in the lane area still works when
-   * content overflows.
+   * Mouse-wheel zoom. The keymap profile (Preferences → Editor conventions)
+   * decides what plain/shift/ctrl/alt + wheel means in this zone. Default
+   * (Foyer / Ardour) is plain=zoom-at-cursor, shift/ctrl=hpan, alt=vzoom.
+   *
+   * We only preventDefault when we actually consume the event so a "vscroll"
+   * op falls through to the browser's native scroll on the ancestor.
    */
   _onWheel(ev) {
     const dy = ev.deltaY;
-    if (!dy) return;
+    const dx = ev.deltaX || 0;
+    if (!dy && !dx) return;
     // Wheel over the sticky lane-head column should scroll the
     // track list vertically — Rich's report 2026-04-21: "should do
     // vertical scrolling, not timeline zoom" when the pointer is
@@ -4858,12 +4488,10 @@ export class TimelineView extends LitElement {
     // lane-head (matches "modifier to scroll a long list" ask).
     const overHead = !!ev.target?.closest?.(".lane-head");
     if (overHead && !ev.shiftKey) {
-      // Default: let the .scroll container's native vertical scroll
-      // handle this. We don't preventDefault, so the browser
-      // forwards the wheel to the scroll ancestor.
       return;
     }
-    if (ev.altKey || ev.ctrlKey) {
+    const op = resolveWheel("timeline_main", ev);
+    if (op === "vzoom") {
       // Vertical (lane-height) zoom. Find the lane the pointer is over.
       const lane = ev.target?.closest?.(".lane");
       if (!lane) return;
@@ -4878,10 +4506,21 @@ export class TimelineView extends LitElement {
       this._laneHeights = { ...this._laneHeights, [trackId]: next };
       this._saveLaneHeights();
       this.requestUpdate();
-      // Give the canvas a beat to resize before repainting.
       requestAnimationFrame(() => this._repaintWaveforms());
       return;
     }
+    if (op === "hscroll") {
+      ev.preventDefault();
+      const scroll = ev.currentTarget;
+      const delta = Math.abs(dx) > Math.abs(dy) ? dx : dy;
+      scroll.scrollLeft = Math.max(0, scroll.scrollLeft + delta);
+      return;
+    }
+    if (op === "vscroll" || op === "none") {
+      // Yield to the browser's native vertical scroll on the .scroll ancestor.
+      return;
+    }
+    // op === "hzoom" — fall through into the temporal-zoom path below.
     // Temporal zoom — anchor around the pointer's current time so the
     // user's cursor stays over the same sample while the scale changes.
     //
@@ -4898,7 +4537,7 @@ export class TimelineView extends LitElement {
     const pointerScreenX = ev.clientX - bounds.left;   // viewport-relative
     const pointerContentX = pointerScreenX + scroll.scrollLeft - HEAD_WIDTH;
     const t0 = pointerContentX / this._zoom;
-    const factor = dy < 0 ? 1.18 : 1 / 1.18;
+    const factor = zoomFactorFromWheel(dy);
     const next = Math.max(2, Math.min(4000, Math.round(this._zoom * factor)));
     if (next === this._zoom) return;
     this._zoom = next;
@@ -4942,11 +4581,11 @@ export class TimelineView extends LitElement {
     const items = [
       {
         heading: multiHead
-          ? `${nHead} regions`
+          ? tr("%{count} regions", { count: nHead })
           : (region.name || region.id),
       },
       {
-        label: region.muted ? "Unmute" : "Mute",
+        label: region.muted ? tr("Unmute") : tr("Mute"),
         icon: region.muted ? "speaker-wave" : "speaker-x-mark",
         shortcut: "M",
         action: () => window.__foyer?.ws?.send({
@@ -4975,23 +4614,23 @@ export class TimelineView extends LitElement {
       const active = !!(layout && layout.active !== false);
       const archived = !!(layout && layout.active === false);
       items.push({
-        label: active ? "Open piano roll (read-only)…" : "Open piano roll…",
+        label: active ? tr("Open piano roll (read-only)…") : tr("Open piano roll…"),
         icon: "sparkles",
         action: () => this._openMidiEditor(region),
       });
       items.push({
-        label: active ? "Open beat sequencer…"
-             : archived ? "Restore beat sequencer…"
-             : "Convert to beat sequencer…",
+        label: active ? tr("Open beat sequencer…")
+             : archived ? tr("Restore beat sequencer…")
+             : tr("Convert to beat sequencer…"),
         icon: "queue-list",
         action: () => this._openBeatSequencer(region),
       });
     }
     items.push({ separator: true });
     items.push({
-      label: "Automation editor…",
+      label: tr("Automation editor…"),
       icon: "chart-bar",
-      title: "Open the full-screen automation editor for this region's track.",
+      title: tr("Open the full-screen automation editor for this region's track."),
       action: () => this._openAutomationModal(region.track_id),
     });
     items.push({ separator: true });
@@ -5011,19 +4650,19 @@ export class TimelineView extends LitElement {
     };
     const meta = this._metaChord();
     items.push({
-      label: "Cut",
+      label: tr("Cut"),
       icon: "scissors",
       shortcut: `${meta}+X`,
       action: () => { ensureSelection(); this.cutRegionSelection(); },
     });
     items.push({
-      label: "Copy",
+      label: tr("Copy"),
       icon: "document-duplicate",
       shortcut: `${meta}+C`,
       action: () => { ensureSelection(); this.copyRegionSelection(); },
     });
     items.push({
-      label: "Paste at cursor",
+      label: tr("Paste at cursor"),
       icon: "clipboard",
       shortcut: `${meta}+V`,
       disabled: !this.hasClipboard(),
@@ -5044,21 +4683,21 @@ export class TimelineView extends LitElement {
       },
     });
     items.push({
-      label: "Paste at playhead",
+      label: tr("Paste at playhead"),
       icon: "clipboard",
       shortcut: `${meta}+Shift+V`,
       disabled: !this.hasClipboard(),
       action: () => this.pasteRegions({ at: "playhead" }),
     });
     items.push({
-      label: "Duplicate",
+      label: tr("Duplicate"),
       icon: "plus",
       shortcut: `${meta}+D`,
       action: () => { ensureSelection(); this.duplicateRegionSelection(); },
     });
     items.push({ separator: true });
     items.push({
-      label: "Delete region",
+      label: tr("Delete region"),
       icon: "trash",
       tone: "danger",
       shortcut: "Del",
@@ -5084,6 +4723,43 @@ export class TimelineView extends LitElement {
     this._pendingDemoteRegionId = null;
     this._reconcileCutPending();
     this.requestUpdate();
+  }
+
+  /// Region-element keydown. Regions are tab-stops (`tabindex="0"`)
+  /// so a keyboard-only user can step through them with Tab; this
+  /// handler then turns Enter into a select (replace) and Ctrl/Cmd+
+  /// Enter into a toggle (additive multi-select). Delete still flows
+  /// through the global keybinds handler because we want it to act
+  /// on the click-selection set, which already includes whatever the
+  /// user just selected via these keys.
+  _onRegionKeydown(ev, region) {
+    if (!region?.id) return;
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.ctrlKey || ev.metaKey) {
+        // Additive toggle — Ctrl+Enter on an already-selected region
+        // removes it from the set, otherwise adds it. Matches
+        // pointer-down's shift/ctrl behavior so muscle memory carries
+        // over between mouse + keyboard flows.
+        if (this._selectedRegionIds.has(region.id)) {
+          this._selectedRegionIds.delete(region.id);
+        } else {
+          this._selectedRegionIds.add(region.id);
+        }
+      } else {
+        this._selectedRegionIds.clear();
+        const g = this._groupOf(region);
+        if (g) {
+          for (const s of this._regionsInGroup(g)) this._selectedRegionIds.add(s.id);
+        } else {
+          this._selectedRegionIds.add(region.id);
+        }
+      }
+      this._pendingDemoteRegionId = null;
+      this._reconcileCutPending();
+      this.requestUpdate();
+    }
   }
 
   _onRegionPointerDown(ev, region) {
@@ -5336,17 +5012,41 @@ export class TimelineView extends LitElement {
   }
 
   /**
-   * Wheel over the ruler scrolls horizontally instead of zooming — the
-   * ruler is a navigation surface, the waveforms underneath are for zoom.
-   * Stop propagation so the outer `.scroll` wheel handler doesn't zoom.
+   * Wheel over the ruler. Default profile scrolls horizontally (the ruler is a
+   * navigation surface, not a zoom one), but Pro Tools / Cubase users expect
+   * Ctrl-wheel here to zoom in at the cursor — the keymap profile decides.
+   * Stop propagation so the outer `.scroll` wheel handler doesn't double-fire.
    */
   _onRulerWheel(ev) {
     const scroll = this.renderRoot.querySelector(".scroll");
     if (!scroll) return;
-    ev.preventDefault();
-    ev.stopPropagation();
     const dx = ev.deltaX || 0;
     const dy = ev.deltaY || 0;
+    if (!dx && !dy) return;
+    const op = resolveWheel("timeline_ruler", ev);
+    if (op === "hzoom") {
+      // Anchor zoom around the pointer's current time.
+      ev.preventDefault();
+      ev.stopPropagation();
+      const bounds = scroll.getBoundingClientRect();
+      const pointerScreenX = ev.clientX - bounds.left;
+      const pointerContentX = pointerScreenX + scroll.scrollLeft - HEAD_WIDTH;
+      const t0 = pointerContentX / this._zoom;
+      const factor = zoomFactorFromWheel(dy);
+      const next = Math.max(2, Math.min(4000, Math.round(this._zoom * factor)));
+      if (next === this._zoom) return;
+      this._zoom = next;
+      const newPointerContentX = t0 * next;
+      const targetScrollLeft = newPointerContentX - (pointerScreenX - HEAD_WIDTH);
+      requestAnimationFrame(() => { scroll.scrollLeft = Math.max(0, targetScrollLeft); });
+      return;
+    }
+    if (op === "vscroll" || op === "none") {
+      return;  // yield to the browser
+    }
+    // "hscroll" (default) — what the ruler historically did.
+    ev.preventDefault();
+    ev.stopPropagation();
     scroll.scrollLeft += (Math.abs(dx) > Math.abs(dy) ? dx : dy);
   }
 

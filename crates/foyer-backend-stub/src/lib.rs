@@ -18,6 +18,7 @@ mod actions;
 mod fixtures;
 mod jail;
 mod regions;
+mod spectrum;
 mod state;
 mod stub_media_pool;
 mod waveform;
@@ -34,7 +35,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use foyer_backend::{AudioIngressAck, Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx};
 use foyer_schema::{
-    Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EntityId, Event,
+    Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EnginePort, EntityId, Event,
     LatencyReport, PathListing, PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch,
     Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
@@ -54,6 +55,9 @@ pub struct StubBackend {
     jail: Option<Arc<Jail>>,
     regions: Arc<Mutex<regions::RegionStore>>,
     waveforms: Arc<Mutex<waveform::WaveformCache>>,
+    /// Active spectrum-subscription pump. Spawns a per-hub task only
+    /// while subscriptions exist; idle sessions pay nothing.
+    spectrum: spectrum::SpectrumHub,
     /// Monotonic seed for `regions::fresh_region_id` — bumped on every
     /// duplicate so concurrent paste batches don't collide.
     dup_seed: std::sync::atomic::AtomicU64,
@@ -100,6 +104,7 @@ impl StubBackend {
             sample_rate: std::sync::atomic::AtomicU32::new(sr),
             meter_handle: None,
             test_tone: false,
+            spectrum: spectrum::SpectrumHub::new(),
         };
         backend.meter_handle = Some(backend.spawn_meter_tick());
         backend
@@ -125,6 +130,7 @@ impl StubBackend {
             sample_rate: std::sync::atomic::AtomicU32::new(foyer_schema::DEFAULT_SAMPLE_RATE),
             meter_handle: None,
             test_tone: false,
+            spectrum: spectrum::SpectrumHub::new(),
         }
     }
 
@@ -294,6 +300,57 @@ impl Backend for StubBackend {
 
     async fn snapshot(&self) -> Result<Session, BackendError> {
         Ok(self.state.lock().await.session_clone())
+    }
+
+    /// Synthesize a port graph so agent + UI workflows that depend on
+    /// `Backend::list_ports` (record-arm, port-matrix, input-source
+    /// dropdowns) have something realistic to chew on in the
+    /// devcontainer. Covers the four port categories any backend DAW
+    /// would expose:
+    ///   * **Physical audio** — `system:capture_1/2`, `system:playback_1/2`
+    ///   * **Physical MIDI** — `system:midi/capture_1`, `system:midi/playback_1`
+    ///     (think: USB MIDI keyboard + DIN-out)
+    ///   * **Virtual / app-to-app audio** — `foyer:ingress-stub`,
+    ///     `bus:reverb_return`, `bus:headphone_mix` (representative of
+    ///     internal bus endpoints in Ardour, Bitwig, Reaper, etc.)
+    ///   * **Virtual MIDI** — `foyer:midi-bridge` (browser MIDI ingress)
+    /// `direction` filters source/sink as the real backend does.
+    async fn list_ports(&self, direction: Option<String>) -> Result<Vec<EnginePort>, BackendError> {
+        let want_source = matches!(direction.as_deref(), Some("source") | None | Some(""));
+        let want_sink = matches!(direction.as_deref(), Some("sink") | None | Some(""));
+        let mut out = Vec::new();
+        let port = |name: &str, dir: &str, is_physical: bool, is_midi: bool| EnginePort {
+            name: name.into(),
+            direction: dir.into(),
+            is_physical,
+            is_midi,
+        };
+        if want_source {
+            // Physical audio inputs (mic / line in, mono-each).
+            out.push(port("system:capture_1", "source", true, false));
+            out.push(port("system:capture_2", "source", true, false));
+            // Physical MIDI keyboard input.
+            out.push(port("system:midi/capture_1", "source", true, true));
+            // Virtual audio sources — browser ingress + bus returns.
+            // Same shape any backend would expose: not hardware, but
+            // still routable as a track input.
+            out.push(port("foyer:ingress-stub", "source", false, false));
+            out.push(port("bus:reverb_return", "source", false, false));
+            // Virtual MIDI source — the browser MIDI bridge a user
+            // sees when they want a remote keyboard to feed a track.
+            out.push(port("foyer:midi-bridge", "source", false, true));
+        }
+        if want_sink {
+            // Physical audio outputs (speakers / interface out).
+            out.push(port("system:playback_1", "sink", true, false));
+            out.push(port("system:playback_2", "sink", true, false));
+            // Physical MIDI hardware out (DIN to a synth, USB to a controller).
+            out.push(port("system:midi/playback_1", "sink", true, true));
+            // Virtual audio sinks — internal bus inputs, headphone mix.
+            out.push(port("bus:reverb_send", "sink", false, false));
+            out.push(port("bus:headphone_mix", "sink", false, false));
+        }
+        Ok(out)
     }
 
     async fn subscribe(&self) -> Result<EventStream, BackendError> {
@@ -730,6 +787,26 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    async fn create_track(
+        &self,
+        name: String,
+        kind: foyer_schema::TrackKind,
+        color: Option<String>,
+        after_id: Option<EntityId>,
+    ) -> Result<Track, BackendError> {
+        let track = self
+            .state
+            .lock()
+            .await
+            .create_track(name, kind, color, after_id.as_ref())?;
+        // Stub doesn't currently emit per-track Created events; force a
+        // snapshot reload so every client repaints with the new track.
+        let _ = self.tx.send(Event::SessionPatch {
+            patch: foyer_schema::Patch::Reload,
+        });
+        Ok(track)
+    }
+
     async fn update_track(&self, id: EntityId, patch: TrackPatch) -> Result<Track, BackendError> {
         let updated = self
             .state
@@ -1077,6 +1154,104 @@ impl Backend for StubBackend {
             });
         }
         Ok(())
+    }
+
+    // ── Spectrum ───────────────────────────────────────────────────
+    async fn spectrum_capabilities(
+        &self,
+    ) -> Result<Option<foyer_schema::SpectrumCapabilities>, BackendError> {
+        Ok(Some(foyer_schema::SpectrumCapabilities::stub()))
+    }
+
+    async fn subscribe_spectrum(
+        &self,
+        target: foyer_schema::SpectrumTarget,
+        opts: foyer_schema::SpectrumOpts,
+    ) -> Result<foyer_schema::SpectrumOpts, BackendError> {
+        let applied = self
+            .spectrum
+            .subscribe(
+                target,
+                opts,
+                self.tx.clone(),
+                self.state.clone(),
+                self.sample_rate(),
+            )
+            .await;
+        Ok(applied)
+    }
+
+    async fn unsubscribe_spectrum(
+        &self,
+        target: foyer_schema::SpectrumTarget,
+    ) -> Result<(), BackendError> {
+        self.spectrum.unsubscribe(target, self.tx.clone()).await;
+        Ok(())
+    }
+
+    async fn snapshot_spectrum(
+        &self,
+        target: foyer_schema::SpectrumTarget,
+        opts: foyer_schema::SpectrumOpts,
+    ) -> Result<foyer_schema::SpectrumFrame, BackendError> {
+        Ok(self
+            .spectrum
+            .snapshot(target, opts, &self.state, self.sample_rate())
+            .await)
+    }
+
+    // ── Scripting ──────────────────────────────────────────────────
+    async fn scripting_capabilities(
+        &self,
+    ) -> Result<Option<foyer_schema::ScriptingCapabilities>, BackendError> {
+        Ok(Some(fixtures::stub_scripting_capabilities()))
+    }
+
+    async fn list_scripts(&self) -> Result<Vec<foyer_schema::Script>, BackendError> {
+        Ok(self.state.lock().await.list_scripts())
+    }
+
+    async fn save_script(
+        &self,
+        script: foyer_schema::Script,
+    ) -> Result<foyer_schema::Script, BackendError> {
+        let saved = self.state.lock().await.save_script(script)?;
+        let _ = self.tx.send(Event::ScriptSaved {
+            script: saved.clone(),
+        });
+        Ok(saved)
+    }
+
+    async fn delete_script(&self, id: foyer_schema::EntityId) -> Result<(), BackendError> {
+        let removed = self.state.lock().await.delete_script(&id);
+        if removed {
+            let _ = self.tx.send(Event::ScriptRemoved { id });
+        }
+        Ok(())
+    }
+
+    async fn enable_script(
+        &self,
+        id: foyer_schema::EntityId,
+        enabled: bool,
+    ) -> Result<foyer_schema::Script, BackendError> {
+        let saved = self.state.lock().await.enable_script(&id, enabled)?;
+        let _ = self.tx.send(Event::ScriptSaved {
+            script: saved.clone(),
+        });
+        Ok(saved)
+    }
+
+    async fn run_script(
+        &self,
+        id: foyer_schema::EntityId,
+        args_override: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<foyer_schema::ScriptRunResult, BackendError> {
+        let result = self.state.lock().await.run_script_stub(&id, args_override);
+        let _ = self.tx.send(Event::ScriptRunResult {
+            result: result.clone(),
+        });
+        Ok(result)
     }
 }
 

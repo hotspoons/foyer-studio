@@ -28,13 +28,29 @@ use tokio::sync::RwLock;
 use crate::store::AgentStore;
 use crate::tools::{Tool, ToolContext, ToolError, ToolResult};
 
+/// One entry in the welcome payload's skills manifest. We send the
+/// `name + summary + tokens_approx` to the agent on the first turn,
+/// NOT the full body — bodies for niche authoring guides (Ardour Lua
+/// DSP, Editor Action / Hook / Snippet) used to be ~6 KB collectively
+/// and bloated every external MCP client's context. The agent fetches
+/// the body on demand via `scripts.skill { name }` when it actually
+/// needs to author the corresponding script type.
+#[derive(Default, Clone)]
+pub struct SkillManifestEntry {
+    pub name: String,
+    pub summary: String,
+    pub tokens_approx: u32,
+}
+
 /// Snapshot of the harness's current prompt + skill + memory state.
 /// Held behind an `RwLock` so the runtime can update it as files
 /// change or the user edits the prompt mid-session.
 #[derive(Default)]
 pub struct WelcomeContext {
     pub system_prompt: String,
-    pub skills_snippets: Vec<(String, String)>,
+    /// Manifest of enabled skills (no bodies). Bodies fetched on
+    /// demand through `scripts.skill { name }`.
+    pub skills: Vec<SkillManifestEntry>,
     pub memories: Vec<(String, String)>,
 }
 
@@ -56,7 +72,18 @@ impl WelcomeTool {
         store: &AgentStore,
         system_prompt: String,
     ) {
-        let skills = store.enabled_skill_bodies().await.unwrap_or_default();
+        let skills: Vec<SkillManifestEntry> = store
+            .list_skills()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.enabled)
+            .map(|s| SkillManifestEntry {
+                name: s.name,
+                summary: s.summary,
+                tokens_approx: s.tokens_approx,
+            })
+            .collect();
         let memories: Vec<(String, String)> = store
             .list_memories()
             .await
@@ -66,7 +93,7 @@ impl WelcomeTool {
             .collect();
         let mut w = ctx.write().await;
         w.system_prompt = system_prompt;
-        w.skills_snippets = skills;
+        w.skills = skills;
         w.memories = memories;
     }
 }
@@ -100,9 +127,21 @@ impl Tool for WelcomeTool {
         let w = self.ctx.read().await;
         let payload = json!({
             "system_prompt": w.system_prompt,
-            "skills": w.skills_snippets.iter()
-                .map(|(name, body)| json!({"name": name, "body": body}))
+            "skills": w.skills.iter()
+                .map(|s| json!({
+                    "name": s.name,
+                    "summary": s.summary,
+                    "tokens_approx": s.tokens_approx,
+                }))
                 .collect::<Vec<_>>(),
+            "skills_note": "Skill BODIES are not included here. This list is an \
+                index of available playbooks. BEFORE running an unfamiliar tool \
+                (especially `plugins`, `midi`, `sequencer`, `automation`, `ui`, \
+                `visualize`, `session`, or `scripts`), call \
+                `scripts.skill { name: \"<skill-name>\" }` to load the playbook for \
+                the task — the playbooks document the actual call shapes, the \
+                gotchas, and the batch-vs-loop tradeoffs that small models tend \
+                to get wrong on the first try.",
             "memories": w.memories.iter()
                 .map(|(name, body)| json!({"name": name, "body": body}))
                 .collect::<Vec<_>>(),
@@ -121,8 +160,8 @@ impl Tool for WelcomeTool {
                 explain to the user)."
         });
         Ok(ToolResult::ok(format!(
-            "welcome — {} skills, {} memories",
-            w.skills_snippets.len(),
+            "welcome — {} skills (bodies on demand via scripts.skill), {} memories",
+            w.skills.len(),
             w.memories.len()
         ))
         .with_data(payload))

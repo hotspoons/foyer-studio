@@ -400,7 +400,11 @@ impl AudioHub {
                         );
                     }
                     let payload = match codec {
-                        AudioCodec::Opus => match encoder.as_mut().unwrap().encode(&chunk) {
+                        AudioCodec::Opus => match encoder
+                            .as_mut()
+                            .expect("encoder is Some(_) whenever codec == Opus (set above)")
+                            .encode(&chunk)
+                        {
                             Ok(b) => b,
                             Err(e) => {
                                 tracing::warn!("opus encode failed on stream {stream_id}: {e}");

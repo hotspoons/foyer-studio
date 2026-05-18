@@ -1048,6 +1048,26 @@ export class LayoutStore extends EventTarget {
     }
     this._emit();
   }
+  /// Rename a saved layout. No-op if `oldName` doesn't exist, the
+  /// names match, or `newName` is empty. Returns true on success so
+  /// the caller can update sibling state (e.g. rebind a keybind).
+  /// If `newName` collides with another entry the new name wins and
+  /// the old occupant is overwritten — saved layouts are user-owned
+  /// scratch data, not a database.
+  renameNamed(oldName, newName) {
+    const from = (oldName || "").trim();
+    const to = (newName || "").trim();
+    if (!from || !to) return false;
+    if (from === to) return false;
+    if (!Object.prototype.hasOwnProperty.call(this.named, from)) return false;
+    this.named[to] = this.named[from];
+    delete this.named[from];
+    if (this._baselineKind === "named" && this._baselineName === from) {
+      this._baselineName = to;
+    }
+    this._emit();
+    return true;
+  }
   listNamed() {
     return Object.keys(this.named).sort();
   }

@@ -43,7 +43,12 @@ const SUBCOMMAND_TO_VIEW = {
   timeline: "timeline",
   mixer: "mixer",
   waveform: "timeline",
-  spectrogram: "spectrogram",
+  // spectrogram (subcommand) → spectrum view. The headless renderer
+  // mounts the real `<foyer-spectrum-tile>` which subscribes to the
+  // backend's live FFT pipeline, waits a few frames for the
+  // waterfall to populate, then captures the canvas. Track-scoped
+  // captures pass `target_track_id` through as a prop.
+  spectrogram: "spectrum",
   // automation_lane mounts the dedicated automation editor (track
   // selector + lane viewport with its own zoom + time ruler). It
   // honours `focusControlId` to pre-check + scroll the requested
@@ -58,6 +63,11 @@ const SUBCOMMAND_TO_VIEW = {
   // beat_sequencer on a region that doesn't carry a sequencer
   // layout.
   beat_sequencer: "beat-sequencer",
+  // `screen` is intentionally absent from this map — the subcommand
+  // means "screenshot whatever is currently mounted", so the headless
+  // hook deliberately skips its layout-swap step (see
+  // `installHeadlessVizIfRequested` below). The FE-attached path
+  // ignores this map entirely and captures the live foyer-app.
 };
 
 function readSubcommand() {
@@ -164,6 +174,15 @@ export async function installHeadlessVizIfRequested() {
   } catch {}
   try {
     const { sub, params } = requested;
+    // `screen` is a literal "what's on the page right now" shot —
+    // skip the chrome-hide + layout-swap so the screenshot reflects
+    // the current state without us mutating it.
+    if (sub === "screen") {
+      // Give whatever variant booted a beat to paint, then signal.
+      await new Promise((r) => setTimeout(r, 600));
+      signalReady();
+      return;
+    }
     const view = SUBCOMMAND_TO_VIEW[sub];
     if (!view) {
       console.error("[headless-viz] unknown subcommand:", sub);
@@ -220,11 +239,84 @@ export async function installHeadlessVizIfRequested() {
             tv.setEventHeatmap(props.trackId);
             tv.focusOnTrack(props.trackId);
           }
-          // give Lit time to repaint the focused view
           await new Promise((r) => setTimeout(r, 400));
         }
       } catch (e) {
         console.warn("[headless-viz] timeline focus failed:", e);
+      }
+    }
+    // midi-editor + beat-sequencer expect their region content
+    // (`notes`, `foyer_sequencer`, `regionName`) to be set on the
+    // live element — they don't fetch it from the store on their
+    // own (the floating-window opener at `openMidiEditor()` does it
+    // imperatively). In headless mode the tile-leaf just instantiates
+    // the bare element with `regionId` / `trackId`, so the editor
+    // mounts empty even when the live region has notes. Fix:
+    // explicitly fetch the region via `list_regions` and hydrate the
+    // element before screenshotting.
+    if (view === "midi-editor" || view === "beat-sequencer") {
+      try {
+        const trackId = props.trackId || props.track_id;
+        const regionId = props.regionId || props.region_id;
+        if (trackId && regionId) {
+          const region = await _fetchRegion(trackId, regionId, 2000);
+          if (region) {
+            const tag =
+              view === "midi-editor" ? "foyer-midi-editor" : "foyer-beat-sequencer";
+            const el = _deepFind(tag);
+            if (el) {
+              if (view === "midi-editor") {
+                el.notes = region.notes || [];
+                el.regionName = region.name || "";
+                el.sequencerLayout = region.foyer_sequencer || null;
+                el.readOnly = !!(
+                  region.foyer_sequencer &&
+                  region.foyer_sequencer.active !== false
+                );
+              } else {
+                el.notes = region.notes || [];
+                el.regionName = region.name || "";
+                if (region.foyer_sequencer) {
+                  el.layout = region.foyer_sequencer;
+                }
+              }
+              // Lit needs a microtask + rAF to commit the new props
+              // into the rendered tree before the screenshotter
+              // captures.
+              await new Promise((r) => setTimeout(r, 250));
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[headless-viz] region hydration failed:", e);
+      }
+    }
+    if (view === "spectrum") {
+      // Map `target_track_id` → the inner tile's `target` prop, and
+      // wait for a real waterfall to fill in before the capturer runs.
+      // Without the wait the screenshot is a blank canvas — the FFT
+      // pipeline needs ~10 frames to build a visible spectrogram.
+      try {
+        const tile = _deepFind("foyer-spectrum-tile");
+        if (tile) {
+          if (props.target_track_id || props.trackId) {
+            const id = props.target_track_id || props.trackId;
+            tile.target = { kind: "track", id };
+          } else {
+            tile.target = { kind: "master" };
+          }
+          // Wait up to 2 s for the spectrum widget to receive enough
+          // frames that the waterfall has visible content.
+          const deadline = performance.now() + 2000;
+          while (performance.now() < deadline) {
+            const inner = _deepFind("foyer-spectrum");
+            const history = inner?._history?.length || 0;
+            if (history >= 8) break;
+            await new Promise((r) => setTimeout(r, 60));
+          }
+        }
+      } catch (e) {
+        console.warn("[headless-viz] spectrum focus failed:", e);
       }
     }
     // Tile-leaf renders an "Unknown view: <id>." placeholder when
@@ -272,6 +364,41 @@ export async function installHeadlessVizIfRequested() {
     document.body.dataset.foyerVizError = String(e?.message || e);
     signalReady();
   }
+}
+
+// Send `list_regions { track_id }` and await the matching
+// `regions_list` envelope, then pick the region with `regionId`.
+// Used by the headless midi-editor / beat-sequencer hydration so
+// the screenshot reflects the live region's notes + sequencer
+// layout instead of the editor's empty default.
+function _fetchRegion(trackId, regionId, deadlineMs = 2000) {
+  return new Promise((resolve) => {
+    const ws = window.__foyer?.ws;
+    if (!ws) return resolve(null);
+    let done = false;
+    const onEnvelope = (e) => {
+      const body = e?.detail?.body || e?.body;
+      if (!body || body.type !== "regions_list") return;
+      if (body.track_id !== trackId) return;
+      const region = (body.regions || []).find((r) => r.id === regionId);
+      if (!region) return;
+      done = true;
+      ws.removeEventListener?.("envelope", onEnvelope);
+      resolve(region);
+    };
+    ws.addEventListener?.("envelope", onEnvelope);
+    try {
+      ws.send({ type: "list_regions", track_id: trackId });
+    } catch {
+      ws.removeEventListener?.("envelope", onEnvelope);
+      return resolve(null);
+    }
+    setTimeout(() => {
+      if (done) return;
+      ws.removeEventListener?.("envelope", onEnvelope);
+      resolve(null);
+    }, deadlineMs);
+  });
 }
 
 // Walk every shadow boundary under foyer-app and return the first

@@ -121,12 +121,22 @@ const CAPTURES = {
     return await canvasToB64(canvas);
   },
   async spectrogram({ track_id, duration_ms }) {
-    const view = deepFind("foyer-spectrogram") || deepFind("foyer-meter-spectrum");
+    // Look for the live spectrum widget first (the one wired to the
+    // backend's FFT pipeline); fall back to the legacy names so this
+    // keeps working against any future renderer.
+    const view = deepFind("foyer-spectrum-tile")
+      || deepFind("foyer-spectrum")
+      || deepFind("foyer-spectrogram")
+      || deepFind("foyer-meter-spectrum");
     if (!view) {
-      throw new Error("no spectrogram component mounted; needs backend wiring");
+      throw new Error("no spectrum component mounted; the spectrum tile-view must be visible to capture");
     }
-    const canvas = findInsideShadow(view, "canvas");
-    if (!canvas) throw new Error("spectrogram has no canvas");
+    // The spectrum widget renders two canvases (bars + waterfall).
+    // Prefer the waterfall — it's the time-history view the agent
+    // usually wants. Falls back to the first canvas it finds.
+    const wf = findInsideShadow(view, "canvas.waterfall");
+    const canvas = wf || findInsideShadow(view, "canvas");
+    if (!canvas) throw new Error("spectrum view has no canvas");
     void track_id;
     void duration_ms;
     return await canvasToB64(canvas);
@@ -168,6 +178,28 @@ const CAPTURES = {
     if (svg) return await svgToB64(svg);
     throw new Error("event heatmap has no canvas/svg");
     void track_id;
+  },
+  async screen() {
+    // "What the user currently sees." Captures the whole foyer-app
+    // host — tile tree, transport, FABs, modals, etc. — at its
+    // current pixel layout. The foreignObject path is lossy on
+    // CSS-in-shadow-DOM and computed gradients (same caveat as the
+    // mixer capture below) but produces a recognizable surface for
+    // the agent's "look at the UI and tell me what to click" prompts.
+    const app = document.querySelector("foyer-app");
+    if (!app) throw new Error("foyer-app not currently mounted");
+    const rect = app.getBoundingClientRect();
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    svg.setAttribute("width", String(rect.width));
+    svg.setAttribute("height", String(rect.height));
+    const fo = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+    fo.setAttribute("width", "100%");
+    fo.setAttribute("height", "100%");
+    const clone = app.cloneNode(true);
+    fo.appendChild(clone);
+    svg.appendChild(fo);
+    return await svgToB64(svg, { width: rect.width, height: rect.height });
   },
   async midi_roll({ track_id, region_id }) {
     const view = deepFind("foyer-piano-roll") || deepFind("foyer-midi-roll");

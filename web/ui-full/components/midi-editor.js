@@ -505,6 +505,7 @@ export class MidiEditor extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this.tabIndex = 0;       // allow focus → keydown handler
+    this.setAttribute("data-foyer-focus-domain", "midi-roll");
     window.addEventListener("keydown", this._onKeyDown);
     window.addEventListener("keydown", this._onChordKeyDown);
     window.addEventListener("keyup",   this._onChordKeyUp);

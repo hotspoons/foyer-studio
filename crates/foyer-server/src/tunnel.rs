@@ -39,8 +39,10 @@ pub async fn load_manifest() -> TunnelManifest {
 pub async fn save_manifest(manifest: &TunnelManifest) -> anyhow::Result<()> {
     let path = manifest_path()?;
     let raw = serde_json::to_string_pretty(manifest)?;
-    let mut tmp =
-        tempfile::NamedTempFile::with_prefix_in("tunnel-manifest", path.parent().unwrap())?;
+    let parent = path
+        .parent()
+        .expect("manifest_path() always returns a file path that has a parent directory");
+    let mut tmp = tempfile::NamedTempFile::with_prefix_in("tunnel-manifest", parent)?;
     tmp.write_all(raw.as_bytes())?;
     tmp.flush()?;
     tokio::fs::rename(tmp.path(), &path).await?;

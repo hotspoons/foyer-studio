@@ -10,6 +10,7 @@
 
 import { LitElement, html, css } from "lit";
 import { icon } from "foyer-ui-core/icons.js";
+import { renderLocalized, onLocaleChange } from "/core/i18n.js";
 
 /** Window (ms) after connect/swap during which errors are collected. */
 const CAPTURE_MS = 4000;
@@ -137,9 +138,14 @@ export class StartupErrors extends LitElement {
     // arrive during the initial catch-up / snapshot stream.
     this._openCaptureWindow();
     window.__foyer?.ws?.addEventListener("envelope", this._onEnvelope);
+    // Re-render so any banner rows holding a `localized` payload
+    // pick up the new locale without waiting for a fresh error to
+    // arrive.
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
     window.__foyer?.ws?.removeEventListener("envelope", this._onEnvelope);
+    this._i18nDispose?.();
     super.disconnectedCallback();
   }
 
@@ -212,15 +218,21 @@ export class StartupErrors extends LitElement {
     //   list_ports_failed   writer queue closed   (×7)
     // in the banner. Group by (code, message) and surface a single
     // row with a count instead.
-    const code    = body.code || "error";
+    const code = body.code || "error";
     const message = body.message || "";
+    // Stash the structured `localized` payload alongside the legacy
+    // `message`. The render path prefers `localized` when present,
+    // so a locale flip re-translates without needing the error to
+    // re-arrive. Dedupe key stays (code, message) so legacy un-
+    // localized duplicates still coalesce correctly.
+    const localized = body.localized || null;
     const idx = this._errors.findIndex((e) => e.code === code && e.message === message);
     let next;
     if (idx >= 0) {
       next = this._errors.slice();
       next[idx] = { ...next[idx], count: (next[idx].count || 1) + 1 };
     } else {
-      next = this._errors.concat([{ code, message, count: 1 }]);
+      next = this._errors.concat([{ code, message, localized, count: 1 }]);
     }
     this._errors = next.slice(-MAX_ERRORS);
   }
@@ -283,12 +295,20 @@ export class StartupErrors extends LitElement {
           <button title="Dismiss" @click=${this._dismiss}>${icon("x-mark", 12)}</button>
         </header>
         <div class="list">
-          ${this._errors.map((e) => html`
-            <div class="row">
-              <span class="code">${e.code}</span>
-              <span class="msg">${e.message}${e.count > 1 ? ` (×${e.count})` : ""}</span>
-            </div>
-          `)}
+          ${this._errors.map((e) => {
+            // Prefer the structured `localized` payload when the
+            // server sent one — it carries placeholder values
+            // separately so each client renders in its own locale.
+            // Fall back to the legacy `message` field for emit
+            // sites that haven't been migrated to `loc!()` yet.
+            const text = e.localized ? renderLocalized(e.localized) : (e.message || "");
+            return html`
+              <div class="row">
+                <span class="code">${e.code}</span>
+                <span class="msg">${text}${e.count > 1 ? ` (×${e.count})` : ""}</span>
+              </div>
+            `;
+          })}
         </div>
         <footer>
           Further errors after dismissal will only appear in the DAW console.
