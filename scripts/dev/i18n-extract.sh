@@ -50,7 +50,7 @@ EXCLUDE_DIRS = {"target", "node_modules", ".git", "vendor", "dist", "build", "lo
 # skip — `[^,"']+,` matches up to the first comma without crossing
 # a string boundary.
 JS_T_RE = re.compile(
-    r'''(?<![A-Za-z0-9_])t\s*\(\s*"((?:[^"\\]|\\.)*)"'''
+    r'''(?<![A-Za-z0-9_])tr?\s*\(\s*"((?:[^"\\]|\\.)*)"'''
 )
 JS_TN_RE = re.compile(
     r'''(?<![A-Za-z0-9_])tn\s*\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"'''

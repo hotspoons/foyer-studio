@@ -82,6 +82,7 @@
 #include "ipc.h"
 #include "master_tap.h"
 #include "msgpack_out.h"
+#include "spectrum_pipeline.h"
 #include "schema_map.h"
 #include "shim_input_port.h"
 #include "shim_midi_input_port.h"
@@ -512,6 +513,18 @@ struct DecodedCmd
 	std::uint32_t audio_channels     = 2;
 	std::uint32_t audio_sample_rate  = 48000;
 	std::uint32_t audio_frame_size   = 0;
+
+	// Spectrum subscription fields — SubscribeSpectrum / UnsubscribeSpectrum.
+	// `target` is a serde-tagged enum (`tag = "kind"`), opts is a struct
+	// with serde-default-on-every-field shape so absent keys are fine.
+	std::string   spectrum_target_kind;  // "master" | "monitor" | "track"
+	std::string   spectrum_target_id;    // only set when kind == "track"
+	std::uint32_t spectrum_fft_size      = 2048;
+	std::uint32_t spectrum_hop_size      = 0;     // 0 = let the hub default to fft/2
+	std::string   spectrum_window        = "hann";
+	double        spectrum_min_db        = -100.0;
+	std::uint32_t spectrum_max_bins      = 0;     // 0 = let the hub default
+	bool          spectrum_per_channel   = true;
 
 	// RegionPatch fields — only read for UpdateRegion. All optional.
 	bool          has_patch_start   = false;
@@ -1678,6 +1691,66 @@ decode (const std::vector<std::uint8_t>& buf)
 							if (!in.skip_value ()) return out;
 						}
 					}
+				} else if (k == "target") {
+					// SubscribeSpectrum / UnsubscribeSpectrum:
+					// `target` is a serde-tagged enum (tag = "kind"):
+					//   { "kind": "master" }
+					//   { "kind": "monitor" }
+					//   { "kind": "track", "id": "<entity_id>" }
+					std::size_t inner = 0;
+					if (!in.read_map_header (inner)) return out;
+					for (std::size_t q = 0; q < inner; ++q) {
+						std::string kk;
+						if (!in.read_str (kk)) return out;
+						if (kk == "kind") {
+							if (!in.read_str (out.spectrum_target_kind)) return out;
+						} else if (kk == "id") {
+							if (!in.read_str (out.spectrum_target_id)) return out;
+						} else {
+							if (!in.skip_value ()) return out;
+						}
+					}
+				} else if (k == "opts") {
+					// SubscribeSpectrum: SpectrumOpts struct. Every field
+					// has a serde default so partial maps are fine.
+					std::size_t inner = 0;
+					if (!in.read_map_header (inner)) return out;
+					for (std::size_t q = 0; q < inner; ++q) {
+						std::string kk;
+						if (!in.read_str (kk)) return out;
+						if (kk == "fft_size") {
+							std::uint64_t v = 0;
+							if (!in.read_u64 (v)) return out;
+							out.spectrum_fft_size = static_cast<std::uint32_t> (v);
+						} else if (kk == "hop_size") {
+							// Option<u32> — nil means "default".
+							if (in.peek () == 0xc0) {
+								in.take_u8 ();
+								out.spectrum_hop_size = 0;
+							} else {
+								std::uint64_t v = 0;
+								if (!in.read_u64 (v)) return out;
+								out.spectrum_hop_size = static_cast<std::uint32_t> (v);
+							}
+						} else if (kk == "window") {
+							if (!in.read_str (out.spectrum_window)) return out;
+						} else if (kk == "min_db") {
+							if (!in.read_f64 (out.spectrum_min_db)) return out;
+						} else if (kk == "max_bins") {
+							if (in.peek () == 0xc0) {
+								in.take_u8 ();
+								out.spectrum_max_bins = 0;
+							} else {
+								std::uint64_t v = 0;
+								if (!in.read_u64 (v)) return out;
+								out.spectrum_max_bins = static_cast<std::uint32_t> (v);
+							}
+						} else if (kk == "per_channel") {
+							if (!in.read_bool (out.spectrum_per_channel)) return out;
+						} else {
+							if (!in.skip_value ()) return out;
+						}
+					}
 				} else if (k == "as_path") {
 					// Command::SaveSession { as_path: Option<String> }
 					// — decoded into `out.id`. `nil` or absent key → empty
@@ -1872,6 +1945,7 @@ decode (const std::vector<std::uint8_t>& buf)
 
 Dispatcher::Dispatcher (FoyerShim& s)
     : _shim (s)
+    , _spectrum_hub (std::make_unique<SpectrumHub> (s))
 {
 	_shim.ipc ().on_frame ([this] (foyer_ipc::FrameKind k, const std::vector<std::uint8_t>& payload) {
 		if (k == foyer_ipc::FrameKind::Control) on_control_frame (payload);
@@ -1879,7 +1953,12 @@ Dispatcher::Dispatcher (FoyerShim& s)
 	});
 }
 
-Dispatcher::~Dispatcher () = default;
+Dispatcher::~Dispatcher ()
+{
+	// Tear down spectrum subscriptions before the dispatcher dies so
+	// the route processors are removed cleanly on shim unload.
+	if (_spectrum_hub) _spectrum_hub->stop_all ();
+}
 
 void
 Dispatcher::on_audio_frame (const std::vector<std::uint8_t>& payload)
@@ -1910,6 +1989,19 @@ void
 Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 {
 	DecodedCmd cmd = decode (buf);
+	// Diagnostic — log every decoded command + its bytes length so we
+	// can confirm IPC roundtrips reach dispatch when a tool times out.
+	// fputs/stderr because PBD::warning routes through Ardour's
+	// dialog-error stream during normal operation, which can be
+	// silently suppressed depending on Ardour's config.
+	{
+		char buf_msg[160];
+		std::snprintf (buf_msg, sizeof (buf_msg),
+		    "foyer_shim: dispatch: recv cmd kind=%d bytes=%zu\n",
+		    static_cast<int> (cmd.kind), buf.size ());
+		std::fputs (buf_msg, stderr);
+		std::fflush (stderr);
+	}
 
 	switch (cmd.kind) {
 		case DecodedCmd::Kind::Subscribe:
@@ -3955,27 +4047,131 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			});
 			break;
 		}
-		case DecodedCmd::Kind::SubscribeSpectrum:
-		case DecodedCmd::Kind::UnsubscribeSpectrum: {
-			// The Ardour shim hasn't shipped its FFT pipeline yet — see
-			// the encode_session_snapshot's `spectrum.available = false`
-			// advertisement, which the FE keys off to hide the analyser
-			// surfaces on this backend. Subscribers that get here
-			// despite the cap flag receive a clear error event so MCP
-			// agents don't sit idle waiting for frames that never
-			// arrive. Implementing the real path means: tap the
-			// destination Route's outputs through a per-subscription
-			// disk-thread analyser, run a Hann-windowed FFT every hop,
-			// and emit `encode_spectrum_frame` from a low-priority
-			// idle slot.
+		case DecodedCmd::Kind::SubscribeSpectrum: {
+			{
+				char buf_msg[200];
+				std::snprintf (buf_msg, sizeof (buf_msg),
+				    "foyer_shim: SubscribeSpectrum (target_kind=%s fft_size=%u target_id=%s)\n",
+				    cmd.spectrum_target_kind.c_str (),
+				    cmd.spectrum_fft_size,
+				    cmd.spectrum_target_id.c_str ());
+				std::fputs (buf_msg, stderr);
+				std::fflush (stderr);
+			}
+			// Resolve the target's route on the session thread (route
+			// lookup goes through RCU), then hand off to the
+			// SpectrumHub which owns the per-subscription tap +
+			// FFT pipeline.
+			DecodedCmd snap = cmd;
 			FoyerShim* shim = &_shim;
-			auto bytes = msgpack_out::encode_error (
-				"spectrum_not_supported",
-				"This Ardour shim build hasn't shipped the FFT pipeline yet — "
-				"switch to the stub backend for a working spectrum analyser, "
-				"or wait for a shim with `spectrum.available=true` advertised "
-				"in the session snapshot.");
-			if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				{
+					char buf_msg[200];
+					std::snprintf (buf_msg, sizeof (buf_msg),
+					    "foyer_shim: SubscribeSpectrum slot running (kind=%s)\n",
+					    snap.spectrum_target_kind.c_str ());
+					std::fputs (buf_msg, stderr);
+					std::fflush (stderr);
+				}
+				SpectrumTargetSpec target;
+				if (snap.spectrum_target_kind == "monitor") {
+					target.kind = SpectrumTargetSpec::Kind::Monitor;
+				} else if (snap.spectrum_target_kind == "track") {
+					target.kind = SpectrumTargetSpec::Kind::Track;
+					target.track_id = snap.spectrum_target_id;
+				} else {
+					target.kind = SpectrumTargetSpec::Kind::Master;
+				}
+
+				// Find the right route. master/monitor are direct
+				// pointers; track requires walking the tracked-route
+				// cache by id.
+				auto& session = shim->session ();
+				std::shared_ptr<Route> route;
+				if (target.kind == SpectrumTargetSpec::Kind::Master) {
+					route = session.master_out ();
+				} else if (target.kind == SpectrumTargetSpec::Kind::Monitor) {
+					// monitor_out is optional; fall back to master if
+					// the session has no separate monitor section.
+					route = session.monitor_out ();
+					if (!route) route = session.master_out ();
+				} else {
+					// Track lookup: same pattern as `set_track_input`.
+					auto routes = schema_map::safe_get_routes (session);
+					for (auto const& r : *routes) {
+						if (!r) continue;
+						std::ostringstream tmp;
+						tmp << r->id ();
+						if (tmp.str () == snap.spectrum_target_id) { route = r; break; }
+					}
+				}
+				{
+					char m[120];
+					std::snprintf (m, sizeof (m),
+					    "foyer_shim: SubscribeSpectrum: route %s for kind=%s\n",
+					    route ? "FOUND" : "NULL", snap.spectrum_target_kind.c_str ());
+					std::fputs (m, stderr);
+					std::fflush (stderr);
+				}
+				if (!route) {
+					auto bytes = msgpack_out::encode_error (
+					    "spectrum_target_not_found",
+					    "Spectrum target route not found on the session.");
+					if (!bytes.empty ())
+						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+					return;
+				}
+
+				SpectrumOptsDecoded opts;
+				opts.fft_size    = snap.spectrum_fft_size;
+				opts.hop_size    = snap.spectrum_hop_size;
+				opts.window      = snap.spectrum_window;
+				opts.min_db      = static_cast<float> (snap.spectrum_min_db);
+				opts.max_bins    = snap.spectrum_max_bins;
+				opts.per_channel = snap.spectrum_per_channel;
+
+				const auto sr = static_cast<std::uint32_t> (session.sample_rate ());
+				const auto applied = self->_spectrum_hub->subscribe (target, opts, route, sr);
+				{
+					char m[120];
+					std::snprintf (m, sizeof (m),
+					    "foyer_shim: SubscribeSpectrum: hub.subscribe returned fft_size=%u\n",
+					    applied.fft_size);
+					std::fputs (m, stderr);
+					std::fflush (stderr);
+				}
+				if (applied.fft_size == 0) {
+					auto bytes = msgpack_out::encode_error (
+					    "spectrum_subscribe_failed",
+					    "Could not install the spectrum tap on the requested route.");
+					if (!bytes.empty ())
+						shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+					return;
+				}
+				auto ack = msgpack_out::encode_spectrum_subscribed (target, applied);
+				if (!ack.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
+			});
+			break;
+		}
+		case DecodedCmd::Kind::UnsubscribeSpectrum: {
+			DecodedCmd snap = cmd;
+			FoyerShim* shim = &_shim;
+			Dispatcher* self = this;
+			_shim.call_slot (MISSING_INVALIDATOR, [shim, self, snap] () {
+				SpectrumTargetSpec target;
+				if (snap.spectrum_target_kind == "monitor") {
+					target.kind = SpectrumTargetSpec::Kind::Monitor;
+				} else if (snap.spectrum_target_kind == "track") {
+					target.kind = SpectrumTargetSpec::Kind::Track;
+					target.track_id = snap.spectrum_target_id;
+				} else {
+					target.kind = SpectrumTargetSpec::Kind::Master;
+				}
+				self->_spectrum_hub->unsubscribe (target);
+				auto bytes = msgpack_out::encode_spectrum_unsubscribed (target, "");
+				if (!bytes.empty ()) shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+			});
 			break;
 		}
 		case DecodedCmd::Kind::SetTrackInput: {

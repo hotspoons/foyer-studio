@@ -1222,6 +1222,7 @@ dependencies = [
  "dirs 5.0.1",
  "eventsource-stream",
  "foyer-backend",
+ "foyer-backend-stub",
  "foyer-schema",
  "futures",
  "reqwest 0.12.28",

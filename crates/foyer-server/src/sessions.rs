@@ -195,6 +195,20 @@ impl SessionRegistry {
             Some(entry) => {
                 entry.pump.abort();
                 let info = entry.to_info();
+                let project_path = entry.path.clone();
+                // Save first — without this the shim's SIGTERM-driven
+                // quit can interrupt Ardour mid-atomic-rename and
+                // leave `<name>.pending` / `<name>.tmp` files in the
+                // project dir. The save is best-effort: stub backends
+                // and live-but-unsaved sessions both fail here
+                // silently and we proceed to shutdown anyway. The
+                // tempfile-sweep below catches whatever's left.
+                let save_result = entry.backend.save_session(None).await;
+                if let Err(e) = &save_result {
+                    tracing::warn!(
+                        "session {id} pre-close save failed (best-effort, continuing): {e}"
+                    );
+                }
                 // Politely ask the host process to exit before we
                 // tear down its IPC channel. The Ardour shim raises
                 // SIGTERM on its own pid; the stub no-ops.
@@ -212,9 +226,22 @@ impl SessionRegistry {
                 let mut proc_slot = entry.process.into_inner();
                 if let Some(proc) = proc_slot.take() {
                     let session_id_for_log = id.clone();
+                    let project_path_for_sweep = project_path.clone();
                     tokio::spawn(async move {
-                        shutdown_child(session_id_for_log, proc).await;
+                        shutdown_child(session_id_for_log.clone(), proc).await;
+                        // After the child has exited, sweep any leftover
+                        // `.pending` / `.tmp` files Ardour might have
+                        // left behind mid-save. These tempfiles strand
+                        // the user with an apparently-corrupted session
+                        // on the next open — better to delete them once
+                        // we know the canonical `.ardour` is the
+                        // authoritative state.
+                        sweep_save_tempfiles(&project_path_for_sweep);
                     });
+                } else {
+                    // No process handle (stub backend / reattach case).
+                    // Sweep synchronously — there's nothing to wait on.
+                    sweep_save_tempfiles(&project_path);
                 }
                 self.broadcast_event(Event::SessionClosed {
                     session_id: id.clone(),
@@ -481,6 +508,49 @@ fn now_secs() -> u64 {
 ///   2. SIGTERM, wait 3s. Catches Ardour builds whose graceful path
 ///      hangs on a save dialog or a stuck plugin.
 ///   3. SIGKILL. Last resort — forces the kernel to reap.
+/// Delete Ardour's atomic-save tempfiles (`<name>.pending`,
+/// `<name>.tmp`) inside the project directory if they survived a
+/// half-completed save. Ardour writes the new state to `.pending`,
+/// renames the old `.ardour` to `.ardour.bak`, then renames
+/// `.pending` to `.ardour`. Killing Ardour between steps strands
+/// `.pending` or `.tmp` on disk; the next open then loads a stale
+/// `.ardour` while the user wonders why their work is missing. We
+/// sweep these after the child has exited so the project dir is
+/// clean for the next open.
+///
+/// Best-effort: missing dir, permission errors, etc. just log + skip.
+fn sweep_save_tempfiles(project_dir: &str) {
+    if project_dir.is_empty() {
+        return;
+    }
+    let dir = std::path::Path::new(project_dir);
+    if !dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if ext == "pending" || ext == "tmp" {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::debug!(
+                    "sweep_save_tempfiles: couldn't remove {} ({e}); leaving in place",
+                    path.display()
+                );
+            } else {
+                tracing::info!(
+                    "sweep_save_tempfiles: cleaned {} (stale half-save)",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
 async fn shutdown_child(session_id: EntityId, mut proc: Box<dyn ProcessHandle>) {
     use std::time::Duration;
     if proc.wait(Duration::from_secs(5)).await {

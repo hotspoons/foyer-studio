@@ -898,18 +898,62 @@ pub trait Backend: Send + Sync + 'static {
     }
 
     /// One-shot snapshot helper: open a subscription, wait for the
-    /// FIRST `SpectrumFrame`, close. Used by the MCP `visualize.spectrum`
-    /// path where the agent wants an instantaneous snapshot rather
-    /// than a stream. Default: returns `Unsupported` so the visualize
-    /// tool can fall back to FE viz-capture.
+    /// FIRST `SpectrumFrame` matching `target`, close. Used by the MCP
+    /// `spectrum.snapshot` path where the agent wants an instantaneous
+    /// FFT frame rather than a stream.
+    ///
+    /// Default impl wires `subscribe_spectrum` → `subscribe`'s event
+    /// stream → `unsubscribe_spectrum` so every backend that supports
+    /// subscriptions gets snapshots for free. Backends without a
+    /// spectrum pipeline still bail at the `subscribe_spectrum` call.
     async fn snapshot_spectrum(
         &self,
-        _target: SpectrumTarget,
-        _opts: SpectrumOpts,
+        target: SpectrumTarget,
+        opts: SpectrumOpts,
     ) -> Result<SpectrumFrame, BackendError> {
-        Err(BackendError::Other(
-            "spectrum snapshot not supported by this backend".into(),
-        ))
+        use foyer_schema::Event;
+        // Open the event stream FIRST so we don't race against the
+        // shim's `SpectrumSubscribed` ack + first frame.
+        let mut stream = self.subscribe().await?;
+        // Kick off the subscription. The `applied` opts come back via
+        // an `Event::SpectrumSubscribed`; we don't need them for the
+        // one-shot return.
+        self.subscribe_spectrum(target.clone(), opts).await?;
+        let unsub_target = target.clone();
+        // Race the first matching frame against a wallclock cap. The
+        // shim's FFT pipeline takes 40 ms per tick and needs at least
+        // one full `fft_size` window to come through the audio path
+        // before the first non-silent frame fires (silent frames at
+        // `min_db` come out immediately). 12 s covers a 4096-sample
+        // FFT @ 48 kHz with one slow-startup cycle even on a busy
+        // Codespaces VM.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+            use futures::StreamExt;
+            loop {
+                let Some(event) = stream.next().await else {
+                    return Err(BackendError::Other(
+                        "event stream ended before spectrum frame arrived".into(),
+                    ));
+                };
+                if let Event::SpectrumFrame { frame } = event {
+                    if frame.target == target {
+                        return Ok(*frame);
+                    }
+                }
+            }
+        })
+        .await;
+        // Always release the subscription, even on timeout — leaking
+        // an FFT pipeline would chew CPU until the next session
+        // teardown.
+        let _ = self.unsubscribe_spectrum(unsub_target).await;
+        match result {
+            Ok(Ok(frame)) => Ok(frame),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(BackendError::Other(
+                "spectrum snapshot timed out waiting for the first frame".into(),
+            )),
+        }
     }
 
     /// Route a track's audio input to a named port (e.g. "foyer:ingress-123").

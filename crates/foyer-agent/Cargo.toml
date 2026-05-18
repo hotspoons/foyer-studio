@@ -29,3 +29,6 @@ eventsource-stream = "0.2"
 dirs = "5"
 base64 = "0.22"
 tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+foyer-backend-stub = { workspace = true }

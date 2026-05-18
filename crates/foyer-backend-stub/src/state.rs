@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use foyer_backend::BackendError;
 use foyer_schema::{
     AutomationLane, AutomationMode, AutomationPoint, ControlUpdate, ControlValue, EntityId, Group,
-    GroupPatch, Parameter, Script, ScriptRunResult, Session, Track, TrackKind, TrackPatch,
+    GroupPatch, IoDirection, IoPort, Parameter, Script, ScriptRunResult, Session, Track, TrackKind,
+    TrackPatch,
 };
 
 /// Enumerates the track-level controls that participate in group
@@ -570,18 +571,22 @@ impl StubState {
             slug.push_str("track");
         }
         let mut id_str = format!("track.{slug}");
+        // Deduplicate by extending the slug itself, not just the id —
+        // every parameter `fixtures::track` builds (gain/pan/mute/solo/
+        // record_arm) embeds the slug in its EntityId. If we only
+        // rewrote the track.id and left the param ids on the original
+        // slug, `find_param_mut` would route ControlSet on the new
+        // track to the FIRST track's parameter, silently misrouting
+        // record-arm / mute / gain edits. Bumping the slug keeps every
+        // id in lock-step.
+        let mut effective_slug = slug.clone();
         let mut suffix = 2;
         while self.session.tracks.iter().any(|t| t.id.as_str() == id_str) {
-            id_str = format!("track.{slug}_{suffix}");
+            effective_slug = format!("{slug}_{suffix}");
+            id_str = format!("track.{effective_slug}");
             suffix += 1;
         }
-        let track = crate::fixtures::track(&slug, &name, kind, color.as_deref());
-        // Override the id from the fixtures helper so deduped suffixes
-        // win — fixtures::track makes its own id from `slug`.
-        let track = Track {
-            id: EntityId::new(id_str),
-            ..track
-        };
+        let track = crate::fixtures::track(&effective_slug, &name, kind, color.as_deref());
         let insert_at = match after_id {
             Some(after) => self
                 .session
@@ -635,10 +640,26 @@ impl StubState {
                 Some(monitor.clone())
             };
         }
-        // input_port routing is shim-managed; the stub's track has no
-        // dedicated field for it (input_port flows through `inputs[]`
-        // which is read-only here). Leaving the live shim to act on
-        // input_port is correct.
+        // input_port routing — the Ardour shim talks to JACK; we
+        // approximate by stashing the assigned port as a single
+        // synthetic IoPort on `track.inputs[0]` so the agent can
+        // verify the routing took effect via `tracks.describe`.
+        // `is_midi` follows the track's kind so a MIDI track routed
+        // to `system:midi/capture_1` reads back as a MIDI input.
+        if let Some(port) = patch.input_port.as_ref() {
+            if port.is_empty() {
+                t.inputs.clear();
+            } else {
+                t.inputs = vec![IoPort {
+                    id: EntityId::new(format!("{}.input.0", t.id.as_str())),
+                    name: port.clone(),
+                    direction: IoDirection::Input,
+                    channels: 1,
+                    bound_peer: None,
+                    is_midi: matches!(t.kind, TrackKind::Midi),
+                }];
+            }
+        }
         Some(t.clone())
     }
 

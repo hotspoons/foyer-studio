@@ -23,6 +23,9 @@ import { WaveformCache } from "foyer-ui-core/layout/waveform-cache.js";
 import "foyer-ui-core/viz/waveform-gl.js";
 import "./midi-strip.js";
 import "./automation-lane.js";
+// `t` is shadowed all over this file as the per-track lambda param —
+// import the translator under `tr` to avoid the collision.
+import { t as tr, onLocaleChange } from "/core/i18n.js";
 import "foyer-ui-core/viz/viz-picker.js";
 import { getVizPref, getVizPrefs, setVizPref } from "foyer-ui-core/viz/viz-settings.js";
 import { resolveWheel, zoomFactorFromWheel } from "foyer-core/keymap/index.js";
@@ -230,6 +233,16 @@ export class TimelineView extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Keyboard nav lives on the host so the keybinds.js global
+    // handler can gate region-nudge on "is the timeline currently
+    // focused?" via the standard `:focus-within` / `composedPath`
+    // checks instead of guessing from selection state. `tabindex=-1`
+    // would suppress tab-into; 0 keeps it in the natural tab order
+    // so a keyboard-only user can land here without a mouse click.
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
+    this.setAttribute("data-foyer-focus-domain", "timeline");
+    this._onHostKey = (ev) => this._onTimelineKey(ev);
+    this.addEventListener("keydown", this._onHostKey);
     const ws = window.__foyer?.ws;
     if (ws) {
       ws.addEventListener("envelope", this._envelopeHandler);
@@ -279,6 +292,9 @@ export class TimelineView extends LitElement {
       if (playing && haveAudio) this.requestUpdate();
     };
     this._playheadRaf = requestAnimationFrame(playheadTick);
+    // Re-render on locale change so context-menu labels, tooltips,
+    // and the lane-head chrome flip languages live.
+    this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
 
   _applyGridColors() {
@@ -321,6 +337,99 @@ export class TimelineView extends LitElement {
     return Math.round(Number(this._playheadSamples) || 0);
   }
 
+  /// Host-level keyboard navigation. Only fires when the timeline (or
+  /// something inside it) actually holds focus — `keybinds.js`'s global
+  /// region-nudge yields to this handler so a left/right press while
+  /// the mixer / agent panel is focused doesn't accidentally move the
+  /// user's regions.
+  ///
+  /// Map (when the timeline is focused):
+  ///   ArrowUp / ArrowDown        — move track selection (channel nav)
+  ///   Shift+Up/Down              — extend selection to that track
+  ///   Enter                      — open the focused track's editor
+  ///   Ctrl/Cmd+Enter             — toggle the focused track in the
+  ///                                multi-selection (additive)
+  ///   ArrowLeft / ArrowRight     — region nudge (delegates to
+  ///                                `nudgeSelectedRegions`); identical
+  ///                                modifier semantics to keybinds.js
+  ///                                so a user who started with the
+  ///                                global binding doesn't relearn it
+  _onTimelineKey(ev) {
+    if (ev.defaultPrevented) return;
+    if (ev.altKey && (ev.key === "ArrowLeft" || ev.key === "ArrowRight"
+                       || ev.key === "ArrowUp" || ev.key === "ArrowDown")) {
+      // Alt+arrow is the tile-focus chord — leave it alone.
+      return;
+    }
+    const tracks = window.__foyer?.store?.state?.session?.tracks || [];
+    const tids = tracks.map((t) => t.id);
+    if (!tids.length) return;
+    const store = window.__foyer?.store;
+    const current = Array.from(store?.state?.selectedTrackIds || []);
+    const anchor = current[current.length - 1] || tids[0];
+    const idx = Math.max(0, tids.indexOf(anchor));
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      const next = ev.key === "ArrowDown"
+        ? Math.min(tids.length - 1, idx + 1)
+        : Math.max(0, idx - 1);
+      if (tids[next] === anchor) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      store?.selectTrack(tids[next], ev.shiftKey ? "extend" : "replace");
+      // Scroll the new selection into view so the user can see what
+      // their arrow just landed on.
+      this._scrollTrackIntoView(tids[next]);
+      return;
+    }
+    if (ev.key === "Enter") {
+      if (!current.length) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.ctrlKey || ev.metaKey) {
+        store?.selectTrack(anchor, "toggle");
+      } else {
+        import("./track-editor-modal.js").then((m) => m.openTrackEditor(anchor));
+      }
+      return;
+    }
+    // ArrowLeft / ArrowRight: region nudge. We re-implement the same
+    // behaviour `keybinds.js` had as a global capture, but scoped to
+    // "timeline is actually focused". Without this any random app
+    // surface (mixer toolbar, agent panel, sessions list) would still
+    // receive ←/→ and nudge regions.
+    if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") {
+      if (!this._selectedRegionIds || !this._selectedRegionIds.size) return;
+      const fine = !!(ev.ctrlKey || ev.metaKey);
+      const beat = !!ev.shiftKey && !fine;
+      const dir = ev.key === "ArrowLeft" ? "left" : "right";
+      if (typeof this.nudgeSelectedRegions === "function"
+          && this.nudgeSelectedRegions(dir, { fine, beat })) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    }
+  }
+
+  /// Scroll the track row for `trackId` into the visible portion of
+  /// the timeline scroller so keyboard navigation doesn't strand the
+  /// user looking at the wrong track. Best-effort — falls back to a
+  /// no-op when the lane element isn't in the DOM yet (e.g. just
+  /// after the track was created and lit hasn't rendered).
+  _scrollTrackIntoView(trackId) {
+    if (!trackId) return;
+    const scroller = this.renderRoot?.querySelector?.(".scroll");
+    if (!scroller) return;
+    const lane = this.renderRoot?.querySelector?.(`[data-track-id="${CSS.escape(trackId)}"]`);
+    if (!lane) return;
+    const laneRect = lane.getBoundingClientRect();
+    const scrollRect = scroller.getBoundingClientRect();
+    if (laneRect.top < scrollRect.top) {
+      scroller.scrollTop -= scrollRect.top - laneRect.top + 8;
+    } else if (laneRect.bottom > scrollRect.bottom) {
+      scroller.scrollTop += laneRect.bottom - scrollRect.bottom + 8;
+    }
+  }
+
   /** Reaper-style: S splits each selected region at `_splitAnchorSamples()`. */
   splitSelectedRegionsAtPlayhead() {
     const ws = window.__foyer?.ws;
@@ -342,6 +451,8 @@ export class TimelineView extends LitElement {
   }
 
   disconnectedCallback() {
+    if (this._onHostKey) this.removeEventListener("keydown", this._onHostKey);
+    if (this._i18nDispose) { this._i18nDispose(); this._i18nDispose = null; }
     if (this._onVizPrefsChanged) window.removeEventListener("foyer:viz-prefs-changed", this._onVizPrefsChanged);
     window.__foyer?.ws?.removeEventListener("envelope", this._envelopeHandler);
     window.__foyer?.ws?.removeEventListener("transport_seek_request", this._seekHandler);
@@ -559,51 +670,51 @@ export class TimelineView extends LitElement {
     // the MIDI-specific block.
     if (track.kind === "midi") {
       items.push({
-        label: "Open piano roll…",
+        label: tr("Open piano roll…"),
         icon: "sparkles",
         action: () => this._openMidiEditorForTrack(track),
       });
       items.push({
-        label: "Open beat sequencer…",
+        label: tr("Open beat sequencer…"),
         icon: "queue-list",
         action: () => this._openBeatSequencerForTrack(track),
       });
       items.push({
-        label: "Add region at playhead",
+        label: tr("Add region at playhead"),
         icon: "plus",
         action: () => this._addRegionAtPlayhead(track),
       });
       items.push({
-        label: "MIDI patches & banks…",
+        label: tr("MIDI patches & banks…"),
         icon: "queue-list",
         action: () => this._openMidiManager(track),
       });
       items.push({ separator: true });
     }
     items.push({
-      label: "Track editor…",
+      label: tr("Track editor…"),
       icon: "adjustments-horizontal",
       action: () => import("./track-editor-modal.js")
                       .then((m) => m.openTrackEditor(track.id)),
     });
     items.push({
-      label: "Automation editor…",
+      label: tr("Automation editor…"),
       icon: "chart-bar",
-      title: "Open the full-screen automation editor for this track.",
+      title: tr("Open the full-screen automation editor for this track."),
       action: () => this._openAutomationModal(track.id),
     });
     items.push({
-      label: "Move track up",
+      label: tr("Move track up"),
       icon: "arrow-up",
       action: () => this._moveTrackBy(track.id, -1),
     });
     items.push({
-      label: "Move track down",
+      label: tr("Move track down"),
       icon: "arrow-down",
       action: () => this._moveTrackBy(track.id, 1),
     });
     items.push({
-      label: "Delete track…",
+      label: tr("Delete track…"),
       icon: "trash",
       tone: "danger",
       action: () => this._deleteTracksFromContext(track.id),
@@ -702,12 +813,12 @@ export class TimelineView extends LitElement {
     // one-click. Audio tracks get straight to paste options.
     if (track.kind === "midi") {
       items.push({
-        label: "Add region here",
+        label: tr("Add region here"),
         icon: "plus",
         action: () => this._createRegionAt(track, atSamples),
       });
       items.push({
-        label: "Add region at playhead",
+        label: tr("Add region at playhead"),
         icon: "play",
         action: () => this._addRegionAtPlayhead(track),
       });
@@ -727,13 +838,16 @@ export class TimelineView extends LitElement {
       this._lastMouseClientY = ev.clientY;
     };
     items.push({
-      label: "Paste here",
+      label: tr("Paste here"),
       icon: "clipboard",
       shortcut: `${meta}+V`,
       disabled: !this.hasClipboard(),
       title: this.hasClipboard()
-        ? `Paste clipboard contents at ${(atSamples / sr).toFixed(2)}s on ${track.name}.`
-        : "Clipboard is empty — copy or cut a region first.",
+        ? tr("Paste clipboard contents at %{seconds}s on %{track}.", {
+            seconds: (atSamples / sr).toFixed(2),
+            track: track.name,
+          })
+        : tr("Clipboard is empty — copy or cut a region first."),
       action: () => {
         captureAnchor();
         // Explicit dest so cut→paste between same-kind tracks lands
@@ -744,7 +858,7 @@ export class TimelineView extends LitElement {
       },
     });
     items.push({
-      label: "Paste at playhead",
+      label: tr("Paste at playhead"),
       icon: "clipboard",
       shortcut: `${meta}+Shift+V`,
       disabled: !this.hasClipboard(),
@@ -3142,36 +3256,36 @@ export class TimelineView extends LitElement {
 
     const items = [];
     items.push({
-      label: "Quantize start to grid",
+      label: tr("Quantize start to grid"),
       icon: "bars-3-bottom-left",
       disabled: !this._gridStepSamples(),
       action: () => this._quantizeSelectedRegionsToGrid(),
     });
     items.push({
-      label: "Crop to time selection",
+      label: tr("Crop to time selection"),
       icon: "scissors",
       disabled: !hasTimeSelection || nSel === 0,
       title: !hasTimeSelection
-        ? "Drag a range on the ruler to enable."
-        : "Replace each selected region with the slice inside the time selection.",
+        ? tr("Drag a range on the ruler to enable.")
+        : tr("Replace each selected region with the slice inside the time selection."),
       action: () => this.cropSelectedRegionsToSelection(),
     });
     items.push({
-      label: "Snap fades to overlap (crossfade)",
+      label: tr("Snap fades to overlap (crossfade)"),
       icon: "arrows-pointing-in",
       disabled: !canCrossfade,
       title: canCrossfade
-        ? "Set symmetric fades across every overlap among the selected audio regions."
-        : "Drag two audio regions on the same track so they share time.",
+        ? tr("Set symmetric fades across every overlap among the selected audio regions.")
+        : tr("Drag two audio regions on the same track so they share time."),
       action: () => this._applyCrossfadeToSelection(),
     });
     items.push({
-      label: "Clear fades",
+      label: tr("Clear fades"),
       icon: "x-mark",
       disabled: !anyAudio,
       title: anyAudio
-        ? "Remove fade-in and fade-out from every selected audio region."
-        : "Select at least one audio region.",
+        ? tr("Remove fade-in and fade-out from every selected audio region.")
+        : tr("Select at least one audio region."),
       action: () => {
         const ws = window.__foyer?.ws;
         if (!ws) return;
@@ -3189,12 +3303,12 @@ export class TimelineView extends LitElement {
       },
     });
     items.push({
-      label: "Reset region gain to 0 dB",
+      label: tr("Reset region gain to 0 dB"),
       icon: "speaker-wave",
       disabled: !anyAudio,
       title: anyAudio
-        ? "Restore unity gain (scale_amplitude = 1.0) on selected audio regions."
-        : "Select at least one audio region.",
+        ? tr("Restore unity gain (scale_amplitude = 1.0) on selected audio regions.")
+        : tr("Select at least one audio region."),
       action: () => {
         const ws = window.__foyer?.ws;
         if (!ws) return;
@@ -3214,40 +3328,40 @@ export class TimelineView extends LitElement {
     if (combineSel) {
       items.push({ separator: true });
       items.push({
-        label: "Glue regions",
+        label: tr("Glue regions"),
         icon: "circle-stack",
         disabled: false,
-        title: "Combine selected regions on this track into one (Ardour playlist combine).",
+        title: tr("Combine selected regions on this track into one (Ardour playlist combine)."),
         action: () => this._combineSelectedRegions(),
       });
     }
     items.push({ separator: true });
     items.push({
-      label: "Reverse audio",
+      label: tr("Reverse audio"),
       icon: "arrow-uturn-left",
       disabled: !anyAudio,
       title: anyAudio
-        ? "Reverse each selected audio region in time."
-        : "Select at least one audio region.",
+        ? tr("Reverse each selected audio region in time.")
+        : tr("Select at least one audio region."),
       action: () => this._reverseSelectedAudioRegions(),
     });
     items.push({
-      label: "Strip silence…",
+      label: tr("Strip silence…"),
       icon: "scissors",
       disabled: !anyAudio,
       title: anyAudio
-        ? "Detect silence and remove it (uses default threshold / fade; Ardour strip silence)."
-        : "Select at least one audio region.",
+        ? tr("Detect silence and remove it (uses default threshold / fade; Ardour strip silence).")
+        : tr("Select at least one audio region."),
       action: () => this._stripSilenceSelectedAudioRegions(),
     });
     items.push({
-      label: "Pitch shift…",
+      label: tr("Pitch shift…"),
       icon: "musical-note",
       disabled: nSel === 0,
       title:
         nSel === 0
-          ? "Select a region."
-          : "Shift pitch for audio (Rubber Band) or transpose MIDI notes.",
+          ? tr("Select a region.")
+          : tr("Shift pitch for audio (Rubber Band) or transpose MIDI notes."),
       action: () => this._pitchShiftSelectedRegions(),
     });
     items.push({ separator: true });
@@ -3258,53 +3372,53 @@ export class TimelineView extends LitElement {
         return !!this._groupOf(r);
       });
       items.push({
-        label: anyGrouped ? "Add to group" : "Group regions",
+        label: anyGrouped ? tr("Add to group") : tr("Group regions"),
         icon: "link",
         disabled: nSel < 2,
         title: nSel < 2
-          ? "Pick two or more regions to link them."
+          ? tr("Pick two or more regions to link them.")
           : anyGrouped
-            ? "Extend the existing group with the newly-selected regions."
-            : "Link selected regions so move / trim / fade / delete cascades to siblings.",
+            ? tr("Extend the existing group with the newly-selected regions.")
+            : tr("Link selected regions so move / trim / fade / delete cascades to siblings."),
         action: () => this.groupSelectedRegions(),
       });
       items.push({
-        label: "Ungroup",
+        label: tr("Ungroup"),
         icon: "no-symbol",
         disabled: !anyGrouped,
         title: anyGrouped
-          ? "Dissolve the group(s) the selection belongs to."
-          : "No grouped region in the selection.",
+          ? tr("Dissolve the group(s) the selection belongs to.")
+          : tr("No grouped region in the selection."),
         action: () => this.ungroupSelectedRegions(),
       });
     }
     items.push({ separator: true });
     items.push({
-      label: "Bring to front",
+      label: tr("Bring to front"),
       icon: "arrow-up",
       disabled: nSel === 0,
-      title: "Stack selected regions above every other region on their track.",
+      title: tr("Stack selected regions above every other region on their track."),
       action: () => this._adjustSelectedRegionLayers("front"),
     });
     items.push({
-      label: "Bring forward",
+      label: tr("Bring forward"),
       icon: "chevron-up",
       disabled: nSel === 0,
-      title: "Move selected regions one layer above the next neighbor.",
+      title: tr("Move selected regions one layer above the next neighbor."),
       action: () => this._adjustSelectedRegionLayers("forward"),
     });
     items.push({
-      label: "Send backward",
+      label: tr("Send backward"),
       icon: "chevron-down",
       disabled: nSel === 0,
-      title: "Move selected regions one layer below the previous neighbor.",
+      title: tr("Move selected regions one layer below the previous neighbor."),
       action: () => this._adjustSelectedRegionLayers("backward"),
     });
     items.push({
-      label: "Send to back",
+      label: tr("Send to back"),
       icon: "arrow-down",
       disabled: nSel === 0,
-      title: "Stack selected regions below every other region on their track.",
+      title: tr("Stack selected regions below every other region on their track."),
       action: () => this._adjustSelectedRegionLayers("back"),
     });
     return items;
@@ -3744,7 +3858,7 @@ export class TimelineView extends LitElement {
           return html`
             <div class="region ${regionSelected ? "selected" : ""}" data-id=${r.id}
                  tabindex="0"
-                 style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px;outline:none"
+                 style="left:${leftPx}px;width:${widthPx}px;top:4px;bottom:4px"
                  @pointerdown=${(e) => {
                    if (e.button === 2) {
                      this._onRegionPointerDownSecondary(e, r);
@@ -3754,6 +3868,7 @@ export class TimelineView extends LitElement {
                    this._onRegionPointerDown(e, r);
                    this._startDrag(e, r, "move");
                  }}
+                 @keydown=${(e) => this._onRegionKeydown(e, r)}
                  @dblclick=${(e) => { e.stopPropagation(); this._openRegionEditor(r); }}
                  @contextmenu=${(e) => this._regionContextMenu(e, r)}>
               ${isMidi
@@ -4466,11 +4581,11 @@ export class TimelineView extends LitElement {
     const items = [
       {
         heading: multiHead
-          ? `${nHead} regions`
+          ? tr("%{count} regions", { count: nHead })
           : (region.name || region.id),
       },
       {
-        label: region.muted ? "Unmute" : "Mute",
+        label: region.muted ? tr("Unmute") : tr("Mute"),
         icon: region.muted ? "speaker-wave" : "speaker-x-mark",
         shortcut: "M",
         action: () => window.__foyer?.ws?.send({
@@ -4499,23 +4614,23 @@ export class TimelineView extends LitElement {
       const active = !!(layout && layout.active !== false);
       const archived = !!(layout && layout.active === false);
       items.push({
-        label: active ? "Open piano roll (read-only)…" : "Open piano roll…",
+        label: active ? tr("Open piano roll (read-only)…") : tr("Open piano roll…"),
         icon: "sparkles",
         action: () => this._openMidiEditor(region),
       });
       items.push({
-        label: active ? "Open beat sequencer…"
-             : archived ? "Restore beat sequencer…"
-             : "Convert to beat sequencer…",
+        label: active ? tr("Open beat sequencer…")
+             : archived ? tr("Restore beat sequencer…")
+             : tr("Convert to beat sequencer…"),
         icon: "queue-list",
         action: () => this._openBeatSequencer(region),
       });
     }
     items.push({ separator: true });
     items.push({
-      label: "Automation editor…",
+      label: tr("Automation editor…"),
       icon: "chart-bar",
-      title: "Open the full-screen automation editor for this region's track.",
+      title: tr("Open the full-screen automation editor for this region's track."),
       action: () => this._openAutomationModal(region.track_id),
     });
     items.push({ separator: true });
@@ -4535,19 +4650,19 @@ export class TimelineView extends LitElement {
     };
     const meta = this._metaChord();
     items.push({
-      label: "Cut",
+      label: tr("Cut"),
       icon: "scissors",
       shortcut: `${meta}+X`,
       action: () => { ensureSelection(); this.cutRegionSelection(); },
     });
     items.push({
-      label: "Copy",
+      label: tr("Copy"),
       icon: "document-duplicate",
       shortcut: `${meta}+C`,
       action: () => { ensureSelection(); this.copyRegionSelection(); },
     });
     items.push({
-      label: "Paste at cursor",
+      label: tr("Paste at cursor"),
       icon: "clipboard",
       shortcut: `${meta}+V`,
       disabled: !this.hasClipboard(),
@@ -4568,21 +4683,21 @@ export class TimelineView extends LitElement {
       },
     });
     items.push({
-      label: "Paste at playhead",
+      label: tr("Paste at playhead"),
       icon: "clipboard",
       shortcut: `${meta}+Shift+V`,
       disabled: !this.hasClipboard(),
       action: () => this.pasteRegions({ at: "playhead" }),
     });
     items.push({
-      label: "Duplicate",
+      label: tr("Duplicate"),
       icon: "plus",
       shortcut: `${meta}+D`,
       action: () => { ensureSelection(); this.duplicateRegionSelection(); },
     });
     items.push({ separator: true });
     items.push({
-      label: "Delete region",
+      label: tr("Delete region"),
       icon: "trash",
       tone: "danger",
       shortcut: "Del",
@@ -4608,6 +4723,43 @@ export class TimelineView extends LitElement {
     this._pendingDemoteRegionId = null;
     this._reconcileCutPending();
     this.requestUpdate();
+  }
+
+  /// Region-element keydown. Regions are tab-stops (`tabindex="0"`)
+  /// so a keyboard-only user can step through them with Tab; this
+  /// handler then turns Enter into a select (replace) and Ctrl/Cmd+
+  /// Enter into a toggle (additive multi-select). Delete still flows
+  /// through the global keybinds handler because we want it to act
+  /// on the click-selection set, which already includes whatever the
+  /// user just selected via these keys.
+  _onRegionKeydown(ev, region) {
+    if (!region?.id) return;
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.ctrlKey || ev.metaKey) {
+        // Additive toggle — Ctrl+Enter on an already-selected region
+        // removes it from the set, otherwise adds it. Matches
+        // pointer-down's shift/ctrl behavior so muscle memory carries
+        // over between mouse + keyboard flows.
+        if (this._selectedRegionIds.has(region.id)) {
+          this._selectedRegionIds.delete(region.id);
+        } else {
+          this._selectedRegionIds.add(region.id);
+        }
+      } else {
+        this._selectedRegionIds.clear();
+        const g = this._groupOf(region);
+        if (g) {
+          for (const s of this._regionsInGroup(g)) this._selectedRegionIds.add(s.id);
+        } else {
+          this._selectedRegionIds.add(region.id);
+        }
+      }
+      this._pendingDemoteRegionId = null;
+      this._reconcileCutPending();
+      this.requestUpdate();
+    }
   }
 
   _onRegionPointerDown(ev, region) {

@@ -264,6 +264,13 @@ export class PluginPanel extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Tabbable so keyboard users can step into the panel; the inner
+    // knob / fader / numeric inputs already have their own tab stops
+    // (native <input> elements). This just hands the panel itself a
+    // landing spot so Tab → first parameter is one keystroke instead
+    // of needing to pierce shadow DOM with focus.
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
+    this.setAttribute("data-foyer-focus-domain", "plugin-panel");
     window.__foyer?.store?.addEventListener("control", this._onControl);
     window.__foyer?.store?.addEventListener("change", this._onControl);
     window.__foyer?.ws?.addEventListener("envelope", this._envelopeHandler);

@@ -672,6 +672,7 @@ impl AgentRuntime {
                 session_director,
                 spectrum_director,
                 prefer_headless_render: prefer_headless,
+                turn_budget: None,
             },
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
         })
@@ -794,6 +795,10 @@ impl AgentRuntime {
             session_director,
             spectrum_director,
             prefer_headless_render: prefer_headless,
+            // `run_turn` overwrites this with the live per-turn
+            // budget handle so `continue_working` can extend the
+            // round cap mid-turn.
+            turn_budget: None,
         };
         // The locale directive is short and goes at the *end* of the
         // system prompt so it overrides any baseline assumption about

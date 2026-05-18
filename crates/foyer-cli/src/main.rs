@@ -1112,6 +1112,78 @@ async fn launch_and_wait_for_shim(
 ) -> Result<(PathBuf, tokio::process::Child)> {
     use std::time::Duration;
 
+    // Clean Ardour's atomic-save tempfiles BEFORE spawning the shim.
+    // A previous foyer crash mid-save leaves `<name>.pending` /
+    // `<name>.tmp` next to `<name>.ardour`; on the next open, Ardour
+    // pops a recovery dialog (which our auto-dispatcher doesn't
+    // always catch) or just stalls trying to disambiguate, blocking
+    // the shim's advertisement past the spawn deadline. Wipe them
+    // proactively — `.ardour` is the canonical state, the tempfiles
+    // are intermediate save states that should never outlive the
+    // process that wrote them.
+    if let Some(parent) = project.parent() {
+        let dir = if project.is_dir() { project } else { parent };
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let Some(ext) = p.extension().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if ext == "pending" || ext == "tmp" {
+                    if let Err(e) = std::fs::remove_file(&p) {
+                        tracing::debug!(
+                            "spawn pre-flight: couldn't unlink stale {}: {e}",
+                            p.display()
+                        );
+                    } else {
+                        tracing::info!(
+                            "spawn pre-flight: cleaned stale {} (half-completed save)",
+                            p.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Reuse an already-running shim for the SAME project if we have
+    // one — otherwise the user's "open this existing project" gesture
+    // would spawn a second Ardour that races the first one for the
+    // session lock + then dies. The shim writes its project path in
+    // the advert; we match on it before falling through to spawn.
+    if let Some(ad) = discovery::find_for_project(project) {
+        // Probe-connect once to be sure the shim is still reachable
+        // (the JSON advert can outlive an unclean exit). On success,
+        // hand the existing socket back to the caller — they'll wrap
+        // it in a HostBackend and proceed as if we'd just spawned.
+        if let Ok(stream) = std::os::unix::net::UnixStream::connect(&ad.socket) {
+            drop(stream);
+            tracing::info!(
+                "reusing live shim at {} for already-open project {}",
+                ad.socket.display(),
+                project.display(),
+            );
+            // We didn't spawn a child for this — the caller's
+            // `ProcessHandle` slot needs to be optional. Synthesize a
+            // dummy child that's already dead so the existing
+            // signature stays the same. (`tokio::process::Child` has
+            // no public default constructor, so we keep the return
+            // shape but document the gotcha at the call site.)
+            // Spawn a /bin/true with kill_on_drop=false so the
+            // returned Child is a real handle but exits instantly.
+            // This lets the caller's existing teardown path (which
+            // expects a Child) work without conditional logic. The
+            // already-running Ardour is owned by whoever spawned it
+            // first; closing the new session doesn't kill it.
+            let dummy = tokio::process::Command::new("/bin/true")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?;
+            return Ok((ad.socket, dummy));
+        }
+    }
+
     let before: std::collections::HashSet<PathBuf> =
         discovery::scan().into_iter().map(|s| s.socket).collect();
 
@@ -1430,7 +1502,19 @@ exec {exec} "$@" "$SESSION_DIR" "$NAME""#,
         .spawn()
         .with_context(|| format!("spawn {}", resolved_exec.display()))?;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // Ardour startup against an EXISTING session loads every plugin
+    // instance + waveform peakfile + automation lane on the way to
+    // `set_active(true)` (which is when the shim writes its advert).
+    // On a Codespaces VM (shared CPU / network-backed disk) this can
+    // easily exceed the old 30 s deadline for a session with a
+    // half-dozen plugins. 90 s covers the slow path; the override env
+    // lets fast hosts (or load-test rigs that don't want to babysit a
+    // hung shim) tune it down.
+    let timeout_secs: u64 = std::env::var("FOYER_SHIM_SPAWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(90);
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
     // The helper invocation runs the shim with `FOYER_SHIM_NO_IPC=1`
     // (see `bootstrap_session_if_missing` and the bash branch above) so
     // it never advertises — the only advert we'll see is from the real

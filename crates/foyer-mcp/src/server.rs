@@ -148,6 +148,10 @@ impl ServerHandler for FoyerMcpServer {
             // own request).
             backend: foyer_agent::tools::make_backend_ref(Arc::downgrade(&backend)),
             fe_attached: fe_render.is_some(),
+            // MCP calls don't run inside the in-process agent's
+            // `run_turn`, so there's no per-turn budget to extend.
+            // `continue_working` no-ops cleanly when this is None.
+            turn_budget: None,
             fe_render,
             headless_render,
             ui_director,

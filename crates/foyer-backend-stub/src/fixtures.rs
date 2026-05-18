@@ -94,6 +94,14 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
             automation_lanes.push(empty_lane(&param.id));
         }
     }
+    // record_arm only exists on audio/midi tracks — buses + master +
+    // monitor don't record. Mirrors Ardour's IO model. The agent
+    // checks for `Some(...)` on this when `tracks.set_arm` fires and
+    // returns a clear error if the chosen track is a bus.
+    let record_arm = match kind {
+        TrackKind::Audio | TrackKind::Midi => Some(toggle(&format!("track.{slug}.rec"), "Rec")),
+        _ => None,
+    };
     Track {
         id: track_id,
         name: name.into(),
@@ -103,7 +111,7 @@ pub(crate) fn track(slug: &str, name: &str, kind: TrackKind, color: Option<&str>
         pan: pan_ctl,
         mute,
         solo,
-        record_arm: Some(toggle(&format!("track.{slug}.rec"), "Rec")),
+        record_arm,
         monitoring: Some("auto".into()),
         sends: vec![],
         plugins,

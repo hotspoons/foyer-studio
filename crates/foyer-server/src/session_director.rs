@@ -113,6 +113,94 @@ impl SessionDirector for SessionDirectorImpl {
         } else {
             backend_id.to_string()
         };
+
+        // Already-open match: if the requested project_path already has
+        // a LIVE session on this backend, just refocus and return —
+        // don't spawn a second copy. Matches existing reuse logic at
+        // the shim-spawner level (`launch_and_wait_for_shim` →
+        // `discovery::find_for_project`) and lifts it up so the agent
+        // and WS dispatcher both benefit.
+        //
+        // We probe `Backend::is_alive` on the candidate before reusing:
+        // a session entry can outlive its shim (Ardour crashed, JACK
+        // hung, network blip) and reusing the dead entry would dead-
+        // end the caller on the next tool call. Closing the stale
+        // entry first lets the spawn path below build a fresh shim.
+        let normalized_new_path = project_path.map(|p| {
+            Path::new(p)
+                .canonicalize()
+                .ok()
+                .and_then(|c| c.to_str().map(String::from))
+                .unwrap_or_else(|| p.to_string())
+        });
+        if let Some(ref np) = normalized_new_path {
+            for s in state.sessions.list().await {
+                if s.backend_id == resolved_backend_id && &s.path == np {
+                    let alive = matches!(
+                        state.sessions.backend(&s.id).await,
+                        Some(b) if b.is_alive()
+                    );
+                    if alive {
+                        self.focus(s.id.as_str()).await?;
+                        return Ok(LaunchOutcome {
+                            session_id: s.id.as_str().to_string(),
+                            backend_id: resolved_backend_id,
+                            project_path: Some(s.path),
+                        });
+                    }
+                    tracing::warn!(
+                        "launch_project: session {} for {} is dead (shim gone) — \
+                         closing stale entry before respawn",
+                        s.id,
+                        s.path,
+                    );
+                    if let Err(e) = self.close(s.id.as_str()).await {
+                        tracing::warn!(
+                            "launch_project: close of dead session {} failed (continuing): {e}",
+                            s.id,
+                        );
+                    }
+                    // Don't break — there could be multiple dead entries
+                    // for the same path. Keep sweeping then fall through
+                    // to spawn.
+                }
+            }
+        }
+
+        // Heavyweight-backend swap: when the requested launch is on a
+        // non-stub backend (Ardour today) and there's already a session
+        // alive on that same backend kind with a different project,
+        // close the old one first. Spawning a second Ardour while the
+        // first is alive doubles plugin-scan + JACK-init work and an
+        // agent tool round can expire mid-spawn (observed: 10-minute
+        // session.new call during the Kimi e2e drive). Closing first
+        // sequentializes the OS work and frees the new spawn to take
+        // the normal ~10–30 s. Stub backends are cheap to multiply so
+        // we leave their sessions intact.
+        let backend_kind = spawner
+            .list()
+            .into_iter()
+            .find(|b| b.id == resolved_backend_id)
+            .map(|b| b.kind);
+        let heavyweight = matches!(backend_kind.as_deref(), Some(k) if k != "stub");
+        if heavyweight {
+            let stale: Vec<_> = state
+                .sessions
+                .list()
+                .await
+                .into_iter()
+                .filter(|s| s.backend_id == resolved_backend_id)
+                .map(|s| s.id.clone())
+                .collect();
+            for sid in stale {
+                if let Err(e) = self.close(sid.as_str()).await {
+                    tracing::warn!(
+                        "launch_project: pre-spawn close of {sid} failed (continuing): {e}"
+                    );
+                }
+            }
+        }
+
         let path = project_path.map(Path::new);
         let launched = spawner
             .launch(&resolved_backend_id, path, sample_rate, None)
@@ -188,5 +276,30 @@ impl SessionDirector for SessionDirectorImpl {
         let backends = state.spawner.as_ref().map(|s| s.list()).unwrap_or_default();
         let active = state.active_backend_id.read().await.clone();
         Ok(BackendsListing { backends, active })
+    }
+
+    async fn focus(&self, session_id: &str) -> Result<(), SessionDirectorError> {
+        let state = self.state()?;
+        let id = foyer_schema::EntityId::new(session_id);
+        let Some(backend) = state.sessions.backend(&id).await else {
+            return Err(SessionDirectorError::Execution(format!(
+                "no session with id `{session_id}` (open it first via session.open / session.new)"
+            )));
+        };
+        // Mirror the WS-level `Command::SelectSession` path: stash the
+        // focus pointer, mirror `state.backend()` to match, and broadcast
+        // the change so other connected clients see the focus flip too.
+        let prev = state.focus_session_id.write().await.replace(id.clone());
+        state.install_active_backend(backend).await;
+        if prev.as_ref() != Some(&id) {
+            crate::ws::broadcast_event(
+                &state,
+                foyer_schema::Event::SessionFocusChanged {
+                    session_id: Some(id.clone()),
+                },
+            )
+            .await;
+        }
+        Ok(())
     }
 }

@@ -24,16 +24,22 @@ use crate::llm::{
 };
 use crate::tools::{Tool, ToolContext, ToolError, ToolRegistry};
 
-/// Soft cap on the model→tool→model loop. Stops a runaway agent
-/// from burning tokens forever, but instead of hard-erroring at the
-/// boundary we inject escalating wrap-up nudges so the model can
-/// finalise. The hard cap (below) only fires if the model keeps
-/// emitting tool calls AFTER the explicit "no more tools" warning.
-pub const MAX_TOOL_ROUNDS: u32 = 32;
-/// Rounds before the limit at which the engine starts nudging.
-/// On round MAX_TOOL_ROUNDS - SOFT_LIMIT_WARN_WINDOW we tell the
-/// model "you have N rounds left, start wrapping up"; on the
-/// last round we tell it "no more tools — final answer now".
+/// Initial budget for the model→tool→model loop per turn. The agent
+/// can extend this mid-turn by calling the hidden `continue_working`
+/// tool when it's genuinely in the middle of something — that bumps
+/// the live cap by `ROUND_BUDGET_EXTENSION` instead of failing out.
+/// Without an extension the agent gets a gentle "you've used your
+/// budget; consider following up with the user" nudge well before
+/// the cliff, and a hard truncation only after it actively ignored
+/// the suggestion.
+pub const INITIAL_TOOL_ROUND_BUDGET: u32 = 32;
+/// How many extra rounds each call to `continue_working` grants.
+pub const ROUND_BUDGET_EXTENSION: u32 = 32;
+/// Rounds before the current budget at which the engine starts
+/// nudging. On `current_budget - SOFT_LIMIT_WARN_WINDOW` we hint
+/// "you've used most of your tool budget — consider wrapping up,
+/// or call `continue_working` if you're genuinely mid-task". On the
+/// last round we tell it "this is your last round before truncation".
 const SOFT_LIMIT_WARN_WINDOW: u32 = 4;
 
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +93,36 @@ pub struct AgentEngine {
     pub system_prompt: String,
 }
 
+/// Per-turn mutable state the engine threads through tool calls so a
+/// tool can request a budget extension and the loop picks it up on
+/// the very next round. Wrapped in an Arc<Mutex<…>> so tool
+/// implementations (in particular the hidden `continue_working`
+/// tool) can mutate it without going through the engine.
+#[derive(Debug, Default)]
+pub struct TurnBudget {
+    /// Current cap on tool rounds. Starts at INITIAL_TOOL_ROUND_BUDGET
+    /// and grows by ROUND_BUDGET_EXTENSION each time the agent calls
+    /// `continue_working`.
+    pub cap: u32,
+    /// How many times the agent has extended the budget in this turn.
+    /// Surfaced in subsequent nudges so the operator can see the
+    /// pattern in the trace.
+    pub extensions: u32,
+}
+
+impl TurnBudget {
+    pub fn new() -> Self {
+        Self {
+            cap: INITIAL_TOOL_ROUND_BUDGET,
+            extensions: 0,
+        }
+    }
+    pub fn extend(&mut self) {
+        self.cap = self.cap.saturating_add(ROUND_BUDGET_EXTENSION);
+        self.extensions = self.extensions.saturating_add(1);
+    }
+}
+
 impl AgentEngine {
     /// Run one user turn — adds the user message, then loops over
     /// assistant turns until the model stops calling tools.
@@ -94,7 +130,7 @@ impl AgentEngine {
         &self,
         user_body: String,
         attachments: Vec<foyer_schema::agent::AgentAttachment>,
-        ctx: ToolContext,
+        mut ctx: ToolContext,
         sink: Arc<dyn EngineSink>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<(), EngineError> {
@@ -107,31 +143,51 @@ impl AgentEngine {
         };
         sink.on_record(user_record).await;
 
+        // Per-turn extendable budget. Tools (specifically the hidden
+        // `continue_working`) mutate this Arc<Mutex<>> mid-turn to
+        // grant the model another batch of rounds.
+        let budget: crate::tools::TurnBudgetHandle =
+            std::sync::Arc::new(std::sync::Mutex::new(TurnBudget::new()));
+        ctx.turn_budget = Some(budget.clone());
+
         let mut rounds = 0u32;
         loop {
             rounds += 1;
-            // Soft wrap-up nudges. The cap exists so a confused
-            // model can't loop forever burning tokens; but a model
-            // that's mid-task on a legitimately large operation just
-            // needs to know it has to start packing up. The nudge is
-            // a system message slipped into THIS round's request only
-            // (not persisted to the transcript), so the model sees
-            // it the same way it sees the regular system prompt.
-            let remaining = MAX_TOOL_ROUNDS.saturating_sub(rounds);
+            // Read the LIVE cap each round — `continue_working` may
+            // have bumped it during the previous round's tool spree.
+            let (current_cap, extensions) = {
+                let g = budget.lock().expect("turn budget mutex poisoned");
+                (g.cap, g.extensions)
+            };
+            // Soft wrap-up nudges. Framing matters: a model that
+            // panics about running out of rounds will stop mid-task
+            // and the user has to re-prompt. The new copy reminds the
+            // model of the *available* options (wrap up cleanly OR
+            // extend via `continue_working`) rather than threatening
+            // a hard stop. The cliff messaging only kicks in on the
+            // final round, and even then we suggest the extension.
+            let remaining = current_cap.saturating_sub(rounds);
             let wrap_up_nudge = if remaining == 0 {
                 Some(format!(
-                    "You've hit the tool-round cap ({MAX_TOOL_ROUNDS}). This MUST \
-                     be your final reply — do NOT emit any more tool calls; \
-                     summarise what you accomplished and what's still pending \
-                     so the user can re-prompt if they want you to continue."
+                    "Heads-up: this is round {rounds}/{current_cap}, your last \
+                     before the harness will trim any further tool calls. \
+                     Two paths from here:\n\
+                     · If you're at a natural checkpoint, give the user a short \
+                       summary of what you finished + what you'd suggest next.\n\
+                     · If you're genuinely mid-task and stopping now would leave \
+                       things half-done, call `continue_working` with a short \
+                       reason — that grants {ROUND_BUDGET_EXTENSION} more rounds \
+                       (already extended {extensions} time(s) this turn).\n\
+                     No pressure either way — pick whatever serves the user best."
                 ))
             } else if remaining < SOFT_LIMIT_WARN_WINDOW {
                 Some(format!(
-                    "Heads-up: you've used {rounds}/{MAX_TOOL_ROUNDS} tool rounds. \
-                     Only {remaining} left before the harness forces a stop. \
-                     Start wrapping up — finish your highest-priority pending \
-                     work, then give the user a status summary instead of \
-                     chaining more tools."
+                    "You're on round {rounds}/{current_cap} ({remaining} left). \
+                     If you're close to a natural stopping point, wrap up + \
+                     surface a summary; if you're genuinely mid-task, you can \
+                     call `continue_working` for another batch of rounds. \
+                     Otherwise carry on — this is a friendly reminder, not a \
+                     stop sign."
                 ))
             } else {
                 None
@@ -321,19 +377,20 @@ impl AgentEngine {
                 return Ok(());
             }
 
-            // Hard stop: we already told the model "no more tools" on
-            // this round via the wrap-up nudge, and it still emitted
-            // tool calls. Rather than hard-error, drop the unexecuted
-            // calls, append a synthetic assistant note explaining the
-            // truncation, and exit. The user can re-prompt with
-            // "continue" if they want the agent to keep going. Each
-            // dropped call gets marked `error` on the existing
-            // assistant record so the UI shows it as truncated rather
-            // than indefinitely-pending.
-            if rounds >= MAX_TOOL_ROUNDS {
+            // Truncation guard: the model already saw the
+            // last-round nudge and didn't pick either path (wrap up
+            // OR extend via `continue_working`), and now wants
+            // another batch of tool calls. We trim them and append
+            // an explanatory assistant note. Re-read the cap because
+            // `continue_working` might have extended it DURING this
+            // round's tool dispatch — in that case we should NOT
+            // truncate, the agent did the right thing.
+            let live_cap = budget.lock().expect("turn budget mutex poisoned").cap;
+            if rounds >= live_cap {
                 for c in &calls {
                     let msg = format!(
-                        "harness round limit ({MAX_TOOL_ROUNDS}) reached — call not dispatched"
+                        "tool round budget ({live_cap}) reached — call not dispatched. \
+                         Call `continue_working` next turn if you need more rounds."
                     );
                     self.record_tool_result(
                         &sink,
@@ -345,13 +402,27 @@ impl AgentEngine {
                     )
                     .await;
                 }
-                // Append a fresh assistant note so the user sees a
-                // human-readable explanation in the transcript instead
-                // of silent truncation.
-                let note = format!(
-                    "_(Reached the {MAX_TOOL_ROUNDS}-round tool cap. Re-prompt with \
-                     \"continue\" to keep going, or ask me to summarise what's left.)_"
-                );
+                // Friendly transcript note. We avoid framing this as
+                // an error — it's a natural stopping point and the
+                // user can keep going by re-prompting or by the
+                // model calling `continue_working` next turn.
+                let extensions_used = budget
+                    .lock()
+                    .expect("turn budget mutex poisoned")
+                    .extensions;
+                let note = if extensions_used > 0 {
+                    format!(
+                        "_(Pausing here — used the full tool budget for this turn ({live_cap} \
+                         rounds, extended {extensions_used} time(s)). Reply 'continue' if you'd \
+                         like me to keep going from where I left off.)_"
+                    )
+                } else {
+                    format!(
+                        "_(Pausing here — that was {live_cap} rounds of tool calls. Reply \
+                         'continue' or give me a more specific direction and I'll pick \
+                         back up.)_"
+                    )
+                };
                 let rec = {
                     let mut conv = self.conversation.lock().await;
                     conv.push_assistant(note, Vec::new())

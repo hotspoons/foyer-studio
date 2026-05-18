@@ -22,6 +22,7 @@ class FoyerShim;
 class MasterTap;
 class ShimInputPort;
 class ShimMidiInputPort;
+class SpectrumHub;
 
 class Dispatcher
 {
@@ -80,6 +81,11 @@ private:
 	// thread can update it without locking against the event-loop
 	// thread that reads it.
 	std::atomic<std::uint32_t> _ingress_ring_prime_ms { 0 };
+
+	// Spectrogram pipeline. Owns one ARDOUR::Processor + ring buffer
+	// per active SpectrumTarget; the SubscribeSpectrum / UnsubscribeSpectrum
+	// arms talk to it. Initialised in the dispatcher constructor.
+	std::unique_ptr<SpectrumHub> _spectrum_hub;
 };
 
 } // namespace ArdourSurface

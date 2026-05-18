@@ -162,6 +162,11 @@ std::vector<std::uint8_t> encode_audio_ingress_closed (std::uint32_t stream_id);
 // pulling `schema_map.h` into every consumer of `msgpack_out.h`.
 namespace ArdourSurface::schema_map { struct ScriptRecord; }
 
+// Forward-declare the spectrum types so the encoders can take them by
+// reference without `msgpack_out.h` having to pull the full pipeline
+// header in.
+namespace ArdourSurface { struct SpectrumTargetSpec; struct SpectrumOptsDecoded; }
+
 namespace ArdourSurface::msgpack_out {
 
 /// Encode `Event::ScriptList { scripts }`.
@@ -181,6 +186,33 @@ std::vector<std::uint8_t> encode_script_run_result (
     const std::string& id, bool ok,
     const std::string& stdout_text, const std::string& error_text,
     std::uint32_t elapsed_ms);
+
+// ── Spectrum (real-time FFT pipeline) ──────────────────────────────
+//
+// Wire parity with `foyer_schema::SpectrumFrame`, `SpectrumSubscribed`,
+// `SpectrumUnsubscribed`. Frames flow at the subscription's hop rate
+// (~25 Hz at 40 ms tick), each carrying per-channel magnitudes in
+// dBFS so the FE can render either a waterfall or an instantaneous
+// bar plot without further server-side processing.
+
+/// Encode `Event::SpectrumFrame { frame: SpectrumFrame }`.
+/// `magnitudes_db` is row-major: one inner vector per channel, each
+/// `bins` long (matching `SpectrumChannel.magnitudes_db`).
+std::vector<std::uint8_t> encode_spectrum_frame (
+    const SpectrumTargetSpec& target,
+    const SpectrumOptsDecoded& opts,
+    std::uint32_t sample_rate,
+    const std::vector<std::vector<float>>& magnitudes_db,
+    std::uint64_t server_mono_ns);
+
+/// Encode `Event::SpectrumSubscribed { target, applied }`.
+std::vector<std::uint8_t> encode_spectrum_subscribed (
+    const SpectrumTargetSpec& target, const SpectrumOptsDecoded& applied);
+
+/// Encode `Event::SpectrumUnsubscribed { target, reason? }`. Pass
+/// an empty string for `reason` to omit it (= clean unsubscribe).
+std::vector<std::uint8_t> encode_spectrum_unsubscribed (
+    const SpectrumTargetSpec& target, const std::string& reason);
 
 } // namespace ArdourSurface::msgpack_out
 

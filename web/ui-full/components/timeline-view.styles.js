@@ -20,7 +20,20 @@ export const EDGE_GRAB = 6;
 
 export const timelineStyles = css`
     ${scrollbarStyles}
-    :host { display: flex; flex-direction: column; flex: 1; overflow: hidden; background: var(--color-surface); }
+    :host { display: flex; flex-direction: column; flex: 1; overflow: hidden; background: var(--color-surface); outline: none; }
+    /* Subtle focus ring so keyboard users can see WHICH view their
+     * arrow / Enter is targeting. Inset 1px so it doesn't push
+     * adjacent layout. focus-visible (not :focus) keeps the ring off
+     * for mouse-only clicks — pointer interactions move focus too. */
+    :host(:focus-visible) {
+      box-shadow: inset 0 0 0 1px var(--color-accent, #7c5cff);
+    }
+    /* Selected-track highlight in keyboard nav. The .selected class
+     * already exists on .lane; this just makes the row read clearly
+     * on a focused timeline. */
+    :host(:focus-within) .lane.selected .lane-head {
+      box-shadow: inset 2px 0 0 var(--color-accent, #7c5cff);
+    }
     .toolbar {
       display: flex; align-items: center; gap: 8px;
       padding: 6px 14px;
@@ -485,6 +498,17 @@ export const timelineStyles = css`
       white-space: nowrap;
     }
     .region:hover { filter: brightness(1.08); }
+    /* Focus ring for keyboard tab-through. focus-visible keeps the
+     * ring off for mouse-clicks (which also move focus to the region
+     * but don't need the affordance). The dashed outline plus inset
+     * shadow reads against any region color. */
+    .region:focus-visible {
+      outline: 2px dashed var(--color-accent, #7c5cff);
+      outline-offset: -2px;
+      box-shadow:
+        0 0 0 1px var(--color-accent, #7c5cff),
+        0 1px 3px rgba(0, 0, 0, 0.35);
+    }
     .region.selected {
       border-color: color-mix(in oklab, var(--color-accent-3) 75%, #fff 25%);
       box-shadow:

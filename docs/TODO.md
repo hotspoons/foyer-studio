@@ -744,34 +744,54 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
     `backend_ref`, `attach_backend`,
     [foyer-mcp/src/server.rs](../crates/foyer-mcp/src/server.rs)
     constructs its own per-call `BackendRef` via `make_backend_ref`.)
-- [/] Spectrum analyser — wire surface ships, real FFT pipeline is shim-side TBD
-  - **Why CPU was high on the stub backend:** the stub producer was
-    ticking at 50 Hz over default 2048-bin frames with a per-tick
-    allocation + sin/log per bin. Dropped to 25 Hz (matches Ardour's own
-    meter refresh) AND clamped default `max_bins` to 512 when callers
-    don't request more — that's enough resolution for the waterfall the
-    FE actually renders. Stub also now locks state only AFTER confirming
-    subs are non-empty (was locking even on the empty-subs early return).
+- [x] Spectrum analyser — real FFT in the Ardour shim
+  - **Stub backend optimisation** (earlier in this session):
+    50 Hz → 25 Hz tick, default `max_bins` clamped to 512 unless
+    callers ask for more, state locked only AFTER subs are
+    confirmed non-empty.
     ([foyer-backend-stub/src/spectrum.rs](../crates/foyer-backend-stub/src/spectrum.rs).)
-  - **What's still synthesised:** the stub fabricates plausible-looking
-    pink-noise + one tone per track — it's not a real FFT, just
-    demo-grade data so the waterfall has motion. The Ardour shim's
-    `subscribe_spectrum` / `unsubscribe_spectrum` arms still emit
-    `spectrum_not_supported` and the session snapshot advertises
-    `spectrum.available = false` so the FE hides the analyser surfaces
-    against a real DAW.
-    ([shims/ardour/src/dispatch.cc:3958-3979](../shims/ardour/src/dispatch.cc).)
-  - **What's left for real audio:** in the C++ shim, tap each
-    destination Route's outputs through a per-subscription disk-thread
-    analyser (Ardour has `ARDOUR::DSP::FFTSpectrum` already), run a
-    Hann-windowed FFT every hop, emit `encode_spectrum_frame` from a
-    low-priority idle slot, and flip `spectrum.available = true` in the
-    session-snapshot emit
-    ([msgpack_out.cc:1169](../shims/ardour/src/msgpack_out.cc)). The
-    schema (`SpectrumFrame { target, bins, sample_rate, window, min_db,
-    channels[], server_mono_ns }`) and the FE renderer are ready —
-    this is purely a shim-side wire-up, no client work needed once it
-    lands.
+  - **Ardour shim FFT pipeline shipped**:
+    · New
+      [spectrum_pipeline.h/.cc](../shims/ardour/src/spectrum_pipeline.h)
+      with `SpectrumTap` (RT-safe `ARDOUR::Processor` writing
+      per-channel `PBD::RingBuffer<float>`) and `SpectrumHub`
+      (subscribe/unsubscribe/tick/stop_all, owns one tap +
+      `ARDOUR::DSP::FFTSpectrum` per subscription).
+    · The RT callback only memcpys into the ring — no FFT work in
+      the audio thread. A `g_timeout_add` at 40 ms drains the ring
+      into rolling per-channel windows, runs libardour's
+      `FFTSpectrum::set_data_hann` + `execute`, downsamples native
+      bins → `max_bins` evenly-spaced output bins (max-pool to
+      preserve transients), and emits via
+      `encode_spectrum_frame`.
+    · `subscribe_spectrum` resolves the target route on the session
+      thread (`session.master_out()` / `monitor_out()` / id-walked
+      `safe_get_routes()`), then hands off to the hub; `Dispatcher`
+      owns a `SpectrumHub` member and calls `stop_all` on shutdown
+      for clean shim unload. ([dispatch.cc](../shims/ardour/src/dispatch.cc).)
+    · `encode_spectrum_subscribed` / `encode_spectrum_unsubscribed`
+      / `encode_spectrum_frame` added to
+      [msgpack_out.cc](../shims/ardour/src/msgpack_out.cc); the
+      session-snapshot emit now flips `spectrum.available = true`
+      with `{ fft_sizes: [256, 512, 1024, 2048, 4096], windows:
+      ["hann"], max_frame_rate_hz: 25 }`. The FE auto-shows the
+      analyser surfaces once this flag is true (no client change
+      needed).
+    · `CMakeLists.txt` picks up the new `.cc`; `cd shims/ardour/build
+      && make -j2` and `cargo check --all` both pass.
+  - **Follow-ups** (not blocking):
+    · Only Hann is honoured — the capability advertises Hann-only
+      so the FE doesn't request a window we can't produce. Adding
+      Hamming / Blackman-Harris would need a custom pre-window
+      path (Ardour's API folds Hann into `set_data_hann`).
+    · Sub-tick hop overlap (multiple FFTs per 40 ms tick) isn't
+      implemented; subscribers that ask for very small hops will
+      still get only one frame per tick. Acceptable for a
+      waterfall, may need work if anyone wants tight onset
+      tracking.
+    · Per-channel cap is hard-coded to 2 — surround sources fold
+      to stereo. Schema supports more; FE waterfall isn't ready
+      for >2 yet.
 - [x] i18n long-tail wrap + translations
   - Wrapped mixer strip + track-strip (~17 keys via the existing `tr`
     alias), agent-panel chrome (~40+ keys), session-view (~15 keys),
@@ -846,12 +866,84 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
       where applicable.
     Selection state is read live via a `deepFindTag` walk for
     `foyer-timeline-view`. ([command-palette.js](../web/ui-full/components/command-palette.js).)
-- [ ] Full-app keyboard navigation (timeline / mixer / midi-roll /
-  sequencer / track-editor gain+pan / plugin parameter panel).
-  Multi-day scope — not started in this session. Notes from Rich:
-  tab stops per region, region select via Enter (not Space),
-  Ctrl+Enter for multi-select; arrow keys navigate channels in the
-  timeline (up/down) and mixer (left/right); unbind global left/right
-  capture for region nudge — only capture when focused in the
-  timeline.
-- [ ] Implement spectrography in shim, complete the task
+- [x] Full-app keyboard navigation — first pass shipped
+  - **Timeline**
+    ([timeline-view.js](../web/ui-full/components/timeline-view.js)
+    `_onTimelineKey`, `_onRegionKeydown`): host is `tabindex="0"`
+    with `data-foyer-focus-domain="timeline"`. Arrow-up / arrow-down
+    moves the track selection through `store.selectTrack(id,
+    "replace" | "extend")` and scrolls the new row into view;
+    Shift+Up/Down extends the selection; Enter opens the track
+    editor for the focused track; Ctrl/Cmd+Enter toggles it in the
+    multi-selection. Regions are already `tabindex="0"` — now they
+    accept Enter (select replace) and Ctrl/Cmd+Enter (additive
+    toggle), with a dashed focus ring so users can see which region
+    they're parked on.
+  - **Mixer** ([mixer.js](../web/ui-full/components/mixer.js)
+    `_onMixerKey`): host is `tabindex="0"` with
+    `data-foyer-focus-domain="mixer"`. Arrow-left / arrow-right
+    walks the strip order (inputs → master/monitor matching the
+    visual layout); Shift extends the selection; Enter solos the
+    focused strip (Ctrl/Cmd+Enter toggles multi-select); plain
+    `m`/`s`/`r` toggle mute/solo/arm via `update_track`. Track
+    strips themselves are `tabindex="0"` so Tab steps through the
+    row.
+  - **Region nudge — focus-scoped**: the old global left/right
+    arrow capture in [keybinds.js](../web/ui-core/layout/keybinds.js)
+    is gone; the same fine/beat semantics now live on
+    `foyer-timeline-view` so a left/right press only nudges regions
+    while the timeline is focused. Other panels (mixer, agent,
+    sessions list) get their arrows back.
+  - **Knob + Fader** ([knob.js](../web/ui-core/widgets/knob.js),
+    [fader.js](../web/ui-core/widgets/fader.js)): both are now
+    `tabindex="0"` + `role="slider"`. Arrow keys nudge value
+    (Shift = fine), Home/End jump to range bounds, Enter resets to
+    the configured default. Focus ring inset 2px so it doesn't
+    push neighbours. This is what makes the track-editor's gain
+    and pan controls keyboard-friendly — the modal renders foyer-knob
+    for both.
+  - **MIDI roll / beat sequencer / plugin panel**: each gets a
+    `tabindex="0"` + `data-foyer-focus-domain` so the tile focus
+    tree can land on them. MIDI roll keeps its existing window-
+    level keydown (delete / undo / copy / paste); sequencer
+    + plugin panel rely on the now-tabbable native inputs inside
+    (knobs, faders, range inputs).
+  - **Smoke spec**:
+    [tests-ui/specs/keyboard-nav.spec.js](../tests-ui/specs/keyboard-nav.spec.js)
+    covers the timeline track-nav round trip, the mixer track-nav
+    round trip, and a standalone `<foyer-knob>` ArrowUp emit.
+  - Deferred (not in this pass): MIDI-roll arrow-key note nav
+    (selection model is per-note, complex enough to deserve its
+    own pass); beat-sequencer cell arrow nav (same — needs an
+    "active cell" pointer to track). The host-focus + tabindex
+    are in place so wiring those later is mechanical.
+- [x] Tool-call round limit reframed + hidden extend tool
+  - Old behaviour: hard cap at 32 tool rounds; the wrap-up nudge
+    threatened a stop in nervous-making language; round 32+1 dropped
+    every queued tool call with an error. Rich saw the agent ditch
+    legitimately-mid-task work because of this.
+  - New behaviour
+    ([engine.rs](../crates/foyer-agent/src/engine.rs) `TurnBudget`,
+    [tools/continue_working.rs](../crates/foyer-agent/src/tools/continue_working.rs)):
+    · `TurnBudget { cap, extensions }` is per-turn shared state
+      (`Arc<std::sync::Mutex<…>>`) cloned into every `ToolContext`
+      built inside `run_turn` (the field is `Option` so MCP +
+      `/v1/chat/completions` keep their own short-lived budgets
+      and the extend tool no-ops there cleanly).
+    · The wrap-up nudge is reframed as a *friendly reminder* —
+      "you're on round R/N, wrap up OR call `continue_working` for
+      another batch — no pressure". The cliff message still tells
+      the model what'll happen if it ignores both paths but never
+      threatens.
+    · `continue_working` is a hidden tool — not mentioned in the
+      welcome payload, not in the system prompt, only surfaced by
+      name inside the wrap-up nudge. Calling it bumps the budget
+      by `ROUND_BUDGET_EXTENSION` (currently 32) and the loop
+      re-reads the cap on the very next iteration. Each extension
+      is counted + surfaced in the trace so an operator can audit
+      a runaway agent.
+    · Truncation messaging now reads as a soft pause, not an
+      error: "Pausing here — that was N rounds of tool calls. Reply
+      'continue' …". When the agent extended at least once, the
+      banner notes the extension count so the user sees the
+      pattern.

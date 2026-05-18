@@ -97,6 +97,13 @@ export class TrackStrip extends LitElement {
         color-mix(in oklab, var(--color-accent) 8%, var(--color-surface)));
       box-shadow: inset 2px 0 0 var(--color-accent);
     }
+    /* Focus ring for keyboard users — focus-visible only so a mouse
+     * click that lands on the strip doesn't paint the ring (the
+     * selection bar already signals selection). */
+    :host(:focus-visible) {
+      outline: 2px solid var(--color-accent, #7c5cff);
+      outline-offset: -2px;
+    }
     .channel-resize {
       /* Stays INSIDE the strip's right edge so it doesn't trespass into
        * the floating-window edge-resize zone. A channel-resize floating
@@ -296,6 +303,11 @@ export class TrackStrip extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Tabbable so users can step through mixer strips with Tab.
+    // The mixer's own keydown handler responds to Enter / arrow keys
+    // for selection ops; tabbing here just gives keyboard users a way
+    // to land on a specific strip without a mouse click.
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
     this._onSelection = () => this._syncSelected();
     this._onBrowserSources = () => this.requestUpdate();
     // Audio ingress envelopes — the desktop track-editor modal and

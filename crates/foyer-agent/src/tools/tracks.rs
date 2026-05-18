@@ -97,6 +97,17 @@ enum Op {
         mode: String,
         mask: u16,
     },
+    /// Toggle record-arm on a track. Required step before recording —
+    /// the transport's global `record(armed=true)` only writes to
+    /// tracks that are themselves armed. Buses + master have no
+    /// record_arm and will return an error. Pair with
+    /// `tracks.update(input_port=…)` to choose the source and
+    /// `tracks.update(monitoring="input")` if the user wants live
+    /// monitoring while tracking.
+    SetArm {
+        track_id: String,
+        armed: bool,
+    },
 }
 
 #[async_trait]
@@ -131,7 +142,11 @@ impl Tool for TracksTool {
          reorder(ordered_track_ids:[…]) — must list every existing id, \
          set_midi_channel_mode(track_id, direction, mode, mask) for \
          per-track MIDI channel filtering (Direction='capture'|'playback', \
-         Mode='all'|'filter'|'force')."
+         Mode='all'|'filter'|'force'), \
+         set_arm(track_id, armed) — toggle record-arm on an audio/MIDI \
+         track. Required before recording. Pair with \
+         `io.list_ports` → `update(input_port)` to pick the source and \
+         `transport.record(armed=true)` to actually start tracking."
     }
 
     fn schema(&self) -> Value {
@@ -142,7 +157,7 @@ impl Tool for TracksTool {
                 "subcommand": { "type": "string",
                     "enum": ["list", "describe", "describe_many",
                              "create", "update", "delete", "reorder",
-                             "set_midi_channel_mode"] },
+                             "set_midi_channel_mode", "set_arm"] },
                 "kind": { "type": "string", "enum": ["audio", "midi", "bus"] },
                 "after_id": { "type": "string" },
                 "instrument_uri": { "type": "string",
@@ -165,7 +180,9 @@ impl Tool for TracksTool {
                     "enum": ["capture", "playback"] },
                 "mode":              { "type": "string",
                     "enum": ["all", "filter", "force"] },
-                "mask":              { "type": "integer", "minimum": 0, "maximum": 65535 }
+                "mask":              { "type": "integer", "minimum": 0, "maximum": 65535 },
+                "armed":             { "type": "boolean",
+                    "description": "set_arm: true to arm the track for recording, false to disarm." }
             }
         })
     }
@@ -379,6 +396,39 @@ impl Tool for TracksTool {
                 .with_data(
                     serde_json::to_value(t).map_err(|e| ToolError::Execution(e.to_string()))?,
                 ))
+            }
+            Op::SetArm { track_id, armed } => {
+                let snap = backend
+                    .snapshot()
+                    .await
+                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                let track = snap
+                    .tracks
+                    .iter()
+                    .find(|t| t.id.as_str() == track_id)
+                    .ok_or_else(|| {
+                        ToolError::InvalidArgs(format!("unknown track_id: {track_id}"))
+                    })?;
+                let rec_param = track.record_arm.as_ref().ok_or_else(|| {
+                    ToolError::InvalidArgs(format!(
+                        "track {} ({track_id}) has no record_arm — buses and master/monitor \
+                         can't be armed",
+                        track.name
+                    ))
+                })?;
+                backend
+                    .set_control(rec_param.id.clone(), ControlValue::Bool(armed))
+                    .await
+                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                Ok(ToolResult::ok(format!(
+                    "track {} ({track_id}) {}",
+                    track.name,
+                    if armed { "armed" } else { "disarmed" }
+                ))
+                .with_data(json!({
+                    "track_id": track_id,
+                    "armed": armed,
+                })))
             }
         }
     }

@@ -332,6 +332,11 @@ export class BeatSequencer extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Focusable so the global tile-tree navigation can land here and
+    // local keys (Ctrl+Z / Ctrl+Y, chord digits, future arrow nav)
+    // route correctly when the user lands on the sequencer surface.
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
+    this.setAttribute("data-foyer-focus-domain", "sequencer");
     window.__foyer?.store?.addEventListener("control", this._onStoreControl);
     window.__foyer?.store?.addEventListener("change", this._onStoreControl);
     // Listen for convert/restore broadcasts from the piano roll so

@@ -34,7 +34,13 @@ export class Mixer extends LitElement {
 
   static styles = css`
     ${scrollbarStyles}
-    :host { display: flex; flex: 1 1 auto; flex-direction: column; overflow: hidden; background: var(--color-surface); }
+    :host { display: flex; flex: 1 1 auto; flex-direction: column; overflow: hidden; background: var(--color-surface); outline: none; }
+    /* Focus ring matches timeline-view's so keyboard users see a
+     * consistent affordance across views. focus-visible only — mouse
+     * clicks still move focus but don't paint the ring. */
+    :host(:focus-visible) {
+      box-shadow: inset 0 0 0 1px var(--color-accent, #7c5cff);
+    }
     .toolbar {
       display: flex; align-items: center; gap: 8px;
       padding: 6px 14px;
@@ -279,6 +285,14 @@ export class Mixer extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Focusable so arrow-left / arrow-right can navigate between
+    // mixer channels when the user has the mixer focused. Marker
+    // attribute lets other handlers (palette, debug overlays) tell
+    // which view the focus tree currently sits in.
+    if (!this.hasAttribute("tabindex")) this.setAttribute("tabindex", "0");
+    this.setAttribute("data-foyer-focus-domain", "mixer");
+    this._onHostKey = (ev) => this._onMixerKey(ev);
+    this.addEventListener("keydown", this._onHostKey);
     // The mixer no longer owns the listener — `audioController`
     // (boot-mounted in app.js) does. We just observe its `change`
     // events to keep the toggle button in sync, and re-render on
@@ -294,11 +308,82 @@ export class Mixer extends LitElement {
     this._i18nDispose = onLocaleChange(() => this.requestUpdate());
   }
   disconnectedCallback() {
+    if (this._onHostKey) this.removeEventListener("keydown", this._onHostKey);
     window.__foyer?.store?.removeEventListener("change", this._onStoreChange);
     window.__foyer?.audio?.removeEventListener?.("change", this._onAudioChange);
     this._offMetronomePref?.();
     this._i18nDispose?.();
     super.disconnectedCallback();
+  }
+
+  /// Mixer keyboard nav. Only fires when the mixer (or one of its
+  /// strips) has focus.
+  ///   ArrowLeft / ArrowRight  — move track selection across strips
+  ///   Shift+Left/Right        — extend selection to that strip
+  ///   Ctrl/Cmd+Enter          — toggle the focused strip in the
+  ///                             multi-selection
+  ///   Enter                   — solo the focused strip (toggle)
+  ///   M / S / R               — Mute / Solo / Record toggles on the
+  ///                             focused strip (when no modifier;
+  ///                             skipped if user is typing)
+  _onMixerKey(ev) {
+    if (ev.defaultPrevented) return;
+    if (ev.altKey) return;
+    const session = this.session || window.__foyer?.store?.state?.session;
+    const tracks = session?.tracks || [];
+    // Mixer left-to-right order matches `render()`: inputs first, then
+    // master/monitor on the right. Mirror that here so arrow keys
+    // walk the strips in the same order the user sees them.
+    const ordered = [
+      ...tracks.filter((t) => t.kind !== "master" && t.kind !== "monitor"),
+      ...tracks.filter((t) => t.kind === "master" || t.kind === "monitor"),
+    ];
+    const tids = ordered.map((t) => t.id);
+    if (!tids.length) return;
+    const store = window.__foyer?.store;
+    const current = Array.from(store?.state?.selectedTrackIds || []);
+    const anchor = current[current.length - 1] || tids[0];
+    const idx = Math.max(0, tids.indexOf(anchor));
+    if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") {
+      const next = ev.key === "ArrowRight"
+        ? Math.min(tids.length - 1, idx + 1)
+        : Math.max(0, idx - 1);
+      if (tids[next] === anchor) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      store?.selectTrack(tids[next], ev.shiftKey ? "extend" : "replace");
+      return;
+    }
+    if (ev.key === "Enter") {
+      if (!anchor) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.ctrlKey || ev.metaKey) {
+        store?.selectTrack(anchor, "toggle");
+        return;
+      }
+      const t = ordered.find((x) => x.id === anchor);
+      if (!t) return;
+      window.__foyer?.ws?.send({
+        type: "update_track",
+        id: anchor,
+        patch: { soloed: !t.soloed },
+      });
+      return;
+    }
+    if (ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
+    const key = ev.key.toLowerCase();
+    if (key === "m" || key === "s" || key === "r") {
+      const t = ordered.find((x) => x.id === anchor);
+      if (!t) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const patch = {};
+      if (key === "m") patch.muted = !t.muted;
+      else if (key === "s") patch.soloed = !t.soloed;
+      else if (key === "r") patch.record_armed = !t.record_armed;
+      window.__foyer?.ws?.send({ type: "update_track", id: anchor, patch });
+    }
   }
 
   /** Mixers overflow horizontally on big sessions, but the browser's

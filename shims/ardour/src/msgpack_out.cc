@@ -1166,18 +1166,26 @@ encode_session_snapshot (Session& session,
 		// `foyer-backend-stub::stub_scripting_capabilities()` so a
 		// Foyer FE iterating against the stub stays wire-compatible.
 		o.str ("scripting"); emit_scripting_capabilities (o);
-		// Spectrum capabilities. Today: stubbed unavailable because the
-		// Ardour shim hasn't shipped an FFT pipeline yet — see TODO.md
-		// follow-up. The FE keys off this map so the spectrogram tile
-		// + visualize.spectrum tool fall back to "switch to stub backend
-		// for demo" messaging instead of failing silently.
+		// Spectrum capabilities. The shim ships a real FFT pipeline
+		// (see spectrum_pipeline.cc) — taps a route's post-fader
+		// output via an ARDOUR::Processor, runs Hann-windowed FFTs
+		// through ARDOUR::DSP::FFTSpectrum from a 25 Hz idle slot.
+		// Window list is Hann-only today: the request schema knows
+		// Hamming / Blackman-Harris / Rectangular but libardour's
+		// FFTSpectrum bakes Hann in via set_data_hann. Advertising
+		// only what we honour avoids the FE silently getting a Hann
+		// result when it asked for Blackman-Harris.
 		o.str ("spectrum");
 		{
 			o.map (4);
-			o.str ("available");        o.b (false);
-			o.str ("fft_sizes");        o.array (0);
-			o.str ("windows");          o.array (0);
-			o.str ("max_frame_rate_hz"); o.u (0u);
+			o.str ("available");         o.b (true);
+			o.str ("fft_sizes");
+			o.array (5);
+			o.u (256u); o.u (512u); o.u (1024u); o.u (2048u); o.u (4096u);
+			o.str ("windows");
+			o.array (1);
+			o.str ("hann");
+			o.str ("max_frame_rate_hz"); o.u (25u);
 		}
 	});
 }
@@ -2084,6 +2092,131 @@ encode_script_run_result (const std::string& id, bool ok,
 		o.str ("stdout"); o.str (stdout_text);
 		if (!error_text.empty ()) { o.str ("error"); o.str (error_text); }
 		o.str ("elapsed_ms"); o.u (elapsed_ms);
+	});
+}
+
+} // namespace ArdourSurface::msgpack_out
+
+// ── Spectrum encoders ─────────────────────────────────────────────
+//
+// Now that the namespace block has closed, pull in the pipeline header
+// for the struct definitions and re-open the namespace.
+
+#include "spectrum_pipeline.h"
+
+namespace ArdourSurface::msgpack_out {
+
+namespace {
+
+/// Emit a `SpectrumTarget` map: `{kind: "master"|"monitor"|"track", id?: "<id>"}`.
+/// Matches the serde `#[serde(tag = "kind", rename_all = "snake_case")]`
+/// representation on the schema side.
+void
+emit_spectrum_target (Out& o, const SpectrumTargetSpec& target)
+{
+	switch (target.kind) {
+		case SpectrumTargetSpec::Kind::Master:
+			o.map (1);
+			o.str ("kind"); o.str ("master");
+			break;
+		case SpectrumTargetSpec::Kind::Monitor:
+			o.map (1);
+			o.str ("kind"); o.str ("monitor");
+			break;
+		case SpectrumTargetSpec::Kind::Track:
+			o.map (2);
+			o.str ("kind"); o.str ("track");
+			o.str ("id");   o.str (target.track_id);
+			break;
+	}
+}
+
+/// Emit a `SpectrumOpts` map. We always send every field — the schema
+/// honours `#[serde(default)]` on each so an absent field is fine,
+/// but echoing the clamped values gives the FE a one-stop reference
+/// for what the shim is actually doing.
+void
+emit_spectrum_opts (Out& o, const SpectrumOptsDecoded& opts)
+{
+	// 6 fields: fft_size, hop_size, window, min_db, max_bins, per_channel.
+	o.map (6);
+	o.str ("fft_size");    o.u (opts.fft_size);
+	o.str ("hop_size");    o.u (opts.hop_size);
+	o.str ("window");      o.str (opts.window);
+	o.str ("min_db");      o.f32 (opts.min_db);
+	o.str ("max_bins");    o.u (opts.max_bins);
+	o.str ("per_channel"); o.b (opts.per_channel);
+}
+
+} // namespace
+
+std::vector<std::uint8_t>
+encode_spectrum_frame (const SpectrumTargetSpec& target,
+                       const SpectrumOptsDecoded& opts,
+                       std::uint32_t sample_rate,
+                       const std::vector<std::vector<float>>& magnitudes_db,
+                       std::uint64_t server_mono_ns)
+{
+	const std::uint32_t bins =
+	    magnitudes_db.empty () ? 0u
+	                           : static_cast<std::uint32_t> (magnitudes_db.front ().size ());
+	return envelope_event ([&] (Out& o) {
+		// 3 top-level keys: dir + type + frame. The "frame" value is a
+		// nested map (the SpectrumFrame body) — boxed on the schema
+		// side (`Box<SpectrumFrame>`) but rmp-serde transparently
+		// unwraps the box so the wire shape is just the inner map as a
+		// single field on the event body. (Was map(4); the off-by-one
+		// truncated frames on the rmp-serde decode side.)
+		o.map (3);
+		o.str ("dir");   o.str ("event");
+		o.str ("type");  o.str ("spectrum_frame");
+		o.str ("frame");
+		o.map (7);
+		o.str ("target");         emit_spectrum_target (o, target);
+		o.str ("bins");           o.u (bins);
+		o.str ("sample_rate");    o.u (sample_rate);
+		o.str ("window");         o.str (opts.window);
+		o.str ("min_db");         o.f32 (opts.min_db);
+		o.str ("channels");
+		o.array (magnitudes_db.size ());
+		for (std::size_t ch = 0; ch < magnitudes_db.size (); ++ch) {
+			auto const& mags = magnitudes_db[ch];
+			o.map (2);
+			o.str ("channel");        o.u (static_cast<std::uint32_t> (ch));
+			o.str ("magnitudes_db");
+			o.array (mags.size ());
+			for (float v : mags) o.f32 (v);
+		}
+		o.str ("server_mono_ns"); o.u (server_mono_ns);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_spectrum_subscribed (const SpectrumTargetSpec& target,
+                            const SpectrumOptsDecoded& applied)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");     o.str ("event");
+		o.str ("type");    o.str ("spectrum_subscribed");
+		o.str ("target");  emit_spectrum_target (o, target);
+		o.str ("applied"); emit_spectrum_opts (o, applied);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_spectrum_unsubscribed (const SpectrumTargetSpec& target,
+                              const std::string& reason)
+{
+	const bool have_reason = !reason.empty ();
+	return envelope_event ([&] (Out& o) {
+		o.map (have_reason ? 4 : 3);
+		o.str ("dir");    o.str ("event");
+		o.str ("type");   o.str ("spectrum_unsubscribed");
+		o.str ("target"); emit_spectrum_target (o, target);
+		if (have_reason) {
+			o.str ("reason"); o.str (reason);
+		}
 	});
 }
 

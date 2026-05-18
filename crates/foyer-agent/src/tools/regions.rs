@@ -191,8 +191,15 @@ impl Tool for RegionsTool {
                         .await
                         .map_err(|e| ToolError::Execution(e.to_string()))?;
                     for r in regions {
+                        // Include `track_name` alongside `track_id` so the
+                        // model can group regions by track without having
+                        // to cross-reference the tracks.list output by
+                        // ID. Observed in the Kimi e2e drive: the agent
+                        // got confused trying to match opaque numeric IDs
+                        // and reported a phantom region/track swap.
                         all.push(json!({
                             "track_id": t.id.as_str(),
+                            "track_name": t.name,
                             "id": r.id.as_str(),
                             "name": r.name,
                             "start_samples": r.start_samples,

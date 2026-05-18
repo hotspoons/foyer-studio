@@ -68,6 +68,14 @@ enum Op {
     /// Close a session by its sidecar id. Quits the shim host process
     /// and removes the entry from the registry. Destructive.
     Close { session_id: String },
+    /// Switch the sidecar's focused session. Subsequent commands
+    /// without an explicit session_id route to this backend; the
+    /// FE's switcher mirrors the focus too. Use after `list_open`
+    /// when more than one project is loaded so the agent's edits
+    /// hit the user's intended target. (`session.open` already
+    /// focuses the just-opened project — this is for switching
+    /// between projects that are ALREADY loaded.)
+    Focus { session_id: String },
     /// List open sessions in the sidecar registry.
     ListOpen,
     /// List recent projects the sidecar has touched.
@@ -99,7 +107,7 @@ impl Tool for SessionTool {
         "Session lifecycle + inspection. Subcommands: \
          summary (cheap counters) · full (whole snapshot) · \
          save / save_as (write the current project) · \
-         open / new / close (manage which project is live) · \
+         open / new / close / focus (manage which project is live) · \
          list_open / recents / forget_recent · \
          browse (filesystem inside the jail) · \
          backends (list adapter ids)."
@@ -115,7 +123,7 @@ impl Tool for SessionTool {
                     "enum": [
                         "summary", "full",
                         "save", "save_as",
-                        "open", "new", "close",
+                        "open", "new", "close", "focus",
                         "list_open", "recents", "forget_recent",
                         "browse", "backends"
                     ]
@@ -235,6 +243,12 @@ impl Tool for SessionTool {
                 let director = require_director(ctx)?;
                 director.close(&session_id).await?;
                 Ok(ToolResult::ok(format!("closed session {session_id}")))
+            }
+            Op::Focus { session_id } => {
+                let director = require_director(ctx)?;
+                director.focus(&session_id).await?;
+                Ok(ToolResult::ok(format!("focused session {session_id}"))
+                    .with_data(json!({ "session_id": session_id })))
             }
             Op::ListOpen => {
                 let director = require_director(ctx)?;

@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use foyer_backend::{AudioIngressAck, Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx};
 use foyer_schema::{
-    Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EntityId, Event,
+    Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EnginePort, EntityId, Event,
     LatencyReport, PathListing, PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch,
     Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
@@ -300,6 +300,57 @@ impl Backend for StubBackend {
 
     async fn snapshot(&self) -> Result<Session, BackendError> {
         Ok(self.state.lock().await.session_clone())
+    }
+
+    /// Synthesize a port graph so agent + UI workflows that depend on
+    /// `Backend::list_ports` (record-arm, port-matrix, input-source
+    /// dropdowns) have something realistic to chew on in the
+    /// devcontainer. Covers the four port categories any backend DAW
+    /// would expose:
+    ///   * **Physical audio** — `system:capture_1/2`, `system:playback_1/2`
+    ///   * **Physical MIDI** — `system:midi/capture_1`, `system:midi/playback_1`
+    ///     (think: USB MIDI keyboard + DIN-out)
+    ///   * **Virtual / app-to-app audio** — `foyer:ingress-stub`,
+    ///     `bus:reverb_return`, `bus:headphone_mix` (representative of
+    ///     internal bus endpoints in Ardour, Bitwig, Reaper, etc.)
+    ///   * **Virtual MIDI** — `foyer:midi-bridge` (browser MIDI ingress)
+    /// `direction` filters source/sink as the real backend does.
+    async fn list_ports(&self, direction: Option<String>) -> Result<Vec<EnginePort>, BackendError> {
+        let want_source = matches!(direction.as_deref(), Some("source") | None | Some(""));
+        let want_sink = matches!(direction.as_deref(), Some("sink") | None | Some(""));
+        let mut out = Vec::new();
+        let port = |name: &str, dir: &str, is_physical: bool, is_midi: bool| EnginePort {
+            name: name.into(),
+            direction: dir.into(),
+            is_physical,
+            is_midi,
+        };
+        if want_source {
+            // Physical audio inputs (mic / line in, mono-each).
+            out.push(port("system:capture_1", "source", true, false));
+            out.push(port("system:capture_2", "source", true, false));
+            // Physical MIDI keyboard input.
+            out.push(port("system:midi/capture_1", "source", true, true));
+            // Virtual audio sources — browser ingress + bus returns.
+            // Same shape any backend would expose: not hardware, but
+            // still routable as a track input.
+            out.push(port("foyer:ingress-stub", "source", false, false));
+            out.push(port("bus:reverb_return", "source", false, false));
+            // Virtual MIDI source — the browser MIDI bridge a user
+            // sees when they want a remote keyboard to feed a track.
+            out.push(port("foyer:midi-bridge", "source", false, true));
+        }
+        if want_sink {
+            // Physical audio outputs (speakers / interface out).
+            out.push(port("system:playback_1", "sink", true, false));
+            out.push(port("system:playback_2", "sink", true, false));
+            // Physical MIDI hardware out (DIN to a synth, USB to a controller).
+            out.push(port("system:midi/playback_1", "sink", true, true));
+            // Virtual audio sinks — internal bus inputs, headphone mix.
+            out.push(port("bus:reverb_send", "sink", false, false));
+            out.push(port("bus:headphone_mix", "sink", false, false));
+        }
+        Ok(out)
     }
 
     async fn subscribe(&self) -> Result<EventStream, BackendError> {

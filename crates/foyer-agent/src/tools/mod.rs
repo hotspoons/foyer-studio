@@ -8,7 +8,9 @@
 //! tool names that have to be re-vetted on every prompt.
 
 pub mod automation;
+pub mod continue_working;
 pub mod groups;
+pub mod io;
 pub mod midi;
 pub mod mixer;
 pub mod plugins;
@@ -89,6 +91,16 @@ pub fn make_backend_ref(weak: std::sync::Weak<dyn Backend>) -> BackendRef {
     std::sync::Arc::new(std::sync::RwLock::new(Some(weak)))
 }
 
+/// Shared, per-turn budget handle. The `continue_working` tool grabs
+/// this to extend the round cap mid-turn. Use `Arc<std::sync::Mutex>`
+/// (not tokio's) so tools that don't touch async can read/write it
+/// freely. Set by `AgentEngine::run_turn` on the ToolContext it
+/// receives, so every flow that funnels through `run_turn` —
+/// in-process FAB, `/v1/chat/completions` proxy, MCP `tools/call` —
+/// shares the same per-turn budget machinery. `None` only on the
+/// rare paths that dispatch a tool *outside* run_turn (mostly tests).
+pub type TurnBudgetHandle = std::sync::Arc<std::sync::Mutex<crate::engine::TurnBudget>>;
+
 /// Per-invocation context the tools receive.
 pub struct ToolContext {
     pub backend: BackendRef,
@@ -116,6 +128,12 @@ pub struct ToolContext {
     /// moment this turn started. Read by the `visualize` tool to
     /// flip the renderer priority.
     pub prefer_headless_render: bool,
+    /// Live per-turn round budget. The hidden `continue_working`
+    /// tool grabs this to extend the round cap mid-turn. Populated
+    /// by `AgentEngine::run_turn` for every caller — FAB,
+    /// `/v1/chat/completions`, MCP. `None` is only seen on the
+    /// thin dispatch paths used in tests.
+    pub turn_budget: Option<TurnBudgetHandle>,
 }
 
 impl ToolContext {
@@ -302,6 +320,15 @@ pub trait SessionDirector: Send + Sync {
     ) -> Result<foyer_schema::PathListing, SessionDirectorError>;
     /// Configured backend adapters + which is currently live.
     async fn list_backends(&self) -> Result<BackendsListing, SessionDirectorError>;
+    /// Switch the sidecar's focused session. Subsequent untagged
+    /// commands (transport, tracks, regions, …) route to this
+    /// session's backend. Default impl errors out; the
+    /// server-side `SessionDirectorImpl` overrides.
+    async fn focus(&self, _session_id: &str) -> Result<(), SessionDirectorError> {
+        Err(SessionDirectorError::Unsupported(
+            "session.focus not wired in this director".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -453,6 +480,8 @@ pub fn default_registry_with_store(
         Arc::new(ui::UiTool),
         Arc::new(visualize::VisualizeTool),
         Arc::new(groups::GroupsTool),
+        Arc::new(io::IoTool),
+        Arc::new(continue_working::ContinueWorkingTool),
     ];
     ToolRegistry::from_tools(tools)
 }
