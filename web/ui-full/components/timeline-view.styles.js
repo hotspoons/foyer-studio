@@ -272,6 +272,20 @@ export const timelineStyles = css`
     .overview-track-row.midi { fill: color-mix(in oklab, var(--color-accent-2) 70%, transparent); }
     .overview-track-row.sequencer { fill: color-mix(in oklab, var(--color-accent-2) 80%, transparent); }
     .overview-track-row.master { fill: color-mix(in oklab, var(--color-text-muted) 50%, transparent); }
+    /* Ruler labels live outside the stretchable SVG so glyphs render
+       at their natural aspect ratio regardless of the strip's width. */
+    .overview-ruler-labels {
+      position: absolute; inset: 0 0 auto 0; height: 12px;
+      pointer-events: none;
+    }
+    .overview-tick-label {
+      position: absolute; top: 0;
+      transform: translateX(2px);
+      font-size: 9px; line-height: 12px;
+      font-family: var(--font-mono);
+      color: var(--color-text-muted);
+      white-space: nowrap;
+    }
     .ruler {
       position: sticky; top: 0; z-index: 3;
       height: ${RULER_HEIGHT}px;

@@ -673,9 +673,35 @@ pub(crate) fn initial_session() -> Session {
         meta: serde_json::json!({ "project": "demo" }),
         scripting: Some(stub_scripting_capabilities()),
         spectrum: Some(foyer_schema::SpectrumCapabilities::stub()),
+        render: Some(stub_render_capabilities()),
         mixer_scenes: vec![],
         active_scene_id: None,
         sections: vec![],
+    }
+}
+
+/// Render surface the stub advertises. Single WAV encoder, three
+/// bit-depths, the standard 44.1/48/88.2/96 kHz rates. Real backends
+/// (Ardour shim) replace this with the codec set their `ExportFormat`
+/// registry actually supports.
+pub(crate) fn stub_render_capabilities() -> foyer_schema::RenderCapabilities {
+    foyer_schema::RenderCapabilities {
+        formats: vec![foyer_schema::RenderFormat {
+            id: "wav".into(),
+            label: "WAV (PCM)".into(),
+            extension: "wav".into(),
+            mime: "audio/wav".into(),
+            lossy: false,
+        }],
+        sample_rates: vec![44_100, 48_000, 88_200, 96_000],
+        bit_depths: vec![
+            foyer_schema::RenderBitDepth::Int16,
+            foyer_schema::RenderBitDepth::Int24,
+            foyer_schema::RenderBitDepth::Float32,
+        ],
+        max_channels: 2,
+        supports_range: true,
+        supports_stems: false,
     }
 }
 

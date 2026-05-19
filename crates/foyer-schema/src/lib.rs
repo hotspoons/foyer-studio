@@ -18,6 +18,7 @@ pub mod message;
 pub mod midi;
 pub mod mixer;
 pub mod plugin;
+pub mod render;
 pub mod scripting;
 pub mod sections;
 pub mod session;
@@ -52,6 +53,10 @@ pub use midi::{
 };
 pub use mixer::{MixerScene, SceneSendLevel, SceneTrackSnapshot};
 pub use plugin::{PluginCatalogEntry, PluginFormat, PluginPreset, PluginRole};
+pub use render::{
+    RenderBitDepth, RenderCapabilities, RenderFormat, RenderOptions, RenderOutput, RenderRange,
+    RenderTarget,
+};
 pub use scripting::{
     Script, ScriptLanguage, ScriptRunResult, ScriptTypeDescriptor, ScriptingCapabilities,
     ScriptingFeatures,

@@ -269,6 +269,29 @@ impl Backend for HostBackend {
             .map_err(|e| BackendError::Other(e.to_string()))
     }
 
+    fn render_capabilities(&self) -> Option<foyer_schema::RenderCapabilities> {
+        // The host client caches the most recent snapshot's `render`
+        // field; surface that synchronously so the server can gate
+        // the menu entry / agent tool without a round trip.
+        self.client.cached_render_caps()
+    }
+
+    async fn render_session(
+        &self,
+        opts: foyer_schema::RenderOptions,
+        progress: Option<foyer_backend::ProgressFn>,
+    ) -> Result<Vec<foyer_schema::RenderOutput>, BackendError> {
+        // The shim demuxes by handle — mint a fresh one per call so
+        // parallel renders don't cross wires.
+        let handle = uuid::Uuid::new_v4().simple().to_string();
+        // The Backend trait's progress is `Box<dyn Fn(u8) + Send + Sync>`
+        // and the host client expects the same shape. Just forward.
+        self.client
+            .render_session(handle, opts, progress)
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
     async fn invoke_action(&self, id: EntityId) -> Result<(), BackendError> {
         // Forward the whole action id as-is to the shim. The shim's
         // InvokeAction dispatch handles transport.*, edit.*, session.*,

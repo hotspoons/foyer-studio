@@ -739,12 +739,15 @@ encode_session_snapshot (Session& session,
 		o.str ("session");
 
 		// Session { schema_version, transport, tracks, groups, dirty,
-		// sample_rate, ppqn, meta, scripting, spectrum }. The spectrum
-		// capability advertisement gets sent unconditionally — set to
-		// `available=false` here until the shim's FFT pipeline ships
-		// so FEs gate the spectrum tile-view + visualize.spectrum
-		// MCP path without us silently rendering a placeholder.
-		o.map (10);
+		// sample_rate, ppqn, meta, scripting, spectrum, render }.
+		// `render` advertises the mixdown encoders the shim can drive
+		// through `ARDOUR::SimpleExport` / `ExportHandler`. The
+		// capability advertisement gets sent unconditionally — empty
+		// `formats` would make the FE hide Session → Render Audio…,
+		// but we ship WAV / FLAC / Ogg Vorbis / MP3 unconditionally
+		// because every libsndfile build Ardour links against ships
+		// those.
+		o.map (11);
 		o.str ("schema_version"); o.array (2); o.u (0); o.u (1);
 
 		// Transport is a struct; map keys are Rust field names, values are Parameter structs.
@@ -1192,6 +1195,64 @@ encode_session_snapshot (Session& session,
 			o.array (1);
 			o.str ("hann");
 			o.str ("max_frame_rate_hz"); o.u (25u);
+		}
+		// Render / mixdown capabilities. Driven by Ardour's
+		// `ARDOUR::ExportHandler` + `ExportFormatSpecification`. We
+		// advertise the four encoders every modern libsndfile build
+		// supports (WAV, FLAC, Ogg Vorbis, MP3); the format spec
+		// override in the render dispatcher sets `set_format_id` +
+		// `set_sample_format` against these. Bit depths only apply
+		// to PCM (WAV / FLAC); lossy formats honour `quality` instead.
+		o.str ("render");
+		{
+			o.map (6);
+			o.str ("formats");
+			o.array (4);
+			{
+				o.map (5);
+				o.str ("id");        o.str ("wav");
+				o.str ("label");     o.str ("WAV (PCM)");
+				o.str ("extension"); o.str ("wav");
+				o.str ("mime");      o.str ("audio/wav");
+				o.str ("lossy");     o.b (false);
+			}
+			{
+				o.map (5);
+				o.str ("id");        o.str ("flac");
+				o.str ("label");     o.str ("FLAC");
+				o.str ("extension"); o.str ("flac");
+				o.str ("mime");      o.str ("audio/flac");
+				o.str ("lossy");     o.b (false);
+			}
+			{
+				o.map (5);
+				o.str ("id");        o.str ("ogg_vorbis");
+				o.str ("label");     o.str ("Ogg Vorbis");
+				o.str ("extension"); o.str ("ogg");
+				o.str ("mime");      o.str ("audio/ogg");
+				o.str ("lossy");     o.b (true);
+			}
+			{
+				o.map (5);
+				o.str ("id");        o.str ("mp3");
+				o.str ("label");     o.str ("MP3");
+				o.str ("extension"); o.str ("mp3");
+				o.str ("mime");      o.str ("audio/mpeg");
+				o.str ("lossy");     o.b (true);
+			}
+			o.str ("sample_rates");
+			o.array (6);
+			o.u (44100u); o.u (48000u); o.u (88200u); o.u (96000u);
+			o.u (176400u); o.u (192000u);
+			o.str ("bit_depths");
+			o.array (3);
+			o.str ("int16"); o.str ("int24"); o.str ("float32");
+			o.str ("max_channels");    o.u (2u);
+			o.str ("supports_range");  o.b (true);
+			// Stems would be `ExportProfileManager::TrackExport`; not
+			// wired today, so the FE / agent should pass
+			// `target.kind = "master"` only.
+			o.str ("supports_stems");  o.b (false);
 		}
 	});
 }
@@ -2223,6 +2284,78 @@ encode_spectrum_unsubscribed (const SpectrumTargetSpec& target,
 		if (have_reason) {
 			o.str ("reason"); o.str (reason);
 		}
+	});
+}
+
+std::vector<std::uint8_t>
+encode_render_started (const std::string& handle)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (3);
+		o.str ("dir");    o.str ("event");
+		o.str ("type");   o.str ("render_started");
+		o.str ("handle"); o.str (handle);
+	});
+}
+
+std::vector<std::uint8_t>
+encode_render_progress (const std::string& handle, std::uint8_t percent)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");     o.str ("event");
+		o.str ("type");    o.str ("render_progress");
+		o.str ("handle");  o.str (handle);
+		o.str ("percent"); o.u (static_cast<std::uint32_t> (percent));
+		// eta_seconds omitted intentionally — Ardour's ExportStatus
+		// exposes processed/total samples but not a smoothed wall-
+		// clock estimate; better to send `None` than a flapping
+		// number. (Wire schema marks the field skip_if_none.)
+	});
+}
+
+std::vector<std::uint8_t>
+encode_render_complete (const std::string& handle,
+                        const std::vector<RenderOutputRow>& outputs)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");     o.str ("event");
+		o.str ("type");    o.str ("render_complete");
+		o.str ("handle");  o.str (handle);
+		o.str ("outputs");
+		o.array (outputs.size ());
+		for (auto const& row : outputs) {
+			// `track_id` + `bytes_b64` are `Option<…>` on the wire —
+			// skip the keys entirely when unset so the Rust side
+			// deserializes them as `None`.
+			const bool have_track = !row.track_id.empty ();
+			const bool have_b64   = !row.bytes_b64.empty ();
+			std::uint32_t n_fields = 4u + (have_track ? 1u : 0u) + (have_b64 ? 1u : 0u);
+			o.map (n_fields);
+			o.str ("path");       o.str (row.path);
+			o.str ("size_bytes"); o.u (row.size_bytes);
+			o.str ("format_id");  o.str (row.format_id);
+			o.str ("mime");       o.str (row.mime);
+			if (have_track) {
+				o.str ("track_id"); o.str (row.track_id);
+			}
+			if (have_b64) {
+				o.str ("bytes_b64"); o.str (row.bytes_b64);
+			}
+		}
+	});
+}
+
+std::vector<std::uint8_t>
+encode_render_error (const std::string& handle, const std::string& message)
+{
+	return envelope_event ([&] (Out& o) {
+		o.map (4);
+		o.str ("dir");     o.str ("event");
+		o.str ("type");    o.str ("render_error");
+		o.str ("handle");  o.str (handle);
+		o.str ("message"); o.str (message);
 	});
 }
 

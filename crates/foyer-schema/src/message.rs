@@ -841,6 +841,42 @@ pub enum Event {
         /// envelope at the decoder.
         action_json: String,
     },
+
+    // ─── render / mixdown lifecycle ────────────────────────────────
+    /// Backend accepted a `Command::RenderSession` and started
+    /// encoding. Lets the UI flip its modal into a progress state
+    /// before the first `RenderProgress` lands.
+    RenderStarted {
+        handle: String,
+    },
+    /// Mid-render progress tick. `percent` is 0..=100. Emitted at
+    /// most a few times per second so a UI bar feels live without
+    /// flooding the wire.
+    RenderProgress {
+        handle: String,
+        percent: u8,
+        /// Optional ETA in seconds. `None` when the backend hasn't
+        /// computed one (very early in the run, or backends that
+        /// don't surface an estimate).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        eta_seconds: Option<u32>,
+    },
+    /// Render finished cleanly. `outputs` holds one entry for a
+    /// master-bus render or one entry per track for a stem render.
+    /// When `RenderOptions::inline_bytes` was set, each output
+    /// carries the encoded bytes inline; otherwise only paths are
+    /// returned and the caller fetches via the file endpoint.
+    RenderComplete {
+        handle: String,
+        outputs: Vec<crate::render::RenderOutput>,
+    },
+    /// Render failed. The `handle` lets the FE / agent match the
+    /// failure to the original request so a parallel render's
+    /// errors don't bleed into the wrong UI / tool result.
+    RenderError {
+        handle: String,
+        message: String,
+    },
 }
 
 impl Event {
@@ -1400,6 +1436,17 @@ pub enum Command {
     SaveSession {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         as_path: Option<String>,
+    },
+
+    /// Mix down the session to an audio file. `handle` is a
+    /// client-chosen id (uuid string) that the server echoes back on
+    /// every `RenderProgress` / `RenderComplete` / `RenderError`
+    /// emission so concurrent renders ride the same broadcast bus
+    /// without a separate subscribe channel. `opts` picks the
+    /// encoder + range + target + bit depth.
+    RenderSession {
+        handle: String,
+        opts: crate::render::RenderOptions,
     },
 
     /// Mutate a region. Fields in `patch` that are `None` stay unchanged.

@@ -70,6 +70,7 @@ const _i18nActionLabels = () => [
   t("Save Session"),
   t("Save Session As…"),
   t("Export Project…"),
+  t("Render Audio…"),
   t("Upload Project…"),
   t("Quantize"),
   t("Crop to selection"),
@@ -406,6 +407,19 @@ export class MainMenu extends LitElement {
     // jail-relative folder via `/sessions/export`.
     if (a.id === "session.export") {
       import("./project-archive-modal.js").then((m) => m.exportCurrentSession());
+      return;
+    }
+    // Render: mix down the session to an audio file. Opens the
+    // render dialog so the user picks format + bit depth + range
+    // BEFORE the backend starts encoding (different from Export,
+    // which kicks off immediately because there are no choices to
+    // make on a tar.gz).
+    if (a.id === "session.render") {
+      import("./render-modal.js")
+        .then((m) => m.openRenderModal())
+        .catch((e) => {
+          console.error("[main-menu] session.render: render-modal import/open failed", e);
+        });
       return;
     }
     // Upload: dest-folder picker + archive picker → POST to

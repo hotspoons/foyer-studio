@@ -146,6 +146,7 @@ fn fake_session() -> Session {
         meta: serde_json::Value::Null,
         scripting: None,
         spectrum: None,
+        render: None,
         mixer_scenes: vec![],
         active_scene_id: None,
         sections: vec![],

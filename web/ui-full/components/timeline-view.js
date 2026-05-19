@@ -1384,11 +1384,12 @@ export class TimelineView extends LitElement {
     const stripWidthPx = 1000; // SVG viewBox; the actual width fills via CSS.
     const xOfSamples = (s) => (s / sessionSamples) * stripWidthPx;
 
-    // Viewport rect — mirror of main timeline's visible range.
-    // scrollLeft is in main-grid px including HEAD_WIDTH; subtract
-    // so we're working in content-px (samples × zoom).
-    const contentX = Math.max(0, this._scrollX - HEAD_WIDTH);
-    const visibleSec0 = contentX / Math.max(1, this._zoom);
+    // Viewport rect — mirror of main timeline's visible range. Time 0
+    // sits at grid-x = HEAD_WIDTH (right after the sticky track heads),
+    // so scrollLeft = 0 means the first visible *time* is 0 — that's
+    // the scrollbar's leftmost state. Treat scrollLeft directly as
+    // content-px so the overview agrees with the scrollbar at the edge.
+    const visibleSec0 = this._scrollX / Math.max(1, this._zoom);
     const visibleSecW = this._scrollViewW / Math.max(1, this._zoom);
     const vpLeft = (visibleSec0 / totalSec) * stripWidthPx;
     const vpW = Math.max(2, (visibleSecW / totalSec) * stripWidthPx);
@@ -1418,18 +1419,22 @@ export class TimelineView extends LitElement {
     // Playhead.
     const playheadX = xOfSamples(this._playheadSamples || 0);
 
-    // Ruler ticks every nice-second-step.
+    // Ruler ticks every nice-second-step. Lines stay inside the
+    // stretchable SVG (vertical 0.5-stroke is fine even when scaled);
+    // the labels render as an HTML overlay so the glyphs don't get
+    // horizontally stretched when the strip is wider than the viewBox.
     const tickStep = totalSec <= 30 ? 5 : totalSec <= 90 ? 10 : 30;
-    const ticks = [];
+    const tickLines = [];
+    const tickLabels = [];
     for (let t = 0; t <= totalSec; t += tickStep) {
       const x = (t / totalSec) * stripWidthPx;
-      ticks.push(svg`<line x1=${x} y1="0" x2=${x} y2=${rulerH}
+      tickLines.push(svg`<line x1=${x} y1="0" x2=${x} y2=${rulerH}
                           stroke="color-mix(in oklab, var(--color-border) 60%, transparent)"
                           stroke-width="0.5" />`);
       if (t > 0) {
-        ticks.push(svg`<text x=${x + 2} y="9" font-size="8"
-                          fill="var(--color-text-muted)"
-                          font-family="var(--font-mono)">${t}s</text>`);
+        const pct = (t / totalSec) * 100;
+        tickLabels.push(html`<span class="overview-tick-label"
+                                style="left:${pct.toFixed(3)}%">${t}s</span>`);
       }
     }
 
@@ -1444,7 +1449,7 @@ export class TimelineView extends LitElement {
              @pointerdown=${(e) => this._onOverviewPointerDown(e, stripWidthPx, totalSec)}
              @dblclick=${(e) => this._onOverviewDoubleClick(e, stripWidthPx, totalSec)}
              @wheel=${(e) => this._onOverviewWheel(e, stripWidthPx, totalSec)}>
-          ${ticks}
+          ${tickLines}
           ${trackRects}
           <line class="overview-playhead"
                 x1=${playheadX.toFixed(2)} y1="0"
@@ -1463,6 +1468,7 @@ export class TimelineView extends LitElement {
                 width="8" height=${stripHeight}
                 @pointerdown=${(e) => this._startOverviewDrag(e, "right", stripWidthPx, totalSec)} />
         </svg>
+        <div class="overview-ruler-labels">${tickLabels}</div>
       </div>
     `;
   }
@@ -1523,7 +1529,7 @@ export class TimelineView extends LitElement {
     const startVbX = clientToVbX(ev.clientX);
     const startScrollX = scroll.scrollLeft;
     const startZoom = this._zoom;
-    const startVpLeftSec = (startScrollX - HEAD_WIDTH) / Math.max(1, startZoom);
+    const startVpLeftSec = startScrollX / Math.max(1, startZoom);
     const startVpWSec = visiblePx / Math.max(1, startZoom);
     const move = (e) => {
       const vbX = clientToVbX(e.clientX);
@@ -1531,7 +1537,7 @@ export class TimelineView extends LitElement {
         ((vbX - startVbX) / stripWidthPx) * totalSec;
       if (mode === "pan") {
         const newLeftSec = Math.max(0, startVpLeftSec + deltaSec);
-        scroll.scrollLeft = newLeftSec * this._zoom + HEAD_WIDTH;
+        scroll.scrollLeft = newLeftSec * this._zoom;
       } else if (mode === "right") {
         // Right edge: viewport keeps its left anchor; width grows
         // with drag. New zoom maps visiblePx to the new viewport
@@ -1543,7 +1549,7 @@ export class TimelineView extends LitElement {
         // viewport's left edge in seconds, recomputed under the
         // new zoom.
         this.updateComplete.then(() => {
-          scroll.scrollLeft = startVpLeftSec * this._zoom + HEAD_WIDTH;
+          scroll.scrollLeft = startVpLeftSec * this._zoom;
         });
       } else if (mode === "left") {
         // Left edge: viewport keeps its right anchor.
@@ -1553,7 +1559,7 @@ export class TimelineView extends LitElement {
         const newZoom = Math.max(2, Math.min(4000, visiblePx / newWSec));
         this._zoom = newZoom;
         this.updateComplete.then(() => {
-          scroll.scrollLeft = newLeftSec * this._zoom + HEAD_WIDTH;
+          scroll.scrollLeft = newLeftSec * this._zoom;
         });
       }
     };
@@ -1597,7 +1603,7 @@ export class TimelineView extends LitElement {
     this._zoom = Math.max(2, Math.min(4000, this._zoom * factor));
     this.updateComplete.then(() => {
       const targetPx = (sampleAtCursor / sr) * this._zoom;
-      scroll.scrollLeft = Math.max(0, targetPx - visiblePx / 2 + HEAD_WIDTH);
+      scroll.scrollLeft = Math.max(0, targetPx - visiblePx / 2);
     });
   }
 

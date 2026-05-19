@@ -214,6 +214,38 @@ std::vector<std::uint8_t> encode_spectrum_subscribed (
 std::vector<std::uint8_t> encode_spectrum_unsubscribed (
     const SpectrumTargetSpec& target, const std::string& reason);
 
+// ─── render / mixdown events ────────────────────────────────────────
+//
+// One handle (chosen by the client) demuxes parallel renders sharing
+// the broadcast bus. `Event::RenderStarted` acks the command before
+// any encoding; `Event::RenderProgress` is rate-limited by the
+// server's wire layer; `Event::RenderComplete` ships the produced
+// file's metadata + (optional) inlined base64 bytes; `RenderError`
+// surfaces a failure with the same handle.
+
+/// Mirrors `foyer_schema::RenderOutput` — one row per file the
+/// renderer produced. `bytes_b64` is set only when the caller asked
+/// for `inline_bytes`.
+struct RenderOutputRow {
+	std::string path;        // jail-relative
+	std::uint64_t size_bytes = 0;
+	std::string format_id;   // "wav" / "flac" / "ogg_vorbis" / "mp3"
+	std::string mime;        // "audio/wav" etc.
+	std::string track_id;    // empty = master render
+	std::string bytes_b64;   // empty = no inline
+};
+
+std::vector<std::uint8_t> encode_render_started (const std::string& handle);
+
+std::vector<std::uint8_t> encode_render_progress (
+    const std::string& handle, std::uint8_t percent);
+
+std::vector<std::uint8_t> encode_render_complete (
+    const std::string& handle, const std::vector<RenderOutputRow>& outputs);
+
+std::vector<std::uint8_t> encode_render_error (
+    const std::string& handle, const std::string& message);
+
 } // namespace ArdourSurface::msgpack_out
 
 #endif

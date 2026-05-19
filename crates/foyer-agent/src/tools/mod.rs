@@ -16,6 +16,7 @@ pub mod midi;
 pub mod mixer;
 pub mod plugins;
 pub mod regions;
+pub mod render;
 pub mod scripts;
 pub mod sections;
 pub mod sequencer;
@@ -635,6 +636,7 @@ pub fn default_registry_with_store(
         Arc::new(mixer::MixerTool),
         Arc::new(tracks::TracksTool),
         Arc::new(regions::RegionsTool),
+        Arc::new(render::RenderTool),
         Arc::new(automation::AutomationTool),
         Arc::new(plugins::PluginsTool),
         Arc::new(midi::MidiTool),

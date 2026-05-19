@@ -1471,6 +1471,80 @@ async fn dispatch_command(
                 }
             }
         }
+        Command::RenderSession { handle, opts } => {
+            // Acknowledge first so the FE can flip its modal into a
+            // progress state before any encoding work starts.
+            broadcast_event(
+                state,
+                Event::RenderStarted {
+                    handle: handle.clone(),
+                },
+            )
+            .await;
+            // Wire the backend's `progress` callback into a periodic
+            // RenderProgress broadcast. We rate-limit to one event per
+            // ~250ms to keep the wire quiet — backends that pulse every
+            // sample don't flood the broadcast bus, but the bar still
+            // feels live to the user.
+            let progress_tx = state.tx.clone();
+            let progress_handle = handle.clone();
+            let progress_next_seq = state.next_seq.clone();
+            let last_emit_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let last_emit_ms_for_cb = last_emit_ms.clone();
+            let progress_cb: foyer_backend::ProgressFn = Box::new(move |percent: u8| {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let prev = last_emit_ms_for_cb.load(std::sync::atomic::Ordering::Relaxed);
+                // Always let the 0% and 100% boundaries through so the
+                // UI flips out of "indeterminate" cleanly even on very
+                // short renders that finish under the rate-limit gap.
+                if percent != 100 && now_ms.saturating_sub(prev) < 250 {
+                    return;
+                }
+                last_emit_ms_for_cb.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                let env = Envelope {
+                    schema: SCHEMA_VERSION,
+                    api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
+                    seq: progress_next_seq.fetch_add(1, Ordering::Relaxed),
+                    origin: Some("backend".into()),
+                    session_id: None,
+                    body: Event::RenderProgress {
+                        handle: progress_handle.clone(),
+                        percent,
+                        eta_seconds: None,
+                    },
+                };
+                let _ = progress_tx.send(env);
+            });
+            // Spawn the render so a long encode (eventually: Ardour's
+            // ExportHandler can take many seconds on a large session)
+            // doesn't block the WS command pump.
+            let state_for_render = state.clone();
+            tokio::spawn(async move {
+                let backend = state_for_render.backend().await;
+                match backend.render_session(opts, Some(progress_cb)).await {
+                    Ok(outputs) => {
+                        broadcast_event(
+                            &state_for_render,
+                            Event::RenderComplete { handle, outputs },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        broadcast_event(
+                            &state_for_render,
+                            Event::RenderError {
+                                handle,
+                                message: e.to_string(),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            });
+        }
         Command::UpdateRegion { id, patch } => {
             match state.backend().await.update_region(id, patch).await {
                 Ok(region) => {

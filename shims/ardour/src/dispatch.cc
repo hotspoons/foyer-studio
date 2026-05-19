@@ -16,7 +16,11 @@
 #include <cctype>
 #include <csignal>
 #include <cstring>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <future>
+#include <thread>
 #include <limits>
 #include <map>
 #include <string>
@@ -65,6 +69,18 @@
 #include "ardour/route_group.h"
 #include "ardour/send.h"
 #include "ardour/session.h"
+#include "ardour/session_directory.h"
+#include "ardour/export_handler.h"
+#include "ardour/export_status.h"
+#include "ardour/export_timespan.h"
+#include "ardour/export_channel_configuration.h"
+#include "ardour/export_format_specification.h"
+#include "ardour/export_format_base.h"
+#include "ardour/export_formats.h"
+#include "ardour/export_filename.h"
+#include "ardour/export_profile_manager.h"
+#include "ardour/location.h"
+#include "ardour/route.h"
 #include "ardour/track.h"
 #include "evoral/Note.h"
 #include "evoral/PatchChange.h"
@@ -288,6 +304,17 @@ struct In
 		return read_str (out);
 	}
 
+	bool read_nil_or_u64 (std::uint64_t& out)
+	{
+		if (!have (1)) return false;
+		if (peek () == 0xc0) {
+			take_u8 ();
+			out = 0;
+			return ok ();
+		}
+		return read_u64 (out);
+	}
+
 	bool read_f64 (double& out)
 	{
 		if (!have (1)) return false;
@@ -429,6 +456,7 @@ struct DecodedCmd
 		OpenPluginGui,
 		ClosePluginGui,
 		SaveSession,
+		RenderSession,
 		AddNote,
 		UpdateNote,
 		DeleteNote,
@@ -769,6 +797,22 @@ struct DecodedCmd
 	std::map<std::string, std::string> script_args;
 	std::string   script_hook;
 	bool          script_has_args_override = false;
+
+	// RenderSession payload. `handle` is the caller-chosen demux id;
+	// `opts` is decoded into discrete fields so the handler doesn't
+	// have to walk a nested map again.
+	std::string   render_handle;
+	std::string   render_format_id   = "wav";
+	std::uint32_t render_sample_rate = 0;     // 0 = use session rate
+	std::string   render_bit_depth;            // "" / "int16" / "int24" / "int32" / "float32"
+	std::uint8_t  render_channels    = 0;     // 0 = backend default (2)
+	std::uint8_t  render_quality     = 6;     // 0..10 (lossy only)
+	bool          render_has_quality = false;
+	std::string   render_range_kind  = "session";  // "session" / "range" / "loop"
+	std::uint64_t render_range_start = 0;
+	std::uint64_t render_range_end   = 0;
+	std::string   render_target_path;          // empty = backend picks
+	bool          render_inline_bytes = false;
 };
 
 // Read an int64 that may be positive or negative on the wire —
@@ -1711,43 +1755,102 @@ decode (const std::vector<std::uint8_t>& buf)
 						}
 					}
 				} else if (k == "opts") {
-					// SubscribeSpectrum: SpectrumOpts struct. Every field
-					// has a serde default so partial maps are fine.
+					// Shared `opts` decoder — `SubscribeSpectrum::opts` and
+					// `RenderSession::opts` both arrive under this key. The
+					// two structs have disjoint field sets, so we walk every
+					// key and dispatch by name. The empty branch at the end
+					// skips unknown keys for forward compatibility.
 					std::size_t inner = 0;
 					if (!in.read_map_header (inner)) return out;
 					for (std::size_t q = 0; q < inner; ++q) {
 						std::string kk;
 						if (!in.read_str (kk)) return out;
+						// ─── SpectrumOpts ─────────────────────────────
 						if (kk == "fft_size") {
 							std::uint64_t v = 0;
 							if (!in.read_u64 (v)) return out;
 							out.spectrum_fft_size = static_cast<std::uint32_t> (v);
 						} else if (kk == "hop_size") {
-							// Option<u32> — nil means "default".
-							if (in.peek () == 0xc0) {
-								in.take_u8 ();
-								out.spectrum_hop_size = 0;
-							} else {
-								std::uint64_t v = 0;
-								if (!in.read_u64 (v)) return out;
-								out.spectrum_hop_size = static_cast<std::uint32_t> (v);
-							}
+							std::uint64_t v = 0;
+							if (!in.read_nil_or_u64 (v)) return out;
+							out.spectrum_hop_size = static_cast<std::uint32_t> (v);
 						} else if (kk == "window") {
 							if (!in.read_str (out.spectrum_window)) return out;
 						} else if (kk == "min_db") {
 							if (!in.read_f64 (out.spectrum_min_db)) return out;
 						} else if (kk == "max_bins") {
-							if (in.peek () == 0xc0) {
-								in.take_u8 ();
-								out.spectrum_max_bins = 0;
-							} else {
-								std::uint64_t v = 0;
-								if (!in.read_u64 (v)) return out;
-								out.spectrum_max_bins = static_cast<std::uint32_t> (v);
-							}
+							std::uint64_t v = 0;
+							if (!in.read_nil_or_u64 (v)) return out;
+							out.spectrum_max_bins = static_cast<std::uint32_t> (v);
 						} else if (kk == "per_channel") {
 							if (!in.read_bool (out.spectrum_per_channel)) return out;
-						} else {
+						}
+						// ─── RenderOptions ────────────────────────────
+						else if (kk == "format_id") {
+							if (!in.read_str (out.render_format_id)) return out;
+						} else if (kk == "sample_rate") {
+							std::uint64_t v = 0;
+							if (!in.read_nil_or_u64 (v)) return out;
+							out.render_sample_rate = static_cast<std::uint32_t> (v);
+						} else if (kk == "bit_depth") {
+							if (!in.read_nil_or_str (out.render_bit_depth)) return out;
+						} else if (kk == "channels") {
+							std::uint64_t v = 0;
+							if (!in.read_nil_or_u64 (v)) return out;
+							out.render_channels = static_cast<std::uint8_t> (v & 0xff);
+						} else if (kk == "quality") {
+							std::uint64_t v = 0;
+							if (!in.read_nil_or_u64 (v)) return out;
+							out.render_quality = static_cast<std::uint8_t> (v & 0xff);
+							out.render_has_quality = true;
+						} else if (kk == "target") {
+							// RenderTarget { kind: "master" | "tracks" }.
+							// Only "master" is wired today — non-master
+							// reaches the handler with `render_handle`
+							// cleared and the handler emits an error.
+							std::size_t tm = 0;
+							if (!in.read_map_header (tm)) return out;
+							for (std::size_t ti = 0; ti < tm; ++ti) {
+								std::string tk;
+								if (!in.read_str (tk)) return out;
+								if (tk == "kind") {
+									std::string kind;
+									if (!in.read_str (kind)) return out;
+									if (kind != "master") {
+										out.render_handle = "";
+									}
+								} else {
+									if (!in.skip_value ()) return out;
+								}
+							}
+						} else if (kk == "range") {
+							std::size_t rm = 0;
+							if (!in.read_map_header (rm)) return out;
+							for (std::size_t ri = 0; ri < rm; ++ri) {
+								std::string rk;
+								if (!in.read_str (rk)) return out;
+								if (rk == "kind") {
+									if (!in.read_str (out.render_range_kind)) return out;
+								} else if (rk == "start_samples") {
+									if (!in.read_u64 (out.render_range_start)) return out;
+								} else if (rk == "end_samples") {
+									if (!in.read_u64 (out.render_range_end)) return out;
+								} else {
+									if (!in.skip_value ()) return out;
+								}
+							}
+						} else if (kk == "target_path") {
+							if (!in.read_nil_or_str (out.render_target_path)) return out;
+						} else if (kk == "inline_bytes") {
+							if (!in.read_bool (out.render_inline_bytes)) return out;
+						} else if (kk == "normalize_to_master") {
+							// Informational on this side — the Ardour
+							// export pipeline already applies master
+							// fades / dither based on the format spec.
+							if (!in.skip_value ()) return out;
+						}
+						// ─── unknown / forward-compat ─────────────────
+						else {
 							if (!in.skip_value ()) return out;
 						}
 					}
@@ -1757,6 +1860,14 @@ decode (const std::vector<std::uint8_t>& buf)
 					// string (save in place). Non-empty → absolute path to
 					// the new session *folder* (parent + final dirname).
 					if (!in.read_nil_or_str (out.id)) return out;
+				} else if (k == "handle") {
+					// Command::RenderSession { handle: String, opts }.
+					// We only emit `handle` from the sidecar today, so
+					// matching by key name (without also gating on
+					// `cmd_type == "render_session"`) is fine. The
+					// `opts` payload is handled by the unified
+					// SpectrumOpts/RenderOptions decoder above.
+					if (!in.read_str (out.render_handle)) return out;
 				} else if (k == "data") {
 					// Command::MidiInput { data: Vec<u8> } — rmp-serde
 					// emits Vec<u8> as a msgpack ARRAY (not bin) so each
@@ -1859,6 +1970,7 @@ decode (const std::vector<std::uint8_t>& buf)
 			else if (cmd_type == "open_plugin_gui")    out.kind = DecodedCmd::Kind::OpenPluginGui;
 			else if (cmd_type == "close_plugin_gui")   out.kind = DecodedCmd::Kind::ClosePluginGui;
 			else if (cmd_type == "save_session")       out.kind = DecodedCmd::Kind::SaveSession;
+			else if (cmd_type == "render_session")     out.kind = DecodedCmd::Kind::RenderSession;
 			else if (cmd_type == "add_note")           out.kind = DecodedCmd::Kind::AddNote;
 			else if (cmd_type == "update_note")        out.kind = DecodedCmd::Kind::UpdateNote;
 			else if (cmd_type == "delete_note")        out.kind = DecodedCmd::Kind::DeleteNote;
@@ -5389,6 +5501,60 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			});
 			break;
 		}
+		case DecodedCmd::Kind::RenderSession: {
+			// Mix down the session via ARDOUR::ExportHandler. The
+			// schema decode set every option directly onto `cmd`;
+			// we copy the few we need into the lambda capture and
+			// bounce onto the event-loop thread (where session
+			// state is safe to read).
+			std::string handle      = cmd.render_handle;
+			std::string fmt_id      = cmd.render_format_id;
+			std::uint32_t sr_opt    = cmd.render_sample_rate;
+			std::string bit_depth   = cmd.render_bit_depth;
+			std::uint8_t qlty       = cmd.render_quality;
+			bool has_quality        = cmd.render_has_quality;
+			std::string range_kind  = cmd.render_range_kind;
+			std::uint64_t range_s   = cmd.render_range_start;
+			std::uint64_t range_e   = cmd.render_range_end;
+			std::string tgt_path    = cmd.render_target_path;
+			bool inline_b           = cmd.render_inline_bytes;
+			FoyerShim* shim         = &_shim;
+			Dispatcher* self        = this;
+			if (handle.empty ()) {
+				// Empty handle reaches us only when the schema
+				// decode flagged a rejection (e.g. target.kind !=
+				// "master") — surface that to the caller as an
+				// error event so the FE / agent can react.
+				auto err = msgpack_out::encode_render_error (
+				    handle, "render: unsupported target (only master is wired)");
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, err);
+				break;
+			}
+			// Ack first — clients flip into a progress UI on
+			// `render_started` so a brief setup hiccup doesn't
+			// look like a stalled command.
+			{
+				auto ack = msgpack_out::encode_render_started (handle);
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, ack);
+			}
+			_shim.call_slot (MISSING_INVALIDATOR,
+			    [shim, self, handle, fmt_id, sr_opt, bit_depth, qlty, has_quality,
+			     range_kind, range_s, range_e, tgt_path, inline_b] () {
+				ARDOUR::Session& session = shim->session ();
+				try {
+					self->run_render_export (
+					    session, handle, fmt_id, sr_opt, bit_depth, qlty,
+					    has_quality, range_kind, range_s, range_e, tgt_path,
+					    inline_b);
+				} catch (std::exception const& e) {
+					auto err = msgpack_out::encode_render_error (
+					    handle,
+					    std::string ("render: unhandled exception: ") + e.what ());
+					shim->ipc ().send (foyer_ipc::FrameKind::Control, err);
+				}
+			});
+			break;
+		}
 		case DecodedCmd::Kind::AudioStreamOpen: {
 			// M6a: install a MasterTap processor on the master route
 			// so audio samples flow into our ring buffer. Today we
@@ -5752,6 +5918,501 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 			// Ignore for M3; M6a/b will fill these in.
 			break;
 	}
+}
+
+namespace {
+
+// Map our wire `format_id` to (ExportFormatBase::FormatId,
+// ExportFormatBase::Type, default SampleFormat). The Type tells the
+// export pipeline which encoder family to dispatch to —
+// `T_Sndfile` covers WAV/FLAC/Vorbis, MP3 goes through libsndfile too
+// on modern builds (SF_FORMAT_MPEG since libsndfile 1.1.0). The
+// default sample-format is the one we fall back to when the caller
+// doesn't override via `bit_depth`.
+bool
+resolve_format (const std::string& id,
+                ARDOUR::ExportFormatBase::FormatId&  format_id_out,
+                ARDOUR::ExportFormatBase::Type&      type_out,
+                ARDOUR::ExportFormatBase::SampleFormat& default_sf_out,
+                std::string& error_out)
+{
+	using F = ARDOUR::ExportFormatBase;
+	if (id == "wav") {
+		format_id_out  = F::F_WAV;
+		type_out       = F::T_Sndfile;
+		default_sf_out = F::SF_24;
+		return true;
+	}
+	if (id == "flac") {
+		format_id_out  = F::F_FLAC;
+		type_out       = F::T_Sndfile;
+		default_sf_out = F::SF_24;
+		return true;
+	}
+	if (id == "ogg_vorbis" || id == "ogg") {
+		format_id_out  = F::F_Ogg;
+		type_out       = F::T_Sndfile;
+		default_sf_out = F::SF_Vorbis;
+		return true;
+	}
+	if (id == "mp3") {
+		format_id_out  = F::F_MPEG;
+		type_out       = F::T_Sndfile;
+		default_sf_out = F::SF_MPEG_LAYER_III;
+		return true;
+	}
+	error_out = "unknown format_id '" + id + "'";
+	return false;
+}
+
+// Pick the libsndfile SampleFormat for the caller's `bit_depth`
+// override, respecting the format's lossy/lossless distinction.
+// Lossy encoders (Vorbis / Opus / MP3) carry their own implicit
+// sample format (`SF_Vorbis`, `SF_Opus`, `SF_MPEG_LAYER_III`) — the
+// "int24 / float32" knob means nothing there, so we just keep the
+// codec's native format. Lossless encoders honour int16 / int24 /
+// float32. The fallback is the format-default the resolver picked.
+ARDOUR::ExportFormatBase::SampleFormat
+sample_format_from_bit_depth (const std::string& bit_depth,
+                              ARDOUR::ExportFormatBase::SampleFormat fallback,
+                              bool format_is_lossy)
+{
+	using F = ARDOUR::ExportFormatBase;
+	if (format_is_lossy || bit_depth.empty ()) return fallback;
+	if (bit_depth == "int16")   return F::SF_16;
+	if (bit_depth == "int24")   return F::SF_24;
+	if (bit_depth == "int32")   return F::SF_32;
+	if (bit_depth == "float32") return F::SF_Float;
+	return fallback;
+}
+
+// Map an integer sample-rate to ExportFormatBase::SampleRate. `0`
+// (or unrecognised value) → `SR_Session` so we use the session's
+// own rate without a resample.
+ARDOUR::ExportFormatBase::SampleRate
+sample_rate_from_int (std::uint32_t hz)
+{
+	using F = ARDOUR::ExportFormatBase;
+	switch (hz) {
+		case 8000u:   return F::SR_8;
+		case 22050u:  return F::SR_22_05;
+		case 24000u:  return F::SR_24;
+		case 44100u:  return F::SR_44_1;
+		case 48000u:  return F::SR_48;
+		case 88200u:  return F::SR_88_2;
+		case 96000u:  return F::SR_96;
+		case 176400u: return F::SR_176_4;
+		case 192000u: return F::SR_192;
+		default:      return F::SR_Session;
+	}
+}
+
+// Convert encoded file bytes to a base64 string. Inline here so the
+// shim doesn't need an extra dep — the inputs are 1-second-ish
+// per-MB so a straight-line scan is fine.
+std::string
+base64_encode (const std::uint8_t* data, std::size_t len)
+{
+	static const char tbl[] =
+	    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string out;
+	out.reserve (((len + 2) / 3) * 4);
+	std::size_t i = 0;
+	while (i + 3 <= len) {
+		std::uint32_t v = (std::uint32_t)data[i] << 16
+		                | (std::uint32_t)data[i + 1] << 8
+		                | (std::uint32_t)data[i + 2];
+		out.push_back (tbl[(v >> 18) & 0x3f]);
+		out.push_back (tbl[(v >> 12) & 0x3f]);
+		out.push_back (tbl[(v >> 6)  & 0x3f]);
+		out.push_back (tbl[v         & 0x3f]);
+		i += 3;
+	}
+	if (i < len) {
+		std::uint32_t v = (std::uint32_t)data[i] << 16;
+		if (i + 1 < len) v |= (std::uint32_t)data[i + 1] << 8;
+		out.push_back (tbl[(v >> 18) & 0x3f]);
+		out.push_back (tbl[(v >> 12) & 0x3f]);
+		out.push_back ((i + 1 < len) ? tbl[(v >> 6) & 0x3f] : '=');
+		out.push_back ('=');
+	}
+	return out;
+}
+
+} // anonymous
+
+void
+Dispatcher::run_render_export (ARDOUR::Session& session,
+                               const std::string& handle,
+                               const std::string& format_id,
+                               std::uint32_t sample_rate_hz,
+                               const std::string& bit_depth,
+                               std::uint8_t quality,
+                               bool has_quality,
+                               const std::string& range_kind,
+                               std::uint64_t range_start,
+                               std::uint64_t range_end,
+                               const std::string& target_path_rel,
+                               bool inline_bytes)
+{
+	using namespace ARDOUR;
+	FoyerShim* shim = &_shim;
+
+	auto emit_error = [&] (const std::string& msg) {
+		auto bytes = msgpack_out::encode_render_error (handle, msg);
+		shim->ipc ().send (foyer_ipc::FrameKind::Control, bytes);
+	};
+
+	// 1. Resolve wire format → libsndfile primitives.
+	ExportFormatBase::FormatId       sf_format_id  {};
+	ExportFormatBase::Type           sf_type       {};
+	ExportFormatBase::SampleFormat   sf_default_sf {};
+	std::string err;
+	if (!resolve_format (format_id, sf_format_id, sf_type, sf_default_sf, err)) {
+		emit_error (err);
+		return;
+	}
+	const bool lossy = (format_id == "ogg_vorbis" || format_id == "ogg" || format_id == "mp3");
+
+	// 2. Figure out the timespan. `RenderRange::Session` walks the
+	// session-range location; `Range` is an explicit window;
+	// `Loop` uses Ardour's loop location.
+	ARDOUR::samplepos_t span_start = 0;
+	ARDOUR::samplepos_t span_end   = 0;
+	if (range_kind == "range") {
+		if (range_end <= range_start) {
+			emit_error ("render: range end must be > start");
+			return;
+		}
+		span_start = static_cast<samplepos_t> (range_start);
+		span_end   = static_cast<samplepos_t> (range_end);
+	} else if (range_kind == "loop") {
+		ARDOUR::Location* loc = session.locations ()->auto_loop_location ();
+		if (!loc) {
+			emit_error ("render: loop range requested but no loop is set");
+			return;
+		}
+		span_start = loc->start_sample ();
+		span_end   = loc->end_sample ();
+	} else {
+		// "session" (default). Use the session-range location;
+		// if there isn't one (fresh project), bail rather than
+		// rendering silence.
+		ARDOUR::Location* sr = session.locations ()->session_range_location ();
+		if (!sr) {
+			emit_error ("render: session has no range — set a session start/end first");
+			return;
+		}
+		span_start = sr->start_sample ();
+		span_end   = sr->end_sample ();
+	}
+	if (span_end <= span_start) {
+		emit_error ("render: empty span");
+		return;
+	}
+
+	// 3. Resolve the master route — we only support master-bus
+	// renders today. Stems would walk `session.get_routes()` and
+	// build one channel config per route.
+	std::shared_ptr<ARDOUR::Route> master = session.master_out ();
+	if (!master) {
+		emit_error ("render: no master bus on session");
+		return;
+	}
+	const std::uint32_t out_chans = master->n_outputs ().n_audio ();
+	if (out_chans == 0) {
+		emit_error ("render: master has 0 audio outputs");
+		return;
+	}
+
+	// 4. Configure the export pipeline. We mirror the SimpleExport
+	// pattern but build everything ourselves so we can override
+	// format_id / sample_format / sample_rate dynamically without
+	// chasing a preset's XML.
+	auto handler = session.get_export_handler ();
+	auto status  = session.get_export_status ();
+	if (!handler || !status) {
+		emit_error ("render: session refused to hand out export handler");
+		return;
+	}
+	status->init ();
+
+	auto timespan = handler->add_timespan ();
+	timespan->set_name ("foyer_render_" + handle);
+	timespan->set_realtime (false);
+	timespan->set_range (span_start, span_end);
+
+	auto channels = handler->add_channel_config ();
+	{
+		// One PortExportChannel per output port — Ardour's export
+		// pipeline reads each channel's ports as a separate input.
+		// Pull master OUTPUT ports via `nth_audio_port` so a stereo
+		// master writes a stereo file, a 5.1 master writes 6
+		// channels, etc.
+		auto io = master->output ();
+		const std::uint32_t n_chans = io->n_ports ().n_audio ();
+		if (n_chans == 0) {
+			emit_error ("render: master output has no audio ports to tap");
+			return;
+		}
+		for (std::uint32_t ch = 0; ch < n_chans; ++ch) {
+			auto port = io->audio (ch);
+			if (!port) continue;
+			// `ExportChannelPtr` is `ComparableSharedPtr<ExportChannel>`,
+			// whose only non-default ctor takes a raw `T*` — so we
+			// `new` the channel and let the comparable-shared-ptr
+			// own it. (Same pattern as Ardour's export_dialog.cc.)
+			auto* pec = new PortExportChannel ();
+			pec->add_port (std::weak_ptr<AudioPort> (port));
+			channels->register_channel (ARDOUR::ExportChannelPtr (pec));
+		}
+	}
+	channels->set_name ("foyer_master");
+
+	auto format = handler->add_format ();
+	// Install a concrete encoder so the spec picks up its file
+	// extension + default sample format + tagging. Without
+	// `set_format()` calling `set_format_id` alone leaves
+	// `_extension` empty — the file is written without an extension,
+	// the readback path mismatches, and `bytes_b64` stays unset.
+	std::shared_ptr<ExportFormat> encoder;
+	if (sf_format_id == ExportFormatBase::F_WAV) {
+		auto wav = std::make_shared<ExportFormatTaggedLinear> ("WAV", ExportFormatBase::F_WAV);
+		wav->add_sample_format    (ExportFormatBase::SF_16);
+		wav->add_sample_format    (ExportFormatBase::SF_24);
+		wav->add_sample_format    (ExportFormatBase::SF_32);
+		wav->add_sample_format    (ExportFormatBase::SF_Float);
+		wav->add_endianness       (ExportFormatBase::E_Little);
+		wav->set_default_sample_format (ExportFormatBase::SF_24);
+		wav->set_extension        ("wav");
+		encoder = wav;
+	} else if (sf_format_id == ExportFormatBase::F_FLAC) {
+		encoder = std::make_shared<ExportFormatFLAC> ();
+	} else if (sf_format_id == ExportFormatBase::F_Ogg) {
+		encoder = std::make_shared<ExportFormatOggVorbis> ();
+	} else if (sf_format_id == ExportFormatBase::F_MPEG) {
+		encoder = std::make_shared<ExportFormatMPEG> ("MP3", "mp3");
+	}
+	if (!encoder) {
+		emit_error ("render: no encoder factory for format " + format_id);
+		return;
+	}
+	format->set_format (encoder);
+	format->set_sample_format  (sample_format_from_bit_depth (bit_depth, sf_default_sf, lossy));
+	format->set_sample_rate    (sample_rate_from_int (sample_rate_hz));
+	format->set_normalize      (false);
+	format->set_trim_beginning (false);
+	format->set_trim_end       (false);
+	format->set_analyse        (false);
+	format->set_with_cue       (false);
+	format->set_with_toc       (false);
+	format->set_with_mp4chaps  (false);
+	format->set_tag            (false);
+	if (lossy && has_quality) {
+		// `_codec_quality` is a 0..100-style number on Ardour's side;
+		// our wire takes 0..10. Scale up. (libsndfile maps higher =
+		// better for Vorbis; MP3 in Ardour's pipeline does the same
+		// mapping through its own VBR rung.)
+		int codec_q = static_cast<int> (quality) * 10;
+		if (codec_q < 0) codec_q = 0;
+		if (codec_q > 100) codec_q = 100;
+		format->set_codec_quality (codec_q);
+	}
+
+	auto filename = handler->add_filename ();
+	filename->set_timespan (timespan);
+	filename->include_label         = true;
+	filename->include_session       = false;
+	filename->include_revision      = false;
+	filename->include_channel_config = false;
+	filename->include_format_name   = false;
+	filename->include_channel       = false;
+	filename->include_timespan      = false;
+	filename->include_time          = false;
+	filename->include_date          = false;
+	filename->use_session_snapshot_name = false;
+	filename->set_label ("foyer-render-" + handle);
+
+	// Resolve output folder. Caller can override via target_path
+	// (jail-relative). Default: the session's `exports/` subfolder
+	// — same place SimpleExport drops files.
+	std::string folder;
+	std::string filename_override;
+	if (!target_path_rel.empty ()) {
+		std::filesystem::path p (target_path_rel);
+		// If the path looks like a filename, split into folder + label.
+		if (p.has_filename () && p.has_extension ()) {
+			folder = p.parent_path ().generic_string ();
+			std::string stem = p.stem ().generic_string ();
+			if (!stem.empty ()) {
+				filename->set_label (stem);
+				filename_override = stem;
+			}
+		} else {
+			folder = p.generic_string ();
+		}
+	}
+	if (folder.empty ()) {
+		folder = session.session_directory ().export_path ();
+	}
+	if (!filename->set_folder (folder)) {
+		emit_error (std::string ("render: cannot create output folder: ") + folder);
+		return;
+	}
+
+	if (!handler->add_export_config (timespan, channels, format, filename, ARDOUR::BroadcastInfoPtr ())) {
+		emit_error ("render: handler refused export config");
+		return;
+	}
+
+	// Path the file will land on so we can read it back after the
+	// export completes. `get_path` builds the same name the export
+	// pipeline will write to.
+	const std::string out_path = filename->get_path (format);
+
+	// 5. Kick off the export. `do_export()` is non-blocking — the
+	// real work happens on Ardour's butler / engine threads. We
+	// poll `export_status()` from a detached thread so the
+	// event-loop thread can keep processing commands.
+	int rv;
+	try {
+		rv = handler->do_export ();
+	} catch (std::exception const& e) {
+		emit_error (std::string ("render: do_export threw: ") + e.what ());
+		return;
+	}
+	if (rv != 0) {
+		emit_error (std::string ("render: do_export rejected the config (code ")
+		            + std::to_string (rv) + ")");
+		return;
+	}
+
+	const std::string handle_copy = handle;
+	const std::string mime =
+	    (format_id == "wav")        ? "audio/wav"
+	    : (format_id == "flac")     ? "audio/flac"
+	    : (format_id == "mp3")      ? "audio/mpeg"
+	                                : "audio/ogg";
+	const std::string format_id_copy = format_id;
+	const std::string out_path_copy  = out_path;
+	const bool inline_b              = inline_bytes;
+
+	// Hold a strong ref on the handler/status so they outlive the
+	// polling thread — Ardour's `Session::get_export_handler()`
+	// caches a weak ptr that doesn't keep the handler alive on its
+	// own. Dropping our ref before the export finishes would tear
+	// down `_status` mid-poll.
+	auto handler_keepalive = handler;
+	auto status_keepalive  = status;
+
+	std::thread ([shim, handle_copy, mime, format_id_copy, out_path_copy,
+	              inline_b, handler_keepalive, status_keepalive] () {
+		ARDOUR::ExportStatus& st = *status_keepalive;
+		std::uint8_t last_percent = 255;
+		// Spin while the export pipeline is alive. `running()` flips
+		// false once `finish_timespan()` completes or `abort()` was
+		// called.
+		while (st.running ()) {
+			samplecnt_t total = st.total_samples;
+			samplecnt_t done  = st.processed_samples;
+			std::uint8_t pct = 0;
+			if (total > 0) {
+				double frac = static_cast<double> (done) / static_cast<double> (total);
+				if (frac < 0) frac = 0;
+				if (frac > 1) frac = 1;
+				pct = static_cast<std::uint8_t> (frac * 100.0);
+			}
+			if (pct != last_percent) {
+				last_percent = pct;
+				auto ev = msgpack_out::encode_render_progress (handle_copy, pct);
+				shim->ipc ().send (foyer_ipc::FrameKind::Control, ev);
+			}
+			std::this_thread::sleep_for (std::chrono::milliseconds (100));
+		}
+		// `status.running()` flips false when the export's worker
+		// thread completes, but the engine's freewheel teardown +
+		// final-file flush happen in `ExportStatus::finish()` —
+		// without this call the WAV write may be truncated, the
+		// output ports keep flushing buffered samples past the end
+		// of the timespan, and the audio device keeps ringing for
+		// a beat. Mirrors `SimpleExport::run_export()`.
+		//
+		// `finish()` emits the `Finished` signal which Ardour
+		// connects to `Session::finalize_audio_export` via
+		// `connect_same_thread` — so the slot runs on whoever
+		// called `finish()`. That slot touches Ardour's
+		// thread-local memory pools (AudioEngine, freewheel, MMC),
+		// which only exist on threads Ardour has registered. Our
+		// polling thread is a raw `std::thread::detach()` and is
+		// invisible to libardour, so calling `finish()` here trips
+		// `programming error: no per-thread pool for thread
+		// unknown` and SIGABRTs the shim.
+		//
+		// Bounce the finish call back onto the AbstractUI event
+		// loop (Ardour's main thread for this control surface),
+		// and wait for it to complete before reading the file —
+		// without the wait we'd race `finalize_audio_export`'s
+		// freewheel-exit + flush against our readback.
+		{
+			std::promise<void> done;
+			auto fut = done.get_future ();
+			ExportStatus* st_ptr = &st;
+			shim->call_slot (MISSING_INVALIDATOR, [st_ptr, &done] () {
+				try {
+					st_ptr->finish (ARDOUR::TRS_UI);
+				} catch (...) {
+					// Don't let an exception from inside Ardour's
+					// slot leave the polling thread permanently
+					// blocked on `fut.wait()`. We still set the
+					// promise so readback proceeds; the file may
+					// be truncated, but the user gets a result
+					// rather than a hang.
+				}
+				done.set_value ();
+			});
+			fut.wait ();
+		}
+		// Drain final state.
+		if (st.aborted ()) {
+			auto ev = msgpack_out::encode_render_error (
+			    handle_copy,
+			    st.errors () ? "render: aborted with errors"
+			                 : "render: aborted");
+			shim->ipc ().send (foyer_ipc::FrameKind::Control, ev);
+			return;
+		}
+		// One last 100% tick so the UI lands on a full bar.
+		{
+			auto ev = msgpack_out::encode_render_progress (handle_copy, 100u);
+			shim->ipc ().send (foyer_ipc::FrameKind::Control, ev);
+		}
+		// Read the file off disk + optionally inline the bytes.
+		msgpack_out::RenderOutputRow row;
+		row.path      = out_path_copy;
+		row.format_id = format_id_copy;
+		row.mime      = mime;
+		try {
+			namespace fs = std::filesystem;
+			fs::path p (out_path_copy);
+			row.size_bytes = fs::exists (p) ? fs::file_size (p) : 0;
+			if (inline_b && row.size_bytes > 0) {
+				std::ifstream ifs (p, std::ios::binary);
+				std::vector<std::uint8_t> buf (row.size_bytes);
+				ifs.read (reinterpret_cast<char*> (buf.data ()), buf.size ());
+				if (ifs) {
+					row.bytes_b64 = base64_encode (buf.data (), buf.size ());
+				}
+			}
+		} catch (std::exception const& e) {
+			auto ev = msgpack_out::encode_render_error (
+			    handle_copy,
+			    std::string ("render: file readback failed: ") + e.what ());
+			shim->ipc ().send (foyer_ipc::FrameKind::Control, ev);
+			return;
+		}
+		auto done_ev = msgpack_out::encode_render_complete (handle_copy, {row});
+		shim->ipc ().send (foyer_ipc::FrameKind::Control, done_ev);
+	}).detach ();
 }
 
 } // namespace ArdourSurface

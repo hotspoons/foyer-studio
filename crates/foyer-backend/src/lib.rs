@@ -18,9 +18,10 @@ use async_trait::async_trait;
 use foyer_schema::{
     Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EnginePort, EntityId, Event,
     LatencyReport, MidiNote, MidiNotePatch, MidiPatchNames, PatchChange, PatchChangePatch,
-    PathListing, PluginCatalogEntry, PluginPreset, Region, RegionPatch, Script, ScriptRunResult,
-    ScriptingCapabilities, SequencerLayout, Session, SpectrumCapabilities, SpectrumFrame,
-    SpectrumOpts, SpectrumTarget, TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    PathListing, PluginCatalogEntry, PluginPreset, Region, RegionPatch, RenderCapabilities,
+    RenderOptions, RenderOutput, Script, ScriptRunResult, ScriptingCapabilities, SequencerLayout,
+    Session, SpectrumCapabilities, SpectrumFrame, SpectrumOpts, SpectrumTarget, TimelineMeta,
+    Track, TrackPatch, WaveformPeaks,
 };
 use futures::Stream;
 use thiserror::Error;
@@ -103,6 +104,13 @@ pub struct AudioIngressAck {
 
 /// The union of everything the sidecar can observe from a backend.
 pub type EventStream = Pin<Box<dyn Stream<Item = Event> + Send>>;
+
+/// Progress callback handed to [`Backend::render_session`]. The
+/// argument is a 0..=100 percent. Backends pulse this each time they
+/// cross a meaningful boundary so the WS layer can broadcast a
+/// `RenderProgress` event without polling; backends that can't
+/// estimate progress simply never call it.
+pub type ProgressFn = Box<dyn Fn(u8) + Send + Sync>;
 
 #[async_trait]
 pub trait Backend: Send + Sync + 'static {
@@ -419,6 +427,36 @@ pub trait Backend: Send + Sync + 'static {
     }
     async fn save_session(&self, _as_path: Option<&str>) -> Result<(), BackendError> {
         Err(BackendError::Other("save_session not supported".into()))
+    }
+    /// What this backend can do on a [`render_session`] call. `None`
+    /// = render is unsupported entirely (the launcher stub before a
+    /// project is open, future read-only backends). Servers surface
+    /// the result on `Session.render` so the FE / agent can gate
+    /// the entry point without a probe round-trip.
+    ///
+    /// [`render_session`]: Self::render_session
+    fn render_capabilities(&self) -> Option<RenderCapabilities> {
+        None
+    }
+    /// Mixdown the session to one or more audio files.
+    ///
+    /// `progress` is an optional callback the backend pulses with a
+    /// 0..=100 percent each time it crosses a meaningful boundary
+    /// (typically every few hundred milliseconds). Backends that
+    /// can't compute progress simply never call it; the server then
+    /// emits a single "starting" + "complete" pair on the wire.
+    ///
+    /// On success the backend returns one [`RenderOutput`] per file
+    /// written — exactly one for a master-bus render, one per track
+    /// for a stem render. Each output's `bytes_b64` is populated
+    /// only when `opts.inline_bytes` was set; otherwise the caller
+    /// reads the file from disk via `output.path`.
+    async fn render_session(
+        &self,
+        _opts: RenderOptions,
+        _progress: Option<ProgressFn>,
+    ) -> Result<Vec<RenderOutput>, BackendError> {
+        Err(BackendError::Other("render_session not supported".into()))
     }
     /// Ask the backend's host process to quit. The Ardour shim
     /// translates this to `kill(getpid(), SIGTERM)` so Ardour's stock

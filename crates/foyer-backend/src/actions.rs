@@ -100,6 +100,17 @@ pub fn default_daw_actions() -> Vec<Action> {
             Some("arrow-down-tray"),
             None,
         ),
+        // Mixdown / bounce-to-disk — different beast from the project
+        // archive `session.export` above. Render writes an audio file
+        // (WAV / FLAC / OGG / MP3 per backend caps); export writes
+        // the .tar.gz of the whole project tree.
+        mk(
+            "session.render",
+            "Render Audio…",
+            ActionCategory::Session,
+            Some("speaker-wave"),
+            None,
+        ),
         // Client-orchestrated upload. The browser POSTs the archive to
         // `/sessions/upload`; the action item is just the menu hook.
         mk(

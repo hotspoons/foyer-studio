@@ -84,6 +84,13 @@ pub(crate) fn catalog() -> Vec<Action> {
             None,
         ),
         mk(
+            "session.render",
+            "Render Audio…",
+            ActionCategory::Session,
+            Some("speaker-wave"),
+            None,
+        ),
+        mk(
             "session.upload",
             "Upload Project…",
             ActionCategory::Session,
