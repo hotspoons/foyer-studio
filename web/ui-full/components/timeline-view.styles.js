@@ -464,6 +464,33 @@ export const timelineStyles = css`
       isolation: isolate;
     }
     .region.dragging { cursor: grabbing; filter: brightness(1.15); }
+    /* Pencil button on MIDI / sequencer regions — opens the matching
+     * editor tab on touch, the floating editor window on desktop.
+     * Sits top-right of the region; styled subtly until the user
+     * hovers / focuses the region so it doesn't dominate. */
+    .region-edit {
+      position: absolute; top: 2px; right: 2px;
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0;
+      background: color-mix(in oklab, var(--color-surface) 70%, transparent);
+      color: var(--color-text);
+      border: 1px solid color-mix(in oklab, var(--color-border) 60%, transparent);
+      border-radius: 6px;
+      cursor: pointer;
+      opacity: 0.55;
+      transition: opacity 100ms;
+      z-index: 2;
+    }
+    .region:hover .region-edit,
+    .region:focus-within .region-edit,
+    .region-edit:hover { opacity: 1; }
+    .region-edit:active { transform: scale(0.94); }
+    /* On touch-primary devices keep it fully visible so it's
+     * discoverable without a hover state. */
+    @media (pointer: coarse) {
+      .region-edit { opacity: 1; width: 32px; height: 32px; }
+    }
     /* Visible hint while the cursor is over a foreign lane during a
      * move drag — the region will be relocated to that lane on
      * pointer-up. A dashed accent outline + soft glow reads as

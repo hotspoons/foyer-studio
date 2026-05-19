@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// Top app bar — session name + big transport buttons + agent FAB.
+// Top app bar — session name + the full ui-full transport bar.
 //
-// We re-use foyer-core's ws.controlSet for transport, but we don't
-// embed ui-full's transport-bar because that surface is too dense
-// for the touch target sizes we want. This is a slimmer, ~5-control
-// version: Play, Stop, Record, Loop, Position readout.
+// We tried a slimmer 3-button version (Play / Record / Loop) but the
+// touch user-base wants parity with desktop — locate, rewind, stop,
+// ffw, locate-end, undo/redo, save, time-sig, tempo, return-mode are
+// all part of "the transport." Embed the existing foyer-transport-bar
+// rather than reimplement; CSS bumps the hit targets for fat fingers.
 
 import { LitElement, html, css } from "lit";
-import { icon } from "foyer-ui-core/icons.js";
+// Side-effect import so `<foyer-transport-bar>` is defined.
+import "../../ui-full/components/transport-bar.js";
 
 export class TouchTopBar extends LitElement {
   static properties = {
@@ -21,12 +23,11 @@ export class TouchTopBar extends LitElement {
       border-bottom: 1px solid var(--color-border, #2a3548);
       padding-top: env(safe-area-inset-top, 0);
     }
-    header {
+    .session-row {
       display: flex;
       align-items: center;
       gap: 12px;
-      padding: 8px 12px;
-      min-height: 56px;
+      padding: 8px 12px 4px;
     }
     .session {
       flex: 1;
@@ -35,7 +36,7 @@ export class TouchTopBar extends LitElement {
       gap: 2px;
     }
     .session .name {
-      font-size: 14px;
+      font-size: 15px;
       font-weight: 600;
       white-space: nowrap;
       overflow: hidden;
@@ -48,47 +49,15 @@ export class TouchTopBar extends LitElement {
       font-variant-numeric: tabular-nums;
       letter-spacing: 0.02em;
     }
-    .transport {
-      display: flex;
-      gap: 8px;
-      flex: 0 0 auto;
+    /* Push the embedded desktop transport-bar's hit targets up. The
+     * bar's .btn rule defines 32px min-width / 28px height; bump both
+     * via descendant selectors so touch users still get ~40px. */
+    foyer-transport-bar {
+      display: block;
     }
-    button {
-      width: 48px; height: 48px;
-      display: flex; align-items: center; justify-content: center;
-      border-radius: 12px;
-      border: 0;
-      background: var(--color-bg);
-      color: var(--color-text);
-      cursor: pointer;
-      transition: transform 80ms, background 100ms, color 100ms;
-    }
-    button:active { transform: scale(0.94); }
-    button.play {
-      background: var(--color-accent, #60a5fa);
-      color: #fff;
-    }
-    button.playing {
-      background: var(--color-success, #34d399);
-      color: #062018;
-    }
-    button.record {
-      background: var(--color-bg);
-      color: var(--color-danger, #f87171);
-      border: 2px solid var(--color-danger, #f87171);
-    }
-    button.record.armed {
-      background: var(--color-danger, #f87171);
-      color: #fff;
-      animation: pulse 1.2s ease-in-out infinite;
-    }
-    button.loop.on {
-      background: var(--color-accent, #60a5fa);
-      color: #fff;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.6; }
+    foyer-transport-bar::part(btn) {
+      min-width: 40px;
+      height: 38px;
     }
   `;
 
@@ -137,29 +106,13 @@ export class TouchTopBar extends LitElement {
     const bars = Math.max(1, Math.floor(s.position_beats / 4) + 1);
     const beats = Math.max(1, Math.floor(s.position_beats % 4) + 1);
     return html`
-      <header>
+      <div class="session-row">
         <div class="session">
           <div class="name">${s.sessionName}</div>
           <div class="pos">${bars}.${beats} · ${s.tempo.toFixed(0)} BPM</div>
         </div>
-        <div class="transport">
-          <button class="play ${s.playing ? "playing" : ""}"
-                  title=${s.playing ? "Stop" : "Play"}
-                  @click=${() => this._set("transport.playing", !s.playing)}>
-            ${icon(s.playing ? "stop" : "play", 22)}
-          </button>
-          <button class="record ${s.recording ? "armed" : ""}"
-                  title=${s.recording ? "Disarm record" : "Arm record"}
-                  @click=${() => this._set("transport.recording", !s.recording)}>
-            <span style="width:14px;height:14px;border-radius:50%;background:currentColor;display:inline-block"></span>
-          </button>
-          <button class="loop ${s.looping ? "on" : ""}"
-                  title=${s.looping ? "Loop off" : "Loop on"}
-                  @click=${() => this._set("transport.looping", !s.looping)}>
-            ${icon("arrow-path", 22)}
-          </button>
-        </div>
-      </header>
+      </div>
+      <foyer-transport-bar></foyer-transport-bar>
     `;
   }
 }

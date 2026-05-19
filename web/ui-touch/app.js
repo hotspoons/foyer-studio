@@ -22,6 +22,7 @@ import "./components/touch-pin-row.js";
 import "./components/touch-panel-host.js";
 import "./components/touch-more-panel.js";
 import "./components/touch-tracks-panel.js";
+import "./components/touch-timeline-split.js";
 
 // View components re-used from ui-full. These are full-featured Lit
 // elements; ui-touch just hosts them in a friendlier shell. Side-
@@ -44,6 +45,7 @@ import "../ui-full/components/agent-panel.js";
 import "../ui-full/components/settings-modal.js";
 
 import { activePanelFromHash, setActivePanel, panelById } from "./panels.js";
+import { setPanelTarget } from "./components/touch-panel-host.js";
 
 export class TouchApp extends LitElement {
   static properties = {
@@ -112,6 +114,17 @@ export class TouchApp extends LitElement {
     this._onStoreChange = () => { this._tick++; };
     this._onOpenModal = (ev) => { this._modal = ev?.detail?.id || null; };
     this._onClosePanel = () => { this._modal = null; };
+    // Region edit pencil in the embedded timeline fires this event
+    // before falling back to the desktop floating-window opener. We
+    // claim it (preventDefault) and route to the matching panel with
+    // the region pre-selected.
+    this._onRegionEdit = (ev) => {
+      const d = ev?.detail || {};
+      if (d.editor !== "piano-roll" && d.editor !== "beat-seq") return;
+      ev.preventDefault?.();
+      setPanelTarget(d.editor, { trackId: d.trackId, regionId: d.regionId });
+      setActivePanel(d.editor);
+    };
   }
 
   connectedCallback() {
@@ -122,6 +135,7 @@ export class TouchApp extends LitElement {
     globalThis.addEventListener("hashchange", this._onHashChange);
     globalThis.addEventListener("foyer-touch:open-modal", this._onOpenModal);
     globalThis.addEventListener("foyer-touch:close-modal", this._onClosePanel);
+    this.addEventListener("foyer:request-region-edit", this._onRegionEdit);
     window.__foyer?.store?.addEventListener?.("change", this._onStoreChange);
     // No initial hash → set the default so back/forward feels stable.
     if (!globalThis.location.hash) setActivePanel(this._activePanel);
@@ -132,6 +146,7 @@ export class TouchApp extends LitElement {
     globalThis.removeEventListener("hashchange", this._onHashChange);
     globalThis.removeEventListener("foyer-touch:open-modal", this._onOpenModal);
     globalThis.removeEventListener("foyer-touch:close-modal", this._onClosePanel);
+    this.removeEventListener("foyer:request-region-edit", this._onRegionEdit);
     window.__foyer?.store?.removeEventListener?.("change", this._onStoreChange);
   }
 

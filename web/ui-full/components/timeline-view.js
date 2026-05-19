@@ -243,6 +243,49 @@ export class TimelineView extends LitElement {
     this.setAttribute("data-foyer-focus-domain", "timeline");
     this._onHostKey = (ev) => this._onTimelineKey(ev);
     this.addEventListener("keydown", this._onHostKey);
+
+    // Two-finger pinch-zoom. iPadOS / Android-on-tablet users get the
+    // same anchored-zoom behavior as desktop wheel + ctrl-key. Single-
+    // touch and three-plus-finger gestures pass through to the
+    // existing pointer/scroll handlers.
+    this._pinch = null;
+    this._onPinchStart = (e) => {
+      if (e.touches.length !== 2) { this._pinch = null; return; }
+      const t0 = e.touches[0]; const t1 = e.touches[1];
+      this._pinch = {
+        startDist: Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY),
+        startZoom: this._zoom,
+        cx: (t0.clientX + t1.clientX) / 2,
+      };
+      e.preventDefault();
+    };
+    this._onPinchMove = (e) => {
+      if (!this._pinch || e.touches.length !== 2) return;
+      const t0 = e.touches[0]; const t1 = e.touches[1];
+      const dist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+      const ratio = dist / Math.max(1, this._pinch.startDist);
+      const newZoom = Math.max(2, Math.min(4000, this._pinch.startZoom * ratio));
+      const scroll = this.renderRoot?.querySelector?.(".scroll");
+      if (!scroll) { this._zoom = newZoom; e.preventDefault(); return; }
+      const bounds = scroll.getBoundingClientRect();
+      const anchorVx = this._pinch.cx - bounds.left;
+      const anchorContentX = scroll.scrollLeft + anchorVx - HEAD_WIDTH;
+      const anchorSec = anchorContentX / Math.max(1, this._zoom);
+      this._zoom = newZoom;
+      this.updateComplete.then(() => {
+        const sc = this.renderRoot?.querySelector?.(".scroll");
+        if (!sc) return;
+        sc.scrollLeft = Math.max(0, HEAD_WIDTH + anchorSec * this._zoom - anchorVx);
+      });
+      e.preventDefault();
+    };
+    this._onPinchEnd = (e) => {
+      if (e.touches.length < 2) this._pinch = null;
+    };
+    this.addEventListener("touchstart", this._onPinchStart, { passive: false });
+    this.addEventListener("touchmove", this._onPinchMove, { passive: false });
+    this.addEventListener("touchend", this._onPinchEnd, { passive: true });
+    this.addEventListener("touchcancel", this._onPinchEnd, { passive: true });
     const ws = window.__foyer?.ws;
     if (ws) {
       ws.addEventListener("envelope", this._envelopeHandler);
@@ -463,6 +506,12 @@ export class TimelineView extends LitElement {
     if (this._playheadRaf) {
       cancelAnimationFrame(this._playheadRaf);
       this._playheadRaf = null;
+    }
+    if (this._onPinchStart) {
+      this.removeEventListener("touchstart", this._onPinchStart);
+      this.removeEventListener("touchmove", this._onPinchMove);
+      this.removeEventListener("touchend", this._onPinchEnd);
+      this.removeEventListener("touchcancel", this._onPinchEnd);
     }
     super.disconnectedCallback();
   }
@@ -3884,6 +3933,16 @@ export class TimelineView extends LitElement {
               ${cutOverlay}
               ${groupBar}
               <div class="name">${r.name}</div>
+              ${isMidi ? html`
+                <button class="region-edit"
+                        title=${r?.foyer_sequencer?.active !== false && r?.foyer_sequencer
+                          ? "Open beat sequencer"
+                          : "Open piano roll"}
+                        @pointerdown=${(e) => e.stopPropagation()}
+                        @click=${(e) => { e.stopPropagation(); this._openRegionEditor(r); }}>
+                  ${icon("pencil-square", 14)}
+                </button>
+              ` : null}
               ${gainStrip}
               ${fadeHandles}
               <div class="edge left"  @pointerdown=${(e) => {
@@ -4921,8 +4980,25 @@ export class TimelineView extends LitElement {
     if (!region) return;
     const track = (this.session?.tracks || []).find((t) => t.id === region.track_id);
     if (!track) return;
+    // Give shell variants (touch / phone) a chance to route to their
+    // own editor panel instead of opening a desktop floating window.
+    // The shell calls preventDefault() to claim the event; otherwise
+    // we fall through to the desktop window-open path.
+    const isSequencer = !!(region?.foyer_sequencer && region.foyer_sequencer.active !== false);
+    const evt = new CustomEvent("foyer:request-region-edit", {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      detail: {
+        regionId: region.id,
+        trackId: region.track_id,
+        editor: track.kind === "midi" ? (isSequencer ? "beat-seq" : "piano-roll") : "audio",
+      },
+    });
+    this.dispatchEvent(evt);
+    if (evt.defaultPrevented) return;
     if (track.kind === "midi") {
-      if (region?.foyer_sequencer && region.foyer_sequencer.active !== false) this._openBeatSequencer(region);
+      if (isSequencer) this._openBeatSequencer(region);
       else this._openMidiEditor(region);
     }
   }
