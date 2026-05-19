@@ -372,6 +372,13 @@ pub struct Session {
     /// or `available=false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spectrum: Option<SpectrumCapabilities>,
+    /// Mixdown / bounce-to-disk capability advertisement. `None` for
+    /// backends that can't export audio (the launcher stub, future
+    /// read-only inspection backends, etc.); FE hides the Session →
+    /// Render menu entry and the agent `render` tool refuses to
+    /// dispatch when this is missing or `formats` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<crate::render::RenderCapabilities>,
     /// Stored mixer scenes — named snapshots of the entire mix state.
     /// Recall flips every track's fader / pan / mute / solo / send
     /// levels in one operation. See [`crate::MixerScene`].
@@ -531,6 +538,7 @@ mod tests {
             meta: serde_json::json!({ "project": "demo" }),
             scripting: None,
             spectrum: None,
+            render: None,
             mixer_scenes: vec![],
             active_scene_id: None,
             sections: vec![],

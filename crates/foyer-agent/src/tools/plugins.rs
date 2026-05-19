@@ -83,8 +83,8 @@ fn resolve_param_id(
                 || p.id
                     .as_str()
                     .split('.')
-                    .last()
-                    .map_or(false, |s| s.eq_ignore_ascii_case(name))
+                    .next_back()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(name))
         });
         return hit.map(|p| p.id.clone()).ok_or_else(|| {
             ToolError::InvalidArgs(format!(

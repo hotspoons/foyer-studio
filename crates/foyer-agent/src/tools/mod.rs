@@ -16,6 +16,7 @@ pub mod midi;
 pub mod mixer;
 pub mod plugins;
 pub mod regions;
+pub mod render;
 pub mod scripts;
 pub mod sections;
 pub mod sequencer;
@@ -43,6 +44,23 @@ pub enum ToolError {
     InvalidArgs(String),
     #[error("backend unavailable")]
     BackendGone,
+    /// Precondition: a backend is attached, but no project is loaded
+    /// (the launcher stub backend with zero tracks, or an Ardour shim
+    /// before the user picked a session). Mutating tools return this
+    /// instead of struggling on with empty state. The agent should
+    /// react by calling `session(subcommand="open", path=…)` to load
+    /// an existing project from `session(subcommand="recents")` /
+    /// `session(subcommand="browse")`, OR `session(subcommand="new")`
+    /// to spin up a fresh one. Inspection tools (`session.summary`,
+    /// `tracks.list`, etc.) deliberately don't trip this — they still
+    /// reflect the empty state so the agent can see *why* it's blocked.
+    #[error(
+        "no project is currently loaded — call session(subcommand=\"recents\") to find one to \
+         open, then session(subcommand=\"open\", path=…), or session(subcommand=\"new\") to \
+         create a fresh project. Read-only tools (session.summary, tracks.list, \
+         session.list_open) work without a loaded project."
+    )]
+    NoSessionLoaded,
     #[error("execution failed: {0}")]
     Execution(String),
     #[error("rejected by autonomy gate")]
@@ -225,11 +243,10 @@ impl ToolContext {
     /// only tools that should still work on an empty session
     /// (`session.summary`, `tracks.list`) keep using bare `backend()`.
     ///
-    /// The user often opens the FAB / MCP connection BEFORE picking a
-    /// project; without this guard the agent fires off requests that
-    /// the shim either drops silently or answers with a cryptic IPC
-    /// error. Surfacing a plain-English precondition lets the model
-    /// tell the user "open a project first" instead of muddling on.
+    /// Returns a `NoSessionLoaded` error variant so the agent can
+    /// recognise the precondition and either open an existing project
+    /// (`session(subcommand="open", path=…)`) or create a fresh one
+    /// (`session(subcommand="new")`) without waiting for the user.
     pub async fn backend_with_loaded_session(&self) -> Result<Arc<dyn Backend>, ToolError> {
         let backend = self.backend()?;
         let snap = backend
@@ -240,20 +257,14 @@ impl ToolContext {
         // stub has zero tracks. Either signal counts as "nothing
         // loaded" — inspection tools (session.summary, tracks.list)
         // still work without a loaded project; mutating tools error
-        // out with the message below.
+        // out with `NoSessionLoaded`.
         let loaded = !snap.tracks.is_empty()
             && snap
                 .tracks
                 .iter()
                 .any(|t| matches!(t.kind, foyer_schema::TrackKind::Master));
         if !loaded {
-            return Err(ToolError::Execution(
-                "no project is currently loaded — ask the user to open a session \
-                 in the Foyer UI (session picker → pick a project) before issuing \
-                 edits. Inspection tools like session.summary / tracks.list still \
-                 work without a loaded project."
-                    .into(),
-            ));
+            return Err(ToolError::NoSessionLoaded);
         }
         Ok(backend)
     }
@@ -625,6 +636,7 @@ pub fn default_registry_with_store(
         Arc::new(mixer::MixerTool),
         Arc::new(tracks::TracksTool),
         Arc::new(regions::RegionsTool),
+        Arc::new(render::RenderTool),
         Arc::new(automation::AutomationTool),
         Arc::new(plugins::PluginsTool),
         Arc::new(midi::MidiTool),

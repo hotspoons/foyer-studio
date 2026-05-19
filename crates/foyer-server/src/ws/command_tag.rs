@@ -44,6 +44,7 @@ pub(crate) fn command_tag(cmd: &Command) -> &'static str {
         Command::BrowsePath { .. } => "browse_path",
         Command::OpenSession { .. } => "open_session",
         Command::SaveSession { .. } => "save_session",
+        Command::RenderSession { .. } => "render_session",
         Command::UpdateRegion { .. } => "update_region",
         Command::DeleteRegion { .. } => "delete_region",
         Command::CreateRegion { .. } => "create_region",

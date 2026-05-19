@@ -1102,28 +1102,6 @@ impl BackendSpawner for CliSpawner {
     }
 }
 
-/// Spawn the configured DAW with the project as argv and poll the
-/// discovery directory until its shim advertises. Returns the shim's
-/// UDS path along with the spawned `Child` so the registry can later
-/// drive a graceful → SIGTERM → SIGKILL escalation on session close.
-/// Times out after ~30 seconds. The child is kept with
-/// `kill_on_drop(false)` — sidecar shutdown does NOT kill the DAW
-/// (preserves the orphan-reattach feature); explicit `CloseSession`
-/// is what triggers the escalation.
-///
-/// Dev-build awareness: when `exec` lives inside an Ardour source
-/// checkout (`<root>/build/gtk2_ardour/`), we wrap the spawn in a bash
-/// shell that first sources `ardev_common_waf.sh` (sets LD_LIBRARY_PATH,
-/// ARDOUR_DATA_PATH, etc. — the same env you'd get from `just
-/// ardour-hardev`) and prepends the Foyer shim to `ARDOUR_SURFACES_PATH`
-/// so the shim activates without manual XML surgery on the session file.
-/// System-installed Ardours (on `$PATH` or in `/Applications/...`) are
-/// exec'd directly — they don't need the wrapper.
-///
-/// `sample_rate_hint`, when `Some`, rewrites the root `<Session>`
-/// `sample-rate="…"` attribute **only if** both `.ardour` paths were
-/// absent before bootstrap (brand-new session). Matches `LaunchProject`
-/// + optional per-backend config from the sidecar.
 /// Result of [`launch_and_wait_for_shim`] — the shim socket + child
 /// handle (as before), plus the MCPHttp port we pinned this session
 /// to (when one was successfully claimed) so callers can probe it
@@ -1134,6 +1112,26 @@ pub(crate) struct ShimLaunch {
     pub mcp_port: Option<u16>,
 }
 
+/// Spawn the configured DAW with the project as argv and poll the
+/// discovery directory until its shim advertises. Returns the shim's
+/// UDS path along with the spawned `Child` so the registry can later
+/// drive a graceful → SIGTERM → SIGKILL escalation on session close.
+/// Times out after ~30 seconds. The child is kept with
+/// `kill_on_drop(false)` — sidecar shutdown does NOT kill the DAW
+/// (preserves the orphan-reattach feature); explicit `CloseSession`
+/// is what triggers the escalation.
+///
+/// Dev-build awareness: when `exec` lives inside an Ardour source
+/// checkout (`<root>/build/gtk2_ardour/`), we source
+/// `ardev_common_waf.sh` (LD_LIBRARY_PATH, ARDOUR_DATA_PATH, etc.) and
+/// prepend the Foyer shim to `ARDOUR_SURFACES_PATH` so the shim
+/// activates without manual XML surgery. System-installed Ardours
+/// (on `$PATH` or in `/Applications/...`) are exec'd directly.
+///
+/// `sample_rate_hint`, when `Some`, rewrites the root `<Session>`
+/// `sample-rate="…"` attribute **only if** both `.ardour` paths were
+/// absent before bootstrap (brand-new session). Matches `LaunchProject`
+/// plus optional per-backend config from the sidecar.
 async fn launch_and_wait_for_shim(
     exec: &std::path::Path,
     extra_args: &[String],

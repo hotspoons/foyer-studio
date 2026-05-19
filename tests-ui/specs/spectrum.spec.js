@@ -137,6 +137,15 @@ test.describe("spectrum analyser", () => {
       return !!inner;
     })()`);
 
+    // The widget intentionally drops frames when transport is stopped
+    // (`if (!this._playing) return;` in the frame handler — silence
+    // frames after stop would scroll garbage past the user). Start
+    // playback so the analyser actually subscribes and the stub's
+    // FFT pipeline starts emitting.
+    await page.evaluate(() => {
+      window.__foyer.ws.controlSet("transport.playing", true);
+    });
+
     await page.waitForFunction(`(() => {
       ${DEEP_FIND}
       const inner = deepFind("foyer-spectrum");

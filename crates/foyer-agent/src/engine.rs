@@ -1183,12 +1183,11 @@ fn is_context_overflow(body: &str) -> bool {
 /// "the screenshot was 142kB" without seeing the bytes.
 fn redact_large_b64_in_value(v: &mut Value, max_chars: usize) {
     match v {
-        Value::String(s) => {
-            if s.len() > max_chars && looks_like_b64(s) {
-                let n = s.len();
-                *s = format!("[base64 elided: {n} chars]");
-            }
+        Value::String(s) if s.len() > max_chars && looks_like_b64(s) => {
+            let n = s.len();
+            *s = format!("[base64 elided: {n} chars]");
         }
+        Value::String(_) => {}
         Value::Array(arr) => {
             for item in arr.iter_mut() {
                 redact_large_b64_in_value(item, max_chars);

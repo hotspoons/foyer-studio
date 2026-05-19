@@ -140,6 +140,12 @@ impl SessionRegistry {
     /// session's id (caller-supplied so the shim can pre-generate
     /// UUIDs and persist them into the .ardour file before the
     /// sidecar knows they exist).
+    // The argument list crept past clippy's 7-arg threshold once we
+    // added mcp_endpoint. Bundling these into a struct would force
+    // every call site (and the WS dispatcher) through a new builder
+    // just to express the same per-session record we already serialize
+    // wholesale onto `SessionInfo`. Live with the wide signature.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn add(
         self: &Arc<Self>,
         id: EntityId,
@@ -511,13 +517,6 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Three-stage shutdown of a host child process after
-/// `Backend::request_quit()` has already fired. Stages:
-///   1. Wait up to 5s for the process to exit on its own (graceful
-///      IPC + Ardour's SIGTERM handler doing the save-and-exit).
-///   2. SIGTERM, wait 3s. Catches Ardour builds whose graceful path
-///      hangs on a save dialog or a stuck plugin.
-///   3. SIGKILL. Last resort — forces the kernel to reap.
 /// Delete Ardour's atomic-save tempfiles (`<name>.pending`,
 /// `<name>.tmp`) inside the project directory if they survived a
 /// half-completed save. Ardour writes the new state to `.pending`,
@@ -561,6 +560,14 @@ fn sweep_save_tempfiles(project_dir: &str) {
     }
 }
 
+/// Three-stage shutdown of a host child process after
+/// `Backend::request_quit()` has already fired. Stages:
+///
+/// 1. Wait up to 5s for the process to exit on its own (graceful
+///    IPC + Ardour's SIGTERM handler doing the save-and-exit).
+/// 2. SIGTERM, wait 3s. Catches Ardour builds whose graceful path
+///    hangs on a save dialog or a stuck plugin.
+/// 3. SIGKILL. Last resort — forces the kernel to reap.
 async fn shutdown_child(session_id: EntityId, mut proc: Box<dyn ProcessHandle>) {
     use std::time::Duration;
     if proc.wait(Duration::from_secs(5)).await {

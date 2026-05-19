@@ -19,6 +19,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 # Decoder for real waveform peaks — pure Rust, multi-format. Feature set
 # matches common Ardour session exports: WAV/BWF/AIFF, FLAC, Vorbis in Ogg.
 # Other codecs can be added behind optional symphonia features if needed.

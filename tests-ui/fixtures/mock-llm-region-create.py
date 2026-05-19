@@ -44,12 +44,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         messages = req.get("messages", [])
         # Round 1: no tool reply yet → call regions.create on stub's
-        # first audio track. The stub fixture always seeds a few
-        # `track.<n>` ids; we hard-code `track.1` here, which the
-        # stub backend recognizes (it auto-creates the track if
-        # missing). The result is captured and re-emitted as our
-        # final assistant text so the test can assert the call
-        # actually round-tripped.
+        # first audio track. Stub fixtures seed `track.kick /
+        # track.snare / track.bass / track.vox` (see
+        # crates/foyer-backend-stub/src/fixtures.rs); pick
+        # `track.kick` since it's always present. Older copies of
+        # this mock hard-coded `track.1` from a previous fixture
+        # generation — the regions.create validator now rejects
+        # unknown track_ids before the call lands.
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -64,7 +65,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "function": {"name": "regions",
                             "arguments": json.dumps({
                                 "subcommand": "create",
-                                "track_id": "track.1",
+                                "track_id": "track.kick",
                                 "at_samples": 0,
                                 "length_samples": 48000,
                                 "kind": "midi",

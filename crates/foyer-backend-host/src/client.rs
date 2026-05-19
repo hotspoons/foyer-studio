@@ -59,6 +59,8 @@ pub enum ClientError {
     ShimError(String, String),
     #[error("stream {0} has no open ingress sink")]
     NoIngressSink(u32),
+    #[error("protocol: {0}")]
+    Protocol(String),
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +83,17 @@ enum AudioRoute {
 enum WriteItem {
     Control(Box<Envelope<Control>>),
     Audio(u32, Vec<u8>),
+}
+
+/// One in-flight render. The terminal RenderComplete / RenderError
+/// event resolves `done` with `Ok(outputs)` or `Err(message)`;
+/// RenderProgress ticks invoke `progress` if it was supplied. We
+/// store the progress fn as a `Box<dyn Fn>` rather than `FnMut` so
+/// it can be invoked from inside the read loop without taking a
+/// mutable borrow on the map.
+struct RenderWaiter {
+    done: oneshot::Sender<Result<Vec<foyer_schema::RenderOutput>, String>>,
+    progress: Option<Box<dyn Fn(u8) + Send + Sync>>,
 }
 
 /// State shared with the reader/writer tasks.
@@ -153,6 +166,14 @@ struct Shared {
     /// runs of different scripts don't collide.
     pending_run_script:
         Mutex<HashMap<EntityId, Vec<oneshot::Sender<foyer_schema::ScriptRunResult>>>>,
+    /// In-flight `render_session` requests, keyed by the
+    /// client-chosen `handle` string so parallel renders don't
+    /// collide. Each entry's value carries a progress callback +
+    /// the oneshot that the terminal RenderComplete / RenderError
+    /// resolves. `progress` is optional and gated to a single
+    /// invocation per percent transition (the shim already
+    /// dedupes); when None the wire just doesn't push progress.
+    pending_render: Mutex<HashMap<String, RenderWaiter>>,
     /// Cached scripting capabilities — populated from every
     /// `SessionSnapshot` and from `ScriptingCapabilitiesChanged` events
     /// so the sync `scripting_capabilities()` call can answer without
@@ -162,6 +183,9 @@ struct Shared {
     /// off `SessionSnapshot.spectrum` so the host's
     /// `spectrum_capabilities()` impl can answer synchronously.
     cached_spectrum_caps: std::sync::Mutex<Option<foyer_schema::SpectrumCapabilities>>,
+    /// Cached render capabilities. Pulled off `SessionSnapshot.render`
+    /// so `HostBackend::render_capabilities()` answers synchronously.
+    cached_render_caps: std::sync::Mutex<Option<foyer_schema::RenderCapabilities>>,
     /// Cache of known regions, keyed by region id. Populated from every
     /// `RegionsList` / `RegionUpdated` event; drained on `RegionRemoved`.
     /// Used to look up `source_path` when the sidecar needs to decode
@@ -223,8 +247,10 @@ impl HostClient {
             pending_save_script: Mutex::new(Vec::new()),
             pending_enable_script: Mutex::new(Vec::new()),
             pending_run_script: Mutex::new(HashMap::new()),
+            pending_render: Mutex::new(HashMap::new()),
             cached_scripting_caps: Mutex::new(None),
             cached_spectrum_caps: std::sync::Mutex::new(None),
+            cached_render_caps: std::sync::Mutex::new(None),
             regions_cache: Mutex::new(HashMap::new()),
             audio_routes: Mutex::new(HashMap::new()),
             disconnected: AtomicBool::new(false),
@@ -904,6 +930,61 @@ impl HostClient {
         timeout(rx, "run_script").await
     }
 
+    /// Mix down the session via the shim's `Command::RenderSession`.
+    /// `handle` should be a uuid-like string the caller minted; the
+    /// terminal RenderComplete / RenderError matches on it so two
+    /// parallel renders don't cross wires. `progress`, if provided,
+    /// is invoked from the reader task on every `RenderProgress`
+    /// envelope — keep the callback cheap; the reader can't make
+    /// forward progress on other events while it's running.
+    pub async fn render_session(
+        &self,
+        handle: String,
+        opts: foyer_schema::RenderOptions,
+        progress: Option<Box<dyn Fn(u8) + Send + Sync>>,
+    ) -> Result<Vec<foyer_schema::RenderOutput>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.shared
+            .pending_render
+            .lock()
+            .await
+            .insert(handle.clone(), RenderWaiter { done: tx, progress });
+        if let Err(e) = self
+            .send_command(Command::RenderSession {
+                handle: handle.clone(),
+                opts,
+            })
+            .await
+        {
+            self.shared.pending_render.lock().await.remove(&handle);
+            return Err(e);
+        }
+        // Renders are unbounded in real time — Ardour freewheels at
+        // CPU speed (typically ~10× realtime), but a long song
+        // through MP3 / OGG encode on a slow box can still take
+        // minutes. Use a generous 30-minute ceiling instead of the
+        // default 5s control-plane timeout; if a render genuinely
+        // hangs the shim, the connection's `disconnected_notify`
+        // already wakes us through the same `rx` (the reader task
+        // drops every pending oneshot on disconnect).
+        const RENDER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+        let outcome = match tokio::time::timeout(RENDER_TIMEOUT, rx).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) => {
+                self.shared.pending_render.lock().await.remove(&handle);
+                return Err(ClientError::WriterClosed);
+            }
+            Err(_) => {
+                self.shared.pending_render.lock().await.remove(&handle);
+                return Err(ClientError::Timeout("render_session"));
+            }
+        };
+        match outcome {
+            Ok(outputs) => Ok(outputs),
+            Err(message) => Err(ClientError::Protocol(message)),
+        }
+    }
+
     pub async fn recover_disabled_scripts(&self) -> Result<Vec<foyer_schema::Script>, ClientError> {
         // The shim emits `ScriptList` after recovery so the regular
         // list waiter picks it up. Sequence: send Recover → wait for
@@ -927,6 +1008,16 @@ impl HostClient {
     pub fn cached_spectrum_caps(&self) -> Option<foyer_schema::SpectrumCapabilities> {
         self.shared
             .cached_spectrum_caps
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+    }
+
+    /// Latest render caps from the most recent session snapshot.
+    /// Sync — same justification as `cached_spectrum_caps`.
+    pub fn cached_render_caps(&self) -> Option<foyer_schema::RenderCapabilities> {
+        self.shared
+            .cached_render_caps
             .lock()
             .ok()
             .and_then(|g| g.clone())
@@ -1214,6 +1305,9 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                     if let Ok(mut g) = shared.cached_spectrum_caps.lock() {
                         *g = session.spectrum.clone();
                     }
+                    if let Ok(mut g) = shared.cached_render_caps.lock() {
+                        *g = session.render.clone();
+                    }
                     let waiters = std::mem::take(&mut *shared.pending_snapshot.lock().await);
                     for w in waiters {
                         let _ = w.send((**session).clone());
@@ -1377,6 +1471,30 @@ async fn handle_incoming(shared: &Arc<Shared>, env: Envelope<Control>) {
                 }
                 Event::Error { code, message, .. } => {
                     tracing::warn!("shim error: {code}: {message}");
+                }
+                Event::RenderStarted { handle } => {
+                    tracing::debug!("render started: {handle}");
+                }
+                Event::RenderProgress {
+                    handle, percent, ..
+                } => {
+                    if let Some(waiter) = shared.pending_render.lock().await.get(handle) {
+                        if let Some(cb) = waiter.progress.as_ref() {
+                            cb(*percent);
+                        }
+                    }
+                }
+                Event::RenderComplete { handle, outputs } => {
+                    if let Some(waiter) = shared.pending_render.lock().await.remove(handle) {
+                        let _ = waiter.done.send(Ok(outputs.clone()));
+                    }
+                }
+                Event::RenderError { handle, message } => {
+                    if let Some(waiter) = shared.pending_render.lock().await.remove(handle) {
+                        let _ = waiter.done.send(Err(message.clone()));
+                    } else {
+                        tracing::warn!("orphan render_error for handle={handle}: {message}");
+                    }
                 }
                 _ => {}
             }

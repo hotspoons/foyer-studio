@@ -659,6 +659,14 @@ pub(crate) struct AppState {
     /// rejected with `401`. Seeded by `foyer-cli` from the CLI flag
     /// / env var / `config.yaml` chain.
     pub(crate) openai_proxy_api_key: RwLock<Option<String>>,
+
+    /// Whether the OpenAI-compatible `/v1/chat/completions` endpoint
+    /// should surface tool calls (start + result lines) to external
+    /// callers. Default `false` so callers see Foyer as a "smarter
+    /// chat model" — flip to `true` (via config or
+    /// `FOYER_OPENAI_PROXY_SHOW_TOOL_CALLS=1`) when you want the
+    /// upstream proxy / chat UI to see what tools the agent fired.
+    pub(crate) openai_proxy_expose_tool_calls: std::sync::atomic::AtomicBool,
 }
 
 /// Tracking state for the sequencer SetSequencerLayout coalescer.
@@ -780,6 +788,12 @@ impl AppState {
     /// `session_id` argument is the UUID the shim pre-generated and
     /// wrote into the .ardour file; when `None` we synthesize a
     /// random id for stub/anonymous backends.
+    // Crossed clippy's 7-arg threshold once mcp_endpoint joined the
+    // signature. A struct wrapper here would force every WS dispatch
+    // path + spawner callback through an extra builder for a record
+    // that's already serialized whole onto `SessionInfo`. Skipping the
+    // lint is cheaper than the churn.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn swap_backend(
         self: &Arc<Self>,
         backend_id: String,
@@ -993,6 +1007,9 @@ impl Server {
             fe_renderer: RwLock::new(None),
             ui_director: RwLock::new(None),
             openai_proxy_api_key: RwLock::new(None),
+            openai_proxy_expose_tool_calls: std::sync::atomic::AtomicBool::new(env_truthy(
+                "FOYER_OPENAI_PROXY_SHOW_TOOL_CALLS",
+            )),
         });
         Self { state }
     }
@@ -1141,6 +1158,27 @@ impl Server {
         } else {
             tracing::info!("/v1/* OpenAI proxy: open (no API key)");
         }
+    }
+
+    /// Control whether the `/v1/chat/completions` endpoint surfaces
+    /// tool calls (`ToolStart` + `ToolEnd` lines interleaved with
+    /// assistant content) to external callers. Default at construction
+    /// is "off unless `FOYER_OPENAI_PROXY_SHOW_TOOL_CALLS=1`"; the CLI
+    /// may override based on `config.yaml`. Independent of the API-key
+    /// gate — operators that share a proxy with multiple upstream
+    /// observers can keep auth on AND tool-call visibility on.
+    pub fn set_openai_proxy_expose_tool_calls(&self, expose: bool) {
+        self.state
+            .openai_proxy_expose_tool_calls
+            .store(expose, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            "/v1/* OpenAI proxy: tool calls {}",
+            if expose {
+                "visible to caller"
+            } else {
+                "hidden"
+            }
+        );
     }
 
     /// Install the RBAC policy. CLI calls this at startup with the
@@ -1727,6 +1765,21 @@ async fn login_post(
 /// If absent we still boot fine — we just hide the toggle in the UI
 /// via the `native_plugin_gui` feature flag. Logged once at startup
 /// with an install link so users on a fresh machine know what to do.
+/// Boolean read of an env var — "1", "true", "yes", "on" (case
+/// insensitive) → true. Anything else (including unset) → false.
+/// Used by config flags that default off but can be flipped via env.
+fn env_truthy(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 fn probe_xpra_available() -> bool {
     if let Ok(path) = std::env::var("PATH") {
         for dir in path.split(':').filter(|d| !d.is_empty()) {

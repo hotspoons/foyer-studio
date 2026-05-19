@@ -33,11 +33,14 @@ use std::time::Duration;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use foyer_backend::{AudioIngressAck, Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx};
+use foyer_backend::{
+    AudioIngressAck, Backend, BackendError, EventStream, PcmFrame, PcmRx, PcmTx, ProgressFn,
+};
 use foyer_schema::{
     Action, AudioFormat, AudioPoolSource, AudioSource, ControlValue, EnginePort, EntityId, Event,
     LatencyReport, PathListing, PluginCatalogEntry, PluginFormat, PluginRole, Region, RegionPatch,
-    Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
+    RenderBitDepth, RenderCapabilities, RenderFormat, RenderOptions, RenderOutput, RenderRange,
+    RenderTarget, Session, TimelineMeta, Track, TrackPatch, WaveformPeaks,
 };
 use futures::{Stream, StreamExt};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -1170,6 +1173,138 @@ impl Backend for StubBackend {
         Ok(())
     }
 
+    fn render_capabilities(&self) -> Option<RenderCapabilities> {
+        Some(RenderCapabilities {
+            formats: vec![
+                RenderFormat {
+                    id: "wav".into(),
+                    label: "WAV (PCM)".into(),
+                    extension: "wav".into(),
+                    mime: "audio/wav".into(),
+                    lossy: false,
+                },
+                // Stub only encodes WAV — listing additional formats
+                // here would mislead the FE picker. Real backends
+                // advertise FLAC / OGG / MP3 as their encoders allow;
+                // the Ardour shim will populate this from
+                // `ExportFormat`'s registered codecs.
+            ],
+            sample_rates: vec![44_100, 48_000, 88_200, 96_000],
+            bit_depths: vec![
+                RenderBitDepth::Int16,
+                RenderBitDepth::Int24,
+                RenderBitDepth::Float32,
+            ],
+            max_channels: 2,
+            supports_range: true,
+            supports_stems: false,
+        })
+    }
+
+    async fn render_session(
+        &self,
+        opts: RenderOptions,
+        progress: Option<ProgressFn>,
+    ) -> Result<Vec<RenderOutput>, BackendError> {
+        // The stub backend has no real audio engine; it manufactures
+        // a stereo sine sweep at the requested sample rate so the
+        // wire / UI / agent path can be exercised end-to-end before
+        // the Ardour shim's `ExportHandler` integration lands. The
+        // sweep is intentionally short so a Playwright round-trip
+        // stays under a second.
+        if opts.format_id != "wav" {
+            return Err(BackendError::Other(format!(
+                "stub backend only supports format_id=\"wav\" (asked for {})",
+                opts.format_id
+            )));
+        }
+        if matches!(opts.target, RenderTarget::Tracks { .. }) {
+            return Err(BackendError::Other(
+                "stub backend does not support stem renders (set target.kind = master)".into(),
+            ));
+        }
+        let sample_rate = opts.sample_rate.unwrap_or(48_000);
+        if !(8_000..=192_000).contains(&sample_rate) {
+            return Err(BackendError::Other(format!(
+                "stub render: sample_rate {sample_rate} out of range"
+            )));
+        }
+        let channels: u16 = match opts.channels.unwrap_or(2) {
+            0 => return Err(BackendError::Other("stub render: channels=0".into())),
+            n if n > 2 => 2, // stub clamps anything above stereo
+            n => n as u16,
+        };
+        let bit_depth = opts.bit_depth.unwrap_or(RenderBitDepth::Int16);
+        let (duration_samples, _start_sample) = match &opts.range {
+            RenderRange::Session => (sample_rate as u64 * 4, 0u64), // 4 seconds
+            RenderRange::Range {
+                start_samples,
+                end_samples,
+            } => {
+                if end_samples <= start_samples {
+                    return Err(BackendError::Other(
+                        "stub render: range end must exceed start".into(),
+                    ));
+                }
+                (end_samples - start_samples, *start_samples)
+            }
+            RenderRange::Loop => (sample_rate as u64 * 4, 0u64),
+        };
+        // Synthesize: two-tone stereo (440 Hz L, 660 Hz R) at -12 dB
+        // peak, gentle 50ms fade-in/out so the file doesn't click.
+        let total_samples = duration_samples as usize;
+        let fade_samples = ((sample_rate as f64) * 0.050) as usize;
+        let mut left = Vec::with_capacity(total_samples);
+        let mut right = Vec::with_capacity(total_samples);
+        for n in 0..total_samples {
+            let t = n as f64 / sample_rate as f64;
+            let envelope = if n < fade_samples {
+                n as f64 / fade_samples.max(1) as f64
+            } else if total_samples - n < fade_samples {
+                (total_samples - n) as f64 / fade_samples.max(1) as f64
+            } else {
+                1.0
+            };
+            let amp = 0.25 * envelope; // ~-12 dBFS
+            left.push((amp * (2.0 * std::f64::consts::PI * 440.0 * t).sin()) as f32);
+            right.push((amp * (2.0 * std::f64::consts::PI * 660.0 * t).sin()) as f32);
+            // Tick progress at every 10% boundary.
+            if let Some(cb) = progress.as_ref() {
+                if total_samples >= 10 && n % (total_samples / 10) == 0 {
+                    let pct = ((n as f64 / total_samples as f64) * 100.0) as u8;
+                    cb(pct);
+                }
+            }
+        }
+        if let Some(cb) = progress.as_ref() {
+            cb(100);
+        }
+        let bytes = encode_wav(&left, &right, sample_rate, channels, bit_depth)?;
+        let size_bytes = bytes.len() as u64;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = opts
+            .target_path
+            .clone()
+            .unwrap_or_else(|| format!("exports/stub-render-{stamp}.wav"));
+        let bytes_b64 = if opts.inline_bytes {
+            use base64::Engine;
+            Some(base64::engine::general_purpose::STANDARD.encode(&bytes))
+        } else {
+            None
+        };
+        Ok(vec![RenderOutput {
+            path,
+            size_bytes,
+            format_id: "wav".into(),
+            mime: "audio/wav".into(),
+            track_id: None,
+            bytes_b64,
+        }])
+    }
+
     async fn snapshot_session(&self, name: Option<String>) -> Result<String, BackendError> {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1386,6 +1521,90 @@ impl Backend for StubBackend {
         });
         Ok(result)
     }
+}
+
+/// Minimal WAV (RIFF) encoder for the stub render path. Supports
+/// PCM-16, PCM-24, and IEEE-float-32. No FLAC / OGG / MP3 — those
+/// land when a real backend (Ardour shim) wires its own encoders
+/// through `Backend::render_session`. Kept self-contained (no `hound`
+/// dep) so the stub's surface stays small.
+fn encode_wav(
+    left: &[f32],
+    right: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    bit_depth: RenderBitDepth,
+) -> Result<Vec<u8>, BackendError> {
+    let frame_count = left.len();
+    if channels == 2 && right.len() != frame_count {
+        return Err(BackendError::Other(
+            "encode_wav: stereo with mismatched L/R buffer lengths".into(),
+        ));
+    }
+    let bits_per_sample: u16 = match bit_depth {
+        RenderBitDepth::Int16 => 16,
+        RenderBitDepth::Int24 => 24,
+        RenderBitDepth::Int32 => 32,
+        RenderBitDepth::Float32 => 32,
+    };
+    // PCM = 1, IEEE float = 3.
+    let format_tag: u16 = if matches!(bit_depth, RenderBitDepth::Float32) {
+        3
+    } else {
+        1
+    };
+    let bytes_per_sample = (bits_per_sample / 8) as usize;
+    let block_align = channels * (bits_per_sample / 8);
+    let byte_rate = sample_rate * (block_align as u32);
+    let data_bytes = frame_count * (channels as usize) * bytes_per_sample;
+    let total_size: usize = 36 + data_bytes;
+    let mut buf: Vec<u8> = Vec::with_capacity(8 + total_size);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(total_size as u32).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    // fmt chunk
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&format_tag.to_le_bytes());
+    buf.extend_from_slice(&channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+    // data chunk
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&(data_bytes as u32).to_le_bytes());
+    for i in 0..frame_count {
+        let l = left[i].clamp(-1.0, 1.0);
+        let r = if channels == 2 {
+            right[i].clamp(-1.0, 1.0)
+        } else {
+            l
+        };
+        let chans: &[f32] = if channels == 2 { &[l, r] } else { &[l] };
+        for &s in chans {
+            match bit_depth {
+                RenderBitDepth::Int16 => {
+                    let q = (s * i16::MAX as f32) as i16;
+                    buf.extend_from_slice(&q.to_le_bytes());
+                }
+                RenderBitDepth::Int24 => {
+                    // 24-bit little-endian signed, scale to ±(2^23 - 1).
+                    let q = (s * 8_388_607.0) as i32;
+                    let bytes = q.to_le_bytes();
+                    buf.extend_from_slice(&bytes[..3]);
+                }
+                RenderBitDepth::Int32 => {
+                    let q = (s * i32::MAX as f32) as i32;
+                    buf.extend_from_slice(&q.to_le_bytes());
+                }
+                RenderBitDepth::Float32 => {
+                    buf.extend_from_slice(&s.to_le_bytes());
+                }
+            }
+        }
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]

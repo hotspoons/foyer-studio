@@ -16,6 +16,10 @@
 #include <mutex>
 #include <vector>
 
+namespace ARDOUR {
+class Session;
+}
+
 namespace ArdourSurface {
 
 class FoyerShim;
@@ -86,6 +90,28 @@ private:
 	// per active SpectrumTarget; the SubscribeSpectrum / UnsubscribeSpectrum
 	// arms talk to it. Initialised in the dispatcher constructor.
 	std::unique_ptr<SpectrumHub> _spectrum_hub;
+
+	// Mixdown / render-to-file pipeline. Drives
+	// `ARDOUR::ExportHandler` against a one-off
+	// `ExportFormatSpecification` built from the caller's
+	// `RenderOptions`. Synchronous from the event-loop thread —
+	// `_handler->do_export()` kicks the export off on Ardour's
+	// internal threads, and we poll `ExportStatus` until it settles.
+	// Progress events are coalesced server-side (≤4 Hz on the wire);
+	// the polling loop just emits raw % values as they change.
+	void run_render_export (
+	    ARDOUR::Session& session,
+	    const std::string& handle,
+	    const std::string& format_id,
+	    std::uint32_t sample_rate_hz,
+	    const std::string& bit_depth,
+	    std::uint8_t quality,
+	    bool has_quality,
+	    const std::string& range_kind,
+	    std::uint64_t range_start,
+	    std::uint64_t range_end,
+	    const std::string& target_path_rel,
+	    bool inline_bytes);
 };
 
 } // namespace ArdourSurface

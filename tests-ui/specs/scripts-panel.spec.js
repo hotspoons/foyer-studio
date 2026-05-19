@@ -96,14 +96,16 @@ test.describe("scripts panel", () => {
     await page.evaluate((id) => {
       window.__foyer.ws.send({ type: "run_script", id });
     }, savedId);
-    await page.waitForFunction((id) =>
-      window.__test_envelopes.some(
-        (b) =>
-          b.type === "script_run_result" &&
-          b.result?.id === id &&
-          b.result?.ok === true,
-      ),
-    , savedId);
+    await page.waitForFunction(
+      (id) =>
+        window.__test_envelopes.some(
+          (b) =>
+            b.type === "script_run_result" &&
+            b.result?.id === id &&
+            b.result?.ok === true,
+        ),
+      savedId,
+    );
     const result = await page.evaluate((id) => {
       const ev = window.__test_envelopes.find(
         (b) => b.type === "script_run_result" && b.result?.id === id,
