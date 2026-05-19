@@ -19,7 +19,7 @@ import { panelById } from "../panels.js";
 function tagFor(id) {
   switch (id) {
     case "mixer":        return "foyer-mixer";
-    case "timeline":     return "foyer-touch-timeline-split";
+    case "timeline":     return "foyer-timeline-view";
     case "tracks":       return "foyer-touch-tracks-panel";
     case "more":         return "foyer-touch-more-panel";
     case "plugins":      return "foyer-plugins-view";
@@ -103,8 +103,19 @@ export class TouchPanelHost extends LitElement {
     .empty p { margin: 0; max-width: 32em; line-height: 1.5; font-size: 14px; }
     .embed {
       width: 100%; height: 100%;
+      min-height: 0;
+      /* Mounted ui-full widgets fill via flex: 1 on their own :host.
+       * Make the wrapper a flex column so that flex chain is honored.
+       * Without this the mixer collapses to its content height and
+       * leaves dead space below. */
+      display: flex;
+      flex-direction: column;
       overflow: hidden;
       -webkit-overflow-scrolling: touch;
+    }
+    .embed > * {
+      flex: 1 1 auto;
+      min-height: 0;
     }
     /* Region picker shown when piano-roll / beat-seq panels open
      * without a selected region. Each card jumps into the editor

@@ -6,6 +6,7 @@ import "foyer-ui-core/widgets/fader.js";
 import "foyer-ui-core/widgets/toggle.js";
 import "foyer-ui-core/widgets/meter.js";
 import "./plugin-strip.js";
+import { icon } from "foyer-ui-core/icons.js";
 import { ControlController } from "foyer-core/store.js";
 import { showContextMenu } from "foyer-ui-core/widgets/context-menu.js";
 import { openTrackEditor } from "./track-editor-modal.js";
@@ -180,6 +181,36 @@ export class TrackStrip extends LitElement {
       display: flex;
       flex-direction: column;
       align-items: stretch;
+      position: relative;
+    }
+    /* Pencil button → opens the track editor modal. Subtle on desktop
+     * (the double-click shortcut is the main path), promoted to a
+     * clear tap target on touch (per CLAUDE.md no-double-tap
+     * conventions). */
+    .strip-edit {
+      position: absolute;
+      top: 0; right: 0;
+      width: 18px; height: 18px;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0;
+      background: transparent;
+      color: var(--color-text-muted);
+      border: 1px solid transparent;
+      border-radius: 4px;
+      cursor: pointer;
+      opacity: 0.6;
+      transition: opacity 100ms, background 100ms, border-color 100ms;
+    }
+    :host(:hover) .strip-edit,
+    .strip-edit:hover { opacity: 1; border-color: var(--color-border); background: var(--color-surface); }
+    .strip-edit:active { transform: scale(0.94); }
+    @media (pointer: coarse) {
+      .strip-edit {
+        width: 32px; height: 32px;
+        opacity: 1;
+        border-color: var(--color-border);
+        background: var(--color-surface);
+      }
     }
     .name-block {
       position: relative;
@@ -513,6 +544,11 @@ export class TrackStrip extends LitElement {
             ${t.kind}${this._isSequencer() ? html`<span class="seq-chip" title=${tr("This track has an active beat-sequencer region")}>${tr("SEQ")}</span>` : null}
           </div>
         ` : null}
+        <button class="strip-edit"
+                title=${tr("Open track editor")}
+                @click=${(e) => { e.stopPropagation(); if (this.track?.id) openTrackEditor(this.track.id); }}>
+          ${icon("pencil-square", 12)}
+        </button>
       </div>
       <div class="monitor-stack">
         <div class="row">

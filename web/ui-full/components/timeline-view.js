@@ -41,7 +41,13 @@ import { promptText } from "foyer-ui-core/widgets/prompt-modal.js";
 import { icon } from "foyer-ui-core/icons.js";
 import { sessionScopedKey } from "foyer-core/session-scope.js";
 
-const LANE_HEIGHT_DEFAULT = 52;
+// Touch devices want roomier lanes by default — 52 px is fine for a
+// mouse-driven editor but leaves the M/S/R buttons + waveform too
+// cramped to read from arm's length on a tablet. Detect `pointer:
+// coarse` at module load; the user can still override per-track via
+// the lane-resize grip.
+const LANE_HEIGHT_DEFAULT = (typeof matchMedia === "function"
+  && matchMedia("(pointer: coarse)").matches) ? 96 : 52;
 const LANE_HEIGHT_MIN = 28;
 const LANE_HEIGHT_MAX = 240;
 // Sample-level detail at extreme zoom requires finer waveform tiers; see

@@ -25,7 +25,6 @@ const STORAGE_KEY = "foyer.ui.touch.pins";
 const CATALOG = [
   { id: "mixer",        label: "Mixer",      icon: "adjustments-horizontal", kind: "tab",   category: "core" },
   { id: "timeline",     label: "Timeline",   icon: "squares-2x2",            kind: "tab",   category: "core" },
-  { id: "tracks",       label: "Tracks",     icon: "queue-list",             kind: "tab",   category: "core" },
   { id: "more",         label: "More",       icon: "bars-3",                 kind: "tab",   category: "core" },
 
   { id: "piano-roll",   label: "Piano roll",   icon: "musical-note",        kind: "panel",  category: "edit" },

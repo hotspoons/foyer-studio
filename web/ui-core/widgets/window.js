@@ -251,7 +251,14 @@ export class FoyerWindow extends LitElement {
     this.icon = "";
     this.storageKey = "";
     this.backdrop = false;
-    this.maximized = false;
+    // Touch-primary devices have no business with desktop window
+    // chrome — no drag, no resize, no maximize toggle. The window
+    // boots maximized and stays that way; the variant's hamburger
+    // menu enumerates minimized windows so the user can pull one
+    // back to the foreground.
+    this._isTouch = typeof matchMedia === "function"
+      && matchMedia("(pointer: coarse)").matches;
+    this.maximized = this._isTouch ? true : false;
     this.minimized = false;
     this.initWidth = 960;
     this.initHeight = 640;
@@ -653,43 +660,55 @@ export class FoyerWindow extends LitElement {
 
   render() {
     const style = `left:${this._x}px;top:${this._y}px;width:${this._w}px;height:${this._h}px`;
+    const touch = this._isTouch;
     return html`
       <div class="backdrop" @pointerdown=${() => this._emitClose()}></div>
       <div class="win" style=${style}>
-        <header @pointerdown=${(e) => this._startDrag(e)}
-                @dblclick=${() => this._toggleMax()}
-                @contextmenu=${(e) => this._onHeaderContextMenu(e)}>
+        <header @pointerdown=${touch ? null : (e) => this._startDrag(e)}
+                @dblclick=${touch ? null : () => this._toggleMax()}
+                @contextmenu=${touch ? null : (e) => this._onHeaderContextMenu(e)}
+                style=${touch ? "cursor:default" : ""}>
           ${this.icon ? html`<span class="title-icon">${icon(this.icon, 14)}</span>` : null}
           <h2>${this.title || ""}</h2>
           <span class="spacer"></span>
-          ${this.viewKind ? html`
+          ${this.viewKind && !touch ? html`
             <button title="Send to tile layer"
                     @click=${() => this._sendToTiles()}>
               ${icon("arrow-down-left-on-square", 14)}
             </button>
           ` : null}
-          <button title="Minimize to dock"
-                  @click=${() => { this.minimized = true; this._persist();
-                    window.__foyer?.layout?.setExternalMinimized?.(this._layoutId, true); }}>
+          <button title=${touch ? "Send to window stack" : "Minimize to dock"}
+                  @click=${() => {
+                    this.minimized = true;
+                    this._persist();
+                    window.__foyer?.layout?.setExternalMinimized?.(this._layoutId, true);
+                    globalThis.dispatchEvent(new CustomEvent("foyer-window:minimized", {
+                      detail: { storageKey: this.storageKey, title: this.title },
+                    }));
+                  }}>
             ${icon("minus", 14)}
           </button>
-          <button title=${this.maximized ? "Restore" : "Maximize"}
-                  @click=${() => this._toggleMax()}>
-            ${icon(this.maximized ? "arrows-pointing-in" : "arrows-pointing-out", 14)}
-          </button>
+          ${touch ? null : html`
+            <button title=${this.maximized ? "Restore" : "Maximize"}
+                    @click=${() => this._toggleMax()}>
+              ${icon(this.maximized ? "arrows-pointing-in" : "arrows-pointing-out", 14)}
+            </button>
+          `}
           <button title="Close" @click=${() => this._emitClose()}>
             ${icon("x-mark", 14)}
           </button>
         </header>
         <div class="body"><slot></slot></div>
-        <div class="rh n"  @pointerdown=${(e) => this._startResize(e, "n")}></div>
-        <div class="rh s"  @pointerdown=${(e) => this._startResize(e, "s")}></div>
-        <div class="rh w"  @pointerdown=${(e) => this._startResize(e, "w")}></div>
-        <div class="rh e"  @pointerdown=${(e) => this._startResize(e, "e")}></div>
-        <div class="rh nw" @pointerdown=${(e) => this._startResize(e, "nw")}></div>
-        <div class="rh ne" @pointerdown=${(e) => this._startResize(e, "ne")}></div>
-        <div class="rh sw" @pointerdown=${(e) => this._startResize(e, "sw")}></div>
-        <div class="rh se" @pointerdown=${(e) => this._startResize(e, "se")}></div>
+        ${touch ? null : html`
+          <div class="rh n"  @pointerdown=${(e) => this._startResize(e, "n")}></div>
+          <div class="rh s"  @pointerdown=${(e) => this._startResize(e, "s")}></div>
+          <div class="rh w"  @pointerdown=${(e) => this._startResize(e, "w")}></div>
+          <div class="rh e"  @pointerdown=${(e) => this._startResize(e, "e")}></div>
+          <div class="rh nw" @pointerdown=${(e) => this._startResize(e, "nw")}></div>
+          <div class="rh ne" @pointerdown=${(e) => this._startResize(e, "ne")}></div>
+          <div class="rh sw" @pointerdown=${(e) => this._startResize(e, "sw")}></div>
+          <div class="rh se" @pointerdown=${(e) => this._startResize(e, "se")}></div>
+        `}
       </div>
     `;
   }

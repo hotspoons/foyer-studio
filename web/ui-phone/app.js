@@ -57,7 +57,7 @@ export class PhoneApp extends LitElement {
       /* Use the small viewport height when available (iOS Safari)
        * so address-bar collapse doesn't clip our last track row. */
       height: 100svh;
-      background: var(--color-bg, #0b1120);
+      background: var(--color-surface);
       color: var(--color-text);
       font-family: var(--font-sans);
       overscroll-behavior: contain;

@@ -398,6 +398,15 @@ export const timelineStyles = css`
       border-color: var(--color-accent);
       color: var(--color-text);
     }
+    /* Coarse pointer (touch tablets / phones) — bump the M/S/R/A
+     * buttons + lane name typography so the lane-head is usable from
+     * arm's length. Same content; just bigger hit targets. */
+    @media (pointer: coarse) {
+      .lane-ctl-btn { font-size: 12px; padding: 6px 0; min-height: 32px; }
+      .lane-name    { font-size: 13px; }
+      .lane-kind    { font-size: 10px; }
+      .lane-controls { gap: 5px; margin-top: 4px; }
+    }
     .lane-ctl-btn.on.mute {
       background: color-mix(in oklab, var(--color-warning) 35%, transparent);
       border-color: var(--color-warning);

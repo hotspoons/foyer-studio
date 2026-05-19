@@ -38,7 +38,7 @@ export class TouchMorePanel extends LitElement {
       overflow: auto;
       -webkit-overflow-scrolling: touch;
       padding: 16px;
-      background: var(--color-bg);
+      background: var(--color-surface);
     }
     h2 {
       margin: 0 0 8px 0;
@@ -111,7 +111,7 @@ export class TouchMorePanel extends LitElement {
       padding: 10px 14px;
       border-radius: 10px;
       border: 1px solid var(--color-border);
-      background: var(--color-bg);
+      background: var(--color-surface);
       color: var(--color-text);
       font-size: 14px;
       min-height: 44px;
