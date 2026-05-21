@@ -17,6 +17,25 @@
 //!     happen inside Foyer and are invisible to the caller.
 //!   * `GET  /v1/models` — single entry: `{id: "foyer-agent", ...}`.
 //!
+//! Media handling sticks to the OpenAI multimodal shape — assistant
+//! attachments ride as `{type:"image_url"|"input_audio", ...}` content
+//! blocks inside `delta.content` (streaming) or `message.content`
+//! (non-streaming). Any OpenAI-compatible client (Open WebUI,
+//! LibreChat, Cursor, …) sees the same shape vLLM / OpenAI itself
+//! emits.
+//!
+//! Tool-call surface: tool dispatch + results travel on a single
+//! additive extension field, `foyer_tool_calls`, attached to the
+//! assistant `delta` (streaming) or `message` (non-streaming). Strict
+//! OpenAI clients ignore unknown fields and see the assistant text
+//! alone; extension-aware clients (the FAB, a tool-trail-rendering
+//! LibreChat fork, etc.) parse the field directly and render a chip /
+//! card per call without having to scrape markdown out of the
+//! content stream. Set `FOYER_OPENAI_PROXY_SHOW_TOOL_CALLS=1` to
+//! ALSO interleave a `> 🔧 …` / `> ✅ …` line into `delta.content`
+//! so plain-text clients (curl, terminal chat front-ends without an
+//! extension hook) see what fired without parsing JSON.
+//!
 //! Auth: when `AppState.openai_proxy_api_key` is set, every `/v1/*`
 //! request must carry `Authorization: Bearer <key>` or it's rejected
 //! with `401`. Unset = open (operator is on the hook for network
@@ -118,16 +137,21 @@ pub async fn chat_completions(
     let expose_tool_calls = state
         .openai_proxy_expose_tool_calls
         .load(std::sync::atomic::Ordering::Relaxed);
-    let (rx, cancel) =
-        foyer_agent::openai_proxy::run_external_chat(parts, request, expose_tool_calls);
+    let (rx, cancel) = foyer_agent::openai_proxy::run_external_chat(parts, request);
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
     if wants_stream {
-        Sse::new(ChunkStream::new(rx, completion_id, echoed_model, cancel))
-            .keep_alive(KeepAlive::default())
-            .into_response()
+        Sse::new(ChunkStream::new(
+            rx,
+            completion_id,
+            echoed_model,
+            cancel,
+            expose_tool_calls,
+        ))
+        .keep_alive(KeepAlive::default())
+        .into_response()
     } else {
-        collect_completion(rx, completion_id, echoed_model)
+        collect_completion(rx, completion_id, echoed_model, expose_tool_calls)
             .await
             .into_response()
     }
@@ -165,9 +189,17 @@ async fn collect_completion(
     mut rx: mpsc::UnboundedReceiver<ExternalChatStreamEvent>,
     completion_id: String,
     model: String,
+    expose_tool_calls: bool,
 ) -> (StatusCode, Json<Value>) {
     let mut buf = String::new();
     let mut attachments: Vec<AgentAttachment> = Vec::new();
+    // Insertion-ordered accumulator for the synthetic field. The
+    // OpenAI proxy emits ToolStart at dispatch time and ToolEnd at
+    // terminal-status time; we merge by call_id so a single entry
+    // ends up with both args (from start) and result (from end).
+    // IndexMap-style with a Vec + helper keeps the order deterministic
+    // without dragging in a new dep.
+    let mut synthetic: Vec<SyntheticToolCall> = Vec::new();
     let mut error: Option<String> = None;
     while let Some(ev) = rx.recv().await {
         match ev {
@@ -183,27 +215,41 @@ async fn collect_completion(
                 attachments.push(att);
             }
             ExternalChatStreamEvent::ToolStart {
+                call_id,
                 tool_name,
                 args_json,
-                ..
             } => {
-                if !buf.is_empty() && !buf.ends_with('\n') {
+                upsert_synthetic_start(&mut synthetic, &call_id, &tool_name, &args_json);
+                if expose_tool_calls {
+                    if !buf.is_empty() && !buf.ends_with('\n') {
+                        buf.push('\n');
+                    }
+                    buf.push_str(&tool_start_markdown(&tool_name, &args_json));
                     buf.push('\n');
                 }
-                buf.push_str(&tool_start_markdown(&tool_name, &args_json));
-                buf.push('\n');
             }
             ExternalChatStreamEvent::ToolEnd {
+                call_id,
                 tool_name,
                 ok,
                 summary,
-                ..
+                result_json,
             } => {
-                if !buf.is_empty() && !buf.ends_with('\n') {
+                upsert_synthetic_end(
+                    &mut synthetic,
+                    &call_id,
+                    &tool_name,
+                    ok,
+                    &summary,
+                    &result_json,
+                );
+                if expose_tool_calls {
+                    if !buf.is_empty() && !buf.ends_with('\n') {
+                        buf.push('\n');
+                    }
+                    buf.push_str(&tool_end_markdown(&tool_name, ok, &summary));
                     buf.push('\n');
                 }
-                buf.push_str(&tool_end_markdown(&tool_name, ok, &summary));
-                buf.push('\n');
             }
             ExternalChatStreamEvent::End => break,
             ExternalChatStreamEvent::Error(e) => {
@@ -224,6 +270,10 @@ async fn collect_completion(
     // Content shape: plain string when no attachments came back
     // (broadest compatibility); content-block array when at least
     // one attachment rode along (OpenAI's vision/audio convention).
+    // No foyer-specific extension field — every OpenAI-compatible
+    // client reads the block array natively; the markdown reference
+    // we splice into the leading text block keeps plain-text consumers
+    // visually whole.
     let content = if attachments.is_empty() {
         Value::String(buf.clone())
     } else {
@@ -236,6 +286,14 @@ async fn collect_completion(
         }
         Value::Array(blocks)
     };
+    let mut message = json!({
+        "role": "assistant",
+        "content": content,
+    });
+    if !synthetic.is_empty() {
+        message["foyer_tool_calls"] =
+            Value::Array(synthetic.iter().map(SyntheticToolCall::to_json).collect());
+    }
     let body = json!({
         "id": completion_id,
         "object": "chat.completion",
@@ -243,18 +301,7 @@ async fn collect_completion(
         "model": model,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": content,
-                // Non-standard echo of the structured attachments so
-                // clients that don't grok block arrays can still
-                // pull the bytes out cleanly.
-                "foyer_attachments": attachments.iter().map(|a| json!({
-                    "name": a.name,
-                    "mime": a.mime,
-                    "b64": a.b64,
-                })).collect::<Vec<_>>(),
-            },
+            "message": message,
             "finish_reason": "stop",
         }],
         // Usage isn't tracked through the transient engine yet —
@@ -395,6 +442,14 @@ struct ChunkStream {
     created: u64,
     state: ChunkState,
     cancel: tokio_util::sync::CancellationToken,
+    /// When `true`, ToolStart/ToolEnd events also inject a
+    /// `> 🔧 …` / `> ✅ …` markdown line into `delta.content` so
+    /// plain-text clients see the call without parsing the
+    /// `foyer_tool_calls` extension field. When `false`, only the
+    /// synthetic field carries the lifecycle — extension-aware
+    /// clients render natively, everyone else sees only assistant
+    /// content.
+    expose_tool_calls: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -417,6 +472,7 @@ impl ChunkStream {
         completion_id: String,
         model: String,
         cancel: tokio_util::sync::CancellationToken,
+        expose_tool_calls: bool,
     ) -> Self {
         Self {
             rx,
@@ -425,6 +481,7 @@ impl ChunkStream {
             created: unix_ts(),
             state: ChunkState::NeedsRole,
             cancel,
+            expose_tool_calls,
         }
     }
 
@@ -511,22 +568,31 @@ impl Stream for ChunkStream {
                         return Poll::Ready(Some(Ok(self.content_chunk(&s))));
                     }
                     Poll::Ready(Some(ExternalChatStreamEvent::Attachment(att))) => {
-                        // Single chunk carries both surfaces — a
-                        // markdown reference inside `delta.content`
-                        // (every OpenAI-shape client renders it) and
-                        // a structured `delta.foyer_attachments`
-                        // entry with the raw bytes (clients that
-                        // grok our extension can pull the binary
-                        // out without re-decoding the markdown data
-                        // URL). Unknown delta fields are ignored
-                        // gracefully by every chat-completions
-                        // client we tested.
+                        // Emit `delta.content` as an OpenAI content-
+                        // block array: a leading text block with the
+                        // markdown reference (so plain-text consumers
+                        // still see *something* — the markdown link
+                        // resolves to the data URL inline below) and
+                        // then the structured `image_url` /
+                        // `input_audio` / `file` block carrying the
+                        // bytes. Every OpenAI-compatible client we
+                        // tested (Open WebUI, LibreChat, Cursor,
+                        // OpenRouter passthrough) accumulates content-
+                        // block arrays from streaming deltas and
+                        // renders the rich block natively. Pure text
+                        // chunks still ship as plain strings (above)
+                        // for maximum compatibility with the
+                        // concat-strings-on-every-chunk clients.
                         let md = attachment_markdown(&att);
                         let prefix = if md.starts_with('\n') {
                             md
                         } else {
                             format!("\n{md}")
                         };
+                        let blocks = vec![
+                            json!({ "type": "text", "text": prefix }),
+                            attachment_content_block(&att),
+                        ];
                         let payload = json!({
                             "id": self.completion_id,
                             "object": "chat.completion.chunk",
@@ -534,14 +600,7 @@ impl Stream for ChunkStream {
                             "model": self.model,
                             "choices": [{
                                 "index": 0,
-                                "delta": {
-                                    "content": prefix,
-                                    "foyer_attachments": [{
-                                        "name": att.name,
-                                        "mime": att.mime,
-                                        "b64": att.b64,
-                                    }],
-                                },
+                                "delta": { "content": Value::Array(blocks) },
                                 "finish_reason": Value::Null,
                             }],
                         });
@@ -550,21 +609,74 @@ impl Stream for ChunkStream {
                         ));
                     }
                     Poll::Ready(Some(ExternalChatStreamEvent::ToolStart {
+                        call_id,
                         tool_name,
                         args_json,
-                        ..
                     })) => {
-                        let line = format!("\n{}\n", tool_start_markdown(&tool_name, &args_json));
-                        return Poll::Ready(Some(Ok(self.content_chunk(&line))));
+                        let entry = SyntheticToolCall::running(&call_id, &tool_name, &args_json);
+                        let mut delta = serde_json::Map::new();
+                        delta.insert(
+                            "foyer_tool_calls".to_string(),
+                            Value::Array(vec![entry.to_json()]),
+                        );
+                        if self.expose_tool_calls {
+                            let line =
+                                format!("\n{}\n", tool_start_markdown(&tool_name, &args_json));
+                            delta.insert("content".to_string(), Value::String(line));
+                        }
+                        let payload = json!({
+                            "id": self.completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": self.created,
+                            "model": self.model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": Value::Object(delta),
+                                "finish_reason": Value::Null,
+                            }],
+                        });
+                        return Poll::Ready(Some(
+                            Ok(SseEvent::default().data(payload.to_string())),
+                        ));
                     }
                     Poll::Ready(Some(ExternalChatStreamEvent::ToolEnd {
+                        call_id,
                         tool_name,
                         ok,
                         summary,
-                        ..
+                        result_json,
                     })) => {
-                        let line = format!("\n{}\n", tool_end_markdown(&tool_name, ok, &summary));
-                        return Poll::Ready(Some(Ok(self.content_chunk(&line))));
+                        let entry = SyntheticToolCall::finished(
+                            &call_id,
+                            &tool_name,
+                            ok,
+                            &summary,
+                            &result_json,
+                        );
+                        let mut delta = serde_json::Map::new();
+                        delta.insert(
+                            "foyer_tool_calls".to_string(),
+                            Value::Array(vec![entry.to_json()]),
+                        );
+                        if self.expose_tool_calls {
+                            let line =
+                                format!("\n{}\n", tool_end_markdown(&tool_name, ok, &summary));
+                            delta.insert("content".to_string(), Value::String(line));
+                        }
+                        let payload = json!({
+                            "id": self.completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": self.created,
+                            "model": self.model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": Value::Object(delta),
+                                "finish_reason": Value::Null,
+                            }],
+                        });
+                        return Poll::Ready(Some(
+                            Ok(SseEvent::default().data(payload.to_string())),
+                        ));
                     }
                     Poll::Ready(Some(ExternalChatStreamEvent::End)) => {
                         self.state = ChunkState::NeedsFinish;
@@ -598,4 +710,283 @@ fn unix_ts() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// One row of the synthetic `foyer_tool_calls` field — additive
+/// extension on `delta`/`message` that mirrors the tool calls Foyer
+/// dispatched internally. Strict OpenAI clients ignore unknown
+/// fields; extension-aware clients (the FAB, a tool-trail-rendering
+/// LibreChat fork, etc.) parse this directly and render rich UI
+/// without having to scrape the `> 🔧 …` markdown out of
+/// `delta.content`.
+///
+/// Schema (per call_id, merged across lifecycle chunks):
+///
+/// ```jsonc
+/// {
+///   "call_id":   "call_…",       // matches OpenAI's tool_call_id
+///   "name":      "visualize",    // foyer tool name
+///   "args_json": "{…}",          // raw args the model emitted
+///   "status":    "running"       // or "done" | "error"
+///   "ok":        true,           // present on terminal status
+///   "summary":   "rendered …",   // truncated one-liner
+///   "result_json": "{…}"         // raw ToolResult JSON with large
+///                                // b64 elided (the bytes already
+///                                // ride in the standard image_url /
+///                                // input_audio content blocks)
+/// }
+/// ```
+#[derive(Debug, Clone)]
+struct SyntheticToolCall {
+    call_id: String,
+    name: String,
+    args_json: Option<String>,
+    status: SyntheticStatus,
+    ok: Option<bool>,
+    summary: Option<String>,
+    result_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SyntheticStatus {
+    Running,
+    Done,
+    Error,
+}
+
+impl SyntheticStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl SyntheticToolCall {
+    fn running(call_id: &str, tool_name: &str, args_json: &str) -> Self {
+        Self {
+            call_id: call_id.to_string(),
+            name: tool_name.to_string(),
+            args_json: Some(args_json.to_string()),
+            status: SyntheticStatus::Running,
+            ok: None,
+            summary: None,
+            result_json: None,
+        }
+    }
+
+    fn finished(
+        call_id: &str,
+        tool_name: &str,
+        ok: bool,
+        summary: &str,
+        result_json: &str,
+    ) -> Self {
+        let sanitized = sanitize_result_json_for_synthetic(result_json);
+        Self {
+            call_id: call_id.to_string(),
+            name: tool_name.to_string(),
+            args_json: None,
+            status: if ok {
+                SyntheticStatus::Done
+            } else {
+                SyntheticStatus::Error
+            },
+            ok: Some(ok),
+            summary: Some(summary.to_string()),
+            result_json: Some(sanitized),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("call_id".into(), Value::String(self.call_id.clone()));
+        obj.insert("name".into(), Value::String(self.name.clone()));
+        if let Some(args) = &self.args_json {
+            obj.insert("args_json".into(), Value::String(args.clone()));
+        }
+        obj.insert(
+            "status".into(),
+            Value::String(self.status.as_str().to_string()),
+        );
+        if let Some(ok) = self.ok {
+            obj.insert("ok".into(), Value::Bool(ok));
+        }
+        if let Some(summary) = &self.summary {
+            obj.insert("summary".into(), Value::String(summary.clone()));
+        }
+        if let Some(rj) = &self.result_json {
+            obj.insert("result_json".into(), Value::String(rj.clone()));
+        }
+        Value::Object(obj)
+    }
+}
+
+/// Merge a `ToolStart` event into the accumulator used by
+/// `collect_completion`. New call_id → append; existing → fill in
+/// args + flip status back to `running` (defensive; ToolStart should
+/// only fire once per call_id).
+fn upsert_synthetic_start(
+    out: &mut Vec<SyntheticToolCall>,
+    call_id: &str,
+    tool_name: &str,
+    args_json: &str,
+) {
+    if let Some(slot) = out.iter_mut().find(|c| c.call_id == call_id) {
+        slot.args_json = Some(args_json.to_string());
+        if !slot.name.is_empty() {
+            // keep the existing name; only fill if missing
+        } else {
+            slot.name = tool_name.to_string();
+        }
+        return;
+    }
+    out.push(SyntheticToolCall::running(call_id, tool_name, args_json));
+}
+
+/// Merge a `ToolEnd` event into the accumulator — preserves any
+/// args_json captured at ToolStart time so the synthetic entry ends
+/// up with the full lifecycle.
+fn upsert_synthetic_end(
+    out: &mut Vec<SyntheticToolCall>,
+    call_id: &str,
+    tool_name: &str,
+    ok: bool,
+    summary: &str,
+    result_json: &str,
+) {
+    let sanitized = sanitize_result_json_for_synthetic(result_json);
+    if let Some(slot) = out.iter_mut().find(|c| c.call_id == call_id) {
+        slot.status = if ok {
+            SyntheticStatus::Done
+        } else {
+            SyntheticStatus::Error
+        };
+        slot.ok = Some(ok);
+        slot.summary = Some(summary.to_string());
+        slot.result_json = Some(sanitized);
+        if slot.name.is_empty() {
+            slot.name = tool_name.to_string();
+        }
+        return;
+    }
+    out.push(SyntheticToolCall::finished(
+        call_id,
+        tool_name,
+        ok,
+        summary,
+        result_json,
+    ));
+}
+
+/// Strip large base64 payloads (image_png_b64, audio attachments)
+/// from a tool's serialized [`ToolResult`] before it lands on the
+/// synthetic `foyer_tool_calls` field. The bytes are already emitted
+/// as standard `image_url` / `input_audio` content blocks elsewhere
+/// in the same response — including them HERE too would double the
+/// wire cost for the same payload (an 80 KB PNG is ~110 KB of b64,
+/// each round). The structured `summary` + `data` minus attachment
+/// payloads are what an extension renderer actually needs to draw a
+/// chip / card; the bytes ride the OpenAI-standard channel.
+///
+/// Threshold matches the LLM-side redactor in
+/// [`foyer_agent::engine::redact_records_for_llm`] so the wire
+/// payload and the model's view stay consistent.
+fn sanitize_result_json_for_synthetic(result_json: &str) -> String {
+    const B64_MAX_CHARS: usize = 24 * 1024;
+    let mut v: Value = match serde_json::from_str(result_json) {
+        Ok(v) => v,
+        Err(_) => return result_json.to_string(),
+    };
+    elide_large_b64(&mut v, B64_MAX_CHARS);
+    serde_json::to_string(&v).unwrap_or_else(|_| result_json.to_string())
+}
+
+/// Recursively walk a JSON value and replace any base64-shaped
+/// string longer than `max_chars` with a short placeholder. Mirrors
+/// `foyer_agent::engine::redact_large_b64_in_value` — duplicated here
+/// to avoid pulling a private function across the crate boundary.
+fn elide_large_b64(v: &mut Value, max_chars: usize) {
+    match v {
+        Value::String(s) if s.len() > max_chars && looks_like_b64(s) => {
+            let n = s.len();
+            *s = format!("[base64 elided: {n} chars]");
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                elide_large_b64(item, max_chars);
+            }
+        }
+        Value::Object(map) => {
+            for (_, val) in map.iter_mut() {
+                elide_large_b64(val, max_chars);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn looks_like_b64(s: &str) -> bool {
+    if s.len() < 64 {
+        return false;
+    }
+    let sample = &s[..s.len().min(256)];
+    sample.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b'\n' || b == b'\r'
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn upsert_start_then_end_merges() {
+        let mut acc: Vec<SyntheticToolCall> = Vec::new();
+        upsert_synthetic_start(&mut acc, "c1", "visualize", "{\"subcommand\":\"mixer\"}");
+        upsert_synthetic_end(
+            &mut acc,
+            "c1",
+            "visualize",
+            true,
+            "rendered 1234 bytes",
+            r#"{"summary":"rendered 1234 bytes","data":{"size":1234}}"#,
+        );
+        assert_eq!(acc.len(), 1);
+        let row = acc[0].to_json();
+        assert_eq!(row["call_id"], "c1");
+        assert_eq!(row["name"], "visualize");
+        assert_eq!(row["status"], "done");
+        assert_eq!(row["ok"], true);
+        assert_eq!(row["summary"], "rendered 1234 bytes");
+        assert!(row["args_json"].as_str().unwrap().contains("\"mixer\""));
+        assert!(row["result_json"].as_str().unwrap().contains("1234"));
+    }
+
+    #[test]
+    fn sanitize_strips_large_image_b64() {
+        let big = "A".repeat(30_000);
+        let input = json!({
+            "summary": "rendered",
+            "image_png_b64": big,
+            "data": {"attachments": [{"name":"x.png","mime":"image/png","b64": "A".repeat(30_000)}]}
+        });
+        let cleaned = sanitize_result_json_for_synthetic(&input.to_string());
+        assert!(cleaned.contains("base64 elided"));
+        // The summary should be preserved (small string)
+        assert!(cleaned.contains("rendered"));
+        // Total length should be drastically smaller than original
+        assert!(cleaned.len() < 5_000);
+    }
+
+    #[test]
+    fn finished_emits_error_status() {
+        let entry = SyntheticToolCall::finished("c2", "render", false, "boom", "boom");
+        let j = entry.to_json();
+        assert_eq!(j["status"], "error");
+        assert_eq!(j["ok"], false);
+    }
 }

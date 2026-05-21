@@ -158,6 +158,13 @@ impl ServerHandler for FoyerMcpServer {
             session_director,
             spectrum_director,
             prefer_headless_render: prefer_headless,
+            // MCP calls are one-shot — no introspective-vision loop
+            // and no prior context to recall from. A fresh empty
+            // library is the correct shape; `media.list` returns no
+            // entries and `media.get` errors with "no media with id".
+            media_library: std::sync::Arc::new(tokio::sync::Mutex::new(
+                foyer_agent::media::MediaLibrary::new(),
+            )),
         };
         // Keep the strong ref alive across the tool call so the Weak
         // inside ToolContext can upgrade for the duration of dispatch.

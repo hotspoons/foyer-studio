@@ -10,13 +10,14 @@
 //! The agent loop drives whatever upstream LLM is configured on the
 //! runtime, executes Foyer tools internally, and forwards the
 //! assistant's text deltas back to the caller as standard
-//! `delta.content` chunks. By default tool calls + tool results stay
-//! invisible to the caller — from their perspective Foyer is a
-//! smarter chat model. Set `expose_tool_calls = true` (or env
-//! `FOYER_OPENAI_PROXY_SHOW_TOOL_CALLS=1`) to interleave each tool
-//! invocation (start + result line) into the content stream — useful
-//! when an upstream proxy or chat UI is debugging which tools fired
-//! during a turn.
+//! `delta.content` chunks. Tool calls + tool results travel out via
+//! [`ExternalChatStreamEvent::ToolStart`]/[`ExternalChatStreamEvent::ToolEnd`]
+//! on every turn — the HTTP layer surfaces them as a non-standard
+//! `foyer_tool_calls` array on the assistant delta / message so
+//! extension-aware clients can render them natively, and (optionally,
+//! gated by `FOYER_OPENAI_PROXY_SHOW_TOOL_CALLS=1`) ALSO interleaves
+//! the same calls as `> 🔧 …` / `> ✅ …` markdown lines in
+//! `delta.content` for plain-text clients.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,8 +69,11 @@ pub enum ExternalChatStreamEvent {
     Attachment(AgentAttachment),
     /// Tool call dispatched (status flipped to `Running`). Args are
     /// the raw JSON string the model emitted so the upstream observer
-    /// gets the same shape Foyer's own UI sees. Only emitted when the
-    /// proxy is configured to expose tool calls (the default).
+    /// gets the same shape Foyer's own UI sees. Always emitted — the
+    /// HTTP layer surfaces this as a `foyer_tool_calls` entry on the
+    /// assistant delta regardless of the `expose_tool_calls` flag
+    /// (which only controls the parallel markdown-into-content
+    /// interleave).
     ToolStart {
         call_id: String,
         tool_name: String,
@@ -78,12 +82,17 @@ pub enum ExternalChatStreamEvent {
     /// Tool call finished. `ok` distinguishes `Done` from `Error`;
     /// `summary` is a short, human-readable result line (the tool's
     /// own summary if it set one, otherwise the first stretch of the
-    /// JSON result). Only emitted when `expose_tool_calls` is on.
+    /// JSON result). `result_json` carries the raw serialized
+    /// `ToolResult` (or error string) so an extension-aware client
+    /// can render structured data without re-parsing the assistant
+    /// content. Always emitted — see [`ExternalChatStreamEvent::ToolStart`]
+    /// for the parallel-channel rationale.
     ToolEnd {
         call_id: String,
         tool_name: String,
         ok: bool,
         summary: String,
+        result_json: String,
     },
     /// Engine finished cleanly. No more events follow.
     End,
@@ -151,6 +160,12 @@ pub fn parse_request(body: Value) -> Result<ExternalChatRequest, String> {
             tool_call_id: msg.tool_call_id.clone(),
             attachments: atts,
             ts_ms: 0,
+            // Prior history is whatever the client sent — there's no
+            // way for an OpenAI-shape request to declare a turn as
+            // synthetic, and we don't want to re-ingest our own
+            // outbound synthetic records as if the client had sent
+            // them (it shouldn't be doing that anyway). Default None.
+            synthetic: None,
         };
         next_id += 1;
         prior.push(record);
@@ -262,13 +277,14 @@ fn data_url_to_attachment(url: &str, default_stem: &str) -> Option<AgentAttachme
 /// `ExternalChatStreamEvent`s — the HTTP layer adapts these into
 /// either an SSE stream or a single non-streaming response. The
 /// returned cancel token can be tripped (e.g. on connection drop)
-/// to interrupt the engine. `expose_tool_calls` opts into
-/// `ToolStart`/`ToolEnd` events — defaults to off at the HTTP layer
-/// so the caller sees plain assistant text only.
+/// to interrupt the engine. `ToolStart`/`ToolEnd` events are emitted
+/// unconditionally; the HTTP layer decides whether to project them
+/// into the synthetic `foyer_tool_calls` field, the legacy markdown-
+/// in-content interleave (gated on `FOYER_OPENAI_PROXY_SHOW_TOOL_CALLS`),
+/// or both.
 pub fn run_external_chat(
     parts: ExternalEngineParts,
     request: ExternalChatRequest,
-    expose_tool_calls: bool,
 ) -> (
     mpsc::UnboundedReceiver<ExternalChatStreamEvent>,
     tokio_util::sync::CancellationToken,
@@ -296,10 +312,10 @@ pub fn run_external_chat(
             model: parts.model,
             autonomy: AgentAutonomy::Auto,
             system_prompt: parts.system_prompt,
+            media_feedback: parts.media_feedback,
         };
         let sink: Arc<dyn EngineSink> = Arc::new(ProxySink {
             tx: tx.clone(),
-            expose_tool_calls,
             tool_names: Mutex::new(HashMap::new()),
             started: Mutex::new(std::collections::HashSet::new()),
         });
@@ -333,10 +349,6 @@ pub fn run_external_chat(
 
 struct ProxySink {
     tx: mpsc::UnboundedSender<ExternalChatStreamEvent>,
-    /// When `true`, emit `ToolStart`/`ToolEnd` events so external
-    /// callers can see which tools fired. When `false`, fall back to
-    /// the legacy text-only stream (Content + Attachment + End).
-    expose_tool_calls: bool,
     /// Track call_id → tool_name from `on_record` so when
     /// `on_tool_update` fires the terminal transition (which only
     /// carries `call_id`) we still know the tool name to emit on the
@@ -363,9 +375,6 @@ impl EngineSink for ProxySink {
         //      hold the record we know the model intended the call.
         //      The `started` set dedupes so a single call_id can't
         //      fire ToolStart twice as the assistant snapshot grows.
-        if !self.expose_tool_calls {
-            return;
-        }
         for tc in &record.tool_calls {
             {
                 let mut names = self.tool_names.lock().await;
@@ -399,30 +408,31 @@ impl EngineSink for ProxySink {
     ) {
         // Emit a ToolEnd on the terminal transitions (Done / Error /
         // Rejected) so the upstream caller can pair it with the
-        // matching ToolStart. The legacy attachment-harvesting block
-        // below still only fires on `Done` because Error/Rejected
-        // can't have media to harvest.
-        if self.expose_tool_calls {
-            let terminal = matches!(
-                status,
-                AgentToolStatus::Done | AgentToolStatus::Error | AgentToolStatus::Rejected
-            );
-            if terminal {
-                let (ok, summary) = summarize_tool_result(status, &result_json);
-                let tool_name = self
-                    .tool_names
-                    .lock()
-                    .await
-                    .get(&call_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let _ = self.tx.send(ExternalChatStreamEvent::ToolEnd {
-                    call_id: call_id.clone(),
-                    tool_name,
-                    ok,
-                    summary,
-                });
-            }
+        // matching ToolStart. Always fired regardless of HTTP-layer
+        // visibility flags — the `foyer_tool_calls` synthetic field
+        // depends on these events landing for every call. The legacy
+        // attachment-harvesting block below still only fires on `Done`
+        // because Error/Rejected can't have media to harvest.
+        let terminal = matches!(
+            status,
+            AgentToolStatus::Done | AgentToolStatus::Error | AgentToolStatus::Rejected
+        );
+        if terminal {
+            let (ok, summary) = summarize_tool_result(status, &result_json);
+            let tool_name = self
+                .tool_names
+                .lock()
+                .await
+                .get(&call_id)
+                .cloned()
+                .unwrap_or_default();
+            let _ = self.tx.send(ExternalChatStreamEvent::ToolEnd {
+                call_id: call_id.clone(),
+                tool_name,
+                ok,
+                summary,
+                result_json: result_json.clone(),
+            });
         }
         // Surface only completed tool runs — the same tool is updated
         // multiple times per call (Pending → Running → Done) and we

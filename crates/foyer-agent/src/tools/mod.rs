@@ -12,6 +12,7 @@ pub mod continue_working;
 pub mod daw_proxy;
 pub mod groups;
 pub mod io;
+pub mod media;
 pub mod midi;
 pub mod mixer;
 pub mod plugins;
@@ -190,6 +191,14 @@ pub struct ToolContext {
     /// `/v1/chat/completions`, MCP. `None` is only seen on the
     /// thin dispatch paths used in tests.
     pub turn_budget: Option<TurnBudgetHandle>,
+    /// Short-id registry for media produced earlier in this
+    /// conversation. The engine stamps tool-produced attachments in
+    /// here on the way out (see `engine::maybe_feed_back_media`);
+    /// the `media` tool reads it back to satisfy `recall_media` /
+    /// `media(subcommand="get")` requests. Shared with the engine
+    /// via `Arc<Mutex<…>>` so registration on one side is visible
+    /// to recall calls on the other.
+    pub media_library: std::sync::Arc<tokio::sync::Mutex<crate::media::MediaLibrary>>,
 }
 
 impl ToolContext {
@@ -370,12 +379,47 @@ pub trait SessionDirector: Send + Sync {
     /// currently-active backend (or the default if none is up yet).
     /// `project_path` of None launches a fresh in-memory project (stub
     /// backends only; Ardour requires a path).
+    ///
+    /// `recover_crash`:
+    ///   - `Some(true)`  → Recover. Leave any `.pending` artifacts in
+    ///     place; the shim's `FOYER_CRASH_RECOVERY=recover` auto-clicks
+    ///     the native recovery dialog when the project opens.
+    ///   - `Some(false)` → Discard. The director deletes `.pending`
+    ///     before spawning so the shim's recovery dialog never opens
+    ///     (matches the WS handler's discard path).
+    ///   - `None`        → Caller hasn't decided. The director still
+    ///     spawns, but the agent tool surface should `probe_recovery`
+    ///     first so the model gets a chance to make the choice — see
+    ///     `SessionTool::Open` / `New` in `tools/session.rs`.
     async fn launch_project(
         &self,
         backend_id: &str,
         project_path: Option<&str>,
         sample_rate: Option<u32>,
+        recover_crash: Option<bool>,
     ) -> Result<LaunchOutcome, SessionDirectorError>;
+
+    /// Probe a project path for crash-recovery artifacts (Ardour
+    /// `.pending` files left over from a prior crashed session,
+    /// `.history` autosave undo state, archived `.bak.<stamp>`
+    /// sweeps from previous foyer sweeps). Returns an empty Vec
+    /// when nothing is on disk or when the resolved backend has no
+    /// recovery model (the in-memory stub).
+    ///
+    /// Used by `session.open` / `session.new` to surface the same
+    /// "Recover vs Discard" decision the human user sees in the FAB,
+    /// so the LLM can decide on the agent's behalf instead of
+    /// silently launching with `None` (which leaves the choice to the
+    /// shim's native dialog — fine on a desktop but a deadlock on a
+    /// headless agent loop). Default impl returns empty so directors
+    /// that pre-date this method don't have to override.
+    async fn probe_recovery(
+        &self,
+        _backend_id: &str,
+        _project_path: &str,
+    ) -> Result<Vec<foyer_schema::SessionRecoveryArtifact>, SessionDirectorError> {
+        Ok(Vec::new())
+    }
     /// Recents list (canonical order: most-recently-touched first).
     async fn list_recents(&self) -> Result<Vec<foyer_schema::RecentEntry>, SessionDirectorError>;
     /// Forget a single recents entry (jail-relative path).
@@ -603,7 +647,17 @@ impl ToolRegistry {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
-        self.tools.values()
+        // Sort by name so the wire-shape of the tools array sent to
+        // the upstream LLM is byte-stable across foyer restarts.
+        // Without this, `HashMap::values()` reshuffles on every
+        // process boot (Rust HashMap RandomState is re-seeded per
+        // process) and vLLM's prefix cache misses on the tools
+        // schema portion of every fresh server's first request.
+        // Sorting costs O(n log n) per request on a registry of ~20
+        // entries — vanishingly small compared to the LLM round-trip.
+        let mut entries: Vec<(&&'static str, &Arc<dyn Tool>)> = self.tools.iter().collect();
+        entries.sort_by_key(|(name, _)| *name);
+        entries.into_iter().map(|(_, tool)| tool)
     }
 
     pub fn len(&self) -> usize {
@@ -649,6 +703,7 @@ pub fn default_registry_with_store(
         Arc::new(groups::GroupsTool),
         Arc::new(io::IoTool),
         Arc::new(sections::SectionsTool),
+        Arc::new(media::MediaTool),
         Arc::new(continue_working::ContinueWorkingTool),
     ];
     ToolRegistry::from_tools(tools)

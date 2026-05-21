@@ -1101,9 +1101,16 @@ export class AgentPanel extends LitElement {
   /// Render a single transcript row. `tool`-role rows (raw context
   /// results being fed back to the model) are hidden from the
   /// visible transcript — they're surfaced as collapsible cards
-  /// attached to the assistant turn that emitted them.
+  /// attached to the assistant turn that emitted them. Records the
+  /// harness synthesizes for the LLM's own consumption
+  /// (`m.synthetic` set — currently the tool-vision-context push
+  /// after a media-producing tool call) are also hidden, since they
+  /// were never anything the user actually typed. The tool card
+  /// already surfaces the image / audio chip; the synthetic record
+  /// is purely backend plumbing for the vision tower.
   _renderMsg(m) {
     if (m.role === "tool") return nothing;
+    if (m.synthetic) return nothing;
     const calls = (m.tool_calls || []).map((c) => this._renderToolCard(c));
     if (m.role === "user") {
       return html`<div class="msg user">${m.text || ""}</div>`;
@@ -1451,7 +1458,10 @@ export class AgentPanel extends LitElement {
 
   /// Translate one record from `foyer_schema::AgentMessageRecord`
   /// into the panel's local row shape. The panel currently keys on
-  /// `id`, `role`, `text`, `tool_calls`, and `tool_call_id`.
+  /// `id`, `role`, `text`, `tool_calls`, `tool_call_id`, and the
+  /// optional `synthetic` marker (set on harness-generated records
+  /// like the tool-vision-context push — `_renderMsg` hides those
+  /// rows so they don't masquerade as user messages in the FAB).
   _recordToRow(record) {
     return {
       id: record.id,
@@ -1459,6 +1469,7 @@ export class AgentPanel extends LitElement {
       text: record.content || "",
       tool_calls: record.tool_calls || [],
       tool_call_id: record.tool_call_id || null,
+      synthetic: record.synthetic || null,
     };
   }
 

@@ -33,6 +33,7 @@ pub struct ExternalEngineParts {
     pub tools: ToolRegistry,
     pub ctx: ToolContext,
     pub system_prompt: String,
+    pub media_feedback: crate::config::MediaFeedback,
 }
 
 /// Events the runtime broadcasts. Subscribers translate these into
@@ -131,6 +132,14 @@ automation_lane / event_heatmap / midi_roll\n\
 supports), snapshot (one-shot FFT frame on master / monitor / a \
 specific track, returned as per-channel dBFS bins). Pair with \
 `visualize.spectrogram` for a temporal waterfall PNG\n\
+  * media — recall earlier tool-produced media by short id (`i3`, \
+`a1`, …). Every visualize/render/spectrum output is stamped with one \
+and surfaced in the synthetic vision-context user record that follows \
+the tool call. Older renders are redacted from the rolling LLM context \
+to keep the prefix cache warm, so when you need to re-examine an \
+earlier image/audio clip, call `media(subcommand=\"list\")` to find \
+it, then `media(subcommand=\"get\", id=\"i3\")` to pull the bytes back \
+into context\n\
 \n\
 Operating principles:\n\
   * **No project loaded?** The sidecar boots into a launcher state \
@@ -239,6 +248,14 @@ pub struct AgentRuntime {
     /// busy flag mid-flight and the UI shows the agent as idle while
     /// it's still working.
     turn_lock: tokio::sync::Mutex<()>,
+    /// Short-id registry of media produced by tool calls in this
+    /// conversation. Lives as long as the runtime so the model can
+    /// recall a render emitted many turns earlier even after it's
+    /// been redacted from the rolling LLM context. The
+    /// `/v1/chat/completions` proxy uses a separate, transient
+    /// library per external request — external callers don't see or
+    /// mutate the FAB's archive.
+    media_library: Arc<Mutex<crate::media::MediaLibrary>>,
 }
 
 const FLUSH_INTERVAL_MS: u64 = 1500;
@@ -357,6 +374,7 @@ impl AgentRuntime {
             pending_writes: Arc::new(Mutex::new(Default::default())),
             current_cancel: tokio::sync::RwLock::new(None),
             turn_lock: tokio::sync::Mutex::new(()),
+            media_library: Arc::new(Mutex::new(crate::media::MediaLibrary::new())),
         });
         WelcomeTool::refresh_from_store(&welcome_ctx, &store, DEFAULT_SYSTEM_PROMPT.to_string())
             .await;
@@ -679,6 +697,7 @@ impl AgentRuntime {
         let llm = inner.llm.clone();
         let model = inner.config.model.clone();
         let prefer_headless = inner.config.prefer_headless_render;
+        let media_feedback = inner.config.media_feedback.clone();
         drop(inner);
         // Gate on "is a backend currently attached?" via the existing
         // tokio field, but pass the shared `backend_ref` so swaps
@@ -692,6 +711,13 @@ impl AgentRuntime {
         let ui_director = self.ui_director.read().await.clone();
         let session_director = self.session_director.read().await.clone();
         let spectrum_director = self.spectrum_director.read().await.clone();
+        // External (proxy) requests run in a TRANSIENT conversation,
+        // so they get a TRANSIENT media library too — no leakage
+        // either direction between the FAB's archive and an API
+        // caller's per-request state. `run_external_chat` could
+        // override this later if a caller wants a shared library, but
+        // the safe default is isolation.
+        let proxy_library = Arc::new(Mutex::new(crate::media::MediaLibrary::new()));
         Some(ExternalEngineParts {
             llm,
             model,
@@ -706,8 +732,10 @@ impl AgentRuntime {
                 spectrum_director,
                 prefer_headless_render: prefer_headless,
                 turn_budget: None,
+                media_library: proxy_library,
             },
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            media_feedback,
         })
     }
 
@@ -800,6 +828,7 @@ impl AgentRuntime {
         let autonomy = inner.config.autonomy;
         let conversation = inner.conversation.clone();
         let ui_locale = inner.config.ui_locale.clone();
+        let media_feedback = inner.config.media_feedback.clone();
         drop(inner);
         // Gate engine construction on "a backend is currently
         // attached" but pass the SHARED `backend_ref` into ToolContext
@@ -828,6 +857,7 @@ impl AgentRuntime {
             session_director,
             spectrum_director,
             prefer_headless_render: prefer_headless,
+            media_library: self.media_library.clone(),
             // `run_turn` overwrites this with the live per-turn
             // budget handle so `continue_working` can extend the
             // round cap mid-turn.
@@ -859,6 +889,7 @@ impl AgentRuntime {
             model,
             autonomy,
             system_prompt,
+            media_feedback,
         };
         Some((engine, ctx))
     }

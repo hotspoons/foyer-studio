@@ -110,6 +110,16 @@ pub struct AgentMessageRecord {
     pub attachments: Vec<AgentAttachment>,
     /// Unix epoch milliseconds of server-side receipt.
     pub ts_ms: u64,
+    /// Marks records the agent harness synthesizes for the LLM's
+    /// own consumption — currently the introspective-vision context
+    /// record (`Some("tool_vision_context")`) pushed after a media-
+    /// producing tool call. These ride on the LLM wire as normal
+    /// `user`-role multimodal messages (so the vision tower fires)
+    /// but the FAB transcript and the OpenAI-proxy egress hide them
+    /// so they don't masquerade as something the human typed.
+    /// `None` (the default) on every record the user actually sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic: Option<String>,
 }
 
 /// One inline media file attached to a user-role message. The bytes
