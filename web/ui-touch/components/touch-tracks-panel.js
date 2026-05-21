@@ -22,7 +22,7 @@ export class TouchTracksPanel extends LitElement {
       overflow: auto;
       -webkit-overflow-scrolling: touch;
       padding: 12px;
-      background: var(--color-bg);
+      background: var(--color-surface);
     }
     .row {
       display: flex; align-items: center; gap: 10px;
@@ -53,7 +53,7 @@ export class TouchTracksPanel extends LitElement {
       width: 44px; height: 44px;
       display: flex; align-items: center; justify-content: center;
       border: 1px solid var(--color-border);
-      background: var(--color-bg);
+      background: var(--color-surface);
       color: var(--color-text);
       border-radius: 10px;
       cursor: pointer;

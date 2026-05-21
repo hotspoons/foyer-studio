@@ -38,9 +38,42 @@ function tagFor(id) {
   }
 }
 
+/** Walk the session and pick a reasonable default region of the given
+ *  kind ("midi" or "sequencer"). Touch's piano-roll / beat-sequencer
+ *  panels need a region to render against; if the user hasn't selected
+ *  one via Tracks → Open, fall back to the first matching region. */
+function firstRegionOfKind(session, wantKind) {
+  for (const track of session?.tracks || []) {
+    for (const region of track.regions || []) {
+      if (wantKind === "midi" && region.kind === "midi") {
+        return { trackId: track.id, regionId: region.id };
+      }
+      if (wantKind === "sequencer" && region.kind === "sequencer") {
+        return { trackId: track.id, regionId: region.id };
+      }
+    }
+  }
+  return null;
+}
+
+/** Per-panel target IDs the user picked via Tracks → Open or
+ *  timeline → ✎. Set globally so the panel host can pick them up when
+ *  the user navigates between tabs. */
+const TARGETS = (globalThis.__foyerTouchTargets ||= new Map());
+
+export function setPanelTarget(panelId, target) {
+  TARGETS.set(panelId, target || null);
+  globalThis.dispatchEvent?.(new CustomEvent("foyer-touch:target-changed", { detail: { panelId } }));
+}
+
+export function getPanelTarget(panelId) {
+  return TARGETS.get(panelId) || null;
+}
+
 export class TouchPanelHost extends LitElement {
   static properties = {
     panelId: { type: String },
+    _tick: { state: true, type: Number },
   };
 
   static styles = css`
@@ -70,10 +103,120 @@ export class TouchPanelHost extends LitElement {
     .empty p { margin: 0; max-width: 32em; line-height: 1.5; font-size: 14px; }
     .embed {
       width: 100%; height: 100%;
-      overflow: auto;
+      min-height: 0;
+      /* Mounted ui-full widgets fill via flex: 1 on their own :host.
+       * Make the wrapper a flex column so that flex chain is honored.
+       * Without this the mixer collapses to its content height and
+       * leaves dead space below. */
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       -webkit-overflow-scrolling: touch;
     }
+    .embed > * {
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    /* Region picker shown when piano-roll / beat-seq panels open
+     * without a selected region. Each card jumps into the editor
+     * pre-targeted at the picked region. */
+    .picker {
+      display: flex; flex-direction: column;
+      height: 100%; gap: 12px; padding: 16px;
+      overflow: auto;
+    }
+    .picker h2 { margin: 0; font-size: 18px; color: var(--color-text); }
+    .picker .hint { margin: 0; color: var(--color-text-muted); font-size: 13px; }
+    .picker .card {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 14px;
+      background: var(--color-surface);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      min-height: 56px;
+      cursor: pointer;
+    }
+    .picker .card:active { transform: scale(0.99); }
+    .picker .swatch {
+      width: 4px; align-self: stretch; border-radius: 999px;
+      background: var(--track-color, var(--color-accent));
+    }
+    .picker .name { flex: 1; font-weight: 600; }
+    .picker .meta { color: var(--color-text-muted); font-size: 12px; }
   `;
+
+  constructor() {
+    super();
+    this._tick = 0;
+    this._onStoreChange = () => { this._tick++; };
+    this._onTargetChange = (ev) => {
+      if (ev.detail?.panelId === this.panelId) this._tick++;
+    };
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    window.__foyer?.store?.addEventListener?.("change", this._onStoreChange);
+    globalThis.addEventListener?.("foyer-touch:target-changed", this._onTargetChange);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.__foyer?.store?.removeEventListener?.("change", this._onStoreChange);
+    globalThis.removeEventListener?.("foyer-touch:target-changed", this._onTargetChange);
+  }
+
+  _pickRegion(target) {
+    setPanelTarget(this.panelId, target);
+  }
+
+  _renderRegionPicker(wantKind) {
+    const session = window.__foyer?.store?.state?.session;
+    const tracks = session?.tracks || [];
+    const items = [];
+    for (const track of tracks) {
+      for (const region of track.regions || []) {
+        const kindOk = wantKind === "midi"
+          ? region.kind === "midi"
+          : region.kind === "sequencer";
+        if (kindOk) {
+          items.push({
+            trackId: track.id,
+            trackName: track.name,
+            trackColor: track.color || "#60a5fa",
+            regionId: region.id,
+            regionName: region.name || "Region",
+          });
+        }
+      }
+    }
+    const label = panelById(this.panelId)?.label || "Editor";
+    if (items.length === 0) {
+      return html`
+        <div class="empty">
+          <h2>${label}</h2>
+          <p>No ${wantKind === "midi" ? "MIDI" : "beat-sequencer"} regions
+          in this session yet. Create one from the
+          <strong>Timeline</strong> tab first.</p>
+        </div>
+      `;
+    }
+    return html`
+      <div class="picker">
+        <h2>${label}</h2>
+        <p class="hint">Pick a region to edit:</p>
+        ${items.map((it) => html`
+          <div class="card"
+               style=${`--track-color:${it.trackColor}`}
+               @click=${() => this._pickRegion({ trackId: it.trackId, regionId: it.regionId })}>
+            <div class="swatch"></div>
+            <div class="name">${it.regionName}</div>
+            <div class="meta">${it.trackName}</div>
+          </div>
+        `)}
+      </div>
+    `;
+  }
 
   render() {
     const tag = tagFor(this.panelId);
@@ -88,22 +231,27 @@ export class TouchPanelHost extends LitElement {
         </div>
       `;
     }
-    // Some panels (piano-roll / beat-seq) need a region or track id.
-    // Without one, render an informational placeholder rather than
-    // mounting an empty editor — the desktop UI lets the user pick
-    // a region first via the timeline / track list, which the touch
-    // variant exposes as Tracks → row → ️Open editor.
+    // Piano-roll / beat-seq need a target region. If the user hasn't
+    // picked one explicitly, fall back to the first matching region
+    // in the session; otherwise render a picker so they choose.
+    let target = getPanelTarget(this.panelId);
     if (this.panelId === "piano-roll" || this.panelId === "beat-seq") {
-      return html`
-        <div class="empty">
-          <h2>${panelById(this.panelId)?.label}</h2>
-          <p>Open a region from the <strong>Tracks</strong> panel to
-          start editing here. Tap a track, then a region.</p>
-        </div>
-      `;
+      const wantKind = this.panelId === "piano-roll" ? "midi" : "sequencer";
+      if (!target) {
+        const session = window.__foyer?.store?.state?.session;
+        target = firstRegionOfKind(session, wantKind);
+      }
+      if (!target) {
+        return this._renderRegionPicker(wantKind);
+      }
     }
+    const session = window.__foyer?.store?.state?.session ?? null;
     const t = unsafeStatic(tag);
-    return staticHtml`<div class="embed"><${t}></${t}></div>`;
+    return staticHtml`<div class="embed"><${t}
+      .session=${session}
+      .trackId=${target?.trackId || ""}
+      .regionId=${target?.regionId || ""}
+    ></${t}></div>`;
   }
 }
 

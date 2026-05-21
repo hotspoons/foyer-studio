@@ -3,12 +3,11 @@
 //
 // Composition:
 //   <foyer-touch-app>
-//     <foyer-touch-top-bar/>          ← session + transport
-//     <foyer-touch-pin-row?>          ← pinned panels (hidden if empty)
+//     <foyer-touch-top-bar/>          ← session + transport + pinned-panel popover
 //     <main>                          ← active panel body
 //       <foyer-touch-panel-host/>
 //     </main>
-//     <foyer-touch-bottom-nav/>       ← Mixer / Timeline / Tracks / More
+//     <foyer-touch-bottom-nav/>       ← Mixer / Timeline / More (+ 1 pinned spill slot)
 
 import { LitElement, html, css } from "lit";
 
@@ -18,7 +17,6 @@ import { bootRegionCache } from "foyer-core/region-cache.js";
 
 import "./components/touch-top-bar.js";
 import "./components/touch-bottom-nav.js";
-import "./components/touch-pin-row.js";
 import "./components/touch-panel-host.js";
 import "./components/touch-more-panel.js";
 import "./components/touch-tracks-panel.js";
@@ -44,6 +42,7 @@ import "../ui-full/components/agent-panel.js";
 import "../ui-full/components/settings-modal.js";
 
 import { activePanelFromHash, setActivePanel, panelById } from "./panels.js";
+import { setPanelTarget } from "./components/touch-panel-host.js";
 
 export class TouchApp extends LitElement {
   static properties = {
@@ -59,7 +58,7 @@ export class TouchApp extends LitElement {
       width: 100%;
       height: 100vh;
       height: 100svh;
-      background: var(--color-bg, #0b1120);
+      background: var(--color-surface);
       color: var(--color-text);
       font-family: var(--font-sans);
       overscroll-behavior: contain;
@@ -112,6 +111,17 @@ export class TouchApp extends LitElement {
     this._onStoreChange = () => { this._tick++; };
     this._onOpenModal = (ev) => { this._modal = ev?.detail?.id || null; };
     this._onClosePanel = () => { this._modal = null; };
+    // Region edit pencil in the embedded timeline fires this event
+    // before falling back to the desktop floating-window opener. We
+    // claim it (preventDefault) and route to the matching panel with
+    // the region pre-selected.
+    this._onRegionEdit = (ev) => {
+      const d = ev?.detail || {};
+      if (d.editor !== "piano-roll" && d.editor !== "beat-seq") return;
+      ev.preventDefault?.();
+      setPanelTarget(d.editor, { trackId: d.trackId, regionId: d.regionId });
+      setActivePanel(d.editor);
+    };
   }
 
   connectedCallback() {
@@ -122,6 +132,7 @@ export class TouchApp extends LitElement {
     globalThis.addEventListener("hashchange", this._onHashChange);
     globalThis.addEventListener("foyer-touch:open-modal", this._onOpenModal);
     globalThis.addEventListener("foyer-touch:close-modal", this._onClosePanel);
+    this.addEventListener("foyer:request-region-edit", this._onRegionEdit);
     window.__foyer?.store?.addEventListener?.("change", this._onStoreChange);
     // No initial hash → set the default so back/forward feels stable.
     if (!globalThis.location.hash) setActivePanel(this._activePanel);
@@ -132,6 +143,7 @@ export class TouchApp extends LitElement {
     globalThis.removeEventListener("hashchange", this._onHashChange);
     globalThis.removeEventListener("foyer-touch:open-modal", this._onOpenModal);
     globalThis.removeEventListener("foyer-touch:close-modal", this._onClosePanel);
+    this.removeEventListener("foyer:request-region-edit", this._onRegionEdit);
     window.__foyer?.store?.removeEventListener?.("change", this._onStoreChange);
   }
 
@@ -158,7 +170,7 @@ export class TouchApp extends LitElement {
           </p>
           <input id="snap-name" type="text" placeholder="snapshot name (optional)"
                  style="padding:12px; font-size:15px; border-radius:8px;
-                        border:1px solid var(--color-border); background:var(--color-bg);
+                        border:1px solid var(--color-border); background:var(--color-surface-elevated);
                         color: var(--color-text)">
           <div style="display:flex; gap:8px; justify-content:flex-end">
             <button @click=${() => this._closeModal()}
@@ -192,7 +204,6 @@ export class TouchApp extends LitElement {
   render() {
     return html`
       <foyer-touch-top-bar></foyer-touch-top-bar>
-      <foyer-touch-pin-row .activeId=${this._activePanel}></foyer-touch-pin-row>
       <main>
         <foyer-touch-panel-host .panelId=${this._activePanel}></foyer-touch-panel-host>
       </main>

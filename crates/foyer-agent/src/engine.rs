@@ -17,12 +17,13 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::config::MediaFeedback;
 use crate::conversation::Conversation;
 use crate::llm::{
     LlmClient, LlmDeltaToolCall, LlmFunctionDef, LlmMessage, LlmRequest, LlmStreamChunk,
     LlmToolCall, LlmToolDef,
 };
-use crate::tools::{Tool, ToolContext, ToolError, ToolRegistry};
+use crate::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 /// Initial budget for the model→tool→model loop per turn. The agent
 /// can extend this mid-turn by calling the hidden `continue_working`
@@ -91,6 +92,14 @@ pub struct AgentEngine {
     pub model: String,
     pub autonomy: AgentAutonomy,
     pub system_prompt: String,
+    /// Whether tool-produced media (PNG visualizers, audio mixdowns,
+    /// …) should be spliced back into the next-turn LLM context so
+    /// the VLM / omni model can actually see/hear its own renders.
+    /// Without this loop the bytes ride alongside the egress stream
+    /// to the chat client but never reach the model's encoders;
+    /// engine.rs:record_tool_result pushes a synthetic user record
+    /// with the right content blocks when this is on.
+    pub media_feedback: MediaFeedback,
 }
 
 /// Per-turn mutable state the engine threads through tool calls so a
@@ -108,6 +117,11 @@ pub struct TurnBudget {
     /// Surfaced in subsequent nudges so the operator can see the
     /// pattern in the trace.
     pub extensions: u32,
+    /// Seconds of audio already spliced into the model context this
+    /// turn (via the `MediaFeedback::audio` path). Used to enforce
+    /// `AudioFeedback::max_total_seconds` so a chain of renders can't
+    /// silently blow the context window when audio-feedback is on.
+    pub audio_feedback_used_secs: u32,
 }
 
 impl TurnBudget {
@@ -115,6 +129,7 @@ impl TurnBudget {
         Self {
             cap: INITIAL_TOOL_ROUND_BUDGET,
             extensions: 0,
+            audio_feedback_used_secs: 0,
         }
     }
     pub fn extend(&mut self) {
@@ -250,6 +265,7 @@ impl AgentEngine {
                 tool_call_id: None,
                 attachments: Vec::new(),
                 ts_ms: now_ms(),
+                synthetic: None,
             })
             .await;
 
@@ -396,9 +412,12 @@ impl AgentEngine {
                         &sink,
                         assistant_id,
                         &c.call_id,
+                        &c.tool_name,
                         AgentToolStatus::Error,
                         &msg,
                         &msg,
+                        Some(&budget),
+                        Some(&ctx.media_library),
                     )
                     .await;
                 }
@@ -447,9 +466,12 @@ impl AgentEngine {
                         &sink,
                         assistant_id,
                         &call.call_id,
+                        &call.tool_name,
                         AgentToolStatus::Rejected,
                         "interrupted by stop",
                         "interrupted",
+                        Some(&budget),
+                        Some(&ctx.media_library),
                     )
                     .await;
                     interrupted = true;
@@ -463,9 +485,12 @@ impl AgentEngine {
                             &sink,
                             assistant_id,
                             &call.call_id,
+                            &call.tool_name,
                             AgentToolStatus::Error,
                             &msg,
                             &msg,
+                            Some(&budget),
+                            Some(&ctx.media_library),
                         )
                         .await;
                         continue;
@@ -491,9 +516,12 @@ impl AgentEngine {
                                 &sink,
                                 assistant_id,
                                 &call.call_id,
+                                &call.tool_name,
                                 AgentToolStatus::Rejected,
                                 "interrupted by stop",
                                 "interrupted",
+                                Some(&budget),
+                                Some(&ctx.media_library),
                             )
                             .await;
                             interrupted = true;
@@ -506,9 +534,12 @@ impl AgentEngine {
                             &sink,
                             assistant_id,
                             &call.call_id,
+                            &call.tool_name,
                             AgentToolStatus::Rejected,
                             "user rejected this tool call",
                             "rejected",
+                            Some(&budget),
+                            Some(&ctx.media_library),
                         )
                         .await;
                         continue;
@@ -539,9 +570,12 @@ impl AgentEngine {
                             &sink,
                             assistant_id,
                             &call.call_id,
+                            &call.tool_name,
                             AgentToolStatus::Rejected,
                             "interrupted by stop",
                             "interrupted",
+                            Some(&budget),
+                            Some(&ctx.media_library),
                         )
                         .await;
                         interrupted = true;
@@ -556,9 +590,12 @@ impl AgentEngine {
                             &sink,
                             assistant_id,
                             &call.call_id,
+                            &call.tool_name,
                             AgentToolStatus::Done,
                             &res.summary.clone(),
                             &result_json,
+                            Some(&budget),
+                            Some(&ctx.media_library),
                         )
                         .await;
                     }
@@ -568,9 +605,12 @@ impl AgentEngine {
                             &sink,
                             assistant_id,
                             &call.call_id,
+                            &call.tool_name,
                             AgentToolStatus::Error,
                             &msg,
                             &msg,
+                            Some(&budget),
+                            Some(&ctx.media_library),
                         )
                         .await;
                     }
@@ -981,14 +1021,18 @@ impl AgentEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn record_tool_result(
         &self,
         sink: &Arc<dyn EngineSink>,
         message_id: u64,
         call_id: &str,
+        tool_name: &str,
         status: AgentToolStatus,
         summary: &str,
         result_json: &str,
+        budget: Option<&crate::tools::TurnBudgetHandle>,
+        media_library: Option<&Arc<Mutex<crate::media::MediaLibrary>>>,
     ) {
         self.broadcast_tool_status(
             sink,
@@ -1016,6 +1060,149 @@ impl AgentEngine {
             "result_json": result_json,
         }))
         .await;
+        // Introspective-vision loop: if the tool produced inline
+        // media, splice it into the model context as a synthetic
+        // user turn so the vision tower / audio encoder actually
+        // sees the bytes on the next round. Without this, tools
+        // like `visualize.timeline` are write-only — the bytes
+        // reach the chat client (via the OpenAI proxy egress
+        // stream) but the model only ever sees opaque base64 in
+        // the tool result JSON, which it can't reason over.
+        if matches!(status, AgentToolStatus::Done) && !result_json.is_empty() {
+            self.maybe_feed_back_media(
+                sink,
+                call_id,
+                tool_name,
+                result_json,
+                budget,
+                media_library,
+            )
+            .await;
+        }
+    }
+
+    /// Extract image/audio attachments from a finished tool's result
+    /// and (subject to the configured feedback policy) push them into
+    /// the model context as a synthetic user record. The user record
+    /// uses the same `AgentAttachment` shape as a real upload, so
+    /// `record_to_llm` folds the bytes into `image_url` / `input_audio`
+    /// content blocks the next time the LLM is called.
+    ///
+    /// Each attachment is also stamped with a short id (`i3`, `a1`,
+    /// …) in the conversation's [`crate::media::MediaLibrary`] when
+    /// one is wired in. The id is embedded in the synthetic user
+    /// record's content text so the model learns the handle and can
+    /// later call `media(subcommand="get", id="i3")` to pull the
+    /// bytes back into context after redaction has stripped them
+    /// from the rolling LLM payload (which keeps vLLM's prefix cache
+    /// stable round-to-round).
+    #[allow(clippy::too_many_arguments)]
+    async fn maybe_feed_back_media(
+        &self,
+        sink: &Arc<dyn EngineSink>,
+        call_id: &str,
+        tool_name: &str,
+        result_json: &str,
+        budget: Option<&crate::tools::TurnBudgetHandle>,
+        media_library: Option<&Arc<Mutex<crate::media::MediaLibrary>>>,
+    ) {
+        let Some((images, audio)) = collect_tool_attachments(result_json) else {
+            return;
+        };
+        if images.is_empty() && audio.is_empty() {
+            return;
+        }
+        let mut to_attach: Vec<foyer_schema::agent::AgentAttachment> = Vec::new();
+        if self.media_feedback.image_enabled {
+            to_attach.extend(images);
+        }
+        let mut skipped_audio_notes: Vec<String> = Vec::new();
+        if self.media_feedback.audio.enabled && !audio.is_empty() {
+            let limits = &self.media_feedback.audio;
+            for att in audio {
+                let est = estimate_audio_seconds(&att);
+                if est > limits.max_seconds {
+                    skipped_audio_notes.push(format!(
+                        "audio clip from `{tool_name}` (~{est}s) exceeded the \
+                         per-clip feedback cap of {}s — bytes shown to the \
+                         user but NOT spliced into the model context this \
+                         turn",
+                        limits.max_seconds
+                    ));
+                    continue;
+                }
+                let used_so_far = budget
+                    .map(|b| {
+                        b.lock()
+                            .expect("turn budget mutex poisoned")
+                            .audio_feedback_used_secs
+                    })
+                    .unwrap_or(0);
+                if used_so_far.saturating_add(est) > limits.max_total_seconds {
+                    skipped_audio_notes.push(format!(
+                        "audio clip from `{tool_name}` (~{est}s) would push the \
+                         per-turn audio-feedback total past {}s (already used \
+                         {used_so_far}s) — bytes shown to the user but NOT \
+                         spliced into the model context this turn",
+                        limits.max_total_seconds
+                    ));
+                    continue;
+                }
+                if let Some(b) = budget {
+                    let mut g = b.lock().expect("turn budget mutex poisoned");
+                    g.audio_feedback_used_secs = g.audio_feedback_used_secs.saturating_add(est);
+                }
+                to_attach.push(att);
+            }
+        } else if !audio.is_empty() && !self.media_feedback.audio.enabled {
+            // Audio feedback is off entirely. Don't emit a warning —
+            // off is the default and the operator already chose it.
+            // The bytes still reach the chat client; only the
+            // model's omni encoder is bypassed.
+        }
+        if to_attach.is_empty() && skipped_audio_notes.is_empty() {
+            return;
+        }
+        if !to_attach.is_empty() {
+            // Stamp each attachment with a short id before the
+            // synthetic user record lands. Rename the attachment
+            // (`name = "{id}.{ext}"`) so the chat-client surface and
+            // the model both see the same handle when it shows up
+            // again in a recall. If no library is wired (only
+            // possible on the thinnest dispatch paths used in tests),
+            // skip the stamp — the bytes still flow, the model just
+            // can't recall them by short id.
+            let stamped_ids: Vec<String> = if let Some(lib) = media_library {
+                let mut lib = lib.lock().await;
+                to_attach
+                    .iter_mut()
+                    .map(|att| {
+                        let id = lib.register(tool_name, call_id, att.clone());
+                        att.name = format!("{id}{}", file_extension_for(&att.mime));
+                        id
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let rec = {
+                let mut conv = self.conversation.lock().await;
+                conv.push_tool_vision_context(tool_name, to_attach, &stamped_ids)
+            };
+            sink.on_record(rec).await;
+        }
+        // Fail-loud notes: when audio was skipped per the limits,
+        // emit an assistant record so the *user* sees the bot is
+        // flying half-blind on that round. Per the design spec —
+        // silently truncating is worse than telling the user.
+        for note in skipped_audio_notes {
+            let body = format!("_(Audio feedback skipped: {note}.)_");
+            let rec = {
+                let mut conv = self.conversation.lock().await;
+                conv.push_assistant(body, Vec::new())
+            };
+            sink.on_record(rec).await;
+        }
     }
 
     fn accumulate_tool(accum: &mut Vec<AccumTool>, delta: LlmDeltaToolCall) {
@@ -1278,11 +1465,24 @@ fn strip_record_attachments(rec: &mut AgentMessageRecord) {
 }
 
 /// Apply redaction to a snapshot of records before they're handed to
-/// `record_to_llm`. The rule: the LAST `Tool` role record stays
-/// intact (the most recent tool output that the model is about to
-/// reason over); every older Tool record gets its large base64 fields
-/// elided. The LAST user record's attachments stay intact; everything
-/// older has its attachments stripped to a stub line.
+/// `record_to_llm`. ALL tool records (including the most recent) get
+/// large base64 fields elided; ALL user records older than the very
+/// latest get attachments stripped. The latest user record keeps its
+/// attachments so the introspective-vision loop has a window where
+/// the bytes reach the model's encoders.
+///
+/// **KV cache stability.** This function intentionally has NO
+/// "preserve the latest tool" exception. Earlier revisions kept the
+/// latest tool record intact and stripped only older ones, which
+/// meant a tool record's wire form changed between the round it was
+/// emitted (intact) and the next round (redacted). vLLM's prefix
+/// cache misses on every such shift — a real cost across long tool
+/// sprees. The recall path through the `media` tool (see
+/// [`crate::tools::media::MediaTool`]) lets the model pull bytes
+/// back into context on demand, so there's no reason to keep them
+/// embedded in the tool result for "one more round just in case".
+/// Stamped attachment ids in the synthetic vision-context user
+/// record are the cheap pointer; recall is the explicit dereference.
 ///
 /// Applied OUTSIDE `compact_conversation_inline` — this keeps the
 /// happy-path request small without changing the canonical
@@ -1293,25 +1493,25 @@ fn redact_records_for_llm(records: &mut [AgentMessageRecord]) {
     // smaller payloads cost almost nothing to keep; larger ones blow
     // the budget after a handful of round trips.
     const B64_MAX_CHARS: usize = 24 * 1024;
-    // Find indices we should NOT redact.
-    let last_tool_idx = records
-        .iter()
-        .rposition(|r| matches!(r.role, AgentRole::Tool));
     let last_user_idx = records
         .iter()
         .rposition(|r| matches!(r.role, AgentRole::User));
     for (idx, rec) in records.iter_mut().enumerate() {
         match rec.role {
             AgentRole::Tool => {
-                if Some(idx) == last_tool_idx {
-                    continue;
-                }
+                // No carve-out for the most recent tool record:
+                // redacting consistently keeps the prefix cache
+                // hot across rounds. See function-level docstring.
                 rec.content = redact_tool_result_content(&rec.content, B64_MAX_CHARS);
             }
             AgentRole::User | AgentRole::Assistant | AgentRole::System => {
                 // Old attachments are no longer needed after the next
                 // user turn — strip from anything older than the most
-                // recent user record.
+                // recent user record. The most-recent user record
+                // (typically the synthetic vision-context one pushed
+                // after a media-producing tool call) keeps its
+                // attachments so the vision tower fires on the next
+                // LLM round.
                 if let Some(last) = last_user_idx {
                     if idx < last {
                         strip_record_attachments(rec);
@@ -1330,6 +1530,146 @@ fn redact_records_for_llm(records: &mut [AgentMessageRecord]) {
             }
         }
     }
+}
+
+/// Pull image + audio attachments out of a tool's serialized
+/// [`ToolResult`] JSON. Tools can surface media in two compatible
+/// ways: the legacy `image_png_b64` field (visualizer tools set this)
+/// and the forward-compat `data.attachments: [{name, mime, b64}]`
+/// shape any tool can use to surface audio or non-PNG images. Both
+/// channels are walked here so the engine has a single funnel for
+/// feeding rendered media back into the model context. Returns
+/// `None` if `result_json` couldn't be parsed as a `ToolResult`
+/// (older record format, plain error string, …) so the caller
+/// short-circuits cleanly.
+pub(crate) fn collect_tool_attachments(
+    result_json: &str,
+) -> Option<(
+    Vec<foyer_schema::agent::AgentAttachment>,
+    Vec<foyer_schema::agent::AgentAttachment>,
+)> {
+    let parsed: ToolResult = serde_json::from_str(result_json).ok()?;
+    let mut images: Vec<foyer_schema::agent::AgentAttachment> = Vec::new();
+    let mut audio: Vec<foyer_schema::agent::AgentAttachment> = Vec::new();
+    if let Some(b64) = parsed.image_png_b64.as_ref() {
+        if !b64.is_empty() {
+            images.push(foyer_schema::agent::AgentAttachment {
+                name: "tool-image.png".into(),
+                mime: "image/png".into(),
+                b64: b64.clone(),
+            });
+        }
+    }
+    if let Some(arr) = parsed.data.get("attachments").and_then(|v| v.as_array()) {
+        for item in arr {
+            let Ok(att) =
+                serde_json::from_value::<foyer_schema::agent::AgentAttachment>(item.clone())
+            else {
+                continue;
+            };
+            if att.b64.is_empty() {
+                continue;
+            }
+            if att.mime.starts_with("image/") {
+                images.push(att);
+            } else if att.mime.starts_with("audio/") {
+                audio.push(att);
+            }
+        }
+    }
+    Some((images, audio))
+}
+
+/// Cheap upper-bound estimate of an audio clip's duration in seconds.
+///
+/// Used by the audio-feedback path to enforce per-clip / per-turn
+/// limits without dragging in a real audio decoder. For PCM WAV we
+/// parse the RIFF header — exact within rounding. For lossy formats
+/// (Ogg Vorbis, MP3, FLAC) we fall back to a byte-rate heuristic
+/// tuned for "good enough for sharing" quality:
+///
+/// - MP3 / Ogg @ ~128 kbps ≈ 16 KB/s → ~16_000 bytes per second
+/// - FLAC stereo @ 48 kHz ≈ ~150 KB/s on real music material
+///
+/// The heuristic is intentionally generous (rounds up) so a borderline
+/// clip is more likely to be *rejected* than slip past the limit and
+/// blow the context window. Returns 0 only when the buffer is empty.
+pub(crate) fn estimate_audio_seconds(att: &foyer_schema::agent::AgentAttachment) -> u32 {
+    if att.b64.is_empty() {
+        return 0;
+    }
+    let raw_bytes = base64_decoded_len(att.b64.len());
+    let mime = att.mime.as_str();
+    if mime.eq_ignore_ascii_case("audio/wav") || mime.eq_ignore_ascii_case("audio/wave") {
+        if let Some(secs) = wav_duration_seconds_from_b64(&att.b64) {
+            return secs;
+        }
+    }
+    // Lossy fallback. 16 KB/s ≈ 128 kbps, the bottom of "shareable
+    // quality" for Vorbis / MP3 / Opus. FLAC packs more bytes per
+    // second but a higher denominator here just means we estimate
+    // *lower* duration → more clips slip past the cap. We use a
+    // single rate so the bias goes the safe direction (overestimate
+    // → reject).
+    let est_secs = (raw_bytes as u64).div_ceil(16_000);
+    est_secs.min(u32::MAX as u64) as u32
+}
+
+/// Approximate decoded length of a base64 string (4 chars → 3 bytes).
+fn base64_decoded_len(b64_len: usize) -> usize {
+    b64_len / 4 * 3
+}
+
+/// Map a MIME type to a leading-dot extension for attachment naming
+/// (`image/png` → `.png`). Covers the formats Foyer's own tools emit;
+/// unknown MIMEs degrade to an empty string so the attachment ends
+/// up named exactly the stamped id (no extension).
+fn file_extension_for(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => ".png",
+        "image/jpeg" => ".jpg",
+        "image/webp" => ".webp",
+        "image/gif" => ".gif",
+        "audio/wav" | "audio/wave" => ".wav",
+        "audio/mpeg" | "audio/mp3" => ".mp3",
+        "audio/ogg" | "audio/vorbis" => ".ogg",
+        "audio/flac" => ".flac",
+        "audio/webm" => ".webm",
+        _ => "",
+    }
+}
+
+/// Parse the WAV (RIFF) header out of a base64-encoded blob and
+/// return the implied playback duration in whole seconds. Returns
+/// `None` on any header mismatch — the caller falls back to a
+/// byte-rate heuristic so a corrupt header doesn't bypass the cap.
+fn wav_duration_seconds_from_b64(b64: &str) -> Option<u32> {
+    // We only need the first ~48 base64 chars to cover the RIFF
+    // header through the `fmt ` chunk's byte_rate field. 64 chars =
+    // 48 raw bytes — enough headroom for the standard header layout.
+    let header_b64: String = b64.chars().take(96).collect();
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(header_b64.as_bytes())
+        .ok()?;
+    if bytes.len() < 44 {
+        return None;
+    }
+    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" || &bytes[12..16] != b"fmt " {
+        return None;
+    }
+    let byte_rate = u32::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]);
+    if byte_rate == 0 {
+        return None;
+    }
+    // Data size = total b64 → bytes minus the standard 44-byte
+    // header. Real WAVs sometimes carry extra chunks before `data`;
+    // we accept the resulting small overestimate (it can only
+    // *trigger* the limit early, which is the safe direction).
+    let total_bytes = base64_decoded_len(b64.len());
+    let data_bytes = total_bytes.saturating_sub(44);
+    let secs = (data_bytes as u64).div_ceil(byte_rate as u64);
+    Some(secs.min(u32::MAX as u64) as u32)
 }
 
 /// Build the text line that announces image/audio attachments to the
@@ -1365,4 +1705,119 @@ fn attachment_announcement(image_count: usize, audio_count: usize) -> String {
             "audio"
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+    use foyer_schema::agent::AgentAttachment;
+    use serde_json::json;
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// 1s of silent 16-bit stereo @ 48 kHz = 44-byte header +
+    /// 48000 * 2 * 2 = 192000 data bytes. The WAV header writes
+    /// byte_rate at offset 28 (sample_rate * channels * bytes_per_sample).
+    fn synth_wav_seconds(secs: u32) -> Vec<u8> {
+        let sample_rate: u32 = 48_000;
+        let channels: u16 = 2;
+        let bits_per_sample: u16 = 16;
+        let byte_rate: u32 = sample_rate * u32::from(channels) * u32::from(bits_per_sample) / 8;
+        let data_bytes: u32 = byte_rate * secs;
+        let mut v = Vec::with_capacity(44 + data_bytes as usize);
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&(36u32 + data_bytes).to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        v.extend_from_slice(&channels.to_le_bytes());
+        v.extend_from_slice(&sample_rate.to_le_bytes());
+        v.extend_from_slice(&byte_rate.to_le_bytes());
+        v.extend_from_slice(&(channels * bits_per_sample / 8).to_le_bytes());
+        v.extend_from_slice(&bits_per_sample.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&data_bytes.to_le_bytes());
+        v.resize(44 + data_bytes as usize, 0);
+        v
+    }
+
+    #[test]
+    fn estimate_wav_duration_matches_header() {
+        for secs in [1u32, 4, 10, 30] {
+            let wav = synth_wav_seconds(secs);
+            let att = AgentAttachment {
+                name: format!("clip-{secs}s.wav"),
+                mime: "audio/wav".into(),
+                b64: b64(&wav),
+            };
+            let est = estimate_audio_seconds(&att);
+            // Allow ±1s slack for the rounding in `div_ceil`
+            // against the 44-byte header strip.
+            assert!(
+                est.abs_diff(secs) <= 1,
+                "estimate_audio_seconds({secs}s wav) = {est}"
+            );
+        }
+    }
+
+    #[test]
+    fn estimate_lossy_fallback_byterate() {
+        // 32 KB of fake mp3 → ~2 s at the 16 KB/s heuristic.
+        let bytes = vec![0u8; 32_000];
+        let att = AgentAttachment {
+            name: "clip.mp3".into(),
+            mime: "audio/mp3".into(),
+            b64: b64(&bytes),
+        };
+        let est = estimate_audio_seconds(&att);
+        assert!((1..=3).contains(&est), "lossy 32KB → {est}s");
+    }
+
+    #[test]
+    fn collect_tool_attachments_pulls_image_and_audio() {
+        let png = b64(&[0u8; 16]);
+        let wav = b64(&synth_wav_seconds(2));
+        let payload = json!({
+            "summary": "ok",
+            "image_png_b64": png,
+            "data": {
+                "attachments": [
+                    {"name": "render.wav", "mime": "audio/wav", "b64": wav},
+                    {"name": "thumb.jpg", "mime": "image/jpeg", "b64": "AAA"},
+                ]
+            }
+        });
+        let s = serde_json::to_string(&payload).unwrap();
+        let (images, audio) = collect_tool_attachments(&s).expect("parses");
+        assert_eq!(images.len(), 2, "image_png_b64 + image_url attachment");
+        assert_eq!(images[0].mime, "image/png");
+        assert_eq!(images[1].mime, "image/jpeg");
+        assert_eq!(audio.len(), 1);
+        assert_eq!(audio[0].mime, "audio/wav");
+    }
+
+    #[test]
+    fn collect_tool_attachments_ignores_non_media() {
+        let payload = json!({
+            "summary": "no media",
+            "data": {
+                "attachments": [
+                    {"name": "stats.json", "mime": "application/json", "b64": "QUFB"},
+                ]
+            }
+        });
+        let s = serde_json::to_string(&payload).unwrap();
+        let (images, audio) = collect_tool_attachments(&s).expect("parses");
+        assert!(images.is_empty());
+        assert!(audio.is_empty());
+    }
+
+    #[test]
+    fn collect_tool_attachments_returns_none_on_non_json() {
+        assert!(collect_tool_attachments("not json").is_none());
+    }
 }

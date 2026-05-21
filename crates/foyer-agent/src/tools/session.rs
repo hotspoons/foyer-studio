@@ -56,6 +56,21 @@ enum Op {
         /// the demo backend regardless.
         #[serde(default)]
         backend_id: Option<String>,
+        /// Crash-recovery decision. **Omit on the first call** — the
+        /// tool probes the path for `.pending` artifacts and, if any
+        /// are present, returns a `recovery_decision_required`
+        /// result listing them so you can decide. Then re-call this
+        /// subcommand with the same `path` plus:
+        ///
+        ///   - `true`  → Recover. The shim auto-clicks Ardour's
+        ///     recovery dialog and reloads uncommitted dirty state.
+        ///   - `false` → Discard. The `.pending` file is deleted
+        ///     before launch; no dialog opens.
+        ///
+        /// A truly fresh project (no artifacts on disk) launches
+        /// normally without this field.
+        #[serde(default)]
+        recover_crash: Option<bool>,
     },
     /// Create a new project at the given path. For the Ardour backend
     /// this generates a fresh `.ardour` file at the path; for the stub
@@ -72,6 +87,12 @@ enum Op {
         /// Defaults to the currently-active backend.
         #[serde(default)]
         backend_id: Option<String>,
+        /// Same as `Op::Open.recover_crash` — only meaningful when
+        /// the `path` you specify happens to ALREADY exist on disk
+        /// with crash artifacts (rare for `new`, but possible if you
+        /// reuse a previously-deleted project's directory name).
+        #[serde(default)]
+        recover_crash: Option<bool>,
     },
     /// Close a session by its sidecar id. Quits the shim host process
     /// and removes the entry from the registry. Destructive.
@@ -143,7 +164,11 @@ impl Tool for SessionTool {
                 "session_id":  { "type": "string" },
                 "backend_id":  { "type": "string" },
                 "sample_rate": { "type": "integer", "minimum": 8000, "maximum": 384000 },
-                "show_hidden": { "type": "boolean" }
+                "show_hidden": { "type": "boolean" },
+                "recover_crash": {
+                    "type": "boolean",
+                    "description": "Used with subcommand=open/new. Omit on first call; if the project has crash-recovery artifacts the tool returns recovery_decision_required with the artifact list. Re-call with true (recover dirty state) or false (discard pending file)."
+                }
             }
         })
     }
@@ -240,10 +265,30 @@ impl Tool for SessionTool {
                 ))
                 .with_data(json!({ "path": path, "name": name })))
             }
-            Op::Open { path, backend_id } => {
+            Op::Open {
+                path,
+                backend_id,
+                recover_crash,
+            } => {
                 let director = require_director(ctx)?;
+                let resolved_backend = backend_id.as_deref().unwrap_or("auto");
+                // Probe BEFORE the launcher fires when the model hasn't
+                // already made a recovery decision. If any artifacts
+                // are on disk, bail with a structured ToolResult that
+                // lists them and asks the model to re-call with
+                // `recover_crash: true|false`. This mirrors the
+                // FAB's blocking modal flow over the wire — the LLM
+                // gets the same chance to choose that a human user
+                // would, instead of the shim silently auto-opening a
+                // dialog the agent can't see.
+                if recover_crash.is_none() {
+                    let artifacts = director.probe_recovery(resolved_backend, &path).await?;
+                    if !artifacts.is_empty() {
+                        return Ok(recovery_decision_required(&path, &artifacts));
+                    }
+                }
                 let outcome = director
-                    .launch_project(backend_id.as_deref().unwrap_or("auto"), Some(&path), None)
+                    .launch_project(resolved_backend, Some(&path), None, recover_crash)
                     .await?;
                 Ok(ToolResult::ok(format!(
                     "opened {} (session {})",
@@ -260,13 +305,28 @@ impl Tool for SessionTool {
                 path,
                 sample_rate,
                 backend_id,
+                recover_crash,
             } => {
                 let director = require_director(ctx)?;
+                let resolved_backend = backend_id.as_deref().unwrap_or("auto");
+                // Same probe-first guard as `Op::Open`: a `session.new`
+                // pointed at a path that ALREADY exists on disk (and
+                // has crashed artifacts) deserves the same recovery
+                // decision. For a truly fresh path, `probe_recovery`
+                // returns empty and we fall through to the launcher
+                // normally.
+                if let (Some(p), None) = (path.as_deref(), recover_crash) {
+                    let artifacts = director.probe_recovery(resolved_backend, p).await?;
+                    if !artifacts.is_empty() {
+                        return Ok(recovery_decision_required(p, &artifacts));
+                    }
+                }
                 let outcome = director
                     .launch_project(
-                        backend_id.as_deref().unwrap_or("auto"),
+                        resolved_backend,
                         path.as_deref(),
                         sample_rate,
+                        recover_crash,
                     )
                     .await?;
                 Ok(ToolResult::ok(format!(
@@ -351,4 +411,130 @@ fn require_director(
                 .into(),
         )
     })
+}
+
+/// Build the `ToolResult` returned by `session.open` / `session.new`
+/// when the backend's `probe_recovery` finds crash artifacts on disk
+/// and the caller hasn't already supplied a `recover_crash` choice.
+///
+/// Wire shape (intentionally rich — the model gets enough to reason
+/// about whether the dirty state is worth keeping):
+///
+/// ```jsonc
+/// {
+///   "summary": "recovery decision required at <path>",
+///   "data": {
+///     "status":        "recovery_decision_required",
+///     "project_path":  "<jail-relative path>",
+///     "artifacts":     [{ name, kind, size_bytes, mtime_unix_ms, archived }, …],
+///     "next_action":   "Re-call session(subcommand=\"open\", path=\"...\", recover_crash=true|false)",
+///     "recover_means": "leave the .pending file in place; the shim auto-clicks Ardour's recovery dialog and the dirty pre-crash state is reloaded",
+///     "discard_means": "delete the .pending file before launch; the shim opens the project as last saved (uncommitted edits are lost)"
+///   }
+/// }
+/// ```
+///
+/// We deliberately surface this as a *successful* `ToolResult` rather
+/// than a `ToolError` — it's not a failure, it's a checkpoint that
+/// needs a decision. The model sees the artifact list in `data` and
+/// can chain a follow-up call cleanly without the harness having to
+/// special-case error recovery.
+fn recovery_decision_required(
+    project_path: &str,
+    artifacts: &[foyer_schema::SessionRecoveryArtifact],
+) -> ToolResult {
+    let total = artifacts.len();
+    let pending_count = artifacts.iter().filter(|a| a.kind == "pending").count();
+    let history_count = artifacts.iter().filter(|a| a.kind == "history").count();
+    let archived_count = artifacts.iter().filter(|a| a.archived).count();
+    let live_pending_count = pending_count.saturating_sub(
+        artifacts
+            .iter()
+            .filter(|a| a.kind == "pending" && a.archived)
+            .count(),
+    );
+    let kind_summary = if archived_count == total && total > 0 {
+        format!(
+            "{archived_count} archived recovery sweep(s) from a previous foyer run — \
+             you can restore the highest-stamped one or move on"
+        )
+    } else if live_pending_count > 0 {
+        format!(
+            "{live_pending_count} uncommitted dirty .pending file(s){}",
+            if history_count > 0 {
+                format!(" + {history_count} .history undo snapshot(s)")
+            } else {
+                String::new()
+            }
+        )
+    } else {
+        format!("{total} recovery artifact(s)")
+    };
+    ToolResult::ok(format!(
+        "recovery decision required at {project_path}: {kind_summary}. \
+         Re-call this subcommand with recover_crash=true (preserve the \
+         dirty state) or recover_crash=false (discard it) to proceed."
+    ))
+    .with_data(json!({
+        "status":        "recovery_decision_required",
+        "project_path":  project_path,
+        "artifacts":     artifacts,
+        "next_action":   format!(
+            "session(subcommand=\"open\", path=\"{project_path}\", recover_crash=true|false)"
+        ),
+        "recover_means": "leave the .pending file in place; the shim auto-clicks \
+                          Ardour's recovery dialog so the dirty pre-crash state is reloaded",
+        "discard_means": "delete the .pending file before launch; the shim opens the \
+                          project as last saved (uncommitted edits are lost)",
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use foyer_schema::SessionRecoveryArtifact;
+
+    fn pending(name: &str, size: u64) -> SessionRecoveryArtifact {
+        SessionRecoveryArtifact {
+            name: name.into(),
+            kind: "pending".into(),
+            size_bytes: size,
+            mtime_unix_ms: 0,
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn decision_required_payload_lists_artifacts_with_next_action() {
+        let res = recovery_decision_required(
+            "Mixdown/Mixdown.ardour",
+            &[pending("Mixdown.pending", 2048)],
+        );
+        assert!(res.summary.contains("recovery decision required"));
+        assert_eq!(res.data["status"], "recovery_decision_required");
+        assert_eq!(res.data["project_path"], "Mixdown/Mixdown.ardour");
+        let arts = res.data["artifacts"].as_array().expect("array");
+        assert_eq!(arts.len(), 1);
+        assert_eq!(arts[0]["kind"], "pending");
+        let next = res.data["next_action"].as_str().unwrap();
+        assert!(next.contains("recover_crash=true|false"));
+        assert!(next.contains("Mixdown/Mixdown.ardour"));
+    }
+
+    #[test]
+    fn decision_required_distinguishes_archived_sweeps() {
+        let archived = SessionRecoveryArtifact {
+            name: "Mixdown.pending.bak.20260518".into(),
+            kind: "pending".into(),
+            size_bytes: 1024,
+            mtime_unix_ms: 0,
+            archived: true,
+        };
+        let res = recovery_decision_required("Mixdown/Mixdown.ardour", &[archived]);
+        assert!(
+            res.summary.contains("archived recovery sweep"),
+            "summary was: {}",
+            res.summary
+        );
+    }
 }

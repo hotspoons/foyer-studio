@@ -17,7 +17,7 @@ import {
   onPinsChange,
 } from "../panels.js";
 
-const PRIMARY_TABS = ["mixer", "timeline", "tracks", "more"];
+const PRIMARY_TABS = ["mixer", "timeline", "more"];
 
 export class TouchBottomNav extends LitElement {
   static properties = {
@@ -90,16 +90,15 @@ export class TouchBottomNav extends LitElement {
   }
 
   render() {
-    // Cap the visible pin in the bottom bar at 1 — more than that
-    // crowds the row and undermines "core nav is always in the
-    // same place." The rest of the user's pins surface in the More
-    // panel and in the dedicated pin row above the active panel.
+    // Three tabs (Mixer / Timeline / More) plus up to one spill slot
+    // for the user's most-pinned panel. The pinned-panel popover from
+    // the top bar carries the rest, so the bottom row stays uncrowded.
     const extraPin = this._pins
       .map((id) => panelById(id))
       .filter(Boolean)
       .slice(0, 1);
     const tabs = [
-      ...PRIMARY_TABS.slice(0, 3).map((id) => panelById(id)),
+      ...PRIMARY_TABS.slice(0, 2).map((id) => panelById(id)),
       ...extraPin,
       panelById("more"),
     ].filter(Boolean);

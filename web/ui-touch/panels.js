@@ -25,7 +25,6 @@ const STORAGE_KEY = "foyer.ui.touch.pins";
 const CATALOG = [
   { id: "mixer",        label: "Mixer",      icon: "adjustments-horizontal", kind: "tab",   category: "core" },
   { id: "timeline",     label: "Timeline",   icon: "squares-2x2",            kind: "tab",   category: "core" },
-  { id: "tracks",       label: "Tracks",     icon: "queue-list",             kind: "tab",   category: "core" },
   { id: "more",         label: "More",       icon: "bars-3",                 kind: "tab",   category: "core" },
 
   { id: "piano-roll",   label: "Piano roll",   icon: "musical-note",        kind: "panel",  category: "edit" },
@@ -42,10 +41,11 @@ const CATALOG = [
   { id: "agent",        label: "Agent",        icon: "chat-bubble-left-right", kind: "panel",  category: "agent" },
   { id: "scripts",      label: "Scripts",      icon: "command-line",        kind: "panel",  category: "agent" },
 
-  { id: "midi-devices", label: "MIDI devices", icon: "musical-note",        kind: "panel",  category: "advanced" },
-  { id: "soft-keyboard",label: "Keyboard",     icon: "musical-note",        kind: "panel",  category: "advanced" },
-  { id: "console",      label: "Console",      icon: "command-line",        kind: "panel",  category: "advanced" },
-  { id: "diagnostics",  label: "Diagnostics",  icon: "check-circle",        kind: "panel",  category: "advanced" },
+  { id: "midi-devices", label: "MIDI devices", icon: "musical-note",        kind: "panel",  category: "midi" },
+  { id: "soft-keyboard",label: "Keyboard",     icon: "musical-note",        kind: "panel",  category: "midi" },
+
+  { id: "console",      label: "Console",      icon: "command-line",        kind: "panel",  category: "developer" },
+  { id: "diagnostics",  label: "Diagnostics",  icon: "check-circle",        kind: "panel",  category: "developer" },
 
   { id: "settings",     label: "Settings",     icon: "cog-6-tooth",         kind: "modal",  category: "settings" },
   { id: "language",     label: "Language",     icon: "globe-alt",           kind: "modal",  category: "settings" },
@@ -66,9 +66,10 @@ export function panelById(id) {
 export const CATEGORIES = [
   { id: "edit",      label: "Edit" },
   { id: "visualize", label: "Visualize" },
+  { id: "midi",      label: "MIDI" },
   { id: "session",   label: "Session" },
   { id: "agent",     label: "Agent" },
-  { id: "advanced",  label: "Advanced" },
+  { id: "developer", label: "Developer" },
   { id: "settings",  label: "Settings" },
 ];
 

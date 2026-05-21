@@ -36,6 +36,9 @@ fn ctx_for(backend: &Arc<dyn Backend>) -> ToolContext {
         spectrum_director: None,
         prefer_headless_render: false,
         turn_budget: None,
+        media_library: Arc::new(tokio::sync::Mutex::new(
+            foyer_agent::media::MediaLibrary::new(),
+        )),
     }
 }
 

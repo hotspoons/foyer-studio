@@ -92,6 +92,7 @@ impl SessionDirector for SessionDirectorImpl {
         backend_id: &str,
         project_path: Option<&str>,
         sample_rate: Option<u32>,
+        recover_crash: Option<bool>,
     ) -> Result<LaunchOutcome, SessionDirectorError> {
         let state = self.state()?;
         let Some(spawner) = state.spawner.clone() else {
@@ -205,8 +206,59 @@ impl SessionDirector for SessionDirectorImpl {
         }
 
         let path = project_path.map(Path::new);
+        // Honor the caller's recovery decision. Discard requires
+        // deleting the live `.pending` file BEFORE spawning so
+        // Ardour's native dialog never opens (the shim's
+        // `FOYER_CRASH_RECOVERY=recover` env still rides along for
+        // the recover branch). Mirrors the WS launch_project path —
+        // both surfaces use the same profile method so the wire
+        // contract stays identical whether a human clicked through
+        // the FAB modal or the LLM picked via session(open,
+        // recover_crash=false).
+        if recover_crash == Some(false) {
+            if let (Some(p), Some(state)) = (path, self.state().ok()) {
+                let abs = match state.jail.as_ref() {
+                    Some(jail) => jail
+                        .root()
+                        .join(p.to_string_lossy().trim_start_matches('/')),
+                    None => p.to_path_buf(),
+                };
+                let profiles = state.profiles().await;
+                // Recovery semantics are filesystem-level (the
+                // profile that owns the project file extension knows
+                // how to identify and delete `.pending`), not tied
+                // to which backend is currently *launched*. The
+                // agent path resolves `backend_id="auto"` to "stub"
+                // during dev, but the .pending file still belongs
+                // to Ardour's recovery model. Try the resolved
+                // backend's profile first; if it has no recovery
+                // model (returned 0), fall back to the registry's
+                // default profile (typically Ardour) — same model
+                // the probe step uses on the same path.
+                let removed_via_resolved = profiles
+                    .get_or_default(&resolved_backend_id)
+                    .map(|prof| prof.discard_recovery(&abs))
+                    .unwrap_or(0);
+                let removed = if removed_via_resolved == 0 {
+                    profiles
+                        .get_or_default("")
+                        .map(|prof| prof.discard_recovery(&abs))
+                        .unwrap_or(0)
+                } else {
+                    removed_via_resolved
+                };
+                if removed > 0 {
+                    tracing::info!(
+                        "launch_project(via director): discarded {removed} pending \
+                         crash-recovery file(s) at {} ({})",
+                        abs.display(),
+                        resolved_backend_id,
+                    );
+                }
+            }
+        }
         let launched = spawner
-            .launch(&resolved_backend_id, path, sample_rate, None)
+            .launch(&resolved_backend_id, path, sample_rate, recover_crash)
             .await
             .map_err(|e| SessionDirectorError::Execution(e.to_string()))?;
         // Synthesize a session uuid here so we can return it to the
@@ -251,6 +303,36 @@ impl SessionDirector for SessionDirectorImpl {
 
     async fn list_recents(&self) -> Result<Vec<RecentEntry>, SessionDirectorError> {
         Ok(recents::load().await)
+    }
+
+    async fn probe_recovery(
+        &self,
+        backend_id: &str,
+        project_path: &str,
+    ) -> Result<Vec<foyer_schema::SessionRecoveryArtifact>, SessionDirectorError> {
+        // Resolve "auto" / empty to the registry default the same
+        // way `launch_project` does — the WS `ProbeSessionRecovery`
+        // path goes through `get_or_default("")` because that
+        // command fires before any backend is attached. The agent
+        // tool's probe runs in the same pre-launch window, so we
+        // also lean on the default profile when the caller hasn't
+        // explicitly named one.
+        let state = self.state()?;
+        let abs = match state.jail.as_ref() {
+            Some(jail) => jail.root().join(project_path.trim_start_matches('/')),
+            None => std::path::PathBuf::from(project_path),
+        };
+        let profile_key = if backend_id.is_empty() || backend_id == "auto" {
+            ""
+        } else {
+            backend_id
+        };
+        let profiles = state.profiles().await;
+        let artifacts = profiles
+            .get_or_default(profile_key)
+            .map(|prof| prof.probe_recovery(&abs))
+            .unwrap_or_default();
+        Ok(artifacts)
     }
 
     async fn forget_recent(&self, path: &str) -> Result<(), SessionDirectorError> {

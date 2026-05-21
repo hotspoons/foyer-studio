@@ -617,14 +617,16 @@ entries). Shipping-state snapshot: [STATUS.md](STATUS.md).
       `data.attachments: [{name, mime, b64}]` array — both shapes
       are scraped by the proxy's sink and emitted as
       `ExternalChatStreamEvent::Attachment`. The HTTP layer renders
-      each attachment two ways simultaneously: a markdown reference
-      (`![…](data:…)` for images, `<audio controls src="data:…">`
-      for audio) inlined into `delta.content` so plain-text clients
-      see something, and a structured block (`image_url`,
-      `input_audio`, or a fallback `file` shape) in either
-      `message.content` (non-streaming) or
-      `delta.foyer_attachments` (streaming) so multi-modal-aware
-      clients can pull the raw bytes without re-decoding the data URL.
+      each attachment as a standard OpenAI multimodal content block
+      (`image_url` / `input_audio` / fallback `file`) inside
+      `message.content` (non-streaming) or `delta.content` (streaming),
+      with a markdown reference (`![…](data:…)` for images,
+      `<audio controls src="data:…">` for audio) spliced into the
+      leading text block of the same array so plain-text clients
+      still see *something*. No foyer-specific extension field on
+      the wire — every OpenAI-compatible client (Open WebUI,
+      LibreChat, Cursor, OpenRouter passthrough) reads the block
+      array natively.
     - Auth: optional Bearer token on the exposed endpoint. When
       `agent.api_key` is unset everywhere, the endpoint is open
       (loopback-only is the operator's responsibility). When set, every
