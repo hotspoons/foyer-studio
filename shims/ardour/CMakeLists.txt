@@ -94,6 +94,61 @@ if(NOT IS_DIRECTORY "${FOYER_ARDOUR_SOURCE}")
 endif()
 
 set(ARDOUR_BUILD_DIR "${FOYER_ARDOUR_SOURCE}/build")
+
+# ── Detect Ardour MAJOR.MINOR for #ifdef guards on API drift ────
+#
+# Two API changes landed in 9.3 that the shim needs to handle:
+#
+#   1. `IO::connect(port, name)` lost its third `void* src` arg
+#      (commit 1fed596 "The big `src` removal").
+#   2. `AutomationList::lock()` returns `PBD::RWLock&` instead of
+#      `Glib::Threads::RWLock&` (commit 3a800f7 "Convert
+#      control-lock to PBD::RWLock"). Same applies to a handful of
+#      other locks across libardour.
+#
+# Both shipped in 9.3 → 9.4 → 9.5. To keep the shim buildable
+# against ALL 9.x targets (which is the deliberate matrix story —
+# users with 9.2 still install our binary surface), we ifdef the
+# two API forms behind `FOYER_ARDOUR_VERSION_GE(9, 3)`. Version
+# resolution priority:
+#
+#   1. `-DFOYER_ARDOUR_VERSION_MAJOR=N -DFOYER_ARDOUR_VERSION_MINOR=M`
+#      from the caller (the build script reads `.env`'s ARDOUR_TAG
+#      and passes them through — most explicit).
+#   2. `git describe --tags` inside the Ardour source tree (works
+#      offline, no env coupling, fails cleanly if the clone is a
+#      tarball without git metadata).
+#   3. Hard fail asking the operator to pass the flag — better than
+#      silently defaulting and producing the wrong codegen.
+#
+# A real `master` checkout reports something like `9.5-1234-gabcdef`
+# which we parse the same way as a clean tag.
+if(NOT DEFINED FOYER_ARDOUR_VERSION_MAJOR OR NOT DEFINED FOYER_ARDOUR_VERSION_MINOR)
+  find_package(Git QUIET)
+  if(Git_FOUND)
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} -C "${FOYER_ARDOUR_SOURCE}" describe --tags --abbrev=0
+      OUTPUT_VARIABLE _foyer_ardour_describe
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE _foyer_ardour_describe_rc
+    )
+    if(_foyer_ardour_describe_rc EQUAL 0
+       AND _foyer_ardour_describe MATCHES "^([0-9]+)\\.([0-9]+)")
+      set(FOYER_ARDOUR_VERSION_MAJOR "${CMAKE_MATCH_1}")
+      set(FOYER_ARDOUR_VERSION_MINOR "${CMAKE_MATCH_2}")
+    endif()
+  endif()
+endif()
+if(NOT DEFINED FOYER_ARDOUR_VERSION_MAJOR OR NOT DEFINED FOYER_ARDOUR_VERSION_MINOR)
+  message(FATAL_ERROR
+    "Unable to determine Ardour MAJOR.MINOR for #ifdef guards. "
+    "Either run from a git checkout of Ardour or pass explicitly: "
+    "cmake -DFOYER_ARDOUR_VERSION_MAJOR=9 -DFOYER_ARDOUR_VERSION_MINOR=5 ...")
+endif()
+message(STATUS
+  "Foyer shim: building against Ardour ${FOYER_ARDOUR_VERSION_MAJOR}.${FOYER_ARDOUR_VERSION_MINOR}")
+
 if(NOT IS_DIRECTORY "${ARDOUR_BUILD_DIR}")
   message(FATAL_ERROR
     "Ardour hasn't been built yet — '${ARDOUR_BUILD_DIR}' missing. "
@@ -254,6 +309,8 @@ target_compile_definitions(foyer_shim PRIVATE
   PACKAGE="foyer_shim"
   ARDOURSURFACE_DLL_EXPORTS
   WAF_BUILD
+  FOYER_ARDOUR_VERSION_MAJOR=${FOYER_ARDOUR_VERSION_MAJOR}
+  FOYER_ARDOUR_VERSION_MINOR=${FOYER_ARDOUR_VERSION_MINOR}
 )
 
 # Match Ardour's own build: silence the GLib-2.62-deprecated noise
@@ -333,6 +390,8 @@ target_compile_definitions(foyer_audiobackend PRIVATE
   PACKAGE="foyer_audiobackend"
   ARDOURBACKEND_DLL_EXPORTS
   WAF_BUILD
+  FOYER_ARDOUR_VERSION_MAJOR=${FOYER_ARDOUR_VERSION_MAJOR}
+  FOYER_ARDOUR_VERSION_MINOR=${FOYER_ARDOUR_VERSION_MINOR}
 )
 target_compile_options(foyer_audiobackend PRIVATE -Wno-deprecated-declarations)
 target_include_directories(foyer_audiobackend PRIVATE

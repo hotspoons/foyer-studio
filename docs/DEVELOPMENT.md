@@ -46,13 +46,15 @@ ABI changes between Ardour releases would break the shim against a
 user's installed Ardour. The pin lives in [.env](../.env):
 
 ```ini
-ARDOUR_TAG=9.2
+ARDOUR_TAG=9.5
 ```
 
-Tags are `major.minor` only (`9.2`, not `9.2.0`); branches
+Tags are `major.minor` only (`9.5`, not `9.5.0`); branches
 (`master`) and full commit SHAs are also accepted. Bump this when
 you need to develop against a post-tag API; pin back to a release
-tag before shipping.
+tag before shipping. The Rust runtime keeps backward-compat for
+earlier 9.x ABIs (see `foyer-cli`'s MCP-advert handling for 9.2
+without `mcp_http`); a real multi-target matrix is on the TODO.
 
 The pin is consumed in three places, all driven by the same env
 var, so a single edit propagates:

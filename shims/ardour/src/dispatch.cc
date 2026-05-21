@@ -10,6 +10,7 @@
  * an `Error` event for now and are filled in alongside their milestones.
  */
 #include "dispatch.h"
+#include "ardour_version.h"
 #include "signal_bridge.h"
 
 #include <algorithm>
@@ -4342,7 +4343,11 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					if (port) {
 						port->disconnect_all ();
 						if (!snap.patch_input_port.empty ()) {
+#if FOYER_ARDOUR_VERSION_GE(9, 3)
+							const int rv = io->connect (port, snap.patch_input_port);
+#else
 							const int rv = io->connect (port, snap.patch_input_port, nullptr);
+#endif
 							if (rv != 0) {
 								PBD::error << "foyer_shim: set_track_input: connect("
 								           << port->name () << " → " << snap.patch_input_port
@@ -4752,7 +4757,11 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 						if (port) {
 							port->disconnect_all ();
 							if (!snap.patch_input_port.empty ()) {
+#if FOYER_ARDOUR_VERSION_GE(9, 3)
+								const int rv = io->connect (port, snap.patch_input_port);
+#else
 								const int rv = io->connect (port, snap.patch_input_port, nullptr);
+#endif
 								if (rv != 0) {
 									PBD::error << "foyer_shim: update_track: connect("
 									           << port->name () << " → " << snap.patch_input_port
@@ -4818,7 +4827,11 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 									if (bus_in && bus_in->n_ports ().n_audio () > 0) {
 										auto bus_port = bus_in->audio (0);
 										if (bus_port) {
-											out_io->connect (out_port, bus_port->name (), nullptr);
+											#if FOYER_ARDOUR_VERSION_GE(9, 3)
+												out_io->connect (out_port, bus_port->name ());
+#else
+												out_io->connect (out_port, bus_port->name (), nullptr);
+#endif
 										}
 									}
 								} else {
@@ -5787,7 +5800,15 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				// value-mismatch snap-back when dragging.
 				std::vector<std::pair<Temporal::samplepos_t, double>> pts;
 				{
-					Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
+					#if FOYER_ARDOUR_VERSION_GE(9, 3)
+						// 9.3 commit 3a800f7 "Convert control-lock to PBD::RWLock":
+						// AutomationList::lock() now returns PBD::RWLock& instead
+						// of Glib::Threads::RWLock&, so the RAII guard type
+						// follows. Same `events()` walk in both branches.
+						PBD::RWLock::ReaderLock lm (alist->lock ());
+#else
+						Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
+#endif
 					pts.reserve (alist->events ().size ());
 					for (auto const* ev : alist->events ()) {
 						if (!ev) continue;

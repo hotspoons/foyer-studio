@@ -267,7 +267,7 @@ anything beyond a public demo, mount a GCS bucket at `/projects`
 via [GCS Fuse](https://cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts)
 — Foyer's upload/export flows just work against it.
 
-## Path 2 — host install against your own Ardour 9.2
+## Path 2 — host install against your own Ardour 9.5
 
 The installer drops a single `foyer` binary on your `$PATH` and
 copies the C++ shim into Ardour's surfaces directory so the next
@@ -276,9 +276,11 @@ Studio Shim** is the box you tick.
 
 ### Prerequisites
 
-- **Ardour 9.2** (`ardour9`, or `Ardour9.app` on macOS). Other
-  9.x point releases usually work because the shim is built against
-  9.2 ABI; 8.x and 10.x do not. Get it from
+- **Ardour 9.5** (`ardour9`, or `Ardour9.app` on macOS) — the
+  current active build target. Earlier 9.x point releases (9.2,
+  9.3, 9.4) still load the shim because the runtime keeps backward-
+  compat for older 9.x ABIs (the MCP-advert path probes for absent
+  fields); 8.x and 10.x do not. Get it from
   <https://community.ardour.org/download> — paying their suggested
   donation is the right call.
 - **An audio backend Ardour can drive.** The shim is backend-agnostic;

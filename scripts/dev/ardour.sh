@@ -37,9 +37,9 @@ fi
 unset __foyer_env_already_set
 
 # Ardour git ref the shim is built against. Default lives in `.env`.
-# Final fallback (when no .env exists) is `9.2`. ABI compatibility
+# Final fallback (when no .env exists) is `9.5`. ABI compatibility
 # with the user's installed Ardour matters more than master parity.
-ARDOUR_TAG="${ARDOUR_TAG:-9.2}"
+ARDOUR_TAG="${ARDOUR_TAG:-9.5}"
 
 # When non-empty AND equal to ARDOUR_TAG, `ensure` apt-installs Ardour
 # from Debian sid instead of running the 25-min `waf build`. Source
@@ -62,7 +62,7 @@ ardour subcommands:
 Current ARDOUR_DIR: $ARDOUR_DIR
 Current ARDOUR_TAG: $ARDOUR_TAG
 Current DEBIAN_SID_ARDOUR_VER: ${DEBIAN_SID_ARDOUR_VER:-(unset — full source build)}
-Override with: FOYER_ARDOUR_DIR=/path/to/ardour, ARDOUR_TAG=9.2
+Override with: FOYER_ARDOUR_DIR=/path/to/ardour, ARDOUR_TAG=9.5
 EOF
 }
 
@@ -138,7 +138,7 @@ do_apt_install_from_sid() {
 }
 
 # Lightweight runtime probe of the apt-installed Ardour. Replaces
-# `do_check` on the apt path — there's no `build/headless/hardour-*`
+# `do_check` on the apt path — there's no `build/gtk2_ardour/ardour-*`
 # to point at; the binary lives at /usr/bin/ardour (a wrapper that
 # sets LD_LIBRARY_PATH then exec's /usr/lib/ardour9/ardour-X.Y.Z).
 apt_check() {
@@ -148,9 +148,9 @@ apt_check() {
         echo "ardour: no ardour on \$PATH (apt install failed?)"
         return 1
     fi
-    if ! "$bin" --version >/tmp/foyer-hardour-check.log 2>&1; then
+    if ! "$bin" --version >/tmp/foyer-ardour-check.log 2>&1; then
         echo "ardour: --version probe failed"
-        sed -n '1,20p' /tmp/foyer-hardour-check.log
+        sed -n '1,20p' /tmp/foyer-ardour-check.log
         return 1
     fi
     echo "ardour: ok ($bin)"
@@ -191,12 +191,29 @@ do_clone() {
 }
 
 latest_bin() {
-    ls -1 "$ARDOUR_DIR"/build/headless/hardour-* 2>/dev/null | sort -V | tail -n1 || true
+    # GUI Ardour only — Foyer depends on X11 for plugin / instrument
+    # GUI projection, so the `build/headless/hardour-*` binary is
+    # intentionally NOT considered (matches the Rust-side
+    # `scan_ardour_build_tree`). A container without DISPLAY runs
+    # this binary against an in-container Xvfb; the entrypoint +
+    # `seed-ardour-config.sh` arrange that.
+    ls -1 "$ARDOUR_DIR"/build/gtk2_ardour/ardour-* 2>/dev/null | sort -V | tail -n1 || true
 }
 
 ensure_tags() {
     if [ -z "$(git -C "$ARDOUR_DIR" tag -l | head -n1)" ]; then
         echo "ardour: no git tags found, fetching from origin..."
+        git -C "$ARDOUR_DIR" fetch --tags origin
+        return
+    fi
+    # We already have SOME tags but the target may be a fresh upstream
+    # release that landed after our clone. Fetch when the specific
+    # `$ARDOUR_TAG` isn't resolvable locally — covers the version-bump
+    # case (clone is on 9.2, .env now requests 9.5, tag was published
+    # after clone). Skip when `$ARDOUR_TAG` is a SHA / branch name that
+    # `rev-parse` can already resolve, to avoid pointless network hits.
+    if ! git -C "$ARDOUR_DIR" rev-parse --verify --quiet "$ARDOUR_TAG^{commit}" >/dev/null 2>&1; then
+        echo "ardour: '$ARDOUR_TAG' not resolvable locally — fetching tags from origin..."
         git -C "$ARDOUR_DIR" fetch --tags origin
     fi
 }
@@ -339,7 +356,7 @@ do_check() {
     local bin
     bin="$(latest_bin)"
     if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-        echo "ardour: no runnable hardour binary under $ARDOUR_DIR/build/headless/"
+        echo "ardour: no runnable ardour binary under $ARDOUR_DIR/build/gtk2_ardour/"
         exit 1
     fi
     if [ ! -f "$ARDOUR_DIR/build/gtk2_ardour/ardev_common_waf.sh" ]; then
@@ -350,9 +367,13 @@ do_check() {
     export ASAN_COREDUMP="${ASAN_COREDUMP:-0}"
     # shellcheck disable=SC1090
     source "$ARDOUR_DIR/build/gtk2_ardour/ardev_common_waf.sh"
-    if ! "$bin" --version >/tmp/foyer-hardour-check.log 2>&1; then
+    # `--version` doesn't open the GUI; GTK init runs after argument
+    # parsing in gtk2_ardour, so this works even on a tty with no
+    # DISPLAY. Log file name kept generic so subsequent renames don't
+    # break tail-on-failure handlers.
+    if ! "$bin" --version >/tmp/foyer-ardour-check.log 2>&1; then
         echo "ardour: runtime probe failed"
-        sed -n '1,20p' /tmp/foyer-hardour-check.log
+        sed -n '1,20p' /tmp/foyer-ardour-check.log
         exit 1
     fi
     echo "ardour: ok ($bin)"
@@ -385,7 +406,7 @@ case "$cmd" in
         # Called by `just prep` before every `just run[-tls]`. Full
         # bootstrap:
         #   1. clone into ext/ardour if source tree missing (~1 GB)
-        #   2. configure + build if the headless binary isn't there
+        #   2. configure + build if the GUI binary isn't there
         #      (or apt-install from sid when DEBIAN_SID_ARDOUR_VER
         #      matches ARDOUR_TAG — see `apt_path_applicable` above)
         #   3. write the resulting executable path into

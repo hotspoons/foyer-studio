@@ -58,7 +58,7 @@ flip into `jack-headless` mode with the privileged flags + JACK
 shm passthrough — full recipe in
 [docs/USAGE.md#path-1--docker](docs/USAGE.md#path-1--docker).
 
-### 2. Host install — drives your own Ardour 9.2
+### 2. Host install — drives your own Ardour 9.5
 
 Best for laptops / studio machines: lowest latency, real audio
 hardware, your existing plugin collection. Linux + macOS (Apple

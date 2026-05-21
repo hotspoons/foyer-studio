@@ -21,7 +21,7 @@ You're picking up a partially-debugged macOS-only blocker. Branch the dev contai
 
 - `install.sh` — the macOS install path. Detects `/Applications/Ardour9.app`; if present, drops the dylib into `Contents/lib/surfaces/`, ad-hoc signs it, and re-signs Ardour9's main executable. Falls back to `~/Library/Preferences/Ardour9/surfaces/` if Ardour isn't installed.
 - `.github/workflows/ci.yml` — CI build for the shim. The macOS job has a "Fix dylib paths + ad-hoc sign (macOS)" step that rewrites runner-baked absolute paths to `@executable_path/../lib/...` and ad-hoc signs the dylib.
-- `shims/ardour/` — the shim source. CMake build. Built against `ext/ardour/` (cloned at `ARDOUR_TAG` — currently `9.2`) on the runner. **The build itself is fine; the issue is purely about how the resulting dylib references its dependencies on the runner's filesystem.**
+- `shims/ardour/` — the shim source. CMake build. Built against `ext/ardour/` (cloned at `ARDOUR_TAG` — currently `9.5`) on the runner. **The build itself is fine; the issue is purely about how the resulting dylib references its dependencies on the runner's filesystem.**
 - `crates/foyer-cli/src/main.rs` — Rust sidecar entry. Doesn't matter for this bug, but `foyer serve` is the binary the user runs to start the sidecar that talks to the shim.
 
 ## First-thing checks
