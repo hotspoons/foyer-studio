@@ -131,7 +131,7 @@ enum Command {
         /// Override the Ardour executable path. Wins over `executable`
         /// in the backend config and the PATH probe. Useful when you
         /// have multiple Ardour versions installed and want a specific
-        /// one (e.g., `--ardour-path /opt/Ardour-9.2/bin/ardour9`).
+        /// one (e.g., `--ardour-path /opt/Ardour-9.5/bin/ardour9`).
         /// Ignored when `--backend stub`.
         #[arg(long, value_name = "BIN")]
         ardour_path: Option<PathBuf>,
@@ -523,7 +523,15 @@ fn configure(
             );
             continue;
         }
-        match cfg::detect_ardour_executable() {
+        // Pass the shim's compile-time target so a $PATH `/usr/bin/ardour`
+        // that doesn't match the major.minor we built against gets
+        // skipped in favor of an in-repo source-built binary. Without
+        // this, an apt-installed 9.2 wrapper on a dev box wins over
+        // the fresh 9.5 build the user just ran `just ardour ensure`
+        // for, and the launched session ABI-mismatches the shim.
+        // `FOYER_ARDOUR_VERSION` is set by `crates/foyer-cli/build.rs`
+        // from the same env var the Ardour source clone uses.
+        match cfg::detect_ardour_executable_for(Some(env!("FOYER_ARDOUR_VERSION"))) {
             Some(found) => {
                 let prev = b.executable.as_ref().map(|p| p.display().to_string());
                 b.executable = Some(found.clone());
@@ -2219,7 +2227,16 @@ fn load_ardour_dev_env(root: &Path) -> Vec<(String, String)> {
     // issues for values that contain newlines. We compare against the
     // *current* process env and only return entries that actually
     // changed — keeps the spawn-side env minimal and audit-able.
+    //
+    // `TOP=<root>` is REQUIRED — `ardev_common_waf.sh` opens with
+    // `[ -z $TOP ] && echo "ardev_common.sh: TOP var must be set" >&2 && exit 1`
+    // and the previous incarnation of this function shipped without
+    // it: bash would exit 1 silently (we routed stderr to /dev/null
+    // for the dev-build noise), `load_ardour_dev_env` returned an
+    // empty Vec, and the spawned Ardour died at dlopen on
+    // `libardourcp.so` because no LD_LIBRARY_PATH ever got set.
     let out = match std::process::Command::new("bash")
+        .env("TOP", root)
         .arg("-c")
         .arg(format!(
             "set -e; source {} >/dev/null 2>&1; env -0",

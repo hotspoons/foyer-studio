@@ -9,9 +9,10 @@ name: release
 # Each zip contains the Rust `foyer` binary and the per-platform shim
 # (`libfoyer_shim.so` on Linux, `libfoyer_shim.dylib` on macOS) plus
 # README/LICENSE. The shim is ABI-locked to the Ardour minor version
-# named by `ardour_tag`; for now we ship a single pin (9.2) and grow
-# the matrix when API drift forces it. See docs/TODO.md "Multi-Ardour
-# version plan" for the long-term shape.
+# named by `ardour_tag`; for now we ship a single pin (currently
+# tracking 9.5 via `.env`) with runtime back-compat for older 9.x
+# ABIs and grow the matrix when API drift forces it. See docs/TODO.md
+# "Multi-Ardour version plan" for the long-term shape.
 #
 # Triggered by:
 #   * pushing a `v*` tag (publishes a real release)
@@ -25,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       ardour_tag:
-        description: "Ardour ref to build the shim against (e.g. 9.2 / master / a SHA). Empty = use the value in .env."
+        description: "Ardour ref to build the shim against (e.g. 9.5 / master / a SHA). Empty = use the value in .env."
         required: false
         default: ""
       release_tag:

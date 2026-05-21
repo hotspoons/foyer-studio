@@ -19,6 +19,7 @@
  * a map keyed by field names.
  */
 #include "msgpack_out.h"
+#include "ardour_version.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -113,7 +114,11 @@ enumerate_plugin_automation_lanes (
 			if (!alist) continue;
 			bool has_data = false;
 			{
+#if FOYER_ARDOUR_VERSION_GE(9, 3)
+				PBD::RWLock::ReaderLock lm (alist->lock ());
+#else
 				Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
+#endif
 				if (!alist->events ().empty ()) has_data = true;
 			}
 			if (!has_data && alist->automation_state () == ARDOUR::Off) continue;
@@ -1133,7 +1138,11 @@ encode_session_snapshot (Session& session,
 					const bool is_pan  = schema_map::is_pan_id  (l.control_id);
 					std::vector<std::pair<std::uint64_t, double>> pts;
 					{
+#if FOYER_ARDOUR_VERSION_GE(9, 3)
+						PBD::RWLock::ReaderLock lm (alist->lock ());
+#else
 						Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
+#endif
 						for (auto const* ev : alist->events ()) {
 							if (!ev) continue;
 							const auto sp = ev->when.samples ();
@@ -2019,7 +2028,11 @@ encode_track_updated (Session& session, const std::string& track_id)
 				const bool is_pan  = schema_map::is_pan_id  (l.control_id);
 				std::vector<std::pair<std::uint64_t, double>> pts;
 				{
+#if FOYER_ARDOUR_VERSION_GE(9, 3)
+					PBD::RWLock::ReaderLock lm (alist->lock ());
+#else
 					Glib::Threads::RWLock::ReaderLock lm (alist->lock ());
+#endif
 					for (auto const* ev : alist->events ()) {
 						if (!ev) continue;
 						const auto sp = ev->when.samples ();

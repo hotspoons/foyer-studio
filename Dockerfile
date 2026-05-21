@@ -41,6 +41,16 @@
 # ─────────────────────────────────────────────────────────────────
 FROM debian:trixie-slim AS builder
 
+# Dockerfile-side ARDOUR_TAG intentionally lags `.env`'s pin (currently
+# 9.5). The runtime image's apt path installs whatever `-t sid ardour`
+# resolves to and uses those libs at runtime — sid hasn't shipped 9.5
+# yet, so a mismatch between the source-clone tag and the apt-installed
+# version would link the shim against 9.5 headers but load 9.2 libs at
+# runtime (ABI mismatch → undefined symbols on session load). When the
+# version-matrix work lands (TODO: source-build path here too, so the
+# image carries its own libs and doesn't depend on sid's pace) this can
+# follow `.env` directly. For now: bump `.env`'s ARDOUR_TAG for local
+# dev (which source-builds), keep this at 9.2 until sid catches up.
 ARG ARDOUR_TAG=9.2
 ARG AUTOVOCODER_REF=master
 ARG GMSYNTH_VERSION=0.6.4

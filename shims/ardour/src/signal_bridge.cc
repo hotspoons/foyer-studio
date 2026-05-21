@@ -10,6 +10,7 @@
 static constexpr bool LOG_TRANSPORT_TICK = false;
 
 #include "signal_bridge.h"
+#include "ardour_version.h"
 
 #include <chrono>
 #include <cstdint>
@@ -428,7 +429,12 @@ SignalBridge::on_session_loaded ()
 					auto src = click_io->nth (i);
 					auto dst = master_in->nth (i);
 					if (!src || !dst) continue;
-					if (click_io->connect (src, dst->name (), &s) != 0) {
+#if FOYER_ARDOUR_VERSION_GE(9, 3)
+					const int rv = click_io->connect (src, dst->name ());
+#else
+					const int rv = click_io->connect (src, dst->name (), &s);
+#endif
+					if (rv != 0) {
 						PBD::warning << "foyer_shim: click_io->" << dst->name ()
 						             << " connect failed" << endmsg;
 					}

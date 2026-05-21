@@ -87,7 +87,7 @@ fn main() {
     // warns on mismatch (the surfaces ABI is version-sensitive).
     // Resolved before the shim block so the default install path
     // can derive the major-version folder name (`ardour9/`, etc.).
-    let ardour_version = std::env::var("FOYER_ARDOUR_VERSION").unwrap_or_else(|_| "9.2".into());
+    let ardour_version = std::env::var("FOYER_ARDOUR_VERSION").unwrap_or_else(|_| "9.5".into());
     let ardour_major = ardour_version
         .split('.')
         .next()

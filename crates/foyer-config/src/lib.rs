@@ -597,14 +597,48 @@ fn default_launcher_jail() -> Option<PathBuf> {
 /// common dev-box layouts (`/workspaces/ardour/build/...` for the sibling
 /// source checkout used by this repo). Returns `None` if nothing is found
 /// — the caller decides whether that's a fatal config error.
+///
+/// Equivalent to [`detect_ardour_executable_for`] with no version
+/// preference; kept as the zero-arg entry point for code paths
+/// (config seeding, tests) that don't have a build-time target to
+/// match against.
 pub fn detect_ardour_executable() -> Option<PathBuf> {
-    // 1. $PATH — preferred when Ardour is system-installed.
+    detect_ardour_executable_for(None)
+}
+
+/// Version-aware variant: when `target_version` is `Some("9.5")` (or
+/// any `major.minor`-shaped string), a `$PATH` candidate is only
+/// accepted if its `--version` output matches that major+minor.
+/// Otherwise we fall through to the source-build scans, so a dev box
+/// with an apt-installed Ardour 9.2 alongside a freshly-built
+/// `ext/ardour/build/gtk2_ardour/ardour-9.5.0` picks the 9.5 binary
+/// — avoiding the ABI mismatch where the shim was built against 9.5
+/// libs but `/usr/bin/ardour` loads 9.2 ones at runtime.
+///
+/// Probing the candidate with `--version` is one short subprocess
+/// per name in the search list; the cost is negligible compared to
+/// any subsequent Ardour launch. If the probe fails (binary refuses
+/// `--version`, output unparseable), we accept the candidate anyway
+/// — better to launch and let the operator see a clearer downstream
+/// error than to fall through silently.
+pub fn detect_ardour_executable_for(target_version: Option<&str>) -> Option<PathBuf> {
+    let target_mm = target_version.and_then(parse_major_minor);
+    // 1. $PATH — preferred when Ardour is system-installed AND its
+    //    major.minor matches our shim build target (when one is
+    //    provided). On mismatch, fall through so the source-build
+    //    scans below get a chance.
     for name in ["ardour9", "ardour8", "ardour7", "ardour6", "ardour"] {
         if let Some(p) = which_on_path(name) {
+            if let Some(target) = target_mm {
+                match probe_ardour_major_minor(&p) {
+                    Some(installed) if installed != target => continue,
+                    _ => {}
+                }
+            }
             return Some(p);
         }
     }
-    // 2. macOS app bundles.
+    // 2. macOS app bundles. Same version filter as the PATH branch.
     for candidate in [
         "/Applications/Ardour9.app/Contents/MacOS/Ardour9",
         "/Applications/Ardour8.app/Contents/MacOS/Ardour8",
@@ -612,9 +646,16 @@ pub fn detect_ardour_executable() -> Option<PathBuf> {
         "/Applications/Ardour.app/Contents/MacOS/Ardour",
     ] {
         let p = PathBuf::from(candidate);
-        if p.exists() {
-            return Some(p);
+        if !p.exists() {
+            continue;
         }
+        if let Some(target) = target_mm {
+            match probe_ardour_major_minor(&p) {
+                Some(installed) if installed != target => continue,
+                _ => {}
+            }
+        }
+        return Some(p);
     }
     // 3. Sibling dev-box Ardour build tree. `$FOYER_ARDOUR_BUILD_ROOT`
     // overrides the default `/workspaces/ardour` path so CI / non-Codespaces
@@ -643,45 +684,22 @@ pub fn detect_ardour_executable() -> Option<PathBuf> {
     None
 }
 
-/// Scan an Ardour source checkout for a built binary. Checks both the
-/// GUI tree (`<root>/build/gtk2_ardour/`) and the headless tree
-/// (`<root>/build/headless/`), preferring headless when `$DISPLAY` is
-/// unset (typical for devcontainers / CI — the GUI binary fails at
-/// startup with "cannot open display"). An explicit preference can be
-/// forced via `$FOYER_ARDOUR_PREFER_HEADLESS=1`.
+/// Scan an Ardour source checkout for a built binary. Always picks
+/// the GUI tree (`<root>/build/gtk2_ardour/`) — Foyer depends on X11
+/// for plugin / instrument GUI projection (xpra in the container,
+/// host X on dev / studio machines), so the headless `hardour` binary
+/// at `<root>/build/headless/` is intentionally NOT considered. A
+/// container with no DISPLAY should still run GUI Ardour against an
+/// in-container Xvfb (which `seed-ardour-config.sh` + the entrypoint
+/// already arrange); falling back to headless silently would just
+/// mask a misconfigured X surface and leave the operator wondering
+/// why plugin windows never paint.
 ///
-/// In each dir, picks `ardour-<version>` / `hardour-<version>` (the real
-/// ELF) over `ardour{N}` (the install wrapper) — the wrapper's `exec`
-/// target `/usr/local/lib/ardour.../...` doesn't exist on dev boxes.
+/// Picks `ardour-<version>` (the real ELF) over `ardour{N}` (the
+/// install wrapper) — the wrapper's `exec` target
+/// `/usr/local/lib/ardour.../...` doesn't exist on dev boxes.
 pub fn scan_ardour_build_tree(root: &Path) -> Option<PathBuf> {
-    let prefer_headless = headless_preferred();
-    let gui = scan_build_dir(&root.join("build/gtk2_ardour"), "ardour");
-    let headless = scan_build_dir(&root.join("build/headless"), "hardour");
-
-    if prefer_headless {
-        headless.or(gui)
-    } else {
-        gui.or(headless)
-    }
-}
-
-/// True when we should prefer the headless Ardour binary over the GUI
-/// one. Driven by `$DISPLAY` (empty = no X available) with an override
-/// via `$FOYER_ARDOUR_PREFER_HEADLESS` (`1`/`true` force-on, `0`/`false`
-/// force-off).
-fn headless_preferred() -> bool {
-    if let Ok(force) = std::env::var("FOYER_ARDOUR_PREFER_HEADLESS") {
-        let v = force.to_ascii_lowercase();
-        if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
-            return true;
-        }
-        if matches!(v.as_str(), "0" | "false" | "no" | "off") {
-            return false;
-        }
-    }
-    std::env::var("DISPLAY")
-        .map(|d| d.is_empty())
-        .unwrap_or(true)
+    scan_build_dir(&root.join("build/gtk2_ardour"), "ardour")
 }
 
 fn scan_build_dir(dir: &Path, prefix: &str) -> Option<PathBuf> {
@@ -761,6 +779,44 @@ fn is_executable(p: &Path) -> bool {
     true
 }
 
+/// Parse a `major.minor`-shaped string into a `(u32, u32)` tuple.
+/// Accepts trailing tokens (`"9.5.0"`, `"9.5-pre1"`, `"9.5"` all
+/// resolve to `(9, 5)`) so it copes with whatever shape `--version`
+/// happens to print across Ardour minor releases.
+fn parse_major_minor(s: &str) -> Option<(u32, u32)> {
+    // Find a version-shaped token if the input is a sentence (e.g.
+    // `ardour9 9.5.0`); otherwise treat the whole string as the token.
+    let token = s
+        .split_whitespace()
+        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.'))
+        .unwrap_or(s);
+    let mut parts = token.split(['.', '-', '+', '~']);
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Run `<bin> --version` and extract the major.minor of the
+/// installed Ardour. Used by [`detect_ardour_executable_for`] to
+/// reject a $PATH candidate that disagrees with the shim's compile
+/// target. Returns `None` if the probe failed (binary refused
+/// `--version`, output unparseable) — the caller defaults to
+/// accepting the candidate in that case, since "we couldn't tell"
+/// is a softer signal than "definitely wrong".
+fn probe_ardour_major_minor(bin: &Path) -> Option<(u32, u32)> {
+    let out = std::process::Command::new(bin)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    parse_major_minor(&stdout)
+}
+
 /// Minimal `which`: walk $PATH, return the first hit. We don't pull in
 /// the `which` crate because this is one call at startup and we'd
 /// rather keep the dep graph small.
@@ -815,6 +871,21 @@ impl Config {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn parse_major_minor_accepts_common_shapes() {
+        assert_eq!(parse_major_minor("9.5"), Some((9, 5)));
+        assert_eq!(parse_major_minor("9.5.0"), Some((9, 5)));
+        assert_eq!(parse_major_minor("9.5-pre1"), Some((9, 5)));
+        assert_eq!(parse_major_minor("ardour9 9.5.0"), Some((9, 5)));
+        assert_eq!(parse_major_minor("Ardour 9.2"), Some((9, 2)));
+        // Debian-epoch form `1:9.2.0+ds-1` deliberately not supported
+        // — we only feed this parser `--version` stdout, not dpkg
+        // output (shim_install.rs has its own check_version_compat
+        // for that surface).
+        assert_eq!(parse_major_minor("not-a-version"), None);
+        assert_eq!(parse_major_minor("9"), None);
+    }
 
     #[test]
     fn seed_roundtrip_parses() {
