@@ -431,9 +431,10 @@ expect pro-DAW waveform rendering: razor-sharp, continuous, per-pixel
 accurate at any zoom including extreme.
 
 **Decision:** Port Ardour's `WaveView::draw_image` algorithm
-(libs/waveview/wave_view.cc, lines 684–702 as of Ardour 9.2) into
-JavaScript, rendered via Canvas2D path strokes. Per pixel column we
-decide between three draw cases:
+(`libs/waveview/wave_view.cc` — function starts around line 471 as
+of Ardour 9.5; the per-column branch logic is in the inner loop a
+few hundred lines down) into JavaScript, rendered via Canvas2D path
+strokes. Per pixel column we decide between three draw cases:
 
 1. Current bucket's top is below the next bucket's bottom in pixel
    Y → falling signal → draw a diagonal `bot → next.bot` connector.

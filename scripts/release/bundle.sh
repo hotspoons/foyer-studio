@@ -154,9 +154,10 @@ Uninstall:
   ./install.sh uninstall            # remove binary + shim
   ./install.sh uninstall --purge    # also wipe ~/.local/share/foyer/
 
-Built against Ardour ${ARDOUR_TAG:-9.2}. The shim is ABI-locked to
-the Ardour minor version above; using it with a different Ardour
-build is undefined behavior.
+Built against Ardour ${ARDOUR_TAG:-9.5}. The shim covers the 9.x
+ABI family via the version-skew guards in shims/ardour/src/
+ardour_version.h; mixing with major versions (8.x, 10.x) is
+undefined behavior.
 EOF
 fi
 

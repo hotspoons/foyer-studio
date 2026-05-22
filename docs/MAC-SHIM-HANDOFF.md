@@ -180,7 +180,7 @@ ls /tmp/foyer/ardour-*.sock
 
 The most likely failure modes left:
 
-1. **Symbol mismatch** — the shim was built against ARDOUR_TAG=9.2 from CI. If the user's Ardour is a slightly different patch (rare on stable releases, but possible), some `_ZN6ARDOUR…` symbol lookup might fail at load time. Look for `Symbol not found:` in stderr or in a fresh crash report.
+1. **Symbol mismatch** — the shim was built against the CI's pinned `ARDOUR_TAG` (currently 9.5 — see `.env`). If the user's Ardour is on a different 9.x minor that drifts outside the version-skew guards in `shims/ardour/src/ardour_version.h` (currently 9.2 vs 9.3+ for `IO::connect` and `AutomationList::lock` shapes), some `_ZN6ARDOUR…` symbol lookup might fail at load time. Look for `Symbol not found:` in stderr or in a fresh crash report.
 
 2. **The shim's `install_name`** (its `LC_ID_DYLIB`) might still embed the runner path. Check:
    ```bash
