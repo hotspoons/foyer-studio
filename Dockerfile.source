@@ -1,10 +1,27 @@
-# Production Dockerfile — Foyer Studio + Ardour + autovocoder + shim.
+# Foyer Studio production image — source-built-Ardour variant.
+#
+# ── Which Dockerfile do I want? ──────────────────────────────────
+#   * Dockerfile.source (this file)
+#     - Source-builds Ardour from upstream at `$ARDOUR_TAG`.
+#     - Slow build (~25 min for the Ardour layer; ~40 min total).
+#     - Tracks `.env`'s `ARDOUR_TAG` exactly (currently 9.5).
+#     - Use this for release artifacts and any time the shim's
+#       ABI-skew guards (shims/ardour/src/ardour_version.h) depend
+#       on a specific Ardour version being present.
+#   * Dockerfile.prebuilt
+#     - Pulls Ardour from Debian sid via apt (`-t sid ardour`).
+#     - Faster build (~5 min for the Ardour layer; ~15 min total).
+#     - Pinned to whatever sid currently ships (9.2 as of 2026-05).
+#     - Use this for snapshot/CI iteration where Ardour version
+#       isn't the variable under test.
+# CI's `docker.yml` selects via `workflow_dispatch` input
+# `image_variant` (defaults to `source`).
 #
 # Two-stage build:
-#   * `builder` stage compiles Ardour from source, the C++ shim that
+#   * `builder` stage source-builds Ardour, the C++ shim that
 #     drives it, the autovocoder LV2 plugin, and the Rust sidecar
-#     binary in release mode. None of this tooling stays in the final
-#     image.
+#     binary in release mode. None of this tooling stays in the
+#     final image.
 #   * `runtime` stage starts from a slim Debian base, copies in the
 #     built artifacts, and ships an entrypoint script that lights up
 #     JACK + Foyer the way `just run` does in dev — minus the
@@ -29,7 +46,7 @@
 #     server pointed at by `FOYER_NETJACK_HOST`.
 #
 # To build:
-#   docker build -t foyer-studio:latest .
+#   docker build -f Dockerfile.source -t foyer-studio:latest .
 # To run locally:
 #   docker run --rm -p 3838:3838 -v "$(pwd):/projects" foyer-studio:latest
 # To deploy to Cloud Run:
@@ -41,49 +58,22 @@
 # ─────────────────────────────────────────────────────────────────
 FROM debian:trixie-slim AS builder
 
-# Dockerfile-side ARDOUR_TAG intentionally lags `.env`'s pin (currently
-# 9.5). The runtime image's apt path installs whatever `-t sid ardour`
-# resolves to and uses those libs at runtime — sid hasn't shipped 9.5
-# yet, so a mismatch between the source-clone tag and the apt-installed
-# version would link the shim against 9.5 headers but load 9.2 libs at
-# runtime (ABI mismatch → undefined symbols on session load). When the
-# version-matrix work lands (TODO: source-build path here too, so the
-# image carries its own libs and doesn't depend on sid's pace) this can
-# follow `.env` directly. For now: bump `.env`'s ARDOUR_TAG for local
-# dev (which source-builds), keep this at 9.2 until sid catches up.
-ARG ARDOUR_TAG=9.2
+# Ardour source ref the image is built against — matches `.env`'s
+# ARDOUR_TAG. The image source-builds Ardour from upstream (no apt /
+# Debian-sid dependency), so this is the SINGLE knob that decides the
+# Ardour version baked into the binary. CI passes the .env value through
+# as a `--build-arg ARDOUR_TAG=...` (see .github/workflows/docker.yml).
+ARG ARDOUR_TAG=9.5
 ARG AUTOVOCODER_REF=master
 ARG GMSYNTH_VERSION=0.6.4
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Add Debian sid as a low-priority apt source so we can pull
-# Ardour 9.2.0+ds from there (trixie's main archive carries
-# Ardour 8.12 which is ABI-incompatible with the shim's 9.x build
-# expectations). Pin sid Pin-Priority=100 / trixie=990 so apt
-# default-pulls from trixie EXCEPT for the explicit `-t sid`
-# requests below — minimizes drift onto a sid stack.
-#
-# What sid's `ardour` package transitively pulls in (also onto
-# trixie): gcc-16-base, libgcc-s1, libstdc++6, libxml2-16,
-# librubberband3, libqm-dsp0t64, libblas3, libgfortran5, liblapack3.
-# These are leaf-end runtime libs; pulling them from sid widens
-# the libstdc++ ABI to gcc-16's, which is forward-compatible with
-# trixie's gcc-14 system libs (newer libstdc++ runs older code).
-RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/sid.list \
- && printf '%s\n' \
-      'Package: *' \
-      'Pin: release a=unstable' \
-      'Pin-Priority: 100' \
-      > /etc/apt/preferences.d/sid-pin
-
-# Build-time deps. Most of these are -dev packages for libs
-# transitively used by Ardour's headers (the shim includes them).
-# The Ardour BINARIES + LIBRARIES come from `apt -t sid ardour`
-# below, so we no longer need the toolchain to compile Ardour
-# itself — just the shim + backend + sidecar against Ardour's
-# already-installed shared libraries.
+# Build-time deps. -dev packages for libs that Ardour, the shim, and
+# the autovocoder pull in via #include. Ardour 9.5 is source-built
+# inside this stage (`python3 waf build`), so the full toolchain — not
+# just the headers — needs to be present.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
       pkg-config \
@@ -125,29 +115,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libopus-dev \
       libudev-dev \
       libltc-dev \
- && apt-get install -y --no-install-recommends -t sid \
-      ardour \
  && rm -rf /var/lib/apt/lists/*
-# Two omissions worth noting:
-#
-# 1. `libwebsockets-dev` intentionally omitted — the Rust sidecar
-#    uses pure-Rust tokio-tungstenite for its WS surface; the shim
-#    doesn't touch websockets. The package was a defensive include
-#    for an Ardour build path we no longer take. Removing it also
-#    drops a transitive `libssl-dev` puller, but the pin fix above
-#    is the load-bearing thing — the `Pin: a=unstable Pin-Priority:
-#    100` on sid (and absence of an explicit `a=stable` boost)
-#    leaves trixie/main and trixie-security tied at the default 500
-#    so apt naturally picks the security-updated `libssl-dev=u2`
-#    over `=u1` from main. Earlier revisions of this Dockerfile
-#    boosted `a=stable` to 990, which (because trixie-security is
-#    `a=stable-security`, not `a=stable`) demoted security to 500
-#    while main went to 990, flipping the version preference.
-#
-# 2. `libcurl4-dev` is the GnuTLS flavor (not the OpenSSL one).
-#    Functionally identical for our build path (waf configure picks
-#    libcurl via pkg-config), and avoids transitively pulling
-#    libssl-dev — belt-and-braces against any future puller.
+# `libwebsockets-dev` intentionally omitted — the Rust sidecar uses
+# pure-Rust tokio-tungstenite for its WS surface; the shim doesn't
+# touch websockets. `libcurl4-dev` is the GnuTLS flavor (not OpenSSL).
+# Functionally identical for our build path (waf configure picks
+# libcurl via pkg-config) and avoids transitively pulling libssl-dev.
 
 # Rust toolchain — minimal profile keeps the builder lean.
 ENV RUSTUP_HOME=/usr/local/rustup \
@@ -158,18 +131,29 @@ RUN curl --proto '=https' --tlsv1.2 -sSf \
         https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
 
-# ── Ardour source headers ────────────────────────────────────────
-# Even though we apt-installed Ardour binaries above, Debian (like
-# upstream Ardour) doesn't ship a `-dev` package — Ardour isn't
-# designed as a library. We still need the SOURCE TREE for headers
-# the shim + backend include (`ardour/session.h` etc.), and we need
-# `waf configure` to generate a handful of config headers
-# (`libardour-config.h` etc. — these encode CMake-flag-equivalent
-# build-time switches that the headers `#ifdef`-guard on).
+# ── Ardour source build ──────────────────────────────────────────
+# Clone Ardour at $ARDOUR_TAG and build it from source. This is the
+# slow path (~25 min on a beefy runner, longer on emulated arm64),
+# but it's the ONLY way to ship 9.5 today — Debian sid still carries
+# 9.2 and a sid-installed Ardour would force an ABI mismatch with the
+# shim that's compiled against 9.5 headers (the version-skew guards
+# in shims/ardour/src/ardour_version.h gate two API changes that
+# landed in 9.3+).
 #
-# Critically we DON'T run `waf build` — that's the 15-min hot
-# path. Configure-only takes ~30 s and produces every header we
-# need; the actual .so files come from the apt install.
+# Install layout (waf install --destdir=/opt/ardour-stage):
+#   /opt/ardour-stage/usr/bin/ardour9                  wrapper script
+#   /opt/ardour-stage/usr/bin/ardour9-*                session_utils helpers
+#   /opt/ardour-stage/usr/lib/ardour9/ardour-9.5.X     actual binary
+#   /opt/ardour-stage/usr/lib/ardour9/*.so             private libs +
+#                                                       backends/, panners/,
+#                                                       surfaces/, LV2/
+#   /opt/ardour-stage/usr/share/ardour9/               data files
+#   /opt/ardour-stage/etc/ardour9/                     config templates
+# The runtime stage copies the staged tree as a single layer.
+#
+# `--sysconfdir=/etc` lands config templates at /etc/ardour9 instead
+# of /usr/etc/ardour9 (waf default for prefix=/usr) — FHS-correct and
+# matches what Debian's ardour package used to do.
 RUN git -c advice.detachedHead=false clone --depth 1 \
         --branch "${ARDOUR_TAG}" \
         https://github.com/Ardour/ardour.git /opt/ardour
@@ -177,7 +161,10 @@ RUN git -c advice.detachedHead=false clone --depth 1 \
 WORKDIR /opt/ardour
 RUN CXXFLAGS="-Wno-deprecated-declarations" \
     CFLAGS="-Wno-deprecated-declarations" \
-    python3 waf configure --optimize --noconfirm
+    python3 waf configure --optimize --noconfirm \
+        --prefix=/usr --sysconfdir=/etc \
+ && python3 waf build -j"$(nproc)" \
+ && python3 waf install --destdir=/opt/ardour-stage
 
 # ── Foyer shim + sidecar + autovocoder ────────────────────────────
 WORKDIR /workspace
@@ -427,7 +414,6 @@ RUN KXSTUDIO_PKGS=""; \
       # it from xpra.org's repo separately.
       xvfb \
       \
-      ardour-lv2-plugins \
       fluid-soundfont-gm fluid-soundfont-gs fluidr3mono-gm-soundfont \
       timgm6mb-soundfont fluidsynth qsynth \
       \
@@ -490,46 +476,30 @@ RUN groupadd --gid 1000 foyer \
  && useradd --uid 1000 --gid foyer --shell /bin/bash --create-home foyer \
  && usermod -aG audio foyer
 
-# ── Ardour 9.2 from sid ──────────────────────────────────────────
-# Same trick as the builder stage: trixie's archive carries Ardour
-# 8.12 only; we want 9.2. Pin sid at low priority so its packages
-# only get used for what we explicitly request, and pull just
-# `ardour` (which Depends on `ardour-data` and `ardour-lv2-plugins`
-# by version, so apt cascades both transitively from sid too).
-#
-# What this gives us:
-#   /usr/bin/ardour          — wrapper script (sets LD_LIBRARY_PATH,
-#                              GTK_PATH, ARDOUR_DATA_PATH, …) then
-#                              exec's the real binary.
-#   /usr/lib/ardour9/        — private libs + helper bins +
-#                              backends/ + surfaces/ + engines/.
-#   /usr/bin/ardour9-*       — session_utils helpers (incl.
-#                              ardour9-new_empty_session that
-#                              foyer-cli's bash launcher invokes
-#                              for new-session bootstrapping).
+# ── Ardour 9.5 from the builder stage ────────────────────────────
+# Source-built upstream by the builder above (`python3 waf install
+# --destdir=/opt/ardour-stage --prefix=/usr --sysconfdir=/etc`),
+# laid out as:
+#   /usr/bin/ardour9          wrapper (sets LD_LIBRARY_PATH, GTK_PATH,
+#                             ARDOUR_DATA_PATH, ARDOUR_CONFIG_PATH,
+#                             ARDOUR_DLL_PATH, VAMP_PATH; execs the
+#                             real binary)
+#   /usr/bin/ardour9-*        session_utils helpers (incl.
+#                             ardour9-new_empty_session that
+#                             foyer-cli's bash launcher invokes)
+#   /usr/lib/ardour9/         private libs + backends/ + panners/ +
+#                             surfaces/ + LV2/ (the a-* bundled
+#                             plugins go here, scanned via
+#                             lv2_bundled_search_path → ${LIBDIR}/LV2)
+#   /usr/share/ardour9/       data files
+#   /etc/ardour9/             config templates
 #
 # foyer-cli's executable detection (foyer-config::detect_ardour_executable)
-# uses $PATH first, so `/usr/bin/ardour` is picked up automatically.
-# `find_new_empty_session_helper` looks for `ardour*-new_empty_session`
-# in the same dir as the resolved exec — `/usr/bin/` matches, no
-# manual paths to maintain.
-RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/sid.list \
- && printf '%s\n' \
-      'Package: *' \
-      'Pin: release a=unstable' \
-      'Pin-Priority: 100' \
-      > /etc/apt/preferences.d/sid-pin \
- && apt-get update \
- && apt-get install -y --no-install-recommends -t sid \
-      ardour \
- && rm -rf /var/lib/apt/lists/*
-
-# `foyer-config::detect_ardour_executable` searches $PATH first, so
-# `/usr/bin/ardour` (apt's wrapper script that sets env vars + execs
-# the real binary at /usr/lib/ardour9/ardour-9.2.0~ds) is found
-# automatically. `find_new_empty_session_helper` scans the same dir
-# as the resolved exec for `ardour*-new_empty_session` — apt installs
-# `/usr/bin/ardour9-new_empty_session` so that picker hits cleanly.
+# searches ["ardour9", "ardour8", "ardour7", "ardour6", "ardour"] on
+# $PATH, so /usr/bin/ardour9 matches first. find_new_empty_session_helper
+# scans the same dir for `ardour*-new_empty_session` — /usr/bin/ardour9-
+# new_empty_session is right there.
+COPY --from=builder /opt/ardour-stage/ /
 
 # ── Foyer shim + autovocoder + sidecar binary ────────────────────
 COPY --from=builder /workspace/shims/ardour/cmake-build/libfoyer_shim.so \
