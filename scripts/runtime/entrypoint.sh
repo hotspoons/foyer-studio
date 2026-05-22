@@ -283,7 +283,7 @@ fi
 
 # Ardour env setup: both Dockerfile variants land a wrapper at
 # `/usr/bin/ardour9` and the real binary under `/usr/lib/ardour9/` —
-#   * Dockerfile.source: `waf install --prefix=/usr --sysconfdir=/etc`
+#   * Dockerfile.source: `waf install --prefix=/usr --configdir=/etc`
 #     generates the wrapper from gtk2_ardour/ardour.sh.in.
 #   * Dockerfile.prebuilt: apt's `-t sid ardour` package ships the
 #     same shape (Debian's `update-alternatives` registers

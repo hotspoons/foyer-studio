@@ -151,9 +151,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf \
 #   /opt/ardour-stage/etc/ardour9/                     config templates
 # The runtime stage copies the staged tree as a single layer.
 #
-# `--sysconfdir=/etc` lands config templates at /etc/ardour9 instead
+# `--configdir=/etc` lands config templates at /etc/ardour9 instead
 # of /usr/etc/ardour9 (waf default for prefix=/usr) — FHS-correct and
-# matches what Debian's ardour package used to do.
+# matches what Debian's ardour package used to do. Ardour's
+# `tools/autowaf.py` maps `--configdir` → the wscript's `SYSCONFDIR`
+# env var, which the top-level wscript then joins with `ardour9` to
+# get CONFDIR.
 RUN git -c advice.detachedHead=false clone --depth 1 \
         --branch "${ARDOUR_TAG}" \
         https://github.com/Ardour/ardour.git /opt/ardour
@@ -162,7 +165,7 @@ WORKDIR /opt/ardour
 RUN CXXFLAGS="-Wno-deprecated-declarations" \
     CFLAGS="-Wno-deprecated-declarations" \
     python3 waf configure --optimize --noconfirm \
-        --prefix=/usr --sysconfdir=/etc \
+        --prefix=/usr --configdir=/etc \
  && python3 waf build -j"$(nproc)" \
  && python3 waf install --destdir=/opt/ardour-stage
 
@@ -478,7 +481,7 @@ RUN groupadd --gid 1000 foyer \
 
 # ── Ardour 9.5 from the builder stage ────────────────────────────
 # Source-built upstream by the builder above (`python3 waf install
-# --destdir=/opt/ardour-stage --prefix=/usr --sysconfdir=/etc`),
+# --destdir=/opt/ardour-stage --prefix=/usr --configdir=/etc`),
 # laid out as:
 #   /usr/bin/ardour9          wrapper (sets LD_LIBRARY_PATH, GTK_PATH,
 #                             ARDOUR_DATA_PATH, ARDOUR_CONFIG_PATH,
