@@ -16,7 +16,7 @@ git config --global --add safe.directory /workspaces/ardour
 # scripts/dev/ardour.sh and the CI workflows. To track a different
 # version, set ARDOUR_TAG in your environment (e.g. .bashrc) and rerun
 # `just ardour ensure`.
-ARDOUR_TAG="${ARDOUR_TAG:-9.2}"
+ARDOUR_TAG="${ARDOUR_TAG:-9.5}"
 ARDOUR_REPO_EXT="/workspaces/foyer-studio/ext/ardour"
 ARDOUR_LEGACY_SIBLING="/workspaces/ardour"
 
