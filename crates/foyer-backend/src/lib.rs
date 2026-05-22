@@ -175,6 +175,30 @@ pub trait Backend: Send + Sync + 'static {
     async fn subscribe(&self) -> Result<EventStream, BackendError>;
     async fn set_control(&self, id: EntityId, value: ControlValue) -> Result<(), BackendError>;
 
+    /// Wipe mutable test fixtures back to their initial state. Stub-only —
+    /// real DAW backends reject with `Unsupported`. Used by the Playwright
+    /// `_boot.js::bootTimeline` helper to give each spec a clean baseline
+    /// instead of sharing the cumulative mutation history of every prior
+    /// spec in a `workers: 1, fullyParallel: false` run.
+    ///
+    /// Why this trait method exists at all: the stub's region store
+    /// (and a handful of sibling caches) are HashMaps that accumulate
+    /// for the life of the process. Playwright runs ~100 specs against
+    /// one shared stub, and the region-clipboard / region-slice specs
+    /// fail in CI because they assume the seeded fixture but actually
+    /// see leftover state from earlier mutations. Calling this from
+    /// each spec's boot flow guarantees the seeded fixture is exactly
+    /// what `regions::synthesize_for` produces — same as a fresh
+    /// process boot, without paying the process-fork cost per spec.
+    ///
+    /// Default impl errors so a misuse against a real DAW backend is
+    /// loud rather than silent. The WS handler at the server layer
+    /// gates this behind a "stub backend in dev / test mode" check so
+    /// production deployments can't be reset over the wire.
+    async fn reset_test_state(&self) -> Result<(), BackendError> {
+        Err(BackendError::Other("reset_test_state is stub-only".into()))
+    }
+
     /// Capability snapshot — map of `feature_id → supported`. Emitted in
     /// `ClientGreeting.features` so clients can gate UI for back-ends
     /// with narrower feature sets than Ardour. The default assumes a

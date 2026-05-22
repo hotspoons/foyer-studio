@@ -445,11 +445,20 @@ test-ui-ci:
     #!/usr/bin/env bash
     set -euo pipefail
     bin="${FOYER_BIN:-./target/debug/foyer}"
-    if [ ! -x "$bin" ]; then
-        if [ -n "${FOYER_BIN:-}" ]; then
-            echo "FOYER_BIN=$FOYER_BIN is not executable — refusing to fall back to a build" >&2
-            exit 1
-        fi
+    if [ -n "${FOYER_BIN:-}" ] && [ ! -x "$FOYER_BIN" ]; then
+        echo "FOYER_BIN=$FOYER_BIN is not executable — refusing to fall back to a build" >&2
+        exit 1
+    fi
+    # ALWAYS rebuild when FOYER_BIN isn't explicitly pinned. Earlier
+    # revisions gated this on `[ ! -x "$bin" ]`, which only rebuilt
+    # when the binary was missing. A stale `./target/debug/foyer`
+    # from before a WS-schema change would then silently run against
+    # source that had moved on — the failure mode was identical to
+    # "tests run but the new Command variant goes unrecognized,"
+    # which is exactly the flake we hit on the test_reset_state
+    # plumbing. Cargo's incremental compilation makes the
+    # no-op path ~0.5 s anyway.
+    if [ -z "${FOYER_BIN:-}" ]; then
         cargo build --bin foyer
     fi
     # Sanity: print binary metadata so a CI log shows what we're

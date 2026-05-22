@@ -768,6 +768,72 @@ impl AppState {
         }
     }
 
+    /// Test-only: replace `state.backend` with a fresh `StubBackend`
+    /// and respawn the legacy event pump so its events flow with
+    /// `session_id: None`. The Playwright `_boot.js::bootTimeline`
+    /// helper invokes this (via `Command::TestResetState`) to give
+    /// each spec a stable, freshly-seeded launcher baseline.
+    ///
+    /// Why we re-spawn the legacy pump instead of just resetting in
+    /// place: after any earlier `swap_backend` call (every agent
+    /// `session.new` triggers one), the original legacy pump has
+    /// been aborted, and the now-current `state.backend` Arc is the
+    /// agent-created session's stub — also registered in the
+    /// `SessionRegistry`, so its events come tagged with that
+    /// session's id and the client store filters them out when the
+    /// freshly-loaded page's `currentSessionId` doesn't match.
+    /// Spawning a fresh stub + a fresh untagged pump fixes both
+    /// halves: the new stub starts with a seeded fixture (no
+    /// accumulated mutations), and the new pump tags everything
+    /// `session_id: None` which bypasses the client's session-scoped
+    /// filter unconditionally.
+    ///
+    /// Leaves the `SessionRegistry` alone — `scripts-panel` and
+    /// `spectrum` specs that don't go through `bootTimeline` keep
+    /// their existing session focus and don't see this operation.
+    /// `focus_session_id` is cleared so subsequent `state.backend()`
+    /// lookups land on the fresh launcher, not a stale registry
+    /// entry.
+    pub(crate) async fn reset_to_fresh_launcher_for_test(self: &Arc<Self>) {
+        // Abort the current legacy pump if it's still alive (it
+        // usually isn't, since `swap_backend` would have killed it
+        // earlier in the run).
+        {
+            let mut slot = self.pump_handle.lock().await;
+            if let Some(h) = slot.take() {
+                h.abort();
+            }
+        }
+        // Mint a fresh launcher. The boot path passes config-driven
+        // sample-rate / test-tone / jail; this reset deliberately
+        // doesn't — we want the baseline every spec sees, not the
+        // operator-tweaked one. Tests that need a specific
+        // configuration can build their own backend and inject it.
+        let fresh: Arc<dyn Backend> = Arc::new(foyer_backend_stub::StubBackend::new());
+        self.install_active_backend(fresh.clone()).await;
+        // Spawn a new legacy pump pointed at the fresh backend.
+        // `event_pump` tags every emitted envelope with
+        // `session_id: None`, which is what bypasses the client's
+        // session-scoped filter and lets the test's `list_regions`
+        // / `duplicate_region` round-trips actually update
+        // `_regionsByTrack`.
+        let s = self.clone();
+        let backend_for_pump = fresh.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = event_pump(backend_for_pump, s).await {
+                tracing::error!("test-reset legacy pump died: {e}");
+            }
+        });
+        *self.pump_handle.lock().await = Some(handle);
+        // Drop the focus pointer so subsequent `state.backend()`
+        // lookups fall through to the freshly-installed launcher.
+        *self.focus_session_id.write().await = None;
+        // The launcher's `subscribe()` will deliver an initial
+        // snapshot through the new pump on its first read, but we
+        // don't wait for it — the WS handler's caller already
+        // assumes async settling.
+    }
+
     /// Same key set as [`Event::ClientGreeting`]: backend [`Backend::features`]
     /// merged with server-only flags (e.g. `native_plugin_gui`).
     pub(crate) async fn merged_feature_map(&self) -> std::collections::BTreeMap<String, bool> {

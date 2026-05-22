@@ -105,7 +105,13 @@ default = ["headless-render"]
 ngrok = ["dep:ngrok"]
 headless-render = ["dep:chromiumoxide", "dep:serde_urlencoded", "dep:which"]
 
+[dependencies.foyer-backend-stub]
+# Used at runtime by the `Command::TestResetState` handler to mint a
+# fresh launcher when Playwright resets per-spec. foyer-cli's launcher
+# already drags this crate in for the bootstrap stub, so promoting it
+# from `dev-dependencies` here adds nothing to the shipping binary.
+workspace = true
+
 [dev-dependencies]
-foyer-backend-stub.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 tokio-tungstenite = "0.24"

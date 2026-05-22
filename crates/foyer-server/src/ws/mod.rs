@@ -3838,6 +3838,23 @@ async fn dispatch_command(
             cmd_agent::session_rename(state, id, title).await
         }
 
+        // ── Test-only: hot-swap a fresh launcher StubBackend in
+        //    place of `state.backend` and respawn the legacy event
+        //    pump so subsequent broadcasts flow with `session_id:
+        //    None`. See `AppState::reset_to_fresh_launcher_for_test`
+        //    for the full rationale.
+        //
+        //    Deliberately leaves the SessionRegistry intact — specs
+        //    that don't go through `bootTimeline` (e.g.
+        //    `scripts-panel`, `spectrum`) depend on the agent-
+        //    created sessions still being reachable via the
+        //    switcher. Only the "what does `state.backend()`
+        //    return" anchor is reset.
+        Command::TestResetState => {
+            state.reset_to_fresh_launcher_for_test().await;
+            tracing::info!("test_reset_state: hot-swapped a fresh launcher StubBackend");
+        }
+
         // ── DAW scripting (shim-declared surface) ─────────────────────
         // Bodies live in `cmd_scripts.rs`; the arms route fields through.
         Command::ListScripts => cmd_scripts::list_scripts(state).await?,
