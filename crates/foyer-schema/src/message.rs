@@ -2302,6 +2302,19 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+
+    /// Test-only: wipe the backend's mutable test fixtures so the next
+    /// list_regions / list_tracks / etc. returns the original seeded
+    /// state. Implemented only by the in-memory stub; real DAW
+    /// backends reject with an error event.
+    ///
+    /// Surfaced for the Playwright `_boot.js::bootTimeline` helper so
+    /// each spec starts from the same baseline regardless of what the
+    /// preceding spec mutated. The server gates dispatch by inspecting
+    /// the active backend — if it isn't stub, the command is logged
+    /// and dropped without touching real session state.
+    #[serde(rename = "test_reset_state")]
+    TestResetState,
 }
 
 #[cfg(test)]

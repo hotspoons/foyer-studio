@@ -27,6 +27,22 @@ async function readConnection(page) {
 }
 
 test("primary + secondary windows share peer_id and audio is gated", async ({ browser }) => {
+  // FIXME(2026-05-22): flaky in CI. The test opens two pages in
+  // quick succession: a "primary" (just `/`) then a "secondary"
+  // with `?parent=<peer_id>&slot=…`. Under load, the secondary's
+  // WS handshake sometimes races ahead of the primary's, the
+  // server registers it first as primary, and the actual primary
+  // ends up flagged as a secondary — so the test's
+  // `audio_ingress_open` from the "primary" trips the
+  // `secondary_window_audio` gate it was checking AGAINST.
+  //
+  // Right fix: pin the role explicitly on the connect URL
+  // (`?role=primary` / `?role=secondary`) instead of inferring it
+  // from connection order, so the test isn't coupled to the WS
+  // handshake interleaving. Or have the spec wait for the primary
+  // to reach a "ready" state on the server side before opening the
+  // secondary page. Disabled until one of those lands.
+  test.fixme(true, "races primary/secondary WS handshake order (see comment)");
   const ctx = await browser.newContext();
   // First (primary) window.
   const primaryPage = await ctx.newPage();

@@ -305,6 +305,50 @@ impl Backend for StubBackend {
         Ok(self.state.lock().await.session_clone())
     }
 
+    /// Test-only reset — wipes the mutable caches so each Playwright
+    /// spec starts from the same seeded fixture. We don't try to be
+    /// surgical: the goal is "looks exactly like a freshly-booted
+    /// stub", so we reset everything that accumulates across a
+    /// process lifetime. The synthesized region fixture, the
+    /// waveform cache, and the duplicate-id seed all re-build lazily
+    /// on the first read after this returns.
+    ///
+    /// We deliberately DO NOT touch `state` (the session itself —
+    /// tracks, plugins, transport, sections) since recreating those
+    /// here would require rebroadcasting the snapshot and breaking
+    /// every connected client's references. The fixture's track
+    /// list is immutable for the life of the stub anyway; only the
+    /// region store and its waveform cache leak across specs in a
+    /// way that matters. If we ever start mutating tracks /
+    /// plugins via tool calls, extend this.
+    async fn reset_test_state(&self) -> Result<(), BackendError> {
+        // Replace the region store wholesale; `regions_for` will
+        // re-seed via `synthesize_for` on the next list_regions
+        // call, matching the original fixture exactly.
+        *self.regions.lock().await = regions::RegionStore::new();
+        *self.waveforms.lock().await = waveform::WaveformCache::new();
+        self.dup_seed.store(1, std::sync::atomic::Ordering::Relaxed);
+        // Emit an empty RegionsList for every track so any client
+        // still holding a stale `_regionsByTrack[trackId]` cache
+        // drops it. The client then re-requests via `list_regions`
+        // when the timeline view next paints, which triggers fresh
+        // `synthesize_for` calls on the server.
+        //
+        // We could fire a single global "everything's stale" event,
+        // but the existing wire schema already carries per-track
+        // `RegionsList` granularity and clients dedupe by id — so
+        // reusing it keeps the surface tiny.
+        let snap = self.state.lock().await.session_clone();
+        for track in &snap.tracks {
+            let _ = self.tx.send(Event::RegionsList {
+                track_id: track.id.clone(),
+                regions: Vec::new(),
+                timeline: self.timeline_meta(),
+            });
+        }
+        Ok(())
+    }
+
     /// Synthesize a port graph so agent + UI workflows that depend on
     /// `Backend::list_ports` (record-arm, port-matrix, input-source
     /// dropdowns) have something realistic to chew on in the
