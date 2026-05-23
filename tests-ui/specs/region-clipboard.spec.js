@@ -54,6 +54,23 @@ async function waitForRegionCount(page, trackId, target) {
   );
 }
 
+/// `controlSet` is fire-and-forget — the local store only updates when the
+/// server echoes the `ControlUpdate` back. A fixed `setTimeout(250)` for
+/// the round-trip was the original flake source: CI runners under load
+/// (or with the agent's headless-render warm-up still in flight) routinely
+/// missed the deadline and paste read the stale playhead → landed the
+/// duplicate on top of the source → region count didn't grow.
+async function setPositionAndWait(page, samples) {
+  await page.evaluate((v) => {
+    window.__foyer.ws.controlSet("transport.position", v);
+  }, samples);
+  await page.waitForFunction(
+    (v) =>
+      Number(window.__foyer?.store?.state?.controls?.get("transport.position") || -1) === v,
+    samples,
+  );
+}
+
 async function selectRegion(page, regionId) {
   await page.evaluate(`(() => {
     ${DEEP_FIND}
@@ -81,10 +98,7 @@ test.describe("region clipboard / mute / duplicate", () => {
       return deepFind("foyer-timeline-view").hasClipboard();
     })()`)).toBe(true);
     // Move playhead well clear of the source region, paste, count grows by 1.
-    await page.evaluate(() => {
-      window.__foyer.ws.controlSet("transport.position", 480_000); // ~10s @ 48k
-    });
-    await new Promise((r) => setTimeout(r, 250));
+    await setPositionAndWait(page, 480_000); // ~10s @ 48k
     await page.evaluate(`(() => {
       ${DEEP_FIND}
       deepFind("foyer-timeline-view").pasteRegionsAtPlayhead();
@@ -147,10 +161,7 @@ test.describe("region clipboard / mute / duplicate", () => {
     // Cut MUST NOT delete the original until paste fires (DuplicateRegion
     // needs the source to still exist server-side).
     expect(await regionCount(page, seed.trackId)).toBe(before);
-    await page.evaluate(() => {
-      window.__foyer.ws.controlSet("transport.position", 960_000);
-    });
-    await new Promise((r) => setTimeout(r, 200));
+    await setPositionAndWait(page, 960_000);
     await page.evaluate(`(() => {
       ${DEEP_FIND}
       deepFind("foyer-timeline-view").pasteRegionsAtPlayhead();

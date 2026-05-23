@@ -158,13 +158,17 @@ config:
         kind: ardour
         enabled: true
         label: Ardour
-        # Path to the Ardour wrapper inside the runtime image. The
-        # production Dockerfile installs ardour from Debian sid via
-        # apt, which lands the launcher at /usr/bin/ardour and the
-        # actual binary at /usr/lib/ardour9/ardour-9.<ver>~ds. Use
-        # the wrapper — it sets up LD_LIBRARY_PATH + LV2 search
-        # paths before exec'ing the binary.
-        executable: /usr/bin/ardour
+        # Path to the Ardour wrapper inside the runtime image. Both
+        # Dockerfile variants ship `/usr/bin/ardour9`:
+        #   * Dockerfile.source: `waf install --prefix=/usr` generates
+        #     the wrapper from gtk2_ardour/ardour.sh.in and lays libs
+        #     under /usr/lib/ardour9/.
+        #   * Dockerfile.prebuilt: Debian's ardour package registers
+        #     /usr/bin/ardour9 via update-alternatives and ships libs
+        #     at the same /usr/lib/ardour9/ path.
+        # Use the wrapper — it sets up LD_LIBRARY_PATH + GTK_PATH +
+        # ARDOUR_*_PATH before exec'ing the binary.
+        executable: /usr/bin/ardour9
   tunnel:
     cloudflare:
       enabled: false

@@ -281,16 +281,18 @@ if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
     fi
 fi
 
-# Ardour env setup: apt's `/usr/bin/ardour` is a wrapper script that
-# sets `LD_LIBRARY_PATH`, `GTK_PATH`, `ARDOUR_DATA_PATH`, etc. itself
-# before exec'ing the real binary at `/usr/lib/ardour9/ardour-9.X.Y~ds`.
-# We don't need to source anything here — every Ardour invocation
-# routes through that wrapper.
-#
-# (Older revisions of this file sourced `ardev_common_waf.sh` from a
-# from-source Ardour build at /opt/ardour. We've since switched to
-# Debian sid's `ardour` package; that file no longer ships and
-# isn't needed.)
+# Ardour env setup: both Dockerfile variants land a wrapper at
+# `/usr/bin/ardour9` and the real binary under `/usr/lib/ardour9/` —
+#   * Dockerfile.source: `waf install --prefix=/usr --configdir=/etc`
+#     generates the wrapper from gtk2_ardour/ardour.sh.in.
+#   * Dockerfile.prebuilt: apt's `-t sid ardour` package ships the
+#     same shape (Debian's `update-alternatives` registers
+#     /usr/bin/ardour9 → /usr/bin/ardour-X.Y.Z~ds).
+# Either way the wrapper exports LD_LIBRARY_PATH, GTK_PATH,
+# ARDOUR_DATA_PATH, ARDOUR_CONFIG_PATH, ARDOUR_DLL_PATH, VAMP_PATH
+# before exec'ing the binary, so we don't need to source anything
+# here. foyer-cli's `detect_ardour_executable` finds `ardour9` on
+# $PATH first (then falls back to plain `ardour`).
 #
 # `FOYER_ARDOUR_BUILD_ROOT` is still honored as an override for dev
 # environments that prefer a sibling source build — see

@@ -20,12 +20,15 @@ There are two supported deployment shapes:
 
 ## Path 1 — Docker
 
-The published image bundles unmodified upstream Ardour 9.2, our
-C++ shim, our [vendored "Foyer Dummy" audio backend](../shims/ardour/backends/dummy/)
-(a fork of Ardour's "None (Dummy)" with an absolute-time-sleep
-timing fix that keeps the audio clock locked to wall clock on
-non-RT threads — what makes pop-free playback possible on Cloud
-Run), the Rust sidecar, and a curated ~200-LV2-plugin pack.
+The published image bundles unmodified upstream Ardour 9.5
+(source-built from `https://github.com/Ardour/ardour.git@9.5`
+during the image build — sid still carries 9.2, so apt isn't a
+shortcut here), our C++ shim, our [vendored "Foyer Dummy" audio
+backend](../shims/ardour/backends/dummy/) (a fork of Ardour's
+"None (Dummy)" with an absolute-time-sleep timing fix that keeps
+the audio clock locked to wall clock on non-RT threads — what
+makes pop-free playback possible on Cloud Run), the Rust sidecar,
+and a curated ~200-LV2-plugin pack.
 Multi-arch (amd64 + arm64) on GHCR; `docker pull` auto-selects
 the right arch.
 

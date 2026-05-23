@@ -25,9 +25,8 @@ installed beyond Docker itself. Full setup recipes for each live in
 ### 1. Docker — Foyer + Ardour + plugins, all in one image
 
 The fastest path: nothing on your machine but Docker. The image
-bundles Ardour 9 (currently the 9.2 Debian sid build — the shim
-itself is built against 9.5 and stays ABI-compatible with the wider
-9.x line), the shim, the autovocoder LV2, and ~200 LV2 plugins.
+bundles Ardour 9.5 (source-built from upstream during the image
+build), the shim, the autovocoder LV2, and ~200 LV2 plugins.
 
 ```bash
 docker run --rm -it --name foyer-studio \

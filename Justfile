@@ -600,16 +600,25 @@ release-bundle:
     FOYER_BIN="$(pwd)/target/$arch_triple/release/foyer" \
         ./scripts/release/bundle.sh
 
-# Build the production container image. Two-stage build (Ardour from
-# source + Foyer release binary in stage 1; slim runtime in stage 2).
-# Slow path is the Ardour compile (~15 min on a modern CPU); rebuilds
-# benefit from the BuildKit cache.
+# Build the production container image. Pick a Dockerfile variant:
+#   variant=source   (default) — source-builds Ardour from `.env`'s
+#                    ARDOUR_TAG. Slow (~40 min cold), tracks 9.5.
+#   variant=prebuilt — apt-installs Ardour from Debian sid. Fast
+#                    (~15 min cold) but pinned to sid (currently 9.2).
+# Rebuilds benefit from the BuildKit cache regardless.
 #
 # Pass `image=foo:tag` to override the tag, or `args="--build-arg X=Y"`
 # to forward extra build args. Example:
 #   just docker-build image=ghcr.io/me/foyer:dev args="--build-arg ARDOUR_TAG=master"
-docker-build image='foyer-studio:latest' *args='':
-    DOCKER_BUILDKIT=1 docker build -t {{image}} {{args}} .
+docker-build image='foyer-studio:latest' variant='source' *args='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{variant}}" in
+        source)   dockerfile=Dockerfile.source ;;
+        prebuilt) dockerfile=Dockerfile.prebuilt ;;
+        *) echo "docker-build: unknown variant '{{variant}}' (expected source|prebuilt)" >&2; exit 1 ;;
+    esac
+    DOCKER_BUILDKIT=1 docker build -f "$dockerfile" -t {{image}} {{args}} .
 
 # Run the production image locally — the easy default. Matches the
 # Cloud Run shape: GUI Ardour painting onto an in-container Xvfb,

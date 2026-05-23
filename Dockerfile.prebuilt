@@ -1,10 +1,27 @@
-# Production Dockerfile — Foyer Studio + Ardour + autovocoder + shim.
+# Foyer Studio production image — prebuilt-Ardour variant.
+#
+# ── Which Dockerfile do I want? ──────────────────────────────────
+#   * Dockerfile.prebuilt (this file)
+#     - Pulls Ardour from Debian sid via apt (`-t sid ardour`).
+#     - Faster build (~5 min for the Ardour layer; ~15 min total).
+#     - Pinned to whatever sid currently ships (9.2 as of 2026-05).
+#     - Use this for snapshot/CI iteration where Ardour version
+#       isn't the variable under test.
+#   * Dockerfile.source
+#     - Source-builds Ardour from upstream at `$ARDOUR_TAG`.
+#     - Slow build (~25 min for the Ardour layer; ~40 min total).
+#     - Tracks `.env`'s `ARDOUR_TAG` exactly (currently 9.5).
+#     - Use this for release artifacts and any time the shim's
+#       ABI-skew guards (shims/ardour/src/ardour_version.h) depend
+#       on a specific Ardour version being present.
+# CI's `docker.yml` selects via `workflow_dispatch` input
+# `image_variant` (defaults to `source`).
 #
 # Two-stage build:
-#   * `builder` stage compiles Ardour from source, the C++ shim that
-#     drives it, the autovocoder LV2 plugin, and the Rust sidecar
-#     binary in release mode. None of this tooling stays in the final
-#     image.
+#   * `builder` stage compiles the C++ shim, the autovocoder LV2
+#     plugin, and the Rust sidecar binary in release mode against
+#     Ardour headers from a shallow source clone. None of this
+#     tooling stays in the final image.
 #   * `runtime` stage starts from a slim Debian base, copies in the
 #     built artifacts, and ships an entrypoint script that lights up
 #     JACK + Foyer the way `just run` does in dev — minus the
@@ -29,7 +46,7 @@
 #     server pointed at by `FOYER_NETJACK_HOST`.
 #
 # To build:
-#   docker build -t foyer-studio:latest .
+#   docker build -f Dockerfile.prebuilt -t foyer-studio:latest .
 # To run locally:
 #   docker run --rm -p 3838:3838 -v "$(pwd):/projects" foyer-studio:latest
 # To deploy to Cloud Run:

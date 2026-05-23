@@ -61,6 +61,14 @@ on:
         description: "Ardour ref the image's shim builds against. Empty = use .env."
         required: false
         default: ""
+      image_variant:
+        description: "Which Dockerfile to build. 'source' (slow, tracks .env's ARDOUR_TAG) vs 'prebuilt' (fast, pinned to sid's Ardour — currently 9.2)."
+        required: false
+        type: choice
+        default: source
+        options:
+          - source
+          - prebuilt
 
 # Cancel an in-flight build when a fresh push lands on the same
 # branch. Main is excluded so every merge produces a complete record
@@ -125,6 +133,24 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      # Pick the Dockerfile variant. On push (non-dispatch) we always
+      # use `source` so merged main is authoritative; dispatch can flip
+      # to `prebuilt` for fast snapshot iteration when the Ardour
+      # version isn't what's being tested.
+      - name: Resolve image variant
+        id: variant
+        run: |
+          variant='${{ github.event.inputs.image_variant }}'
+          variant="${variant:-source}"
+          case "$variant" in
+            source)   dockerfile="Dockerfile.source" ;;
+            prebuilt) dockerfile="Dockerfile.prebuilt" ;;
+            *) echo "::error::unknown image_variant '$variant' (expected source|prebuilt)"; exit 1 ;;
+          esac
+          echo "variant=$variant" >> "$GITHUB_OUTPUT"
+          echo "dockerfile=$dockerfile" >> "$GITHUB_OUTPUT"
+          echo "::notice::image_variant=$variant → $dockerfile"
+
       - name: Compute image tags
         id: tags
         run: |
@@ -164,7 +190,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile
+          file: ${{ steps.variant.outputs.dockerfile }}
           platforms: ${{ matrix.platform }}
           # `push-by-digest=true` + `name-canonical=true` together
           # write only an immutable digest reference; no tag is
@@ -183,14 +209,15 @@ jobs:
           build-args: |
             ARDOUR_TAG=${{ steps.ardour.outputs.tag }}
             WITH_KXSTUDIO=0
-          # Per-(arch, scope) cache. arm64 and amd64 have wholly
-          # different layer hashes once the toolchain selection
-          # diverges, so sharing a cache key would just thrash. Both
-          # fall back to main's cache on a fresh branch.
+          # Per-(arch, variant, scope) cache. arm64 and amd64 have
+          # wholly different layer hashes once the toolchain selection
+          # diverges; source vs prebuilt are even more divergent
+          # (whole Ardour compile vs apt-install). Both fall back to
+          # main's cache on a fresh branch.
           cache-from: |
-            type=gha,scope=foyer-${{ matrix.arch }}-${{ steps.tags.outputs.scope }}
-            type=gha,scope=foyer-${{ matrix.arch }}-main
-          cache-to: type=gha,scope=foyer-${{ matrix.arch }}-${{ steps.tags.outputs.scope }},mode=max
+            type=gha,scope=foyer-${{ matrix.arch }}-${{ steps.variant.outputs.variant }}-${{ steps.tags.outputs.scope }}
+            type=gha,scope=foyer-${{ matrix.arch }}-${{ steps.variant.outputs.variant }}-main
+          cache-to: type=gha,scope=foyer-${{ matrix.arch }}-${{ steps.variant.outputs.variant }}-${{ steps.tags.outputs.scope }},mode=max
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
