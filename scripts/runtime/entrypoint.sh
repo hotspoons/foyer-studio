@@ -237,36 +237,66 @@ start_x_session() {
 start_x_session
 log "DISPLAY=${DISPLAY:-<unset>}"
 
+# Ardour config seeding. Three things to know:
+#
+#   1. `.a9` (welcome-wizard skip) and `instant.xml` (memlock-warning
+#      suppression) are needed in EVERY runtime mode. GUI Ardour
+#      paints both modals onto Xvfb in gui-dummy mode; under
+#      jack-headless mode the user usually still attaches a browser /
+#      xpra session for inspection, and even a single AMS dialog
+#      blocks `hardour` -> shim handshake in some session-load paths.
+#      The seed script writes those two files unconditionally.
+#
+#   2. The `--force-ams-dummy` flag additionally pins the AMS state
+#      to the Foyer Dummy backend. We ONLY want that in gui-dummy
+#      mode — pinning Dummy in jack-headless mode would override the
+#      user's choice of JACK / NetJACK and break the whole point of
+#      the mode. Stale configs are still a concern in jack-headless:
+#      if `--ams-dummy` (idempotent variant) is right when the user
+#      wants the dummy preset but didn't ask for it explicitly, the
+#      operator can re-seed via `FOYER_RESEED_ARDOUR=force-ams-dummy`.
+#
+#   3. The GUI binary IGNORES the `ARDOUR_BACKEND` env var (only
+#      `hardour` honors it via our patches/002 — `search_paths.cc`
+#      only knows `ARDOUR_BACKEND_PATH`), so a seeded
+#      `<EngineStates>` block is the only knob that actually pins
+#      the GUI to Dummy.
+cfg_dir="${ARDOUR_CONFIG_DIR:-$HOME/.config/ardour9}"
+seed_flag=""
 if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
     FOYER_JACK_MODE=none
-    # Seed ~/.config/ardour9/{.a9,config} so first-run wizard and
-    # AMS dialogs are skipped. We use `--force-ams-dummy` here (not
-    # `--ams-dummy`) because in gui-dummy mode WE own the config —
-    # any pre-existing config file is either:
-    #   (a) a stale leftover from a prior `jack-headless` run on a
-    #       reused volume, in which case it pins JACK and ardour-9
-    #       tries to acquire RT scheduling and dies with
-    #       `failed_constructor`; or
-    #   (b) something Ardour itself wrote during a prior session
-    #       save/load that doesn't carry a usable `<EngineStates>`
-    #       block, so `EngineControl::set_state` falls through to
-    #       `set_default_state` which picks the first backend from
-    #       `ARDOUR_BACKEND_PATH` — and that's JACK. Same death.
-    # The GUI binary IGNORES the `ARDOUR_BACKEND` env var (only
-    # `hardour` honors it via our patches/002 — search_paths.cc
-    # only knows `ARDOUR_BACKEND_PATH`), so a seeded
-    # `<EngineStates>` block is the only knob that actually pins
-    # the GUI to Dummy. Force-overwrite is the safe move.
-    cfg_dir="${ARDOUR_CONFIG_DIR:-$HOME/.config/ardour9}"
-    if [ -x /usr/local/bin/foyer-seed-ardour-config ]; then
-        /usr/local/bin/foyer-seed-ardour-config --force-ams-dummy || \
-            log "WARNING: foyer-seed-ardour-config exited non-zero — Ardour will likely fall back to JACK and die"
-    elif [ -x /workspace/scripts/runtime/seed-ardour-config.sh ]; then
-        /workspace/scripts/runtime/seed-ardour-config.sh --force-ams-dummy || \
-            log "WARNING: seed-ardour-config.sh exited non-zero — Ardour will likely fall back to JACK and die"
-    else
-        log "WARNING: no seed-ardour-config script found — Ardour will fall back to JACK and die under non-privileged container runtimes"
-    fi
+    seed_flag="--force-ams-dummy"
+    # Tell the sidecar to advertise a dummy engine in its
+    # ClientGreeting so connecting browsers default the master-bus
+    # Listen toggle to ON — in gui-dummy mode the WebSocket egress
+    # is the only audio path; muting by default would surprise the
+    # user. The host-install path (jack-headless mode, or a
+    # standalone `foyer serve --backend ardour`) leaves this unset
+    # so the conservative real-engine default applies.
+    export FOYER_ENGINE_DUMMY="${FOYER_ENGINE_DUMMY:-1}"
+fi
+# Operator override — useful when the user landed in jack-headless
+# mode but wants the dummy AMS preset seeded anyway (e.g. a stale
+# `<EngineStates>` from a previous boot is causing autostart to
+# pick the wrong backend).
+case "${FOYER_RESEED_ARDOUR:-}" in
+    force-ams-dummy) seed_flag="--force-ams-dummy" ;;
+    ams-dummy)       seed_flag="${seed_flag:-"--ams-dummy"}" ;;
+esac
+seed_script=""
+if [ -x /usr/local/bin/foyer-seed-ardour-config ]; then
+    seed_script=/usr/local/bin/foyer-seed-ardour-config
+elif [ -x /workspace/scripts/runtime/seed-ardour-config.sh ]; then
+    seed_script=/workspace/scripts/runtime/seed-ardour-config.sh
+fi
+if [ -n "$seed_script" ]; then
+    # shellcheck disable=SC2086 # seed_flag is "" or a single token
+    "$seed_script" $seed_flag || \
+        log "WARNING: ${seed_script} exited non-zero — Ardour wizard / AMS dialog may not be suppressed"
+else
+    log "WARNING: no seed-ardour-config script found — Ardour wizard + memlock modal will not be suppressed"
+fi
+if [ "${FOYER_RUNTIME_MODE}" = "gui-dummy" ]; then
     # Post-seed verification — surface this in `docker logs` so a
     # JACK fallback is unambiguous to debug. Looks for both the
     # file and the `backend="Foyer Dummy"` line that EngineControl

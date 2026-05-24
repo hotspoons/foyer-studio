@@ -480,6 +480,23 @@ pub enum Event {
         /// browser.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_ui_variant: Option<String>,
+        /// True when the backend's audio engine is a dummy (no host
+        /// hardware path). The client uses this to decide whether
+        /// the master-bus Listen toggle starts ON (dummy: browser is
+        /// the only audio path) or OFF (real engine: the user
+        /// already hears it through speakers, browser monitoring
+        /// would duplicate). Tunnel guests bypass this — they
+        /// always default to ON regardless.
+        ///
+        /// Resolution chain on the server:
+        ///   1. `FOYER_ENGINE_DUMMY=1|0` env override (the container
+        ///      entrypoint sets this in `gui-dummy` mode).
+        ///   2. The active backend's `engine_is_dummy()` self-report.
+        ///   3. Conservative default `false` — assume real audio so
+        ///      a host-install user with JACK/CoreAudio doesn't
+        ///      hear double on first connect.
+        #[serde(default)]
+        engine_is_dummy: bool,
     },
 
     // ───── track / group / plugin lifecycle ─────────────────────────────

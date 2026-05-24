@@ -172,13 +172,15 @@ enum Command {
         /// `--jack` / `--netjack`.
         #[arg(long, conflicts_with_all = ["jack", "netjack"])]
         integrated: bool,
-        /// Bind-mount the host's JACK socket dir into the container.
-        /// Linux only. Mutually exclusive with `--integrated` / `--netjack`.
+        /// Bind-mount the host's JACK / PipeWire-JACK socket dir
+        /// into the container. Linux only. Mutually exclusive with
+        /// `--integrated` / `--netjack`.
         #[arg(long, conflicts_with_all = ["integrated", "netjack"])]
         jack: bool,
-        /// Connect to a NetJACK server over TCP. Set
-        /// `FOYER_NETJACK_HOST` + `FOYER_NETJACK_PORT` env vars to
-        /// point at it. Mutually exclusive with `--integrated` / `--jack`.
+        /// Connect to a NetJACK server over TCP. Set `--netjack-host`
+        /// / `--netjack-port` (or `FOYER_NETJACK_HOST` /
+        /// `FOYER_NETJACK_PORT`) to point at it. Mutually exclusive
+        /// with `--integrated` / `--jack`.
         #[arg(long, conflicts_with_all = ["integrated", "jack"])]
         netjack: bool,
         /// Container image. Default `ghcr.io/hotspoons/foyer-studio:latest`.
@@ -192,14 +194,37 @@ enum Command {
         #[arg(long, value_name = "BIN")]
         runtime: Option<String>,
         /// Host port to publish the container's 3838 on. Default 3838.
+        /// Ignored when `--network=host`.
         #[arg(long, value_name = "PORT")]
         host_port: Option<u16>,
+        /// Container networking mode. `bridge` (default) publishes
+        /// the sidecar port through Docker's bridge driver; `host`
+        /// shares the host's network namespace directly (Linux only,
+        /// lower latency, required for mDNS / NetJACK auto-discovery).
+        #[arg(long, value_enum, value_name = "MODE")]
+        network: Option<cfg::DockerNetwork>,
+        /// NetJACK target host. Only meaningful with `--netjack`.
+        #[arg(long, value_name = "HOST")]
+        netjack_host: Option<String>,
+        /// NetJACK target port. Default 19000.
+        #[arg(long, value_name = "PORT")]
+        netjack_port: Option<u16>,
         /// Detach instead of streaming logs.
         #[arg(short, long, default_value_t = false)]
         detach: bool,
         /// Print the assembled command without running it.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+        /// Run the pre-flight dependency checks for the selected
+        /// mode and print results, then exit. Combine with `--json`
+        /// to get machine-readable output (used by the desktop
+        /// wrapper's setup wizard).
+        #[arg(long, default_value_t = false)]
+        doctor: bool,
+        /// Emit `--doctor` output as JSON instead of human-readable
+        /// lines. No-op without `--doctor`.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Print the resolved config and exit.
     Backends,
@@ -306,8 +331,13 @@ async fn main() -> Result<()> {
             image,
             runtime,
             host_port,
+            network,
+            netjack_host,
+            netjack_port,
             detach,
             dry_run,
+            doctor,
+            json,
         } => {
             let mode_override = if integrated {
                 Some(cfg::DockerMode::Integrated)
@@ -318,6 +348,19 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
+            if doctor {
+                let resolved_mode = mode_override
+                    .or(config.docker.as_ref().and_then(|d| d.mode))
+                    .unwrap_or(cfg::DockerMode::Integrated);
+                docker_cmd::report_doctor(
+                    &config,
+                    resolved_mode,
+                    runtime.as_deref(),
+                    netjack_host.as_deref(),
+                    json,
+                );
+                return Ok(());
+            }
             docker_cmd::run(
                 &config,
                 docker_cmd::DockerCmdArgs {
@@ -325,6 +368,9 @@ async fn main() -> Result<()> {
                     image_override: image,
                     runtime_override: runtime,
                     host_port_override: host_port,
+                    network_override: network,
+                    netjack_host_override: netjack_host,
+                    netjack_port_override: netjack_port,
                     detach,
                     dry_run,
                 },

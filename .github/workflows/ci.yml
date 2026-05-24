@@ -198,13 +198,66 @@ jobs:
           else
             otool -L dist/foyer 2>&1 || true
           fi
+      # foyer-desktop (Linux only this round — macOS Cocoa shell
+      # ships later). Different build profile from `foyer`: tao+wry
+      # need to dynamically link to libgtk-3 + libwebkit2gtk-4.1, so
+      # we DON'T pass musl-target / +crt-static here. Build against
+      # the runner's default glibc target and ship as a dynamic
+      # binary; install.sh prints a per-distro hint for the runtime
+      # libs the user needs.
+      - name: Build foyer-desktop (linux only)
+        if: matrix.os == 'linux'
+        env:
+          # Quiet the warnings-as-errors gate — same shape the `rust`
+          # job above uses, but no musl/+crt-static envs here.
+          RUSTFLAGS: "-Dwarnings"
+        run: |
+          if [ "$RELEASE_BUILD" = "true" ]; then
+            echo "::notice::Building foyer-desktop in RELEASE profile (glibc-dynamic)"
+            cargo build --release --bin foyer-desktop
+            cp target/release/foyer-desktop dist/foyer-desktop
+          else
+            echo "::notice::Building foyer-desktop in DEBUG profile (glibc-dynamic)"
+            cargo build --bin foyer-desktop
+            cp target/debug/foyer-desktop dist/foyer-desktop
+          fi
+          file dist/foyer-desktop
+          ldd dist/foyer-desktop || true
+          # Drop the icon + .desktop template alongside the binary
+          # so the downstream install.sh / release-bundle steps pick
+          # them up out of the same artifact directory.
+          # Use the mixer-fader logo (not the browser-tab favicon)
+          # for the XDG menu entry — it scales up properly in the
+          # Linux app grid. See scripts/release/bundle.sh for the
+          # same swap.
+          cp web/logo.svg dist/foyer-studio.svg
+          cat > dist/foyer-studio.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Foyer Studio
+          GenericName=DAW Control Surface
+          Comment=Web-native control surface for the Ardour DAW
+          Exec=foyer-desktop
+          TryExec=foyer-desktop
+          Icon=foyer-studio
+          Terminal=false
+          Categories=AudioVideo;Audio;AudioEditing;Music;
+          Keywords=Ardour;DAW;Audio;Music;Mixer;Studio;
+          StartupNotify=true
+          StartupWMClass=Foyer Studio
+          EOF
+          # Strip the heredoc's leading indentation that bash adds when
+          # the heredoc is embedded in an indented `run:` block. The
+          # `[Desktop Entry]` header must be column-zero or
+          # `desktop-file-validate` rejects it.
+          sed -i 's/^          //' dist/foyer-studio.desktop
       - name: Upload foyer binary
         uses: actions/upload-artifact@v4
         with:
           # Same name shape as release.yml so the install.sh URL doesn't
           # change between CI artifacts and tagged releases.
           name: foyer-${{ matrix.os }}-${{ matrix.arch }}
-          path: dist/foyer
+          path: dist/
           retention-days: 7
           if-no-files-found: error
 

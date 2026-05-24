@@ -287,6 +287,15 @@ impl Backend for StubBackend {
         self.sample_rate.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    fn engine_is_dummy(&self) -> Option<bool> {
+        // Stub generates audio entirely in-process (test tone +
+        // pre-roll synthesizers). There is no host audio path; if
+        // the user wants to hear anything, browser monitoring is
+        // the only route. The client's master-bus Listen toggle
+        // uses this to decide the cold-start default.
+        Some(true)
+    }
+
     fn transport_position_samples(&self) -> u64 {
         // Read the latest position the meter tick wrote into
         // `transport.position_beats` — same value the WS layer would

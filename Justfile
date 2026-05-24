@@ -596,8 +596,46 @@ release-bundle:
     export OPUS_NO_PKG=1
     cargo build --release --target "$arch_triple" --bin foyer
 
+    # Build foyer-desktop on Linux too. It can't ride the same
+    # musl+crt-static path as `foyer` because tao+wry need to
+    # dynamically link to system libgtk-3 + libwebkit2gtk-4.1 (no
+    # static GTK story). Build against the default glibc target
+    # WITHOUT the musl env so cargo resolves cc and pkg-config the
+    # normal way. macOS is skipped this round.
+    foyer_desktop_bin=""
+    if [ "$(uname -s)" = "Linux" ]; then
+        # Detect dev deps the build needs (the user usually already
+        # has them from the dev container, but a fresh studio rig
+        # might not). Print a clear hint instead of failing deep
+        # inside cargo's diagnostics.
+        missing=()
+        for pkg in libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev; do
+            if ! dpkg -s "$pkg" >/dev/null 2>&1 \
+                 && ! rpm -q "${pkg%-dev}-devel" >/dev/null 2>&1; then
+                missing+=("$pkg")
+            fi
+        done
+        if [ "${#missing[@]}" -gt 0 ]; then
+            echo "release-bundle: foyer-desktop needs GTK3/WebKit2GTK dev headers" >&2
+            echo "release-bundle: missing on this host: ${missing[*]}" >&2
+            echo "release-bundle: install via apt/dnf and re-run, or set FOYER_SKIP_DESKTOP=1 to ship CLI only" >&2
+            if [ "${FOYER_SKIP_DESKTOP:-0}" != "1" ]; then
+                exit 1
+            fi
+        fi
+        if [ "${FOYER_SKIP_DESKTOP:-0}" != "1" ]; then
+            # Clear the musl/crt-static RUSTFLAGS for this build —
+            # webkit2gtk binds dynamically and crt-static would
+            # produce an unloadable binary against system GTK.
+            ( unset RUSTFLAGS CC CC_x86_64_unknown_linux_musl CC_aarch64_unknown_linux_musl
+              cargo build --release --bin foyer-desktop )
+            foyer_desktop_bin="$(pwd)/target/release/foyer-desktop"
+        fi
+    fi
+
     ./scripts/dev/shim.sh build
     FOYER_BIN="$(pwd)/target/$arch_triple/release/foyer" \
+        FOYER_DESKTOP_BIN="$foyer_desktop_bin" \
         ./scripts/release/bundle.sh
 
 # Build the production container image. Pick a Dockerfile variant:

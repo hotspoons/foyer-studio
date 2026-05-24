@@ -265,9 +265,28 @@ pub struct DockerConfig {
     /// Host port to publish the container's 3838 on. Defaults to
     /// 3838 (same as the host-mode sidecar) — flip this when the
     /// host already has a foyer sidecar running and you want to
-    /// run the container alongside.
+    /// run the container alongside. Ignored when
+    /// `network == DockerNetwork::Host`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_port: Option<u16>,
+    /// Container networking model. `bridge` (default) publishes
+    /// `3838` from inside the container to `host_port` on the host
+    /// via Docker's bridge driver — works on every host but adds a
+    /// userspace `docker-proxy` hop. `host` shares the host's
+    /// network namespace directly: lower latency, mandatory for
+    /// some NetJACK / mDNS / multicast configs, but only works
+    /// reliably on Linux (Docker Desktop on Mac/Windows runs a VM
+    /// and `--network=host` falls back to bridge there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<DockerNetwork>,
+    /// NetJACK target host (hostname or IP). Only honored when
+    /// `mode == netjack`; falls back to the `FOYER_NETJACK_HOST`
+    /// env var if unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub netjack_host: Option<String>,
+    /// NetJACK target port. Default 19000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub netjack_port: Option<u16>,
     /// Extra command-line arguments appended to the runtime's `run`
     /// invocation, before the image name. Use for host-specific
     /// flags `foyer docker` doesn't know about (e.g.,
@@ -278,18 +297,40 @@ pub struct DockerConfig {
 }
 
 /// Audio-engine integration mode for `foyer docker`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
+#[clap(rename_all = "snake_case")]
 pub enum DockerMode {
     /// No external audio system — container runs Foyer's dummy
     /// backend with elevated caps so low-latency processing still
     /// works. Smallest setup; default.
     #[default]
     Integrated,
-    /// Bind-mount the host's JACK socket dir. Linux only.
+    /// Bind-mount the host's JACK socket dir. Linux only. The
+    /// container's libjack speaks to either a real JACK 2 server
+    /// or PipeWire's JACK-compat layer (pipewire-jack) the same
+    /// way — both expose the same `/dev/shm/jack-*` + `/tmp/jack-*`
+    /// shapes.
     Jack,
     /// Connect to a NetJACK server over TCP. Cross-platform.
     Netjack,
+}
+
+/// Container networking strategy for `foyer docker`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+#[clap(rename_all = "snake_case")]
+pub enum DockerNetwork {
+    /// `-p <host_port>:3838` via the runtime's default bridge
+    /// network. Works everywhere; adds a `docker-proxy` hop.
+    #[default]
+    Bridge,
+    /// `--network=host` — the container shares the host's network
+    /// namespace directly. Lower latency, lets the container reach
+    /// link-local services (mDNS discovery, NetJACK auto-discover,
+    /// LAN-only IPs). Linux only; on Docker Desktop the daemon's
+    /// VM intercepts this and silently falls back to bridge.
+    Host,
 }
 
 /// Network config for the sidecar's HTTP/WS surface. Both fields

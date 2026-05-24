@@ -45,6 +45,14 @@ PREFIX="${FOYER_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/foyer}"
 BIN_DIR="$PREFIX/bin"
 PATH_SENTINEL="# foyer-studio installer (managed)"
 CI_BRANCH="${FOYER_CI_BRANCH:-main}"
+# XDG paths for the Linux .desktop integration. Per-user only —
+# install.sh never asks for sudo. Override `XDG_DATA_HOME` upstream
+# to retarget to a packaged / system install root.
+XDG_DATA_HOME_RESOLVED="${XDG_DATA_HOME:-$HOME/.local/share}"
+DESKTOP_DIR="$XDG_DATA_HOME_RESOLVED/applications"
+ICON_DIR="$XDG_DATA_HOME_RESOLVED/icons/hicolor/scalable/apps"
+DESKTOP_FILE="$DESKTOP_DIR/foyer-studio.desktop"
+ICON_FILE="$ICON_DIR/foyer-studio.svg"
 
 OS=""
 ARCH=""
@@ -173,7 +181,9 @@ download_and_extract_ci() {
         die "download failed (URL: $shim_url) — no successful run on '$CI_BRANCH'?"
     fi
 
-    # Each CI artifact zip wraps a single file at the root.
+    # The foyer artifact wraps multiple files at the root (foyer +
+    # Linux-only: foyer-desktop, foyer-studio.svg,
+    # foyer-studio.desktop). The shim artifact wraps just one.
     ( cd "$bundle" && unzip -qo "$bin_zip" && unzip -qo "$shim_zip" )
     [ -f "$bundle/foyer" ] \
         || die "CI bundle missing foyer binary (from $bin_url)"
@@ -181,6 +191,7 @@ download_and_extract_ci() {
         || die "CI bundle missing shim (from $shim_url)"
     # GitHub Actions artifact uploads strip the executable bit.
     chmod +x "$bundle/foyer"
+    [ -f "$bundle/foyer-desktop" ] && chmod +x "$bundle/foyer-desktop"
     echo "$bundle"
 }
 
@@ -235,12 +246,67 @@ macos_fixup_shim() {
 install_files() {
     local source_dir="$1"
     local foyer_src="$source_dir/foyer"
+    local desktop_bin_src="$source_dir/foyer-desktop"
+    local desktop_entry_src="$source_dir/foyer-studio.desktop"
+    local icon_src="$source_dir/foyer-studio.svg"
     local shim_src="$source_dir/libfoyer_shim.$SHIM_EXT"
     [ -x "$foyer_src" ] || [ -f "$foyer_src" ] || die "missing $foyer_src in bundle"
 
     mkdir -p "$BIN_DIR"
     install -m 0755 "$foyer_src" "$BIN_DIR/foyer"
     note "installed $BIN_DIR/foyer"
+
+    # Linux-only: foyer-desktop binary + XDG menu integration. macOS
+    # gets the CLI only this round — Cocoa wrapper polish lands
+    # separately. The bundle is the source of truth; absent the
+    # foyer-desktop file the install just keeps moving.
+    if [ "$OS" = "linux" ] && [ -f "$desktop_bin_src" ]; then
+        install -m 0755 "$desktop_bin_src" "$BIN_DIR/foyer-desktop"
+        note "installed $BIN_DIR/foyer-desktop"
+
+        if [ -f "$icon_src" ]; then
+            mkdir -p "$ICON_DIR"
+            install -m 0644 "$icon_src" "$ICON_FILE"
+            note "installed $ICON_FILE"
+        else
+            note "bundle missing icon — desktop entry will fall back to the generic app glyph"
+        fi
+
+        if [ -f "$desktop_entry_src" ]; then
+            mkdir -p "$DESKTOP_DIR"
+            # Rewrite Exec=/TryExec= to the absolute install path
+            # so the menu entry works under any FOYER_PREFIX, not
+            # just the default $HOME/.local/share/foyer. We hand
+            # the file through a temp so we don't depend on
+            # in-place sed flavor (BSD vs GNU).
+            local tmp
+            tmp="$(mktemp)"
+            awk -v exec_path="$BIN_DIR/foyer-desktop" '
+                /^Exec=/    { print "Exec=" exec_path; next }
+                /^TryExec=/ { print "TryExec=" exec_path; next }
+                            { print }
+            ' "$desktop_entry_src" > "$tmp"
+            install -m 0644 "$tmp" "$DESKTOP_FILE"
+            rm -f "$tmp"
+            note "installed $DESKTOP_FILE"
+
+            # Refresh the desktop database so the entry shows up
+            # without a re-login on GNOME/KDE/XFCE. Best-effort —
+            # tool is missing on minimal sysroots.
+            if command -v update-desktop-database >/dev/null 2>&1; then
+                update-desktop-database -q "$DESKTOP_DIR" 2>/dev/null || true
+            fi
+            if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+                gtk-update-icon-cache -q -t \
+                    "$XDG_DATA_HOME_RESOLVED/icons/hicolor" 2>/dev/null || true
+            fi
+        else
+            note "bundle missing foyer-studio.desktop — skipping menu integration"
+        fi
+    elif [ "$OS" = "linux" ]; then
+        note "bundle has no foyer-desktop binary — installing CLI only."
+        note "  build it locally with: cargo build --release --bin foyer-desktop"
+    fi
 
     # Bundle may or may not include the shim — macOS bundles ship
     # foyer-only today (see bundle.sh's FOYER_SKIP_SHIM path).
@@ -264,6 +330,73 @@ install_files() {
         xattr -dr com.apple.quarantine "$BIN_DIR/foyer" 2>/dev/null || true
     fi
 
+}
+
+# Print a distro-specific suggestion for the GTK3 + WebKit2GTK
+# runtime libs foyer-desktop needs. Best-effort — we look at
+# /etc/os-release and pick a one-liner. The user can ignore if they
+# already have a working desktop environment.
+print_desktop_runtime_hint() {
+    [ "$OS" = "linux" ] || return 0
+    [ -x "$BIN_DIR/foyer-desktop" ] || return 0
+    # If the binary loads cleanly today, don't spam the user.
+    if ldd "$BIN_DIR/foyer-desktop" 2>/dev/null | grep -q "not found"; then
+        :
+    else
+        return 0
+    fi
+    local family="generic"
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        case "${ID_LIKE:-$ID}" in
+            *debian*|*ubuntu*) family=debian ;;
+            *fedora*|*rhel*|*centos*) family=fedora ;;
+            *arch*) family=arch ;;
+            *suse*) family=suse ;;
+        esac
+    fi
+    cat >&2 <<EOF
+
+foyer-desktop is missing one or more runtime libraries. Install:
+
+EOF
+    case "$family" in
+        debian)
+            cat >&2 <<'EOF'
+  sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0 libsoup-3.0-0 \
+                   libjavascriptcoregtk-4.1-0
+EOF
+            ;;
+        fedora)
+            cat >&2 <<'EOF'
+  sudo dnf install gtk3 webkit2gtk4.1 libsoup3 javascriptcoregtk4.1
+EOF
+            ;;
+        arch)
+            cat >&2 <<'EOF'
+  sudo pacman -S gtk3 webkit2gtk-4.1 libsoup3
+EOF
+            ;;
+        suse)
+            cat >&2 <<'EOF'
+  sudo zypper install gtk3 libwebkit2gtk-4_1-0 libsoup-3_0-0 \
+                      libjavascriptcoregtk-4_1-0
+EOF
+            ;;
+        *)
+            cat >&2 <<'EOF'
+  Install your distro's packages providing:
+    libgtk-3.so.0, libwebkit2gtk-4.1.so.0, libsoup-3.0.so.0,
+    libjavascriptcoregtk-4.1.so.0
+EOF
+            ;;
+    esac
+    cat >&2 <<EOF
+
+Re-run after installing — \`foyer-desktop\` should then launch a
+native window. Until then \`foyer serve\` + your browser still works.
+EOF
 }
 
 # Idempotently append a PATH export to whichever shell rc files exist.
@@ -361,6 +494,7 @@ do_install() {
 
     install_files "$source_dir"
     add_to_path
+    print_desktop_runtime_hint
 
     [ "$cleanup_workdir" = 1 ] && rm -rf "$workdir" && trap - EXIT
 
@@ -383,6 +517,15 @@ Open a new shell, or run:
 Then start Ardour and enable "Foyer Studio Shim" under
   Edit → Preferences → Control Surfaces.
 EOF
+
+    if [ "$OS" = "linux" ] && [ -x "$BIN_DIR/foyer-desktop" ]; then
+        cat <<EOF
+
+Native window shell installed — launch it from your application menu
+("Foyer Studio") or with:
+  foyer-desktop
+EOF
+    fi
 
     # macOS: shim lives in the per-user surfaces dir, ad-hoc signed
     # with @executable_path-relative load commands. Ardour scans this
@@ -443,6 +586,28 @@ do_uninstall() {
     if [ -f "$foyer_path" ]; then
         rm -f "$foyer_path"
         note "removed $foyer_path"
+    fi
+
+    # foyer-desktop + XDG entries (Linux only — install.sh never
+    # wrote them on macOS so the removes are no-ops there).
+    if [ -f "$BIN_DIR/foyer-desktop" ]; then
+        rm -f "$BIN_DIR/foyer-desktop"
+        note "removed $BIN_DIR/foyer-desktop"
+    fi
+    if [ -f "$DESKTOP_FILE" ]; then
+        rm -f "$DESKTOP_FILE"
+        note "removed $DESKTOP_FILE"
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database -q "$DESKTOP_DIR" 2>/dev/null || true
+        fi
+    fi
+    if [ -f "$ICON_FILE" ]; then
+        rm -f "$ICON_FILE"
+        note "removed $ICON_FILE"
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -q -t \
+                "$XDG_DATA_HOME_RESOLVED/icons/hicolor" 2>/dev/null || true
+        fi
     fi
 
     remove_from_path

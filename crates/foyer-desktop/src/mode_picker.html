@@ -4,60 +4,326 @@
     <meta charset="utf-8" />
     <title>Foyer Studio — first launch</title>
     <style>
+      :root {
+        --bg: #0e1116;
+        --panel: #161b22;
+        --panel-hi: #1f262f;
+        --border: #1f2630;
+        --border-hi: #6c8cff;
+        --text: #e5e8ee;
+        --mute: #8a93a3;
+        --ok: #4ade80;
+        --warn: #fbbf24;
+        --err: #f87171;
+      }
       html, body {
         margin: 0;
-        padding: 24px;
+        padding: 0;
         height: 100%;
-        background: #0e1116;
-        color: #e5e8ee;
+        background: var(--bg);
+        color: var(--text);
         font-family: system-ui, sans-serif;
         font-size: 14px;
+        overflow: hidden;
       }
-      h1 { margin: 0 0 12px 0; font-size: 18px; }
-      p  { margin: 0 0 18px 0; color: #8a93a3; font-size: 12px; }
+      .page { display: none; padding: 20px 24px; box-sizing: border-box; height: 100%; overflow-y: auto; }
+      .page.active { display: block; }
+      h1 { margin: 0 0 10px 0; font-size: 18px; }
+      p.lede { margin: 0 0 18px 0; color: var(--mute); font-size: 12px; }
       .row { display: flex; gap: 12px; }
-      button {
+      .col { display: flex; flex-direction: column; gap: 12px; }
+      button.card {
         flex: 1;
-        background: #161b22;
-        color: #e5e8ee;
-        border: 1px solid #1f2630;
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
         border-radius: 8px;
         padding: 14px 16px;
         text-align: left;
         font: inherit;
         cursor: pointer;
+        transition: border-color 80ms, background 80ms;
       }
-      button:hover { border-color: #6c8cff; background: #1f262f; }
-      button h2  { margin: 0 0 6px 0; font-size: 13px; }
-      button div { font-size: 11px; color: #8a93a3; }
+      button.card:hover:not(:disabled) {
+        border-color: var(--border-hi);
+        background: var(--panel-hi);
+      }
+      button.card:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      button.card.selected {
+        border-color: var(--border-hi);
+        background: var(--panel-hi);
+      }
+      button.card h2 { margin: 0 0 4px 0; font-size: 13px; }
+      button.card .desc { font-size: 11px; color: var(--mute); }
+      .checks { margin-top: 10px; font-size: 11px; line-height: 1.5; }
+      .check { display: flex; gap: 6px; align-items: flex-start; }
+      .check.ok    .mark { color: var(--ok); }
+      .check.warn  .mark { color: var(--warn); }
+      .check.err   .mark { color: var(--err); }
+      .check .mark { font-weight: 700; min-width: 12px; }
+      .check .body { color: var(--mute); }
+      .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+      .actions button {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 16px;
+        font: inherit;
+        cursor: pointer;
+      }
+      .actions button.primary { background: var(--border-hi); border-color: var(--border-hi); }
+      .actions button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+      .actions button:hover:not(:disabled) { background: var(--panel-hi); }
+      .field { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+      .field label { font-size: 11px; color: var(--mute); }
+      .field input, .field select {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 6px 8px;
+        font: inherit;
+      }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      details { margin-top: 8px; }
+      details summary { font-size: 11px; color: var(--mute); cursor: pointer; }
+      details pre {
+        font-size: 10px; color: var(--mute);
+        background: #0a0d12; padding: 6px 8px; border-radius: 4px;
+        overflow-x: auto; white-space: pre-wrap;
+      }
+      .breadcrumb { font-size: 11px; color: var(--mute); margin-bottom: 6px; }
     </style>
   </head>
   <body>
-    <h1>How should Foyer run?</h1>
-    <p>
-      Pick once — saved to <code>config.yaml</code>. Re-run with
-      <code>--reset-mode</code> to change later.
-    </p>
-    <div class="row">
-      <button data-pick="host">
-        <h2>Run on this machine (Host)</h2>
-        <div>Embeds the Foyer sidecar in this window. No containers.</div>
-      </button>
-      <button data-pick="docker">
-        <h2>Run in a container (Docker)</h2>
-        <div>Spawns <code>foyer docker</code> with the configured mode.</div>
-      </button>
-    </div>
+    <!-- Page 1: Host vs Docker -->
+    <section id="page-mode" class="page active">
+      <h1>How should Foyer run?</h1>
+      <p class="lede">
+        Pick once — saved to <code>config.yaml</code>. Re-run with
+        <code>--reset-mode</code> to change later.
+      </p>
+      <div class="row">
+        <button class="card" data-act="pick:host">
+          <h2>Run on this machine (Host)</h2>
+          <div class="desc">Embeds the Foyer sidecar in this window. No containers.</div>
+        </button>
+        <button class="card" data-act="goto-docker">
+          <h2>Run in a container (Docker)</h2>
+          <div class="desc">Spawns <code>foyer docker</code> with a configured audio + network mode.</div>
+        </button>
+      </div>
+    </section>
+
+    <!-- Page 2: Docker audio mode -->
+    <section id="page-audio" class="page">
+      <div class="breadcrumb">Docker › Audio mode</div>
+      <h1>Pick an audio integration</h1>
+      <p class="lede">
+        Each option's pre-flight check ran when the picker opened.
+        Greyed-out modes are blocked by a missing dependency — see the
+        check details under each card.
+      </p>
+      <div class="row" id="audio-cards"></div>
+      <div class="actions">
+        <button data-act="back:mode">Back</button>
+        <button class="primary" id="audio-next" disabled data-act="goto-network">Next</button>
+      </div>
+    </section>
+
+    <!-- Page 3: Network + (conditional) NetJACK target -->
+    <section id="page-network" class="page">
+      <div class="breadcrumb">Docker › Networking</div>
+      <h1>Choose a networking model</h1>
+      <p class="lede">
+        Host mode is lower latency and required for some discovery
+        protocols, but only works on Linux — Docker Desktop's VM
+        silently falls back to bridge. Bridge works everywhere.
+      </p>
+      <div class="row">
+        <button class="card" data-net="bridge">
+          <h2>Bridge (port mapping)</h2>
+          <div class="desc">Publishes the container's 3838 to a host port via the bridge driver. Works on any host.</div>
+        </button>
+        <button class="card" data-net="host">
+          <h2>Host networking</h2>
+          <div class="desc">Container shares the host's network namespace. Linux only.</div>
+        </button>
+      </div>
+      <div class="field" id="host-port-field">
+        <label for="host-port">Host port (bridge only — default 3838)</label>
+        <input id="host-port" type="number" value="3838" min="1" max="65535" />
+      </div>
+      <div id="netjack-fields" style="display:none">
+        <div class="grid2">
+          <div class="field">
+            <label for="netjack-host">NetJACK host</label>
+            <input id="netjack-host" type="text" placeholder="studio.local or IP" />
+          </div>
+          <div class="field">
+            <label for="netjack-port">NetJACK port</label>
+            <input id="netjack-port" type="number" value="19000" min="1" max="65535" />
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <button data-act="back:audio">Back</button>
+        <button class="primary" id="net-launch" disabled data-act="launch">Launch</button>
+      </div>
+    </section>
+
     <script>
+      // The Rust side embeds the doctor results for all three modes
+      // here before serving the page. Shape:
+      //   { integrated: { ok, checks: [...] }, jack: {...}, netjack: {...} }
+      // Each check: { id, label, ok, severity, detail }
+      const DOCTOR = window.__doctor || {};
+
       function pick(v) {
         if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(v);
       }
-      for (const b of document.querySelectorAll("[data-pick]")) {
-        b.addEventListener("click", () => pick(b.dataset.pick));
+      function show(pageId) {
+        for (const p of document.querySelectorAll(".page")) {
+          p.classList.toggle("active", p.id === pageId);
+        }
       }
+
+      // State
+      let selectedAudio = null;     // "integrated" | "jack" | "netjack"
+      let selectedNetwork = null;   // "bridge" | "host"
+
+      // Build the audio mode cards from DOCTOR
+      const audio = [
+        { id: "integrated", title: "Integrated (no host audio)",
+          desc: "Dummy backend runs entirely inside the container. Works on any host." },
+        { id: "jack", title: "Host JACK / PipeWire-JACK",
+          desc: "Container talks to the host's running JACK or PipeWire-JACK server. Linux only." },
+        { id: "netjack", title: "NetJACK (remote master)",
+          desc: "Container connects to a NetJACK server over TCP. Cross-platform; pays network jitter." },
+      ];
+
+      function renderAudioCards() {
+        const root = document.getElementById("audio-cards");
+        root.innerHTML = "";
+        for (const a of audio) {
+          const d = DOCTOR[a.id] || { ok: false, checks: [] };
+          const blocked = !d.ok;
+          const card = document.createElement("button");
+          card.className = "card";
+          card.disabled = blocked;
+          card.dataset.audio = a.id;
+
+          const checksHtml = (d.checks || []).map(c => {
+            const cls = c.ok ? "ok" : (c.severity === "warning" ? "warn" : "err");
+            const mark = c.ok ? "✓" : (c.severity === "warning" ? "⚠" : "✗");
+            return `<div class="check ${cls}">
+                      <span class="mark">${mark}</span>
+                      <span class="body"><strong>${escapeHtml(c.label)}</strong>: ${escapeHtml(firstLine(c.detail))}</span>
+                    </div>`;
+          }).join("");
+
+          const detailHtml = (d.checks || []).filter(c => !c.ok).map(c =>
+            `[${c.severity}] ${c.label}\n${c.detail}`
+          ).join("\n\n");
+
+          card.innerHTML = `
+            <h2>${a.title}</h2>
+            <div class="desc">${a.desc}</div>
+            <div class="checks">${checksHtml || '<em>No checks ran.</em>'}</div>
+            ${detailHtml ? `<details><summary>Why blocked?</summary><pre>${escapeHtml(detailHtml)}</pre></details>` : ""}
+          `;
+          if (!blocked) {
+            card.addEventListener("click", () => {
+              selectedAudio = a.id;
+              for (const c of root.querySelectorAll(".card")) c.classList.remove("selected");
+              card.classList.add("selected");
+              document.getElementById("audio-next").disabled = false;
+            });
+          }
+          root.appendChild(card);
+        }
+      }
+
+      function escapeHtml(s) {
+        return String(s || "").replace(/[&<>"']/g, c =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      }
+      function firstLine(s) {
+        return String(s || "").split("\n")[0];
+      }
+
+      // Wire button events
+      document.addEventListener("click", (ev) => {
+        const t = ev.target.closest("[data-act],[data-net]");
+        if (!t) return;
+        if (t.dataset.act === "pick:host") return pick("host");
+        if (t.dataset.act === "goto-docker") {
+          renderAudioCards();
+          show("page-audio");
+          return;
+        }
+        if (t.dataset.act === "back:mode") return show("page-mode");
+        if (t.dataset.act === "goto-network") {
+          // Show / hide network-mode-dependent fields
+          document.getElementById("netjack-fields").style.display =
+            selectedAudio === "netjack" ? "" : "none";
+          // Default to bridge when nothing selected
+          if (!selectedNetwork) selectNetwork("bridge");
+          show("page-network");
+          return;
+        }
+        if (t.dataset.act === "back:audio") return show("page-audio");
+        if (t.dataset.net) {
+          selectNetwork(t.dataset.net);
+          return;
+        }
+        if (t.dataset.act === "launch") return submitLaunch();
+      });
+
+      function selectNetwork(n) {
+        selectedNetwork = n;
+        for (const c of document.querySelectorAll('[data-net]')) {
+          c.classList.toggle("selected", c.dataset.net === n);
+        }
+        document.getElementById("host-port-field").style.display =
+          n === "bridge" ? "" : "none";
+        validateLaunch();
+      }
+
+      function validateLaunch() {
+        let ok = !!selectedAudio && !!selectedNetwork;
+        if (selectedAudio === "netjack") {
+          const h = (document.getElementById("netjack-host").value || "").trim();
+          if (!h) ok = false;
+        }
+        document.getElementById("net-launch").disabled = !ok;
+      }
+      document.addEventListener("input", validateLaunch);
+
+      function submitLaunch() {
+        const payload = {
+          mode: selectedAudio,
+          network: selectedNetwork,
+          host_port: parseInt(document.getElementById("host-port").value, 10) || 3838,
+          netjack_host: (document.getElementById("netjack-host").value || "").trim() || null,
+          netjack_port: parseInt(document.getElementById("netjack-port").value, 10) || 19000,
+        };
+        pick("docker:" + JSON.stringify(payload));
+      }
+
       document.addEventListener("keydown", (ev) => {
+        // Quick path on the first page only.
+        const onMode = document.getElementById("page-mode").classList.contains("active");
+        if (!onMode) return;
         if (ev.key === "h" || ev.key === "H") pick("host");
-        if (ev.key === "d" || ev.key === "D") pick("docker");
+        if (ev.key === "d" || ev.key === "D") {
+          renderAudioCards();
+          show("page-audio");
+        }
       });
     </script>
   </body>
