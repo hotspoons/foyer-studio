@@ -1338,6 +1338,7 @@ name = "foyer-config"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "clap",
  "dirs 5.0.1",
  "foyer-schema",
  "serde",
@@ -1358,6 +1359,8 @@ dependencies = [
  "foyer-server",
  "gtk",
  "libc",
+ "serde",
+ "serde_json",
  "tao",
  "tokio",
  "tracing",

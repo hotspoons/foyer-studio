@@ -13,17 +13,36 @@
 // The mixer's toggle button now calls `start()` / `stop()` on this
 // singleton; it doesn't own any AudioListener of its own.
 //
-// Forced-on rule: tunnel guests have no hardware audio path to the
-// host machine, so we always start the listener for them. The
-// non-tunnel branch honors the user's saved preference
-// (`foyer.listen.master`), and when unset defaults to **on** so a
-// normal browser session against the sidecar hears the mix without
-// an extra click. (Older builds defaulted local connections to off
-// on the assumption the operator was also at the DAW with monitors;
-// standalone Foyer use is common enough that default-off caused more
-// confusion than help.)
+// Default-on rules (only apply when the user hasn't set a saved
+// preference via the Listen toggle):
+//
+//   * Tunnel guests       → ON (no host audio path, WS is their
+//                                 only way to hear anything).
+//   * Local + dummy engine → ON (Foyer Dummy / stub backend; the
+//                                 WS is the only audio path even
+//                                 on the user's own machine —
+//                                 cloud-demo containers live here).
+//   * Local + real engine + full layout
+//                          → OFF (Ardour with JACK/PipeWire/CoreAudio
+//                                 is already playing through the
+//                                 user's speakers; browser monitoring
+//                                 would double-monitor and usually
+//                                 phase-cancel into a mess. The
+//                                 phone layout keeps default-ON
+//                                 because phones are commonly used
+//                                 as a separate monitor for a
+//                                 desktop-driven session.)
+//   * Local + real engine + non-full layout
+//                          → ON (phone/touch/kids variants — safer
+//                                 default; the user is more likely
+//                                 to be off-desk).
+//
+// `engine_is_dummy` is taken from `client_greeting`; see
+// `crates/foyer-backend/src/lib.rs::engine_is_dummy` for the
+// server-side resolution chain (env var + backend self-report).
 
 import { AudioListener, readAudioPrefs } from "./audio-listener.js";
+import { getActiveVariant } from "foyer-core/registry/widgets.js";
 
 const PREF_KEY = "foyer.listen.master";
 
@@ -49,6 +68,15 @@ class AudioController extends EventTarget {
     this._store = store || null;
     if (!this._ws) return;
     this._ws.addEventListener("envelope", this._envelopeHandler);
+    // Re-evaluate the auto-on rule whenever the variant mounts — the
+    // default-OFF branch (local + real engine + full layout) needs
+    // the variant id to be settled before we can decide. The
+    // greeting may arrive before or after `foyer-variant-mounted`;
+    // applying on each settles whichever order races.
+    this._variantHandler = () => this._applyPref(null);
+    if (typeof window !== "undefined") {
+      window.addEventListener("foyer-variant-mounted", this._variantHandler);
+    }
     // The greeting may have already arrived before we attached
     // (race between core bootstrap and UI mount). Apply pref right
     // away using whatever info the store has now.
@@ -57,6 +85,10 @@ class AudioController extends EventTarget {
 
   detach() {
     if (this._ws) this._ws.removeEventListener("envelope", this._envelopeHandler);
+    if (this._variantHandler && typeof window !== "undefined") {
+      window.removeEventListener("foyer-variant-mounted", this._variantHandler);
+    }
+    this._variantHandler = null;
     this._ws = null;
     this._store = null;
   }
@@ -188,16 +220,53 @@ class AudioController extends EventTarget {
     if (role === "secondary") return;
     const rbac = this._store?.state?.rbac;
     const isTunnel = !!rbac?.isTunnel;
+    // Saved preference always wins over heuristics — the user has
+    // explicitly clicked the Listen toggle at least once.
+    let saved = null;
+    try { saved = localStorage.getItem(PREF_KEY); } catch {}
+    if (saved === "1") {
+      this._scheduleAutoStart();
+      return;
+    }
+    if (saved === "0") return;
+
     let wantOn;
     if (isTunnel) {
+      // Tunnel guests have no local audio path — WS is the only
+      // way to hear anything. Always default on.
       wantOn = true;
     } else {
-      let saved = null;
-      try { saved = localStorage.getItem(PREF_KEY); } catch {}
-      if (saved === "1") wantOn = true;
-      else if (saved === "0") wantOn = false;
-      else if (isLocal === null) return;
-      else wantOn = true;
+      // Local-network connection. Decide based on whether the
+      // server's audio engine is a dummy (only WS gives audio) or
+      // a real engine (speakers/headphones already play it).
+      const greeting = this._store?.state?.greeting;
+      if (!greeting) {
+        // No ClientGreeting yet — we can't tell dummy from real.
+        // Bail; the next greeting/variant event will re-call us.
+        return;
+      }
+      const engineIsDummy = !!greeting?.engine_is_dummy;
+      if (engineIsDummy) {
+        // Cloud-demo container, stub backend, gui-dummy mode —
+        // browser monitoring is the only output path.
+        wantOn = true;
+      } else {
+        // Real audio engine on the host. The full-layout user is
+        // (presumed to be) at the same machine as the DAW with
+        // monitors already attached — double-monitoring through
+        // the browser duplicates audio and usually phase-cancels
+        // into mush. Phone/touch/kids variants stay default-on
+        // because phones are commonly used as a portable monitor
+        // for a desktop-driven session.
+        const variant = getActiveVariant();
+        if (variant == null) {
+          // Variant not mounted yet. Bail out; the
+          // `foyer-variant-mounted` listener will call us again
+          // once the decision is settled.
+          return;
+        }
+        wantOn = variant !== "full";
+      }
     }
     if (wantOn) this._scheduleAutoStart();
   }

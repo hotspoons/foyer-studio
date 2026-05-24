@@ -171,6 +171,28 @@ pub trait Backend: Send + Sync + 'static {
         true
     }
 
+    /// Whether the backend's audio engine produces sound only inside
+    /// the container / process (a dummy engine the user can ONLY
+    /// hear via the browser's WebSocket monitoring), or drives real
+    /// host audio hardware that the user already hears via
+    /// speakers/headphones.
+    ///
+    /// `Some(true)`  — dummy engine (StubBackend; Ardour running the
+    ///                 Foyer Dummy audio backend inside a container).
+    ///                 Browser monitoring is the only path; the
+    ///                 master-bus Listen toggle should default ON.
+    /// `Some(false)` — real audio engine (Ardour against JACK /
+    ///                 PipeWire / CoreAudio / ALSA on the user's
+    ///                 box). Browser monitoring would duplicate what
+    ///                 the speakers already play; the Listen toggle
+    ///                 should default OFF for local-network browsers.
+    /// `None`        — backend doesn't know. Server falls back to its
+    ///                 own resolution (env override + conservative
+    ///                 default).
+    fn engine_is_dummy(&self) -> Option<bool> {
+        None
+    }
+
     async fn snapshot(&self) -> Result<Session, BackendError>;
     async fn subscribe(&self) -> Result<EventStream, BackendError>;
     async fn set_control(&self, id: EntityId, value: ControlValue) -> Result<(), BackendError>;

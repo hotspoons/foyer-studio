@@ -19,15 +19,16 @@
 //! launches skip the prompt. Pass `--reset-mode` to re-prompt.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use foyer_backend_host::HostBackend;
 use foyer_backend_stub::StubBackend;
-use foyer_config::{self as cfg, DesktopMode};
+use foyer_config::{self as cfg, DesktopMode, DockerMode, DockerNetwork};
 use foyer_server::{Config, Server};
+use serde::Deserialize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tao::window::{Fullscreen, WindowBuilder};
@@ -343,12 +344,29 @@ fn run_webview(
     });
 }
 
-/// First-launch picker. Opens a small chromeless window with two
-/// buttons — clicking either writes `desktop.mode` into config.yaml,
-/// closes the picker, and relaunches `foyer-desktop` with the new
-/// mode in effect.
+/// First-launch picker. Opens a chromeless window with a two-page
+/// wizard:
+///
+///   1. Host vs Docker.
+///   2. (Docker only) Audio mode picker pre-decorated with the
+///      result of `foyer docker --doctor --json` for each mode,
+///      then a networking-model + (NetJACK only) host/port form.
+///
+/// Clicking through writes `desktop.mode` + (if Docker) the full
+/// `docker:` block into config.yaml, closes the picker, and
+/// relaunches `foyer-desktop` with the new mode in effect.
 fn show_mode_picker() -> Result<()> {
-    let html = include_str!("./mode_picker.html");
+    let template = include_str!("./mode_picker.html");
+    // Run the pre-flight checks for all three docker modes BEFORE
+    // opening the window, so the audio-mode page renders with full
+    // state on first paint. Each spawn is fast (<200 ms on a warm
+    // host); doing it in parallel via threads keeps cold-start
+    // perception under half a second.
+    let doctor_json = build_doctor_payload();
+    let html = template.replace(
+        "<head>",
+        &format!("<head>\n    <script>window.__doctor = {doctor_json};</script>"),
+    );
     // Why a custom `foyer://` protocol instead of `with_html` /
     // `data:` / `file:///`:
     //
@@ -363,7 +381,7 @@ fn show_mode_picker() -> Result<()> {
     // Custom protocols give us a real `scheme://host/path` URI
     // shape that `http::Uri` accepts, AND let us serve arbitrary
     // bytes from memory without writing temp files.
-    let html_bytes = html.as_bytes().to_vec();
+    let html_bytes = html.into_bytes();
     let event_loop: EventLoop<PickResult> =
         EventLoopBuilder::<PickResult>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -396,14 +414,14 @@ fn show_mode_picker() -> Result<()> {
         .with_url("foyer://localhost/picker.html")
         .with_ipc_handler(move |req| {
             let body = req.body();
-            let choice = match body.as_str() {
-                "host" => PickResult::Host,
-                "docker" => PickResult::Docker,
-                _ => return,
-            };
-            // Best-effort — if the event loop's gone there's nothing
-            // we can do here anyway.
-            let _ = proxy.send_event(choice);
+            let pick = parse_ipc_pick(body.as_str());
+            if let Some(p) = pick {
+                // Best-effort — if the event loop's gone there's
+                // nothing we can do here anyway.
+                let _ = proxy.send_event(p);
+            } else {
+                tracing::warn!("mode-picker: unrecognized IPC payload: {body}");
+            }
         })
         .build(&window)?;
     apply_linux_render_workarounds(&webview);
@@ -426,10 +444,47 @@ fn show_mode_picker() -> Result<()> {
     });
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum PickResult {
     Host,
-    Docker,
+    Docker(DockerWizardChoice),
+}
+
+/// Wizard output — everything the docker page collected from the
+/// user. Mirrors the JS payload shape verbatim so the picker's HTML
+/// and this struct can be eyeballed side-by-side.
+#[derive(Debug, Clone, Deserialize)]
+struct DockerWizardChoice {
+    mode: DockerMode,
+    network: DockerNetwork,
+    #[serde(default = "default_host_port")]
+    host_port: u16,
+    #[serde(default)]
+    netjack_host: Option<String>,
+    #[serde(default)]
+    netjack_port: Option<u16>,
+}
+
+fn default_host_port() -> u16 {
+    3838
+}
+
+/// Translate the raw IPC body the WebView's `window.ipc.postMessage`
+/// hands us into one of the discrete picker outcomes. Anything
+/// unrecognised returns `None` so the IPC handler can log it.
+fn parse_ipc_pick(body: &str) -> Option<PickResult> {
+    if body == "host" {
+        return Some(PickResult::Host);
+    }
+    if let Some(rest) = body.strip_prefix("docker:") {
+        match serde_json::from_str::<DockerWizardChoice>(rest) {
+            Ok(c) => return Some(PickResult::Docker(c)),
+            Err(e) => {
+                tracing::warn!("mode-picker: docker payload failed to parse: {e} (body={rest})");
+            }
+        }
+    }
+    None
 }
 
 /// Write the chosen mode into config.yaml and exec a fresh
@@ -439,10 +494,26 @@ fn persist_and_relaunch(pick: PickResult) -> Result<()> {
     let desktop = config
         .desktop
         .get_or_insert_with(cfg::DesktopConfig::default);
-    desktop.mode = Some(match pick {
-        PickResult::Host => DesktopMode::Host,
-        PickResult::Docker => DesktopMode::Docker,
-    });
+    match &pick {
+        PickResult::Host => {
+            desktop.mode = Some(DesktopMode::Host);
+        }
+        PickResult::Docker(choice) => {
+            desktop.mode = Some(DesktopMode::Docker);
+            // Replace any previous docker block — the wizard always
+            // collects every field we care about, so a partial
+            // merge would leave stale values from an earlier run.
+            let mut dcfg = config.docker.take().unwrap_or_default();
+            dcfg.mode = Some(choice.mode);
+            dcfg.network = Some(choice.network);
+            dcfg.host_port = Some(choice.host_port);
+            if matches!(choice.mode, DockerMode::Netjack) {
+                dcfg.netjack_host = choice.netjack_host.clone();
+                dcfg.netjack_port = choice.netjack_port;
+            }
+            config.docker = Some(dcfg);
+        }
+    }
     cfg::save(&config).context("save config.yaml after mode pick")?;
 
     // Re-exec self with the new config in place. On Unix `exec`
@@ -461,6 +532,105 @@ fn persist_and_relaunch(pick: PickResult) -> Result<()> {
         let _ = std::process::Command::new(&exe).spawn()?;
         std::process::exit(0);
     }
+}
+
+/// Build the `window.__doctor = {...}` JSON blob the picker page
+/// reads to render its three audio-mode cards. We shell out to
+/// `foyer docker --<mode> --doctor --json` once per mode in
+/// parallel; if `foyer` itself isn't on PATH or fails, we emit a
+/// stub blob with every mode flagged as `ok: false` and the error
+/// inlined so the user sees what went wrong without a console.
+fn build_doctor_payload() -> String {
+    let foyer_bin = find_foyer_binary();
+    let modes = ["integrated", "jack", "netjack"];
+    let handles: Vec<_> = modes
+        .iter()
+        .map(|m| {
+            let bin = foyer_bin.clone();
+            let mode = (*m).to_string();
+            std::thread::spawn(move || (mode.clone(), doctor_one(bin.as_deref(), &mode)))
+        })
+        .collect();
+
+    let mut pairs: Vec<String> = Vec::with_capacity(3);
+    for h in handles {
+        let (mode, json) = h
+            .join()
+            .unwrap_or_else(|_| ("?".into(), "{\"ok\":false,\"checks\":[]}".into()));
+        pairs.push(format!("\"{mode}\": {json}"));
+    }
+    format!("{{ {} }}", pairs.join(", "))
+}
+
+fn doctor_one(foyer_bin: Option<&Path>, mode: &str) -> String {
+    let Some(bin) = foyer_bin else {
+        return synth_failure(
+            "`foyer` binary not found",
+            "Install it (or rebuild the bundle) so the desktop shell can run \
+             pre-flight checks. Looked next to foyer-desktop and on PATH.",
+        );
+    };
+    let flag = match mode {
+        "integrated" => "--integrated",
+        "jack" => "--jack",
+        "netjack" => "--netjack",
+        _ => return synth_failure("unknown mode", mode),
+    };
+    let out = std::process::Command::new(bin)
+        .args(["docker", flag, "--doctor", "--json"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_else(|e| {
+            synth_failure(
+                "foyer docker --doctor returned non-UTF8 output",
+                &e.to_string(),
+            )
+        }),
+        Ok(o) => synth_failure(
+            "foyer docker --doctor exited non-zero",
+            &String::from_utf8_lossy(&o.stderr),
+        ),
+        Err(e) => synth_failure("failed to spawn foyer docker --doctor", &e.to_string()),
+    }
+}
+
+/// Emit a synthetic JSON blob shaped like a real doctor result so
+/// the picker UI doesn't have to special-case "no data". One
+/// required-severity failure → the card renders disabled with the
+/// detail string the user can act on.
+fn synth_failure(label: &str, detail: &str) -> String {
+    let label_json = json_escape(label);
+    let detail_json = json_escape(detail);
+    format!(
+        "{{\"ok\":false,\"checks\":[{{\"id\":\"foyer-cli\",\"label\":\"{label_json}\",\"ok\":false,\"severity\":\"required\",\"detail\":\"{detail_json}\"}}]}}"
+    )
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Locate the `foyer` CLI binary, preferring the sibling next to
+/// our own executable (which is how install.sh lays things out)
+/// and falling back to PATH for `cargo run` dev launches.
+fn find_foyer_binary() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("foyer")))
+        .filter(|p| p.is_file())
+        .or_else(|| which("foyer"))
 }
 
 /// Linux-only WebKit2GTK render workarounds applied to every

@@ -108,16 +108,28 @@ For host-bind mounts, add `--user "$(id -u):$(id -g)"` so files
 written from inside the container land owned by your host user
 instead of the image's default uid 1000.
 
-### Advanced — host JACK passthrough (real audio, Linux only)
+### Advanced — host JACK / PipeWire passthrough (real audio, Linux only)
 
 For driving real audio hardware, flip into `jack-headless` mode and
-share the host's running jackd:
+share the host's running sound server. **Both classic JACK 2 and
+PipeWire's JACK-compat layer work identically** — they expose the
+same `/dev/shm/jack-*` registry and `/tmp/jack-*` socket files, so
+the container doesn't need to know which is on the other side.
 
 ```bash
-# 1. Start jackd on the host (if not already running):
+# 1a. If you're on PipeWire (most modern distros — Fedora 36+,
+#     Ubuntu 22.10+, Arch, etc.) — verify the JACK-compat layer is
+#     installed and the user session is active:
+sudo apt install pipewire-jack pipewire-audio   # Debian/Ubuntu
+sudo dnf install pipewire-jack-audio-connection-kit  # Fedora
+sudo pacman -S pipewire-jack                    # Arch
+systemctl --user status pipewire pipewire-pulse wireplumber
+pw-jack jack_lsp     # smoke test — should list system ports
+
+# 1b. OR start classic jackd on the host (older Ubuntu/Debian setups):
 jackd -R -d alsa -d hw:0 -r 48000 -p 1024 &
 
-# 2. Run the container against that jackd:
+# 2. Run the container against whichever is up:
 docker run --rm -it --name foyer-studio \
   -p 3838:3838 --shm-size=1g \
   --privileged --ulimit rtprio=95 --ulimit memlock=-1 \
@@ -133,19 +145,29 @@ docker run --rm -it --name foyer-studio \
 What's different vs. standalone:
 
 - **`FOYER_RUNTIME_MODE=jack-headless`** runs the headless `hardour`
-  binary against jackd with realtime scheduling — same low-latency
-  path Ardour uses normally on a desktop.
+  binary against the host's audio server with realtime scheduling —
+  same low-latency path Ardour uses normally on a desktop.
 - **`--privileged --ulimit rtprio=95 --ulimit memlock=-1`** are
   non-negotiable for RT scheduling. Without them
   `pthread_setschedparam(SCHED_FIFO)` returns EPERM and Ardour's
   AudioEngine fatals at startup.
 - **`FOYER_JACK_MODE=shm` + `--ipc=host` + the `/dev/shm` and
   `/tmp` bind mounts** let the container's libjack find the host's
-  running jackd through its POSIX-shm registry.
+  running jackd / pipewire-jack through its POSIX-shm registry.
 - **`--user "$(id -u):$(id -g)" --group-add audio`** keep the
   in-container uid matching the host's shm-segment owner and add
   the runtime user to the host's `audio` group (needed for RT
   scheduling permission on most distros).
+
+**PipeWire specifics:** PipeWire's JACK compat is user-session
+scoped — the shm registry lives under `/run/user/<uid>/pipewire-*`
+in addition to the legacy `/dev/shm` path. The Docker example above
+covers both via `--ipc=host` + `/dev/shm`; if your distro disables
+the legacy shim, also pass
+`-v /run/user/$(id -u):/run/user/$(id -u)` and
+`-e XDG_RUNTIME_DIR=/run/user/$(id -u)`. Verify from inside the
+container with `jack_lsp` (the libjack the container ships speaks
+to either server transparently).
 
 **macOS:** Docker Desktop's Linux VM doesn't expose host audio
 devices at all, so JACK shm passthrough doesn't apply. Mac users
@@ -197,6 +219,38 @@ layers of defense (symlink-reject, zip-bomb caps, XML scrubber for
 preserved as inert XML comments and can be restored on a trusted
 desktop via `foyer scrub-restore <session.ardour>`. Full
 threat-model walk-through in [SECURITY.md](SECURITY.md).
+
+### Driving the container from the `foyer` CLI
+
+When you've installed `foyer` on the host, `foyer docker` wraps the
+plumbing above behind a single command. It picks `podman` /
+`docker` / `nerdctl` from `$PATH` (podman preferred for rootless),
+fills in the right cap-adds + ulimits per mode, and exits when the
+container does.
+
+```bash
+# Integrated (default — no host audio, works everywhere):
+foyer docker
+
+# Host JACK or PipeWire-JACK passthrough (Linux only):
+foyer docker --jack
+
+# NetJACK to a remote master:
+foyer docker --netjack --netjack-host studio.local --netjack-port 19000
+
+# Use host networking instead of the bridge port-map (Linux only,
+# lower latency, required for mDNS / NetJACK auto-discovery):
+foyer docker --jack --network host
+
+# Pre-flight only — check whether the selected mode will work on
+# this host and emit JSON for tooling (used by the desktop wrapper):
+foyer docker --jack --doctor --json
+```
+
+Defaults flow through `config.yaml`'s `docker:` block — set
+`docker.runtime`, `docker.image`, `docker.mode`, `docker.network`,
+`docker.netjack_host` / `docker.netjack_port`, and `docker.host_port`
+there to skip flags on every invocation.
 
 ### Building the image locally
 
@@ -291,8 +345,19 @@ Studio Shim** is the box you tick.
   - **macOS** — CoreAudio works out of the box (Ardour's default
     on macOS). JACK via Homebrew's `jack` package or the
     [jackaudio.org](https://jackaudio.org) installer is also fine.
-  - **Linux** — JACK 2 (`jackd2`) for the typical low-latency path,
-    or ALSA / PipeWire for a JACK-less setup.
+  - **Linux** — three first-class options, all supported equally:
+    - **PipeWire** (default on Fedora 36+, Ubuntu 22.10+, Arch,
+      most current GNOME/KDE installs). Install
+      `pipewire-jack` / `pipewire-jack-audio-connection-kit` so
+      Ardour can pick the "JACK" backend in the Audio/MIDI Setup
+      dialog — PipeWire's compat layer answers transparently, and
+      no extra `jackd` process is needed.
+    - **JACK 2** (`jackd2`) — the classic low-latency path, still
+      the right call for studio rigs with a dedicated audio
+      interface and no desktop sound mixing.
+    - **ALSA** — Ardour's ALSA backend if you're running headless /
+      JACK-less. Works but only one process at a time can hold the
+      device.
 - A browser. Chrome/Edge/Safari/Firefox all work. Mobile Safari
   too — the UI is responsive.
 

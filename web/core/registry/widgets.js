@@ -28,7 +28,25 @@ const _parents = new Map();   // variant -> parent variant id
 let _activeVariant = null;
 
 /** Tell the registry which variant is currently active. */
-export function setActiveVariant(id) { _activeVariant = id; }
+export function setActiveVariant(id) {
+  _activeVariant = id;
+  // Notify anyone who needs to wait for the variant decision before
+  // making a setting choice — currently the master-bus Listen
+  // controller uses this to re-evaluate its default-on/off rule
+  // (full-layout vs phone-layout get different defaults).
+  if (typeof window !== "undefined") {
+    try {
+      window.dispatchEvent(
+        new CustomEvent("foyer-variant-mounted", { detail: { id } }),
+      );
+    } catch {}
+  }
+}
+
+/** Return the currently-active variant id, or `null` if nothing's
+ *  been mounted yet. Reflects whatever was last passed to
+ *  `setActiveVariant`. */
+export function getActiveVariant() { return _activeVariant; }
 
 /** Declare a parent variant for fallback lookups. */
 export function setVariantParent(variant, parent) {

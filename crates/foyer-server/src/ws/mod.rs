@@ -81,6 +81,28 @@ async fn orphans_for_wire(state: &std::sync::Arc<AppState>) -> Vec<foyer_schema:
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TunnelOrigin;
 
+/// Resolve the `engine_is_dummy` field for the outgoing
+/// `ClientGreeting`. The container's entrypoint sets
+/// `FOYER_ENGINE_DUMMY=1` in `gui-dummy` mode so the cloud-demo
+/// container reports dummy even though the backend object is the
+/// real Ardour host backend. Otherwise we trust the backend's
+/// self-report; if it doesn't know, conservatively assume the
+/// engine is real (the host-install case the user actually hit —
+/// double-monitoring would be surprising and ugly).
+async fn resolve_engine_is_dummy(state: &AppState) -> bool {
+    if let Ok(v) = std::env::var("FOYER_ENGINE_DUMMY") {
+        let trimmed = v.trim();
+        if matches!(trimmed, "1" | "true" | "yes" | "on") {
+            return true;
+        }
+        if matches!(trimmed, "0" | "false" | "no" | "off") {
+            return false;
+        }
+    }
+    let backend = state.backend.read().await.clone();
+    backend.engine_is_dummy().unwrap_or(false)
+}
+
 pub(crate) async fn upgrade(
     ws: WebSocketUpgrade,
     Query(params): Query<HashMap<String, String>>,
@@ -376,6 +398,12 @@ async fn handle(
                 // `Config::default_ui_variant` to force all browsers
                 // onto `touch`, `kids`, `lite`, or a third-party UI.
                 default_ui_variant: state.default_ui_variant.clone(),
+                // Drives the client-side master-bus Listen default:
+                // dummy engine → ON (only audio path), real engine →
+                // OFF for local-network browsers (speakers already
+                // play it). Tunnel guests bypass this on the client
+                // side and always default ON.
+                engine_is_dummy: resolve_engine_is_dummy(&state).await,
             },
         };
         let _ = send_env(&mut tx_ws, &greeting).await;
