@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sprunki Beats — Preview</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    color: #f0f0f0;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  .app { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+
+  /* ── Header ── */
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; background: rgba(0,0,0,0.3);
+    border-bottom: 2px solid rgba(255,255,255,0.08);
+  }
+  .title {
+    font-size: 22px; font-weight: 800;
+    background: linear-gradient(90deg, #ff6b6b, #feca57, #48dbfb, #ff9ff3);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; letter-spacing: 1px;
+  }
+  .tabs { display: flex; gap: 6px; }
+  .tab {
+    padding: 6px 18px; border-radius: 20px;
+    border: 2px solid transparent;
+    background: rgba(255,255,255,0.08);
+    color: #ccc; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .tab:hover { background: rgba(255,255,255,0.15); }
+  .tab.active { border-color: var(--tc); background: color-mix(in srgb, var(--tc) 30%, transparent); color: white; }
+
+  /* ── Main two-panel layout ── */
+  .main { display: grid; grid-template-columns: 200px 1fr; min-height: 0; overflow: hidden; }
+
+  /* LEFT: Roster */
+  .roster {
+    background: rgba(0,0,0,0.25);
+    border-right: 2px solid rgba(255,255,255,0.06);
+    padding: 12px 8px;
+    overflow-y: auto;
+  }
+  .roster-title { font-size: 13px; font-weight: 800; color: rgba(255,255,255,0.8); padding: 0 8px; margin-bottom: 2px; }
+  .roster-hint { font-size: 10px; color: rgba(255,255,255,0.3); padding: 0 8px; margin-bottom: 12px; }
+  .cat-label {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 2px; color: rgba(255,255,255,0.3); padding: 10px 8px 4px;
+  }
+  .chip {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-radius: 10px;
+    background: rgba(255,255,255,0.05);
+    border: 2px solid rgba(255,255,255,0.06);
+    cursor: grab; transition: all 0.12s;
+    user-select: none; margin-bottom: 4px;
+  }
+  .chip:hover {
+    background: color-mix(in srgb, var(--cc) 15%, rgba(255,255,255,0.05));
+    border-color: color-mix(in srgb, var(--cc) 40%, transparent);
+    transform: translateX(3px);
+  }
+  .chip:active { cursor: grabbing; transform: scale(1.05); }
+  .chip-emoji { font-size: 18px; width: 24px; text-align: center; }
+  .chip-name { font-size: 12px; font-weight: 600; color: #ddd; }
+
+  /* RIGHT: Timeline */
+  .timeline {
+    padding: 16px;
+    display: flex; flex-direction: column;
+    justify-content: center; overflow-x: auto;
+  }
+  .tl-header { font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.6); margin-bottom: 8px; }
+  .tl-hint { font-size: 10px; color: rgba(255,255,255,0.3); font-weight: 400; margin-left: 8px; }
+  .beat-nums { display: flex; gap: 4px; margin-bottom: 4px; padding: 0 2px; }
+  .beat-nums span {
+    flex: 1; min-width: 56px; text-align: center;
+    font-size: 10px; color: rgba(255,255,255,0.25); font-weight: 500;
+  }
+  .slots { display: flex; gap: 4px; padding: 2px; }
+  .slot {
+    flex: 1; min-width: 56px; min-height: 130px;
+    border-radius: 12px;
+    border: 2px dashed rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.02);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 4px; padding: 6px;
+    transition: all 0.15s; position: relative;
+  }
+  .slot:hover { border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.04); }
+  .slot.accent { border-style: solid; border-color: rgba(255,255,255,0.15); }
+  .slot.has-chars { border-style: solid; border-color: rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); }
+  .slot.drag-over {
+    border-color: #feca57 !important;
+    background: rgba(254,202,87,0.1) !important;
+    box-shadow: inset 0 0 16px rgba(254,202,87,0.15);
+    transform: scale(1.03); z-index: 2;
+  }
+  .slot-char {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px;
+    background: color-mix(in srgb, var(--cc) 25%, transparent);
+    border: 2px solid color-mix(in srgb, var(--cc) 60%, transparent);
+    cursor: pointer; transition: all 0.1s; position: relative;
+  }
+  .slot-char:hover {
+    transform: scale(1.15);
+    box-shadow: 0 0 12px color-mix(in srgb, var(--cc) 40%, transparent);
+  }
+  .slot-char:hover::after {
+    content: "×";
+    position: absolute; top: -6px; right: -6px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: rgba(0,0,0,0.7); color: #ff6b6b;
+    font-size: 10px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .beat-dots { display: flex; gap: 4px; margin-top: 8px; padding: 0 2px; }
+  .beat-dot {
+    flex: 1; min-width: 56px; height: 4px; border-radius: 2px;
+    background: rgba(255,255,255,0.08);
+  }
+  .beat-dot.downbeat { background: rgba(255,255,255,0.2); }
+
+  /* ── Footer ── */
+  .footer {
+    display: flex; align-items: center; justify-content: center;
+    gap: 20px; padding: 12px 20px;
+    background: rgba(0,0,0,0.4);
+    border-top: 2px solid rgba(255,255,255,0.08);
+  }
+  .btn { border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+  .btn-stop {
+    width: 42px; height: 42px; border-radius: 50%;
+    background: rgba(255,255,255,0.1); color: white; font-size: 14px;
+  }
+  .btn-stop:hover { background: rgba(255,255,255,0.2); }
+  .btn-play {
+    width: 52px; height: 52px; border-radius: 50%;
+    background: #00b894; color: white; font-size: 22px;
+    box-shadow: 0 0 16px rgba(0,184,148,0.4);
+  }
+  .btn-play:hover { transform: scale(1.08); box-shadow: 0 0 24px rgba(0,184,148,0.6); }
+  .bpm-box {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 12px; background: rgba(255,255,255,0.06); border-radius: 10px;
+  }
+  .bpm-label { font-size: 10px; color: rgba(255,255,255,0.5); font-weight: 600; text-transform: uppercase; }
+  .bpm-value { font-size: 24px; font-weight: 800; color: #feca57; }
+  .pos { font-size: 13px; color: rgba(255,255,255,0.45); min-width: 50px; }
+
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 6px color-mix(in srgb, var(--cc) 30%, transparent); }
+    50% { box-shadow: 0 0 14px color-mix(in srgb, var(--cc) 60%, transparent); }
+  }
+  .slot-char { animation: pulse 1.8s ease-in-out infinite; }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- HEADER -->
+  <div class="header">
+    <div class="title">🎵 Sprunki Beats</div>
+    <div class="tabs">
+      <div class="tab active" style="--tc:#6c5ce7">Intro</div>
+      <div class="tab" style="--tc:#00b894">Verse</div>
+      <div class="tab" style="--tc:#e17055">Chorus</div>
+      <div class="tab" style="--tc:#fd79a8">Drop</div>
+    </div>
+  </div>
+
+  <!-- MAIN: Roster + Timeline -->
+  <div class="main">
+    <div id="roster" class="roster"></div>
+    <div id="timeline" class="timeline"></div>
+  </div>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <button class="btn btn-stop">⏹</button>
+    <button class="btn btn-play">▶</button>
+    <div class="bpm-box">
+      <span class="bpm-label">BPM</span>
+      <span class="bpm-value">120</span>
+    </div>
+    <div class="pos">1.1.1</div>
+  </div>
+</div>
+
+<script>
+const STEPS = 16;
+
+const chars = [
+  {id:"kick",name:"Boomer",emoji:"🦶",color:"#ff6b35",cat:"drums",tags:["kick","thump"]},
+  {id:"snare",name:"Snappy",emoji:"👏",color:"#f7c948",cat:"drums",tags:["snare","crack"]},
+  {id:"hihat",name:"Ticky",emoji:"🥁",color:"#7ec8e3",cat:"drums",tags:["hi-hat","tick"]},
+  {id:"clap",name:"Clappy",emoji:"🙌",color:"#c3aed6",cat:"drums",tags:["clap","snap"]},
+  {id:"crash",name:"Crashy",emoji:"💥",color:"#ff9ff3",cat:"drums",tags:["crash","cymbal"]},
+  {id:"bass_deep",name:"WubWub",emoji:"🐙",color:"#6c5ce7",cat:"bass",tags:["bass","wobble"]},
+  {id:"bass_punch",name:"Thumper",emoji:"🐘",color:"#a29bfe",cat:"bass",tags:["bass","punch"]},
+  {id:"pad_warm",name:"Warmy",emoji:"🌈",color:"#00b894",cat:"chords",tags:["pad","warm"]},
+  {id:"pad_bright",name:"Shiny",emoji:"✨",color:"#00cec9",cat:"chords",tags:["pad","bright"]},
+  {id:"lead_sq",name:"Beepy",emoji:"🤖",color:"#e17055",cat:"lead",tags:["lead","square"]},
+  {id:"lead_saw",name:"Buzz-Buzz",emoji:"🐝",color:"#fab1a0",cat:"lead",tags:["lead","saw"]},
+  {id:"lead_pluck",name:"Plucky",emoji:"🎸",color:"#ffeaa7",cat:"lead",tags:["lead","pluck"]},
+  {id:"fx_hit",name:"Bam!",emoji:"💢",color:"#d63031",cat:"fx",tags:["fx","hit"]},
+  {id:"fx_zap",name:"Zappy",emoji:"⚡",color:"#fdcb6e",cat:"fx",tags:["fx","zap"]},
+];
+
+// State: { stepIndex: [charId, ...] }
+const state = {};
+const demoToggles = {
+  0: ['kick','hihat','fx_hit'],
+  2: ['hihat'],
+  4: ['snare','hihat','pad_warm'],
+  6: ['hihat'],
+  8: ['kick','hihat','lead_sq','bass_deep'],
+  10: ['hihat'],
+  12: ['snare','hihat','pad_warm'],
+  14: ['hihat'],
+};
+for (let i = 0; i < STEPS; i++) state[i] = [...(demoToggles[i]||[])];
+
+// Build roster
+const roster = document.getElementById('roster');
+roster.innerHTML = '<div class="roster-title">Characters</div><div class="roster-hint">Drag onto the beat grid ↓</div>';
+
+const cats = ['drums','bass','chords','lead','fx'];
+const catNames = {drums:'Drums',bass:'Bass',chords:'Chords',lead:'Lead',fx:'FX'};
+
+for (const cat of cats) {
+  const catChars = chars.filter(c => c.cat === cat);
+  if (!catChars.length) continue;
+
+  const lbl = document.createElement('div');
+  lbl.className = 'cat-label'; lbl.textContent = catNames[cat];
+  roster.appendChild(lbl);
+
+  for (const ch of catChars) {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.style.setProperty('--cc', ch.color);
+    chip.draggable = true;
+    chip.innerHTML = `<span class="chip-emoji">${ch.emoji}</span><span class="chip-name">${ch.name}</span>`;
+
+    chip.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', ch.id);
+      e.dataTransfer.effectAllowed = 'move';
+    });
+
+    roster.appendChild(chip);
+  }
+}
+
+// Build timeline
+const timeline = document.getElementById('timeline');
+timeline.innerHTML = '<div class="tl-header">Beat Timeline<span class="tl-hint">Drop characters here</span></div>';
+
+const slotMap = []; // stepIndex → DOM element
+
+function renderSlots() {
+  let html = '<div class="beat-nums">';
+  for (let i = 0; i < STEPS; i++) html += `<span>${i+1}</span>`;
+  html += '</div><div class="slots">';
+
+  for (let i = 0; i < STEPS; i++) {
+    const chs = state[i] || [];
+    const activeChars = chs.map(id => chars.find(c => c.id === id)).filter(Boolean);
+    const isAccent = i % 4 === 0;
+    html += `<div class="slot ${isAccent?'accent':''} ${activeChars.length?'has-chars':''}" data-step="${i}">`;
+    for (const ch of activeChars) {
+      html += `<div class="slot-char" style="--cc:${ch.color}" data-char="${ch.id}" data-step="${i}" title="${ch.name}">${ch.emoji}</div>`;
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+
+  html += '<div class="beat-dots">';
+  for (let i = 0; i < STEPS; i++) {
+    html += `<div class="beat-dot ${i%4===0?'downbeat':''}"></div>`;
+  }
+  html += '</div>';
+
+  timeline.innerHTML = '<div class="tl-header">Beat Timeline<span class="tl-hint">Drop characters here</span></div>' + html;
+
+  // Re-attach event listeners
+  document.querySelectorAll('.slot').forEach(slot => {
+    const step = parseInt(slot.dataset.step);
+    slot.ondragover = (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      slot.classList.add('drag-over');
+    };
+    slot.ondragleave = () => slot.classList.remove('drag-over');
+    slot.ondrop = (e) => {
+      e.preventDefault();
+      slot.classList.remove('drag-over');
+      const charId = e.dataTransfer.getData('text/plain');
+      if (!charId) return;
+      // Toggle: if already there, remove; else add
+      const arr = state[step] || [];
+      const idx = arr.indexOf(charId);
+      if (idx >= 0) arr.splice(idx, 1);
+      else arr.push(charId);
+      state[step] = arr;
+      renderSlots();
+    };
+  });
+
+  // Click on placed character to remove
+  document.querySelectorAll('.slot-char').forEach(el => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      const step = parseInt(el.dataset.step);
+      const charId = el.dataset.char;
+      const arr = state[step] || [];
+      const idx = arr.indexOf(charId);
+      if (idx >= 0) arr.splice(idx, 1);
+      state[step] = arr;
+      renderSlots();
+    };
+  });
+}
+
+renderSlots();
+</script>
+</body>
+</html>
