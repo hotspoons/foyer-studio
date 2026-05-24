@@ -75,6 +75,37 @@ run-static *args='': prep
     FOYER_BUNDLE_WATCH_DEBUG=1 cargo build --bin foyer
     ./target/debug/foyer serve --listen 0.0.0.0:3838 {{args}}
 
+# Launch `foyer-desktop` (the native tao+wry shell) into the
+# in-container xpra display on :99, pointed at whatever sidecar
+# `just run` / `just run-jack` is already serving on :3838. Lets you
+# eyeball the desktop shell from your host browser via
+# http://127.0.0.1:14500 without leaving the dev container.
+#
+# `connect <url>` mode is deliberate — bare `foyer-desktop` would
+# open the first-run mode picker and try to embed its own sidecar
+# (Host mode) or spawn a container (Docker mode), neither of which
+# is what you want when inspecting the existing `just run` session.
+# Pass `--fullscreen` (or any other arg) through as `args=...`.
+#
+# `WEBKIT_FORCE_SANDBOX=0` and the `WEBKIT_DISABLE_*` env vars are
+# set by foyer-desktop itself in `main()` — you don't need them in
+# this recipe. We DO need `DISPLAY=:99` because tao/wry inherits
+# from the parent shell and a dev-container terminal has it unset.
+run-desktop *args='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! (echo > /dev/tcp/127.0.0.1/3838) 2>/dev/null; then
+        echo "run-desktop: foyer sidecar not on :3838 — start \`just run\` (or \`just run-jack\`) in another terminal first." >&2
+        exit 1
+    fi
+    if ! (echo > /dev/tcp/127.0.0.1/14500) 2>/dev/null; then
+        echo "run-desktop: xpra not on :14500 — start \`just run\` (it boots xpra as a side-effect)." >&2
+        exit 1
+    fi
+    echo "==> foyer-desktop attaching to http://127.0.0.1:3838/ via DISPLAY=:99"
+    echo "==> view the window at http://127.0.0.1:14500/ in your host browser"
+    DISPLAY=:99 cargo run --bin foyer-desktop -- connect http://127.0.0.1:3838/ {{args}}
+
 # Default dev loop. Run with the libardour Dummy backend instead of
 # JACK. Mirrors the Cloud Run / non-privileged-container audio path
 # locally — no jackd, no realtime scheduling, GUI Ardour painting onto

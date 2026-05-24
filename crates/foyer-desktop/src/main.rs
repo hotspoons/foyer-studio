@@ -94,42 +94,23 @@ enum Backend {
 }
 
 fn main() -> Result<()> {
-    // WebKit2GTK 2.42+ defaults to GPU compositing via dmabuf, which
-    // doesn't survive forwarding through xpra / nested X servers /
-    // remote desktops — the user sees a blank window even though
-    // the DOM is rendered. Force the software path by default so
-    // `foyer-desktop` Just Works under a forwarded display.
+    // Clean baseline — we previously stacked half a dozen
+    // `WEBKIT_DISABLE_*` env vars + `HardwareAccelerationPolicy::Never`
+    // in pursuit of xpra compatibility, and the WebView still rendered
+    // as a solid white surface (DOM populated, devtools work,
+    // context menus paint — only the page content area is blank).
+    // Those layered workarounds were the *cause*, not the cure: with
+    // hardware acceleration policy forced to Never on webkit2gtk 2.4x,
+    // the page rendering surface allocates but never commits, while
+    // peripheral GTK widgets (inspector, menu) keep painting through
+    // their own paths. See [docs/DECISIONS.md] follow-up.
     //
-    // Native local sessions still benefit from compositing; set
-    // `FOYER_DESKTOP_KEEP_COMPOSITING=1` (or simply pre-set any of
-    // the named env vars yourself) to opt out of these defaults.
-    if std::env::var_os("FOYER_DESKTOP_KEEP_COMPOSITING").is_none() {
-        for (k, v) in [
-            // dmabuf renderer is the WebKit 2.42+ default; xpra can't
-            // forward the resulting GPU surface.
-            ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
-            ("WEBKIT_DISABLE_COMPOSITING_MODE", "1"),
-            // WebKit 2.42+ spins up a separate GPU process whose
-            // output doesn't reach the parent window under nested
-            // X servers. Force the in-process renderer.
-            ("WEBKIT_DISABLE_GPU_PROCESS", "1"),
-            // Software GL — when we can't escape compositing, at
-            // least keep it CPU-bound so xpra sees the bits.
-            ("LIBGL_ALWAYS_SOFTWARE", "1"),
-            // Some WebKit sandbox setups require namespaces that
-            // don't exist in dev containers; turning it off lets
-            // the render path complete.
-            ("WEBKIT_FORCE_SANDBOX", "0"),
-            // Force the X11 GDK backend in case GTK auto-picks
-            // Wayland (xpra is X11-only).
-            ("GDK_BACKEND", "x11"),
-        ] {
-            if std::env::var_os(k).is_none() {
-                // Safety: setting env at the start of `main` before
-                // any thread spawns — std::env::set_var is sound here.
-                unsafe { std::env::set_var(k, v) };
-            }
-        }
+    // Strategy: trust WebKit's default acceleration pipeline. The
+    // only env var we still want is `GDK_BACKEND=x11` because GTK
+    // auto-pick of Wayland fails hard under xpra.
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        // Safety: pre-thread-spawn env mutation.
+        unsafe { std::env::set_var("GDK_BACKEND", "x11") };
     }
 
     tracing_subscriber::fmt()
@@ -327,8 +308,29 @@ fn run_webview(
     }
     let window = wb.build(&event_loop)?;
 
-    let webview = WebViewBuilder::new().with_url(&url).build(&window)?;
-    apply_linux_render_workarounds(&webview);
+    // Use `build_gtk` instead of `build` on Linux: the latter goes
+    // through wry's `new_x11` path which creates a *foreign* GTK
+    // window attached to tao's raw X11 handle. On webkit2gtk 2.4x
+    // that foreign-window setup renders the page surface to a
+    // pixmap that's never committed back to the X11 parent — DOM
+    // populated, inspector/context menus paint via their own GTK
+    // paths, but the page area stays solid white. Wry's official
+    // examples all use `build_gtk(window.default_vbox())` on Linux
+    // (see wry/examples/custom_protocol.rs); tao's default_vbox is
+    // the GtkBox it already mounted as a direct child of the
+    // window's gtk_window, so wry adds the webview into the real
+    // widget tree and skips the foreign-window indirection.
+    #[cfg(target_os = "linux")]
+    let _webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        let vbox = window
+            .default_vbox()
+            .ok_or_else(|| anyhow::anyhow!("tao window missing default_vbox"))?;
+        WebViewBuilder::new().with_url(&url).build_gtk(vbox)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _webview = WebViewBuilder::new().with_url(&url).build(&window)?;
 
     tracing::info!("opened WebView at {url}");
     let _child_guard = child.map(ChildGuard);
@@ -390,7 +392,7 @@ fn show_mode_picker() -> Result<()> {
         .with_inner_size(tao::dpi::LogicalSize::new(640.0, 420.0))
         .with_resizable(false)
         .build(&event_loop)?;
-    let webview = WebViewBuilder::new()
+    let builder = WebViewBuilder::new()
         // Enable devtools so a white-screen failure mode is
         // diagnosable from inside the window — right-click → Inspect
         // Element opens the WebKit inspector with the live DOM +
@@ -422,9 +424,22 @@ fn show_mode_picker() -> Result<()> {
             } else {
                 tracing::warn!("mode-picker: unrecognized IPC payload: {body}");
             }
-        })
-        .build(&window)?;
-    apply_linux_render_workarounds(&webview);
+        });
+    // Same rationale as `run_webview`: on Linux we must `build_gtk`
+    // into tao's GtkBox rather than going through wry's `new_x11`
+    // foreign-window path, which renders the page surface white.
+    #[cfg(target_os = "linux")]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        let vbox = window
+            .default_vbox()
+            .ok_or_else(|| anyhow::anyhow!("tao window missing default_vbox"))?;
+        builder.build_gtk(vbox)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let webview = builder.build(&window)?;
+    let _ = webview; // hold the webview alive for the event loop
 
     event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -631,40 +646,6 @@ fn find_foyer_binary() -> Option<PathBuf> {
         .and_then(|p| p.parent().map(|d| d.join("foyer")))
         .filter(|p| p.is_file())
         .or_else(|| which("foyer"))
-}
-
-/// Linux-only WebKit2GTK render workarounds applied to every
-/// `WebView` we build. On webkit2gtk 2.50+ the env-var route for
-/// disabling accelerated compositing is unreliable — the
-/// `WEBKIT_DISABLE_*` family is silently ignored in some builds.
-/// Setting `HardwareAccelerationPolicy::Never` on the WebKit
-/// settings object directly is the documented, supported knob; this
-/// helper applies it (plus the matching 2D-canvas disable) right
-/// after `WebViewBuilder::build`.
-///
-/// No-op on macOS and Windows — those platforms use WKWebView /
-/// WebView2 respectively, which don't share any rendering code
-/// with WebKit2GTK and don't need this treatment.
-#[allow(unused_variables)]
-fn apply_linux_render_workarounds(webview: &wry::WebView) {
-    #[cfg(target_os = "linux")]
-    {
-        use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
-        use wry::WebViewExtUnix as _;
-        let raw = webview.webview();
-        if let Some(settings) = WebViewExt::settings(&raw) {
-            settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
-            // `set_enable_accelerated_2d_canvas` is deprecated since
-            // webkit2gtk 2.32 but still functional and still load-
-            // bearing for our use case (the 2D canvas backend can
-            // commit to an unreachable surface even when AC policy
-            // is Never). The deprecation is on the *property*, not
-            // the behaviour.
-            #[allow(deprecated)]
-            settings.set_enable_accelerated_2d_canvas(false);
-            tracing::info!("applied linux render workarounds: hw_accel=Never, accel_2d_canvas=off",);
-        }
-    }
 }
 
 fn which(name: &str) -> Option<PathBuf> {
