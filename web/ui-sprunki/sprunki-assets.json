@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "source": "ext/sprunki-website/assets/project.json (decompiled TurboWarp/Scratch project)",
+  "version": 2,
+  "source": "ext/sprunki-website/assets/project.json (decompiled TurboWarp/Scratch project); rebuilt via scripts/dev/build-sprunki-manifest.py",
   "assetRoot": "ext/sprunki-website/assets/",
   "fileNamingNote": "All file values are content-addressed by md5; resolve as `${assetRoot}${file}`. svgs are vector character/UI art, wavs are 48 kHz stems.",
   "categories": {
@@ -12,14 +12,15 @@
     "phantom": "Hidden \"evil\" reveal character (Sprunki Phase 1 secret)."
   },
   "costumeBuckets": {
-    "idle": "Resting frames played on loop while the character is on stage but the slot is muted.",
-    "play": "Primary animation cycle synced to the primary sound loop.",
-    "alternate": "Phase-2 / 'evil' animation cycle synced to the alternate sound loop. Named `anim???` in source.",
-    "other": "Anything that didn't match the idle/anim/anim??? patterns (e.g. Sky blue's lone `bar` overlay frame)."
+    "idle": "Safe resting frame (default mode). One entry per character.",
+    "idle_alternate": "Horror-mode resting frame (project.json `idle2`). Only surfaced when scary mode is unlocked + enabled.",
+    "play": "Safe play / dance cycle (project.json `anim`, `anim2`, ...).",
+    "alternate": "Horror-mode play cycle (project.json `anim???`, `anim???2`, ...). Hidden unless scary mode is on.",
+    "other": "Costumes that don't match the idle / anim / anim??? naming (overlays, UI fragments)."
   },
   "soundBuckets": {
     "primary": "Default loop fired when the character is placed.",
-    "alternate": "Phase-2 / 'evil' variant. Each character has 0–2 alternates; some (e.g. Yellow, Blue) have multiple alternate generations because the audio was re-cut."
+    "alternate": "Phase-2 / 'evil' variant. Each character has 0\u20132 alternates; some (e.g. Yellow, Blue) have multiple alternate generations because the audio was re-cut."
   },
   "characters": [
     {
@@ -39,7 +40,19 @@
         ],
         "alternate": [
           {
+            "name": "kick2",
+            "file": "2ff9e556ae0b3cb4f9e4750dbe9b17d4.wav",
+            "rate": 48000,
+            "samples": 238500
+          },
+          {
             "name": "kick3",
+            "file": "010667e9c7c5d755a22e2e04508088ed.wav",
+            "rate": 48000,
+            "samples": 443785
+          },
+          {
+            "name": "kick4",
             "file": "010667e9c7c5d755a22e2e04508088ed.wav",
             "rate": 48000,
             "samples": 443785
@@ -51,7 +64,9 @@
           {
             "name": "idle",
             "file": "5f188f291a010091bd38162b7642e9f4.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "7f43606c2bb5773e80850a58b14574f9.svg"
@@ -101,6 +116,11 @@
             "file": "f214304407e8b76f7d5eb35bb3e45397.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "ed8d8ed35a3d83d6a92ea2e6eb32235a.svg",
+        "pressed": "a8537c58fc79e45ce91c18966856999b.svg",
+        "dimmed": "be776eec3eb735790c34bd3f004c8319.svg"
       }
     },
     {
@@ -120,7 +140,19 @@
         ],
         "alternate": [
           {
+            "name": "snare2",
+            "file": "ae111f7b2abb4ffe113d49e85cadcf7c.wav",
+            "rate": 48000,
+            "samples": 248400
+          },
+          {
             "name": "snare3",
+            "file": "dfc4e0e27b844fefd14c04892a578aa0.wav",
+            "rate": 48000,
+            "samples": 553928
+          },
+          {
+            "name": "snare4",
             "file": "dfc4e0e27b844fefd14c04892a578aa0.wav",
             "rate": 48000,
             "samples": 553928
@@ -132,7 +164,9 @@
           {
             "name": "idle",
             "file": "d7dc847b001632e8bdf1a390145f10ac.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "81db31f03946a06cda6672a136378790.svg"
@@ -178,6 +212,11 @@
             "file": "21dba1fb96be6f9de4b4456101954282.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "6d67648ab2de791bd741a5ab68e9b9fa.svg",
+        "pressed": "fa7cf4710ffce80070f7af4aa3f8d7f2.svg",
+        "dimmed": "645ffd2bba0d95f635b2045545c30e0e.svg"
       }
     },
     {
@@ -221,7 +260,9 @@
           {
             "name": "idle",
             "file": "b015564e47af15b260825f7d6af8c643.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "057c7e0f0b4d5038edf62ee970e1ebbe.svg"
@@ -275,6 +316,11 @@
             "file": "9ae3716557bd659f5dc4aac8f59e7f6e.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "60a27d15faf05f1d5629eed89151b5d4.svg",
+        "pressed": "92073a5ef372001c4307846d50421869.svg",
+        "dimmed": "99a7d0e0d881e95b6e9f6414a84bcfe9.svg"
       }
     },
     {
@@ -294,7 +340,19 @@
         ],
         "alternate": [
           {
+            "name": "amen2",
+            "file": "5af077595ce5ece3c73a7cb302394015.wav",
+            "rate": 48000,
+            "samples": 230700
+          },
+          {
             "name": "amen3",
+            "file": "9f2b469fe298e16a125fa3c28167df47.wav",
+            "rate": 48000,
+            "samples": 330642
+          },
+          {
+            "name": "amen4",
             "file": "9f2b469fe298e16a125fa3c28167df47.wav",
             "rate": 48000,
             "samples": 330642
@@ -306,7 +364,9 @@
           {
             "name": "idle",
             "file": "4539a15043d037f0b70f71553b30c9cd.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "1a4f6f2468fd65af089e0556b19d940e.svg"
@@ -380,6 +440,11 @@
             "file": "c2c0d2e9f10aa4d90eeb9086da040891.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "c23585a15963a45e79a0ea00b24e2a58.svg",
+        "pressed": "97e511eede080c86148eb3c5625970a9.svg",
+        "dimmed": "f082858db80403c23a4310424d206501.svg"
       }
     },
     {
@@ -399,7 +464,19 @@
         ],
         "alternate": [
           {
+            "name": "shaky shaky2",
+            "file": "7f08e76918d14fdfa46c4c61728808fc.wav",
+            "rate": 48000,
+            "samples": 242099
+          },
+          {
             "name": "shakey",
+            "file": "9a64e35275249dafad42b40a2aedf53d.wav",
+            "rate": 48000,
+            "samples": 343285
+          },
+          {
+            "name": "shakey2",
             "file": "9a64e35275249dafad42b40a2aedf53d.wav",
             "rate": 48000,
             "samples": 343285
@@ -411,7 +488,9 @@
           {
             "name": "idle",
             "file": "876921f082afc3d621d511481167abc4.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "e6c8a300c38a43c2dbb90f64537e6cfd.svg"
@@ -469,6 +548,11 @@
             "file": "270a8e8be43360898bccd0985a3dcf78.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "1a0fab1a41cf7a0e20caecff2287f22e.svg",
+        "pressed": "606dc674df311e351c86a7352f6583f8.svg",
+        "dimmed": "2b8b3911088c2f7e0aa516f1da1b6f1a.svg"
       }
     },
     {
@@ -512,7 +596,9 @@
           {
             "name": "idle",
             "file": "2b0d707dc5b6ea94ca34186218819915.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "752ddb8b3986c55b8cfa8ff7e82d2c70.svg"
@@ -598,6 +684,11 @@
             "file": "daabd3f2bb4822ad45e63afaaf966a47.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "00959cc2612bfdd930fa03c883c6aeda.svg",
+        "pressed": "af137ea9150e67c6adf5282a646c2cfc.svg",
+        "dimmed": "0a4e8ddb94d90bb6f18ee6acaf188963.svg"
       }
     },
     {
@@ -617,6 +708,12 @@
         ],
         "alternate": [
           {
+            "name": "goofy ahh thing2",
+            "file": "ef3c0e50f5c2ac26bfc5700fce42db63.wav",
+            "rate": 48000,
+            "samples": 230999
+          },
+          {
             "name": "weird sound",
             "file": "347dead247cb42851bb4f766ad2da762.wav",
             "rate": 48000,
@@ -635,7 +732,9 @@
           {
             "name": "idle",
             "file": "d8d68126b5adc22c77480dd7d6bef466.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "ea45f13a799706ddf7fb1b07422625a4.svg"
@@ -713,6 +812,11 @@
             "file": "7e3afca1877d497b87badc248bf17a0c.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "bafcea40784d4816670424ad15f6e41c.svg",
+        "pressed": "850dfe13898e7a0d88887936fba86e37.svg",
+        "dimmed": "356b145ea37acb1a108821821c829463.svg"
       }
     },
     {
@@ -732,7 +836,19 @@
         ],
         "alternate": [
           {
+            "name": "arpeg2",
+            "file": "20dd7bff5b7f33e61e878d6e7b03e48c.wav",
+            "rate": 48000,
+            "samples": 230999
+          },
+          {
             "name": "slow arpeg",
+            "file": "25db76755896bea9f2be69ba1ed2b862.wav",
+            "rate": 48000,
+            "samples": 445285
+          },
+          {
+            "name": "slow arpeg2",
             "file": "25db76755896bea9f2be69ba1ed2b862.wav",
             "rate": 48000,
             "samples": 445285
@@ -744,7 +860,9 @@
           {
             "name": "idle",
             "file": "9601af13c89996f130ecc71a8eb0febc.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "a93b7e7c76b2c868e94e7c2029c10fe9.svg"
@@ -806,6 +924,11 @@
             "file": "94e457f8cd7b42f8b2a17485f988e8a4.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "b230f8e43677270eef8b0be5cfbb1a87.svg",
+        "pressed": "b7c5c3c038043c37427e1228d0d30386.svg",
+        "dimmed": "53fa332a91e43a0a43e8f30f2cbb47e7.svg"
       }
     },
     {
@@ -849,7 +972,9 @@
           {
             "name": "idle",
             "file": "654ee2c380273f6f0a7e263a6d9b6b28.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "59d2bfa0836e768f07a72e753a489978.svg"
@@ -939,6 +1064,11 @@
             "file": "08d3a110669a16efd42240d4e447f45c.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "653b0cddac59eba8af02a844ed17bd8f.svg",
+        "pressed": "15ffc913f1c1f24ffb9a2f603dd0fa45.svg",
+        "dimmed": "fdbf338e2221e6bb660dd1bdf1b3eaa3.svg"
       }
     },
     {
@@ -982,7 +1112,9 @@
           {
             "name": "idle",
             "file": "6ee7ba49eae48f5753deb07e0b32199b.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "67965ffc73229ff7ce85c3d800308af6.svg"
@@ -1054,6 +1186,11 @@
             "file": "384f91727ed5e51fe8702361a0e8a25c.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "5e7c8ed0deded797dc9bbf11a540faef.svg",
+        "pressed": "dbf8d1bae85b1feda0517f19fdc2bf3b.svg",
+        "dimmed": "7a03767d3a794b28d44a17708f344fe8.svg"
       }
     },
     {
@@ -1097,7 +1234,9 @@
           {
             "name": "idle",
             "file": "78203662c512913b3b4a16300cdf194a.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "d12897519365d274bb1092123157dd74.svg"
@@ -1155,6 +1294,11 @@
             "file": "3044b6b567bc0b81d2183cb1e05a56f6.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "cd58b0c5395822dadb1df2f1bb17025d.svg",
+        "pressed": "530bc5abcc88d6c508c217e5a1008ba5.svg",
+        "dimmed": "95eb75c066cb8ce319a82b1d9df6b9af.svg"
       }
     },
     {
@@ -1198,7 +1342,9 @@
           {
             "name": "idle",
             "file": "89536b13f86fa5415b0d51716634fa9e.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "70a9972e0b69781017187642e8a2d7bd.svg"
@@ -1316,6 +1462,11 @@
             "file": "915c4a74e00e678094b1b706966e140f.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "f596d50f4e95bcffbaa7f4e3b7949a46.svg",
+        "pressed": "5d4a851aa3d53a2495e6c0662420b03b.svg",
+        "dimmed": "0fbf2a24952e002e8f02332b10a8be52.svg"
       }
     },
     {
@@ -1359,7 +1510,9 @@
           {
             "name": "idle",
             "file": "1ccf355435482ae38d24bd5b948ef417.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "7b2e0217b2e1e623f5d0cec8230b492c.svg"
@@ -1400,6 +1553,11 @@
           }
         ],
         "alternate": []
+      },
+      "icon": {
+        "normal": "a0597b08926456e2542afd1ec635643b.svg",
+        "pressed": "28d1d850739af5c1dd08b800c21fe8e6.svg",
+        "dimmed": "73787e99bf6ce435215db359bf4e68e7.svg"
       }
     },
     {
@@ -1455,7 +1613,9 @@
           {
             "name": "idle",
             "file": "543119325edb49e5294dd252d196b479.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "8c42261018dd75b744c8aaee4fb14aef.svg"
@@ -1501,6 +1661,11 @@
             "file": "2b3f173449b5d1646d6eb17856e10721.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "b85c7e752913a38c5e08783987a20863.svg",
+        "pressed": "23010e2f2362f3708af491dc9140b61b.svg",
+        "dimmed": "94178ef28745318a032bb290c888ec45.svg"
       }
     },
     {
@@ -1544,7 +1709,9 @@
           {
             "name": "idle",
             "file": "b8faa34280594a1de2cae550193055a1.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "9a27d2bd973f23b8628c54f033c6f893.svg"
@@ -1646,6 +1813,11 @@
             "file": "880de3c79cbd8ec5f57dc26a050e8d35.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "643bee791d3ecb46b1e241592e314076.svg",
+        "pressed": "c816ab6533009d067e70920ef51b561a.svg",
+        "dimmed": "d98b4def352124d05a065fe8cc28c60d.svg"
       }
     },
     {
@@ -1689,7 +1861,9 @@
           {
             "name": "idle",
             "file": "a08bbafe2167b837995fd8bf79f5a27f.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "d895b92511c21488273c6dc18dca0b88.svg"
@@ -1831,6 +2005,11 @@
             "file": "6b7549fc20107f5145089c735f051a66.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "0ae0f666e090c73ac1dfce0ac8ba8a20.svg",
+        "pressed": "e8bf58b95094f72da3d257f9ad158c29.svg",
+        "dimmed": "18b6791438082999c6bf4e1393cc5ca7.svg"
       }
     },
     {
@@ -1850,7 +2029,19 @@
         ],
         "alternate": [
           {
+            "name": "boring hey sound2",
+            "file": "d3412e9a60ca1e4fb3db49587687ec28.wav",
+            "rate": 48000,
+            "samples": 230700
+          },
+          {
             "name": "crazy",
+            "file": "3ff567bc278b8e218f4e028911fb3b17.wav",
+            "rate": 48000,
+            "samples": 330642
+          },
+          {
+            "name": "crazy2",
             "file": "3ff567bc278b8e218f4e028911fb3b17.wav",
             "rate": 48000,
             "samples": 330642
@@ -1868,7 +2059,9 @@
           {
             "name": "idle",
             "file": "16d88ed40d2540e0196ad94687a163c3.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "be8824af39117d9f76459b4fa1e0c49d.svg"
@@ -1970,6 +2163,11 @@
             "file": "f6012d8b6c3ad2bac2658da5a18ef65c.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "64912b79896a7ae4cc347cc82c00f741.svg",
+        "pressed": "8ea7646ebccdf71a0dbdbc81c07453c9.svg",
+        "dimmed": "5ef8d7c2c90a94af1fcbff278f70e39b.svg"
       }
     },
     {
@@ -2013,7 +2211,9 @@
           {
             "name": "idle",
             "file": "4cf8eac32e710942a8ebc364559b1a44.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "527da1721c0526eadb401943bc496820.svg"
@@ -2091,6 +2291,11 @@
             "file": "3fd5368ac0a2dca5723986f73ae385bb.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "e308f9d71537eb7d8b61768a1e130792.svg",
+        "pressed": "934e9ba469703552f17996c62f943206.svg",
+        "dimmed": "ae4953ed82e3e68da1d8b9662ccc3f6f.svg"
       }
     },
     {
@@ -2158,7 +2363,9 @@
           {
             "name": "idle",
             "file": "a43501db4b83e7684b7e6bbb0f735027.svg"
-          },
+          }
+        ],
+        "idle_alternate": [
           {
             "name": "idle2",
             "file": "55da7779a61dee195eda9944cf299340.svg"
@@ -2224,6 +2431,11 @@
             "file": "d4fe2304da2029b2a5438f9194aecc14.svg"
           }
         ]
+      },
+      "icon": {
+        "normal": "916ed101af8b7aecbbf1e926c4d9d487.svg",
+        "pressed": "e8a72cb25f5eaf26d057dfa32b5f45c3.svg",
+        "dimmed": "6d631ff079f6456cf7b4e021a8e0eab7.svg"
       }
     },
     {
@@ -2257,8 +2469,14 @@
             "file": "bedb9c366284888a3c28537c96ea7715.svg"
           }
         ],
+        "idle_alternate": [],
         "play": [],
         "alternate": []
+      },
+      "icon": {
+        "normal": "f54342541b54074ffd15d59936ae5738.svg",
+        "pressed": "76da9caabff1aa7dadc4e3935a146be6.svg",
+        "dimmed": "14e46ec3e2ba471c2adfe8f119052307.svg"
       }
     }
   ],

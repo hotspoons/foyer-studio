@@ -1,68 +1,33 @@
 // Sprunki asset-pack bridge.
 //
-// Resolves OG-sprunki SVG art + sample paths for our characters so
-// the UI can render the real reverse-engineered artwork (when the
-// asset pack has been downloaded) instead of placeholder emoji.
+// Resolves OG-sprunki SVG art (idle / play costumes) for our
+// patches so the stage renders real reverse-engineered artwork
+// when the asset pack has been downloaded — emoji fallback
+// otherwise.
 //
-// Two parts:
-//   1. A lazy fetch of `sprunki-assets.json`, the reverse-engineered
-//      manifest of the OG Sprunki characters + their costume / sound
-//      buckets. Lives next to this module in the variant tree.
-//   2. A static mapping from our [[sound-catalog]] character ids to
-//      OG sprunki character ids — our roster has 18 characters across
-//      5 categories, OG has 30 across 6. The map is best-effort
-//      role-matching (kick→oren, hihat→vineria, …); duplicates are
-//      fine since multiple of our characters can share OG art.
+// Each patch in `patches.js` declares a `sprunki_id` pointing at
+// an OG sprunki character in the reverse-engineered manifest
+// (`sprunki-assets.json`). Multiple patches may share the same
+// sprunki_id (e.g. atomic "Kick" and composite "Drum Kit" both
+// style after Oren); that's fine.
 //
 // The asset pack extracts to `$XDG_DATA_HOME/foyer/asset-packs/sprunki/`
-// on disk and is served at `/asset-packs/sprunki/` (see
-// `crates/foyer-server/src/asset_packs.rs`). The archive ships with a
-// `sprunki-website/assets/` prefix; we probe both layouts at first
-// use so a future strip_prefix change in the server doesn't break us.
+// on disk and is served at `/asset-packs/sprunki/`. We probe two
+// candidate paths the first time we resolve a URL, and cache the
+// winner.
 
 const MANIFEST_URL = new URL("./sprunki-assets.json", import.meta.url).href;
+// Order matters: the working path goes first to keep the dev
+// console clean. See SPRUNKI_VISION.md → "404 probe noise."
 const ASSET_BASE_CANDIDATES = [
-  "/asset-packs/sprunki/sprunki-website/assets/",
   "/asset-packs/sprunki/assets/",
+  "/asset-packs/sprunki/sprunki-website/assets/",
 ];
-
-/** Our character id → OG sprunki id. */
-export const SPRUNKI_ID_MAP = {
-  // Drums (8 ours → 5 OG, re-using OG ids where roles overlap).
-  kick:   "oren",
-  snare:  "raddy",
-  hihat:  "vineria",
-  clap:   "fun-bot",
-  crash:  "clukr",
-  ride:   "clukr",
-  tom_hi: "raddy",
-  tom_lo: "oren",
-
-  // Bass (1 OG character — both ours map to it).
-  bass_deep:  "gray",
-  bass_punch: "gray",
-
-  // Chords (pads): map to OG melody characters with mellower timbres.
-  pad_warm:   "mr-tree", // organ
-  pad_bright: "sky",     // music box
-  pad_dark:   "durple",  // brass
-
-  // Lead: brighter melody picks.
-  lead_sq:    "simon",   // square synth
-  lead_saw:   "garnold", // arpeggio
-  lead_pluck: "mr-sun",  // piano
-
-  // FX: matches OG fx category.
-  fx_riser:   "owakcx",  // buildup
-  fx_hit:     "brud",    // vocal glitch
-  fx_zap:     "tunner",  // whistle
-};
 
 let _manifestPromise = null;
 let _resolvedBase = null;
 let _manifest = null;
 
-/** Fetch + cache the sprunki-assets.json manifest. */
 export function loadSprunkiManifest() {
   if (_manifestPromise) return _manifestPromise;
   _manifestPromise = fetch(MANIFEST_URL)
@@ -79,44 +44,134 @@ export function loadSprunkiManifest() {
   return _manifestPromise;
 }
 
-/** Return the cached manifest, or `null` if it hasn't been loaded
- *  yet. Useful for sync render paths. */
 export function manifestSync() {
   return _manifest;
 }
 
-/** OG character record for one of our `CHARACTERS[].id`, or null
- *  when the mapping or manifest isn't ready. Sync — caller is
- *  expected to have awaited `loadSprunkiManifest()` first. */
-export function ogCharacter(ourId) {
-  if (!_manifest) return null;
-  const ogId = SPRUNKI_ID_MAP[ourId];
-  if (!ogId) return null;
-  return _manifest.characters.find((c) => c.id === ogId) || null;
+/** OG character record for a given sprunki_id (the one declared
+ *  on the patch), or null when the manifest isn't loaded yet. */
+export function ogCharacterById(sprunkiId) {
+  if (!_manifest || !sprunkiId) return null;
+  return _manifest.characters.find((c) => c.id === sprunkiId) || null;
 }
 
-/** First idle costume file (the resting frame) for our character.
- *  Returns the resolved URL or null. */
-export function idleCostumeUrl(ourId) {
-  const og = ogCharacter(ourId);
+/** Idle-costume URL (resting pose) for an OG sprunki id. First
+ *  frame only — for cycling through all available idle frames
+ *  (the blink + look-around magic from OG), use
+ *  `allIdleCostumeUrlsFor`. */
+export function idleCostumeUrlFor(sprunkiId) {
+  const og = ogCharacterById(sprunkiId);
   if (!og || !_resolvedBase) return null;
   const file = og.costumes?.idle?.[0]?.file;
   return file ? `${_resolvedBase}${file}` : null;
 }
 
-/** First play costume (the animation cycle's lead frame). */
-export function playCostumeUrl(ourId) {
-  const og = ogCharacter(ourId);
+/** Safe (default-mode) idle frames for a character.
+ *
+ *  After the manifest re-extraction the `idle` bucket holds *only*
+ *  the verified-safe resting pose — the horror variant (project
+ *  name `idle2`) lives in `idle_alternate` and is gated behind
+ *  scary mode. As of today every character has exactly one safe
+ *  idle frame so this returns a 1-element list and the stage's
+ *  blink-cycler stays inert; if a future asset drop adds more
+ *  safe blink/look-around frames, drop them into `costumes.idle`
+ *  and the cycler picks them up automatically. */
+export function allIdleCostumeUrlsFor(sprunkiId) {
+  const og = ogCharacterById(sprunkiId);
+  if (!og || !_resolvedBase) return [];
+  return (og.costumes?.idle || [])
+    .map((c) => c.file)
+    .filter(Boolean)
+    .map((f) => `${_resolvedBase}${f}`);
+}
+
+/** Scary-mode idle frames (project `idle2`). Only surface these
+ *  when scaryMode + parental unlock both say yes. */
+export function alternateIdleCostumeUrlsFor(sprunkiId) {
+  const og = ogCharacterById(sprunkiId);
+  if (!og || !_resolvedBase) return [];
+  return (og.costumes?.idle_alternate || [])
+    .map((c) => c.file)
+    .filter(Boolean)
+    .map((f) => `${_resolvedBase}${f}`);
+}
+
+/** Play-costume URL (first play-cycle frame) for an OG sprunki id. */
+export function playCostumeUrlFor(sprunkiId) {
+  const og = ogCharacterById(sprunkiId);
   if (!og || !_resolvedBase) return null;
   const file = og.costumes?.play?.[0]?.file;
   return file ? `${_resolvedBase}${file}` : null;
 }
 
-/** Probe which `/asset-packs/sprunki/...` prefix the server is
- *  exposing. Done once per session via a HEAD against the
- *  manifest's first known file. Calling this BEFORE the asset
- *  pack is downloaded just yields `null` — caller should re-probe
- *  on the `AssetPackUpdated` event when state flips to `ready`. */
+/** ALL play-cycle frames for a character. Used by the stage when
+ *  a sprunki's track is actively making sound — rotate through
+ *  play frames in sync with the beat. */
+export function allPlayCostumeUrlsFor(sprunkiId) {
+  const og = ogCharacterById(sprunkiId);
+  if (!og || !_resolvedBase) return [];
+  return (og.costumes?.play || [])
+    .map((c) => c.file)
+    .filter(Boolean)
+    .map((f) => `${_resolvedBase}${f}`);
+}
+
+/** OG sprunki id we fall back to for empty stage slots. Kept
+ *  for any consumers that still need a manifest id; the actual
+ *  empty visual now uses the plain-gray Polo "0" sprite via
+ *  `emptySprunkiUrl()` below. */
+export const EMPTY_SLOT_SPRUNKI_ID = "raddy";
+
+/** The OG game uses a dedicated "Polo" sprite as the gray,
+ *  unactivated stage slot. Costume "0" of every Polo target is
+ *  the canonical mid-gray body (`#808080` torso + `#666666`
+ *  shadow, no accessories). The project file's `currentCostume`
+ *  field reflects a saved game state at export time and isn't
+ *  the boot visual — the boot visual is costume "0", which we
+ *  hard-code here. Re-run scripts/dev/build-sprunki-manifest.py
+ *  if the OG asset pack ever changes. */
+const EMPTY_SLOT_FILE = "65c6f48ea19105ebd99a6b53e24842f3.svg";
+export function emptySprunkiUrl() {
+  return _resolvedBase ? `${_resolvedBase}${EMPTY_SLOT_FILE}` : null;
+}
+
+/** OG stage backdrop. The Scratch project ships seven backdrops
+ *  (`backdrop`, `backdropcute`, `backdropevil`, …); `backdropcute`
+ *  is the cheerful 680×321 illustrated sky-and-hills scene OG
+ *  defaults to in showcase mode. Hard-coded by md5 so we don't
+ *  have to plumb stage costumes through the manifest yet. */
+const BACKDROP_FILE = "1c282eae03a608f17b842c01ceacf74e.svg";
+export function backdropUrl() {
+  return _resolvedBase ? `${_resolvedBase}${BACKDROP_FILE}` : null;
+}
+
+/** OG Mute Buttons SVGs — the three S/M/× icons that ride on top
+ *  of every active sprunki. Costume names map straight to the
+ *  intent here. */
+const MUTE_BUTTON_FILES = {
+  base:   "9803b5d3d73856f9961959093454b2b1.svg",
+  mute:   "73903442b0f1ccf295e8d77861b01931.svg",
+  solo:   "7a86c3b3e1fd3e3bef80bb5cd5cd1df2.svg",
+  remove: "5d14b470589678ccbc9c5dd1e638aea9.svg",
+};
+export function muteButtonUrl(kind) {
+  const file = MUTE_BUTTON_FILES[kind];
+  return file && _resolvedBase ? `${_resolvedBase}${file}` : null;
+}
+
+/** OG palette icon for a character. The manifest stores the
+ *  three variants emitted by the `Icons` sprite:
+ *    normal   — full-color tile (default)
+ *    pressed  — shadowed / actively-being-dragged
+ *    dimmed   — grayscale (e.g. already on stage)
+ *  Returns null if the manifest isn't loaded yet. */
+export function iconUrlFor(sprunkiId, variant = "normal") {
+  const og = ogCharacterById(sprunkiId);
+  if (!og || !_resolvedBase) return null;
+  const file = og.icon?.[variant];
+  return file ? `${_resolvedBase}${file}` : null;
+}
+
 export async function probeAssetBase() {
   if (_resolvedBase) return _resolvedBase;
   if (!_manifest) await loadSprunkiManifest();
@@ -130,13 +185,11 @@ export async function probeAssetBase() {
         console.info(`[sprunki-assets] asset base resolved: ${base}`);
         return base;
       }
-    } catch (_) { /* try next candidate */ }
+    } catch (_) { /* try next */ }
   }
   return null;
 }
 
-/** Clear the resolved-base cache — call this when the asset pack
- *  state flips back to non-ready (e.g. user deleted the pack). */
 export function invalidateAssetBase() {
   _resolvedBase = null;
 }

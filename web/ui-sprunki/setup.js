@@ -1,47 +1,75 @@
 // Sprunki backend setup — provisions one MIDI track + region per
-// category on first run, caches the resulting IDs in localStorage,
-// and reuses them on subsequent boots.
+// *stage slot* (not per category — that's the v1 model).
 //
-// Why this exists: `set_sequencer_layout` writes notes into an
-// EXISTING region; it doesn't create the region for you. And the
-// region has to live on a MIDI track with an instrument plugin or
-// the played notes are silent. The previous Sprunki shell skipped
-// both of these — it shipped a sequencer layout for a hardcoded
-// region id that no Ardour session ever had, so play sounded like
-// nothing happening. This module is the missing infrastructure.
+// Per slot:
+//   1. Look up the cached `track_id` on the slot. If it matches a
+//      live track in the session snapshot, reuse it. Otherwise
+//      reuse any track named "Sprunki Slot N" already in the
+//      session (handles reloads); only `create_track` as a last
+//      resort.
+//   2. If the slot holds a patch, verify the track's plugin chain
+//      matches the patch's `instrument_uri`. If not, walk the
+//      fallback chain to repair. This catches:
+//        * tracks created before the URI catalogue fix landed,
+//        * patches the kid swapped on an existing slot,
+//        * users that emptied the plugin manually in the GUI.
+//   3. Look for a MIDI region on the track named "Sprunki"; create
+//      one if missing. Cache the (track_id, region_id) on the slot.
 //
-// The flow per category:
-//   1. Look up the cached track_id from `sprunkiStore`. If it
-//      matches a live track in `store.state.session`, reuse it.
-//   2. Otherwise, send `create_track` with `instrument_uri:
-//      "gmsynth"`, `gm_program`, `gm_channel`. The server reports
-//      back via `TrackUpdated` / `TrackAdded` events; we poll the
-//      store snapshot for the new track by name to recover its id.
-//   3. Once the track id is known, look for a MIDI region on it
-//      named "Sprunki" — reuse if present, otherwise `create_region`.
-//   4. Cache the (track_id, region_id) pair in `sprunkiStore`.
+// On a fresh Ardour session, this provisions N empty tracks
+// (typically 7 — `DEFAULT_STAGE_SLOT_COUNT`), one per slot. On a
+// reload, it should be a no-op: tracks exist, plugins land, regions
+// already there, layout-push uses the cached IDs.
 
-import { CATEGORIES, STEPS_PER_PATTERN, DEFAULT_PATTERNS } from "./components/sound-catalog.js";
+import {
+  BARS_PER_PATTERN,
+  DEFAULT_PATTERNS,
+  STEPS_PER_PATTERN,
+} from "./components/sound-catalog.js";
+import { getPatch } from "./patches.js";
 
 const REGION_NAME = "Sprunki";
-const PROVISION_TIMEOUT_MS = 6000;
+const PROVISION_TIMEOUT_MS = 8000;
+
+/** Per-slot track name. Stable across reloads so the by-name
+ *  lookup deduplicates properly. Using `·` (middle-dot) because
+ *  Ardour sanitizes "/" to "_" in route names. */
+function trackNameForSlot(slot, idx) {
+  return `Sprunki Slot ${idx + 1}`;
+}
 
 /**
- * Ensure every category has a backing MIDI track + region. Idempotent.
- * Returns a map { categoryId → { track_id, region_id } }.
- * Throws on hard failures so the caller can render an error.
+ * Ensure every stage slot has a backing MIDI track + region, and
+ * that any slot holding a patch has the patch's instrument loaded
+ * on its track. Idempotent. Throws on hard failures so the caller
+ * can render an error toast.
+ *
+ * @param {object} store         — foyer-core store (for snapshots).
+ * @param {object} ws            — foyer-core ws (for commands).
+ * @param {object} sprunkiStore  — our SprunkiStore.
+ * @returns {Promise<Array<{slot_id, track_id, region_id}>>} the
+ *   provisioned slot-track-region triples, in slot order.
  */
-export async function ensureSprunkiBoard(store, ws, sprunkiStore) {
-  const out = {};
+export async function ensureSprunkiStage(store, ws, sprunkiStore) {
   const sessionRoot = () => store?.state?.session;
   const tracks = () => sessionRoot()?.tracks || [];
 
-  for (const cat of CATEGORIES) {
-    const cached = sprunkiStore.tracksFor(cat.id);
-    let trackId = cached.track_id;
-    let regionId = cached.region_id;
+  // Wait for the snapshot to be loaded before any dedupe / lookup.
+  // status === "open" fires when the WS handshake completes;
+  // SessionSnapshot lands a few hundred ms later. Without this gate
+  // every reload double-creates tracks because by-name lookup runs
+  // against an empty tracks[].
+  await waitFor(() => tracks().some((t) => t?.kind === "master"), 5_000);
 
-    // Re-validate the cached track id against the live snapshot.
+  const out = [];
+  const stage = sprunkiStore.stage;
+  for (let i = 0; i < stage.length; i++) {
+    const slot = stage[i];
+    const trackName = trackNameForSlot(slot, i);
+    let trackId = slot.track_id;
+    let regionId = slot.region_id;
+
+    // Re-validate cached track id against the live snapshot.
     if (trackId && !tracks().some((t) => t?.id === trackId)) {
       trackId = null;
       regionId = null;
@@ -49,127 +77,150 @@ export async function ensureSprunkiBoard(store, ws, sprunkiStore) {
     if (regionId && trackId) {
       const t = tracks().find((tr) => tr?.id === trackId);
       const regions = store?.state?.regionsByTrack?.get?.(trackId) || t?.regions || [];
-      if (!regions.some((r) => r?.id === regionId)) {
-        regionId = null;
-      }
+      if (!regions.some((r) => r?.id === regionId)) regionId = null;
     }
 
+    // Resolve the track: cache → by-name → create.
     if (!trackId) {
-      // Reuse any existing track with the same name BEFORE
-      // creating a new one. Otherwise a stale localStorage purge
-      // (or testing across Playwright contexts) leaves the
-      // backend with the previous run's track, and create_track
-      // helpfully appends `_2` to disambiguate — accumulating
-      // duplicates in the Ardour session over time.
-      const existing = tracks().find((t) => t?.name === cat.track_name && t?.kind === "midi");
+      const existing = tracks().find((t) => t?.name === trackName && t?.kind === "midi");
       if (existing) {
         trackId = existing.id;
       } else {
-        trackId = await createCategoryTrack(store, ws, cat);
+        trackId = await createSlotTrack(store, ws, trackName);
       }
     }
+
+    // Patch verification: if the slot holds a patch, make sure the
+    // track has the patch's instrument plugin loaded.
+    if (slot.patch_id) {
+      const patch = getPatch(slot.patch_id);
+      if (patch) {
+        await ensurePatchInstrument(store, ws, trackId, patch);
+      }
+    }
+
+    // Region.
     if (!regionId) {
       const existingRegion = regionsForTrack(store, trackId)
         .find((r) => r?.name === REGION_NAME);
       if (existingRegion) {
         regionId = existingRegion.id;
       } else {
-        regionId = await createCategoryRegion(store, ws, cat, trackId);
+        regionId = await createSlotRegion(store, ws, trackId);
       }
     }
 
-    sprunkiStore.setTracks(cat.id, { track_id: trackId, region_id: regionId });
-    out[cat.id] = { track_id: trackId, region_id: regionId };
+    sprunkiStore.setTracks(slot.id, { track_id: trackId, region_id: regionId });
+    out.push({ slot_id: slot.id, track_id: trackId, region_id: regionId });
   }
   return out;
 }
 
-async function createCategoryTrack(store, ws, cat) {
+async function createSlotTrack(store, ws, name) {
   const before = new Set(tracksSnapshot(store).map((t) => t.id));
+  // No instrument at creation time — `ensurePatchInstrument` lands
+  // the right plugin once we know the patch. Tracks start as bare
+  // MIDI carriers; patch assignment is what gives them voice.
   ws.send({
     type: "create_track",
-    name: cat.track_name,
+    name,
     kind: "midi",
     color: "#7c5cff",
-    instrument_uri: cat.default_instrument_uri,
-    gm_program: cat.default_gm_program,
-    gm_channel: cat.default_gm_channel,
   });
-  // The server emits `TrackUpdated` (or rebroadcasts the whole
-  // session) once the create lands. Poll for the new track id by
-  // diffing against the pre-create set. By-name matches are a
-  // fallback for backends that don't surface the create as a delta.
   const fresh = await waitFor(
     () => {
       const ts = tracksSnapshot(store);
       const byDelta = ts.find((t) => !before.has(t.id));
       if (byDelta) return byDelta;
-      const byName = ts.find((t) => t.name === cat.track_name);
+      const byName = ts.find((t) => t.name === name);
       return byName || null;
     },
     PROVISION_TIMEOUT_MS,
   );
-  if (!fresh) {
-    throw new Error(`create_track timed out for ${cat.track_name}`);
-  }
-  // Plugin URI fallback walk. `add_plugin` returns Err silently when
-  // the URI isn't in the host's catalog — the track lands with an
-  // empty plugin slot. Walk the category's fallback list and retry
-  // until something sticks (or we exhaust the list). avldrums is
-  // the gold-standard drum kit but might not be installed on every
-  // box; the chain ends at gmsynth which is bundled with Ardour
-  // itself.
-  await ensureInstrumentLanded(store, ws, fresh.id, cat);
+  if (!fresh) throw new Error(`create_track timed out for ${name}`);
   return fresh.id;
 }
 
-/** Make sure the track has at least one instrument plugin attached.
- *  If `default_instrument_uri` didn't take (catalog miss), walk
- *  `instrument_uri_fallbacks` in order. Last resort: ask the server
- *  for an `add_default_instrument` (auto-pick). */
-async function ensureInstrumentLanded(store, ws, trackId, cat) {
-  const hasPlugin = () =>
-    (tracksSnapshot(store).find((t) => t.id === trackId)?.plugins || []).length > 0;
-  // The plugin may still be settling — give the first attempt a
-  // beat before declaring failure.
-  await waitFor(hasPlugin, 1500);
-  if (hasPlugin()) return;
+/** Make sure `trackId` has the patch's instrument plugin loaded.
+ *  Walks the URI fallback chain when the primary doesn't take. If
+ *  the track already has a plugin matching the patch's primary URI,
+ *  we leave it alone. */
+async function ensurePatchInstrument(store, ws, trackId, patch) {
+  const trackHasPlugin = (uri) => {
+    const t = tracksSnapshot(store).find((tr) => tr.id === trackId);
+    return (t?.plugins || []).some((p) => p.uri === uri);
+  };
+  const anyPlugin = () => {
+    const t = tracksSnapshot(store).find((tr) => tr.id === trackId);
+    return (t?.plugins || []).length > 0;
+  };
 
-  const fallbacks = Array.isArray(cat.instrument_uri_fallbacks)
-    ? cat.instrument_uri_fallbacks
+  // Happy path: the right plugin is already loaded.
+  if (trackHasPlugin(patch.instrument_uri)) {
+    await applyPatchProgram(ws, trackId, patch);
+    return;
+  }
+
+  // We deliberately do NOT remove an existing plugin before adding
+  // the new one — Ardour's chain semantics get confused by a
+  // remove+add race during a patch swap, and the server's
+  // add_plugin gracefully replaces a tail-of-chain instrument when
+  // a new one of the same role lands. (If this turns out to be
+  // wrong in practice, we add a remove_plugin call here.)
+  ws.send({ type: "add_plugin", track_id: trackId, plugin_uri: patch.instrument_uri });
+  await waitFor(() => trackHasPlugin(patch.instrument_uri), 1_500);
+  if (trackHasPlugin(patch.instrument_uri)) {
+    await applyPatchProgram(ws, trackId, patch);
+    return;
+  }
+
+  // Walk the fallback chain.
+  const fallbacks = Array.isArray(patch.instrument_uri_fallbacks)
+    ? patch.instrument_uri_fallbacks
     : [];
   for (const uri of fallbacks) {
-    if (hasPlugin()) return;
+    if (anyPlugin()) break;
     ws.send({ type: "add_plugin", track_id: trackId, plugin_uri: uri });
-    await waitFor(hasPlugin, 1500);
+    await waitFor(() => trackHasPlugin(uri), 1_500);
+    if (trackHasPlugin(uri)) break;
   }
-  if (hasPlugin()) return;
-  // Last resort — let the server pick whatever it can find.
-  ws.send({ type: "add_default_instrument", track_id: trackId });
-  await waitFor(hasPlugin, 2000);
-  if (!hasPlugin()) {
-    console.warn(
-      `[sprunki] no instrument landed on ${cat.track_name} — track will be silent`
-    );
+  if (!anyPlugin()) {
+    // Last resort — ask the server to pick anything.
+    ws.send({ type: "add_default_instrument", track_id: trackId });
+    await waitFor(anyPlugin, 2_000);
+  }
+  if (anyPlugin()) {
+    await applyPatchProgram(ws, trackId, patch);
+  } else {
+    console.warn(`[sprunki] no instrument landed for patch ${patch.id} on ${trackId}`);
   }
 }
 
-async function createCategoryRegion(store, ws, cat, trackId) {
-  // 1 bar at 16 steps = 4 beats. Backend uses ticks; the sequencer
-  // layout we ship next regenerates the region length anyway, so an
-  // initial 1-bar stub is fine.
-  const oneBarSamples = barsToSamples(4); // 4 bars of headroom (Intro/Verse/Chorus/Drop)
+async function applyPatchProgram(ws, trackId, patch) {
+  // GM program-change on the patch's channel. gmsynth's program
+  // handler reads bank+pgm from MIDI data per channel.
+  if (typeof patch.gm_program === "number") {
+    ws.send({
+      type: "set_track_midi_patch",
+      track_id: trackId,
+      channel: patch.gm_channel || 0,
+      bank: 0,
+      program: patch.gm_program,
+    });
+  }
+}
+
+async function createSlotRegion(store, ws, trackId) {
+  // 16 bars of headroom — Intro / Verse / Chorus / Drop, each
+  // 4 bars long, mirroring OG's continuous multi-bar loop feel.
+  const regionLengthSamples = barsToSamples(BARS_PER_PATTERN * DEFAULT_PATTERNS.length);
   const before = new Set(regionsForTrack(store, trackId).map((r) => r.id));
-  // Field name on the wire is `at_samples` (not `start_samples`) —
-  // matches `Command::CreateRegion` in foyer-schema. Passing the
-  // wrong field made the backend reject silently and the poller
-  // timed out waiting for a RegionsList echo that never came.
   ws.send({
     type: "create_region",
     track_id: trackId,
     name: REGION_NAME,
     at_samples: 0,
-    length_samples: oneBarSamples,
+    length_samples: regionLengthSamples,
     kind: "midi",
   });
   const fresh = await waitFor(
@@ -182,9 +233,7 @@ async function createCategoryRegion(store, ws, cat, trackId) {
     },
     PROVISION_TIMEOUT_MS,
   );
-  if (!fresh) {
-    throw new Error(`create_region timed out for ${cat.track_name}`);
-  }
+  if (!fresh) throw new Error(`create_region timed out for track ${trackId}`);
   return fresh.id;
 }
 
@@ -203,11 +252,6 @@ function barsToSamples(bars, sampleRate = 48000, bpm = 120) {
   return Math.round(bars * 4 * secondsPerBeat * sampleRate);
 }
 
-/**
- * Poll `probe()` every animation frame (or 60 ms in non-DOM contexts)
- * until it returns a truthy value or the timeout elapses. Resolves
- * with the truthy value or `null` on timeout.
- */
 function waitFor(probe, timeoutMs) {
   return new Promise((resolve) => {
     const start = performance.now();
@@ -221,12 +265,6 @@ function waitFor(probe, timeoutMs) {
   });
 }
 
-/**
- * Pattern-id → starting-bar offset map. Used by the transport's
- * "Play section" handler to know where to seek + loop. Computed
- * from sound-catalog so adding a new pattern doesn't require
- * editing the setup code.
- */
 export function patternBarOffset(patternId) {
   const p = DEFAULT_PATTERNS.find((x) => x.id === patternId);
   return p ? p.bar : 0;

@@ -16,13 +16,17 @@
 
 import { LitElement, html } from "lit";
 import { transportStyles } from "../styles.js";
-import { DEFAULT_BPM, DEFAULT_PATTERNS } from "./sound-catalog.js";
+import { BARS_PER_PATTERN, DEFAULT_BPM, DEFAULT_PATTERNS } from "./sound-catalog.js";
 import { sprunkiStore } from "../state-store.js";
 import { patternBarOffset, barsToSamples } from "../setup.js";
 
-const ARRANGEMENT_BARS = DEFAULT_PATTERNS.length; // 4 bars total
+// Each section/pattern is BARS_PER_PATTERN bars long; the full
+// arrangement is that × the section count. Currently 4 × 4 = 16
+// bars (OG sprunki feels more like 8-bar continuous; we'll
+// collapse sections into a single loop once the arrangement
+// palette lands — see SPRUNKI_VISION.md → "auto-captured loops").
+const ARRANGEMENT_BARS = DEFAULT_PATTERNS.length * BARS_PER_PATTERN;
 const BAR_BEATS = 4;
-const STEPS_PER_BAR = 16;
 
 export class TransportBar extends LitElement {
   static styles = transportStyles;
@@ -96,13 +100,15 @@ export class TransportBar extends LitElement {
 
   _ws() { return globalThis.__foyer?.ws; }
 
-  /** Compute (start, end) sample range for the current play mode. */
+  /** Compute (start, end) sample range for the current play mode.
+   *  Section mode loops one pattern, which now spans BARS_PER_PATTERN
+   *  bars (not 1). All mode plays the full ARRANGEMENT_BARS sweep. */
   _loopRangeSamples() {
     const beat = (60 / this._bpm) * this._sampleRate;
     const oneBar = BAR_BEATS * beat;
     if (this._section) {
       const offset = patternBarOffset(this.patternId);
-      return [offset * oneBar, (offset + 1) * oneBar];
+      return [offset * oneBar, (offset + BARS_PER_PATTERN) * oneBar];
     }
     return [0, ARRANGEMENT_BARS * oneBar];
   }
@@ -169,8 +175,44 @@ export class TransportBar extends LitElement {
     }
   }
   _setBpm(delta) {
-    const next = Math.max(40, Math.min(300, this._bpm + delta));
+    const next = Math.max(40, Math.min(300, Math.round(this._bpm) + delta));
     this._ws()?.controlSet?.("transport.tempo", next);
+  }
+
+  // ── click-and-drag on the BPM readout ─────────────────────────
+  // Drag up to speed up, down to slow down. ~3 px per BPM unit
+  // gives the kid plenty of throw for the 40–300 range without
+  // crawling — ~85 px covers a 30 BPM swing.
+  _onBpmPointerDown(e) {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = e.currentTarget;
+    el.setPointerCapture?.(e.pointerId);
+    el.classList.add("dragging");
+    this._dragBpmStartY = e.clientY;
+    this._dragBpmStart = Math.round(this._bpm);
+    this._dragBpmLast = this._dragBpmStart;
+    const move = (ev) => {
+      const dy = this._dragBpmStartY - ev.clientY; // up = positive
+      const next = Math.max(40, Math.min(300, this._dragBpmStart + Math.round(dy / 3)));
+      if (next === this._dragBpmLast) return;
+      this._dragBpmLast = next;
+      // Optimistic local update for snappy feedback — the backend
+      // echo will overwrite this in _readState once it lands.
+      this._bpm = next;
+      this._ws()?.controlSet?.("transport.tempo", next);
+    };
+    const up = (ev) => {
+      el.releasePointerCapture?.(ev.pointerId);
+      el.classList.remove("dragging");
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
   }
 
   render() {
@@ -196,7 +238,11 @@ export class TransportBar extends LitElement {
 
       <div class="bpm-display">
         <span class="bpm-label">BPM</span>
-        <span class="bpm-value">${this._bpm}</span>
+        <span
+          class="bpm-value"
+          title="Drag up/down to change tempo"
+          @pointerdown=${this._onBpmPointerDown}
+        >${Math.round(this._bpm)}</span>
         <div class="bpm-buttons">
           <button @click=${() => this._setBpm(1)}>▲</button>
           <button @click=${() => this._setBpm(-1)}>▼</button>

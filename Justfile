@@ -572,6 +572,88 @@ config-reset:
 tw-build:
     ./scripts/dev/tw.sh build
 
+# Regenerate a bundled session template from a live foyer run.
+#
+# Usage:
+#   just template-rebuild sprunki-beats /?ui=sprunki
+#
+# The recipe boots a fresh foyer (kills any existing one + wipes the
+# scratch dir), points a headless chromium at the variant URL,
+# waits for the variant to finish its provisioning dance (tracks +
+# plugins + regions), triggers a `session.save` over the WS, then
+# zips the resulting `/workspaces/<template>-scratch/` into
+# `crates/foyer-cli/templates/<template>.zip` — the artefact the
+# `include_dir!` in foyer-cli later embeds.
+#
+# Re-runs cleanly: nothing persists between invocations. Idempotent.
+# Side effect: when finished, leaves a clean foyer + an empty
+# `/workspaces/<template>-scratch/` for inspection. Run
+# `just kill-daws` afterward if you want a quiet machine.
+#
+# Why a recipe instead of a one-off script: every variant we add
+# grows its own session shape (sprunki has 5 MIDI tracks; a future
+# "synthwave-jam" template might have 8 + a Lua DSP slot), and the
+# track layout is going to keep iterating. Bundling a stale
+# template into the binary is silently worse than the variant
+# doing the provisioning live (the variant catches drift; a stale
+# template just produces broken sessions), so the cost of
+# regenerating has to stay low.
+template-rebuild TEMPLATE_ID="sprunki-beats" VARIANT_URL="/?ui=sprunki":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ID="{{TEMPLATE_ID}}"
+    URL="{{VARIANT_URL}}"
+    PORT=3849   # off the default 3838 so we don't fight a running foyer
+    SCRATCH="/workspaces/${ID}-scratch"
+    OUT="crates/foyer-cli/templates/${ID}.zip"
+
+    echo "▶ template-rebuild ${ID}"
+    echo "  variant url:  ${URL}"
+    echo "  scratch dir:  ${SCRATCH}"
+    echo "  output zip:   ${OUT}"
+
+    just kill-daws >/dev/null 2>&1 || true
+    pkill -9 -f "foyer serve --listen 127.0.0.1:${PORT}" 2>/dev/null || true
+    rm -rf "${SCRATCH}" /tmp/foyer/ardour-*.sock /tmp/foyer/ardour-*.json
+    mkdir -p /tmp/foyer-template-state/state /tmp/foyer-template-state/data
+
+    echo "▶ booting foyer on :${PORT}…"
+    DISPLAY="${DISPLAY:-:99}" \
+    FOYER_ARDOUR_DEV_TREE="${PWD}/ext/ardour" \
+    XDG_STATE_HOME=/tmp/foyer-template-state/state \
+    XDG_DATA_HOME=/tmp/foyer-template-state/data \
+    cargo run --quiet --bin foyer -- serve \
+        --listen "127.0.0.1:${PORT}" \
+        --web-root web \
+        --backend ardour \
+        --ardour-path "${PWD}/ext/ardour/build/gtk2_ardour/ardour-9.5.0" \
+        > /tmp/foyer-template-state/foyer.log 2>&1 &
+    FOYER_PID=$!
+    trap "kill ${FOYER_PID} 2>/dev/null || true; just kill-daws >/dev/null 2>&1 || true" EXIT
+
+    echo "▶ waiting for listener on :${PORT}…"
+    for _ in $(seq 1 30); do
+        if ss -tln 2>/dev/null | grep -q ":${PORT} "; then break; fi
+        sleep 1
+    done
+    ss -tln 2>/dev/null | grep -q ":${PORT} " || { echo "✗ foyer never came up"; exit 1; }
+
+    echo "▶ driving the variant via headless chromium…"
+    PROBE_PORT="${PORT}" PROBE_URL_PATH="${URL}" PROBE_SCRATCH="${SCRATCH}" \
+        bun scripts/dev/seed-template.js
+
+    if [ ! -d "${SCRATCH}" ] || [ ! -f "${SCRATCH}/${ID}-scratch.ardour" ] && [ ! -f "${SCRATCH}/$(basename ${SCRATCH}).ardour" ]; then
+        echo "✗ scratch session never landed at ${SCRATCH}"
+        exit 2
+    fi
+
+    echo "▶ zipping ${SCRATCH} → ${OUT}…"
+    rm -f "${OUT}"
+    (cd "${SCRATCH}" && zip -r "${PWD}/${OUT}" . \
+        -x "*.bak" -x "peaks/*" -x "analysis/*" -x "dead/*" -x "*.history*")
+
+    echo "✓ wrote ${OUT} ($(du -h ${OUT} | cut -f1))"
+
 # Build a release zip for the host platform. Mirrors what the
 # `release.yml` matrix does on each runner — useful for sanity-checking
 # the bundle layout, or for cutting an unsigned local build to hand to

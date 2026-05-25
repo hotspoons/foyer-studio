@@ -17,8 +17,9 @@ export const sprunkiBase = css`
 
 export const appStyles = css`
   :host {
+    /* header / chord-strip / stage (flex 1fr) / palette / footer */
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
     width: 100%;
     height: 100vh;
     overflow: hidden;
@@ -75,7 +76,15 @@ export const appStyles = css`
     display: flex;
     min-height: 0;
     overflow: hidden;
-    padding: 0;
+    padding: 12px;
+  }
+  /* The new sprunki-stage component has its own aspect-ratio but
+     should fill the available horizontal space; flex item grows
+     to width but is height-bounded by the grid row. */
+  .sprunki-main sprunki-stage {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
   }
 
   .sprunki-footer {
@@ -224,6 +233,25 @@ export const characterBoardStyles = css`
   .slot-char .char-art {
     width: 100%;
     height: 100%;
+  }
+
+  /* ── Audio-reactive pulse ──
+     Every chip / slot-char carries a data-cat attribute naming
+     its category; the parent app pushes a per-category dBFS
+     reading 30 times per second via the --meter custom property
+     (0..1, where 0 = silent and 1 = clipping). Scale + glow
+     scale linearly with --meter. CSS transitions ease the change
+     so the surface isn't twitchy. */
+  .roster-chip[data-cat],
+  .slot-char[data-cat] {
+    transform: scale(calc(1 + var(--meter, 0) * 0.18));
+    box-shadow:
+      0 0 calc(var(--meter, 0) * 18px)
+        color-mix(in srgb, var(--chip-color, var(--cc, #fff)) 80%, transparent);
+    filter: brightness(calc(1 + var(--meter, 0) * 0.45));
+    transition: transform 60ms ease-out,
+                box-shadow 80ms ease-out,
+                filter 80ms ease-out;
   }
 
   .chip-name {
@@ -481,6 +509,20 @@ export const transportStyles = css`
     font-weight: 800;
     color: #feca57;
     font-variant-numeric: tabular-nums;
+    cursor: ns-resize;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    padding: 0 4px;
+    border-radius: 6px;
+    transition: background-color 100ms ease;
+  }
+  .bpm-value:hover {
+    background: rgba(254, 202, 87, 0.10);
+  }
+  .bpm-value.dragging {
+    background: rgba(254, 202, 87, 0.18);
+    cursor: grabbing;
   }
 
   .bpm-buttons {
