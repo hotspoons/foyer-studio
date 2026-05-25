@@ -82,11 +82,49 @@ export const appStyles = css`
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 20px;
+    gap: 14px;
     padding: 12px 20px;
     background: rgba(0, 0, 0, 0.4);
     border-top: 2px solid rgba(255, 255, 255, 0.08);
     flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  /* Header right-side toolbar (clear / preferences). */
+  .sprunki-toolbar {
+    display: flex;
+    gap: 6px;
+  }
+  .sprunki-icon-btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+    color: #f0f0f0;
+    font-size: 16px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+  }
+  .sprunki-icon-btn:hover {
+    background: rgba(255, 255, 255, 0.18);
+    border-color: rgba(255, 255, 255, 0.28);
+  }
+
+  /* Boot / provisioning / error screen. */
+  .sprunki-bootscreen {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    color: #cdd;
+    font-size: 17px;
+    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    text-align: center;
+    padding: 0 24px;
   }
 `;
 
@@ -166,6 +204,26 @@ export const characterBoardStyles = css`
     font-size: 18px;
     width: 24px;
     text-align: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* OG-sprunki SVG art when the asset pack is downloaded. The
+     emoji fallback (.char-emoji) is intentionally untouched so
+     pre-pack and post-pack rosters line up visually. */
+  .char-art {
+    width: 28px;
+    height: 28px;
+    object-fit: contain;
+    pointer-events: none;
+  }
+  .char-emoji {
+    font-size: inherit;
+  }
+  .slot-char .char-art {
+    width: 100%;
+    height: 100%;
   }
 
   .chip-name {
@@ -349,43 +407,57 @@ export const transportStyles = css`
   }
 
   .transport-btn {
-    width: 48px;
-    height: 48px;
-    border-radius: 50%;
-    border: none;
+    min-width: 44px;
+    height: 40px;
+    padding: 0 14px;
+    border-radius: 20px;
+    border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.1);
+    color: #f0f0f0;
     cursor: pointer;
-    font-size: 20px;
-    display: flex;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
+    gap: 6px;
     transition: all 0.15s;
   }
+  .transport-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.2);
+    transform: translateY(-1px);
+  }
+  .transport-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .transport-btn.play {
     background: #00b894;
     color: white;
-    box-shadow: 0 0 16px rgba(0, 184, 148, 0.4);
+    box-shadow: 0 0 14px rgba(0, 184, 148, 0.35);
   }
-
-  .transport-btn.play:hover {
-    transform: scale(1.08);
-    box-shadow: 0 0 24px rgba(0, 184, 148, 0.6);
+  .transport-btn.play:hover:not(:disabled) {
+    background: #00d2a7;
+    box-shadow: 0 0 18px rgba(0, 184, 148, 0.55);
   }
-
   .transport-btn.play.playing {
     background: #e17055;
-    box-shadow: 0 0 16px rgba(225, 112, 85, 0.4);
+    box-shadow: 0 0 14px rgba(225, 112, 85, 0.45);
   }
 
   .transport-btn.stop {
     background: rgba(255, 255, 255, 0.1);
     color: white;
-    width: 40px;
-    height: 40px;
+    min-width: 40px;
+    padding: 0 10px;
+  }
+  .transport-btn.stop:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.2);
   }
 
-  .transport-btn.stop:hover {
-    background: rgba(255, 255, 255, 0.2);
+  .transport-btn.on {
+    background: rgba(108, 140, 255, 0.35);
+    border-color: #6c8cff;
+    color: #fff;
   }
 
   .bpm-display {

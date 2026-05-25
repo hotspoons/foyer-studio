@@ -618,6 +618,82 @@ impl Backend for StubBackend {
         Ok((meta, regions))
     }
 
+    async fn create_region(
+        &self,
+        track_id: EntityId,
+        at_samples: u64,
+        length_samples: Option<u64>,
+        kind: String,
+        name: Option<String>,
+        source_path: Option<String>,
+    ) -> Result<(), BackendError> {
+        // The stub only models MIDI region creation for now — audio
+        // would need a source-pool lookup that the launcher backend
+        // doesn't carry. Audio creates are silently no-op'd today
+        // by the default trait impl, so reject explicitly here so
+        // the caller knows. (The Sprunki demo + every other
+        // sequencer-style flow only needs MIDI, so this is fine.)
+        if kind != "midi" {
+            return Err(BackendError::Other(format!(
+                "stub create_region: only midi is implemented (got {kind:?})"
+            )));
+        }
+        let sr = self.sample_rate();
+        // Fallback length: 4 bars at 120 BPM (sane MIDI clip size).
+        let length = length_samples.unwrap_or_else(|| {
+            (sr as u64) * 4 * 60 / 120 // 4 beats × 60s / 120 BPM = 2s, × 4 bars = 8s
+        });
+        // Generate a fresh id. The track-slug + timestamp suffix
+        // gives us stability across the test's regions_for call,
+        // which is keyed by track_id.
+        let slug = track_id.as_str().rsplit('.').next().unwrap_or("x");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let region_id = EntityId::new(format!("region.{slug}.new.{nanos:08x}"));
+        let region = foyer_schema::Region {
+            id: region_id.clone(),
+            track_id: track_id.clone(),
+            name: name.unwrap_or_else(|| format!("{slug} region")),
+            start_samples: at_samples as i64,
+            length_samples: length,
+            color: None,
+            muted: false,
+            source_path,
+            source_offset_samples: None,
+            source_segments: vec![],
+            notes: vec![],
+            patch_changes: vec![],
+            foyer_sequencer: None,
+            gain_linear: None,
+            fade_in_samples: None,
+            fade_out_samples: None,
+            fade_in_shape: None,
+            fade_out_shape: None,
+            ingress_latency_ms: None,
+            group_id: None,
+            layer: None,
+        };
+        // Lazy-init the synthesized regions for this track, then
+        // append ours. `regions_for` synthesizes a default 4-region
+        // set on first read; subsequent inserts land alongside.
+        // Sprunki provisions on a freshly-created track (no
+        // synthesized stubs since we never call regions_for on it),
+        // so inserts cleanly.
+        let regions = {
+            let mut store = self.regions.lock().await;
+            store.insert(region);
+            store.regions_for(&track_id, sr).clone()
+        };
+        let _ = self.tx.send(Event::RegionsList {
+            track_id,
+            regions,
+            timeline: self.timeline_meta(),
+        });
+        Ok(())
+    }
+
     async fn delete_region(&self, id: EntityId) -> Result<EntityId, BackendError> {
         let track_id = {
             let mut store = self.regions.lock().await;

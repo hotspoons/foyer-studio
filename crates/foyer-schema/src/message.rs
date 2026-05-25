@@ -894,6 +894,24 @@ pub enum Event {
         handle: String,
         message: String,
     },
+
+    /// Snapshot of every known foreign-content asset pack the
+    /// server can fetch. Emitted at greeting time and on
+    /// `Command::ListAssetPacks`. Each entry's `state` reflects
+    /// whatever is currently on disk; the client uses it to decide
+    /// whether to show a consent prompt + Download button or just
+    /// proceed with locally-cached assets.
+    AssetPackList {
+        packs: Vec<crate::asset_pack::AssetPackInfo>,
+    },
+
+    /// Single-pack state transition. Streamed during downloads
+    /// (Downloading → Extracting → Ready / Failed). The browser
+    /// can splice this into the cached `AssetPackList` view
+    /// without re-fetching the full list.
+    AssetPackUpdated {
+        info: crate::asset_pack::AssetPackInfo,
+    },
 }
 
 impl Event {
@@ -2332,6 +2350,23 @@ pub enum Command {
     /// and dropped without touching real session state.
     #[serde(rename = "test_reset_state")]
     TestResetState,
+
+    /// Ask the server to send a fresh `AssetPackList` summarizing
+    /// every known foreign-content pack and its current local
+    /// state. Useful as an explicit refresh after a network blip.
+    ListAssetPacks,
+
+    /// Request the server start downloading + extracting the named
+    /// pack from its hardcoded source URL. Caller is responsible
+    /// for showing the user a consent prompt with the pack's
+    /// `credits` / `license_note` / `source_url` first — the server
+    /// just trusts that this command means "the user agreed".
+    /// Progress is streamed via `Event::AssetPackUpdated`. Idempotent
+    /// when the pack is already `Ready` (returns the current state
+    /// without re-downloading).
+    FetchAssetPack {
+        name: String,
+    },
 }
 
 #[cfg(test)]

@@ -453,6 +453,22 @@ async fn handle(
         let _ = send_env(&mut tx_ws, &env).await;
     }
 
+    // Seed the new client with the asset-pack list. The client uses
+    // this to decide whether to show the consent prompt (state =
+    // Available) or skip straight to the game UI (state = Ready).
+    {
+        let packs = state.asset_packs.list().await;
+        let env = Envelope {
+            schema: SCHEMA_VERSION,
+            api_version: foyer_schema::CONTROL_PLANE_API_VERSION.to_string(),
+            seq: state.next_seq.fetch_add(1, Ordering::Relaxed),
+            origin: Some("server".into()),
+            session_id: None,
+            body: Event::AssetPackList { packs },
+        };
+        let _ = send_env(&mut tx_ws, &env).await;
+    }
+
     // Seed the new client with the current script list so the Scripts
     // panel (and external MCP clients that call `scripts.list` right
     // after attach) has data without an explicit refresh round-trip.
@@ -3881,6 +3897,34 @@ async fn dispatch_command(
         Command::TestResetState => {
             state.reset_to_fresh_launcher_for_test().await;
             tracing::info!("test_reset_state: hot-swapped a fresh launcher StubBackend");
+        }
+
+        // ── Foreign asset packs ─────────────────────────────────────
+        // `list_asset_packs` is a refresh — the greeting already
+        // seeds the initial list, so this is for hand-triggered
+        // diagnostics or post-error recovery. `fetch_asset_pack`
+        // assumes the consent prompt happened on the client side.
+        Command::ListAssetPacks => {
+            let packs = state.asset_packs.list().await;
+            broadcast_event(state, Event::AssetPackList { packs }).await;
+        }
+        Command::FetchAssetPack { name } => {
+            let state_for_task = state.clone();
+            let name_for_task = name.clone();
+            tokio::spawn(async move {
+                let manager = state_for_task.asset_packs.clone();
+                let state_inner = state_for_task.clone();
+                let result = crate::asset_packs::fetch_pack(&manager, &name_for_task, |info| {
+                    let s = state_inner.clone();
+                    async move {
+                        broadcast_event(&s, Event::AssetPackUpdated { info }).await;
+                    }
+                })
+                .await;
+                if let Err(e) = result {
+                    tracing::warn!("fetch_asset_pack {name_for_task} failed: {e}");
+                }
+            });
         }
 
         // ── DAW scripting (shim-declared surface) ─────────────────────

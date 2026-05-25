@@ -315,6 +315,11 @@ pub struct CheckResult {
     pub ok: bool,
     pub severity: CheckSeverity,
     pub detail: String,
+    /// A copy-pasteable shell command that resolves the failing
+    /// check on the current OS, when we can derive one. `None`
+    /// for `ok` checks and for failure modes the user has to
+    /// hand-fix (e.g. "set FOYER_NETJACK_HOST in config").
+    pub install_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +328,204 @@ pub enum CheckSeverity {
     Required,
     /// Failure degrades the experience but the launch still works.
     Warning,
+}
+
+/// Linux distribution family — controls which install one-liner we
+/// suggest. `Unknown` falls through to a generic hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsFamily {
+    Debian,
+    Fedora,
+    Arch,
+    Suse,
+    Unknown,
+}
+
+impl OsFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            OsFamily::Debian => "debian",
+            OsFamily::Fedora => "fedora",
+            OsFamily::Arch => "arch",
+            OsFamily::Suse => "suse",
+            OsFamily::Unknown => "unknown",
+        }
+    }
+}
+
+/// Snapshot of OS-level facts the picker uses to render install
+/// hints + pretty labels. Cheap — reads `/etc/os-release` once and
+/// runs `pgrep` against a couple of known audio daemons.
+#[derive(Debug, Clone)]
+pub struct OsProbe {
+    pub family: OsFamily,
+    pub pretty_name: String,
+    /// True when a host-side PipeWire daemon is up. Used to pick
+    /// `pipewire-jack` over plain `jack2` in the suggested install.
+    pub pipewire_running: bool,
+}
+
+impl OsProbe {
+    pub fn detect() -> Self {
+        let (family, pretty_name) = parse_os_release();
+        let pipewire_running = is_running("pipewire");
+        Self {
+            family,
+            pretty_name,
+            pipewire_running,
+        }
+    }
+}
+
+fn parse_os_release() -> (OsFamily, String) {
+    let content = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let mut id = String::new();
+    let mut id_like = String::new();
+    let mut pretty = String::new();
+    for line in content.lines() {
+        if let Some(v) = line.strip_prefix("ID=") {
+            id = v.trim_matches('"').to_string();
+        } else if let Some(v) = line.strip_prefix("ID_LIKE=") {
+            id_like = v.trim_matches('"').to_string();
+        } else if let Some(v) = line.strip_prefix("PRETTY_NAME=") {
+            pretty = v.trim_matches('"').to_string();
+        }
+    }
+    let combined = format!("{id} {id_like}");
+    let family = if combined.contains("debian") || combined.contains("ubuntu") {
+        OsFamily::Debian
+    } else if combined.contains("fedora")
+        || combined.contains("rhel")
+        || combined.contains("centos")
+    {
+        OsFamily::Fedora
+    } else if combined.contains("arch") {
+        OsFamily::Arch
+    } else if combined.contains("suse") {
+        OsFamily::Suse
+    } else {
+        OsFamily::Unknown
+    };
+    let pretty = if pretty.is_empty() {
+        std::env::consts::OS.to_string()
+    } else {
+        pretty
+    };
+    (family, pretty)
+}
+
+fn is_running(name: &str) -> bool {
+    Command::new("pgrep")
+        .arg("-x")
+        .arg(name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Install-command lookup tables. The audio stack pick (pipewire-jack
+/// vs jack2) is driven by whether PipeWire is already on the host:
+///   * PipeWire active   → install `pipewire-jack` compat layer.
+///   * No PipeWire       → install classic JACK 2.
+fn install_runtime(family: OsFamily) -> Option<String> {
+    Some(
+        match family {
+            OsFamily::Debian => "sudo apt update && sudo apt install -y podman",
+            OsFamily::Fedora => "sudo dnf install -y podman",
+            OsFamily::Arch => "sudo pacman -S --noconfirm podman",
+            OsFamily::Suse => "sudo zypper install -y podman",
+            OsFamily::Unknown => return None,
+        }
+        .into(),
+    )
+}
+
+fn install_jack_stack(family: OsFamily, pipewire_present: bool) -> Option<String> {
+    Some(if pipewire_present {
+        match family {
+            OsFamily::Debian => {
+                "sudo apt install -y pipewire-jack pipewire-audio wireplumber && \
+                 systemctl --user enable --now pipewire pipewire-pulse wireplumber"
+            }
+            OsFamily::Fedora => {
+                "sudo dnf install -y pipewire-jack-audio-connection-kit wireplumber && \
+                 systemctl --user enable --now pipewire pipewire-pulse wireplumber"
+            }
+            OsFamily::Arch => {
+                "sudo pacman -S --noconfirm pipewire-jack wireplumber && \
+                 systemctl --user enable --now pipewire pipewire-pulse wireplumber"
+            }
+            OsFamily::Suse => {
+                "sudo zypper install -y pipewire-libjack-0_3 wireplumber && \
+                 systemctl --user enable --now pipewire pipewire-pulse wireplumber"
+            }
+            OsFamily::Unknown => return None,
+        }
+        .to_string()
+    } else {
+        match family {
+            OsFamily::Debian => {
+                "sudo apt install -y jackd2 qjackctl && \
+                 sudo usermod -aG audio $USER  # log out / back in to pick up the group"
+            }
+            OsFamily::Fedora => "sudo dnf install -y jack-audio-connection-kit qjackctl",
+            OsFamily::Arch => "sudo pacman -S --noconfirm jack2 qjackctl",
+            OsFamily::Suse => "sudo zypper install -y jack qjackctl",
+            OsFamily::Unknown => return None,
+        }
+        .to_string()
+    })
+}
+
+fn install_ardour(family: OsFamily) -> Option<String> {
+    // Two install paths per OS, joined into a single multi-line
+    // shell snippet the picker shows in a copy-pasteable block:
+    //
+    //   1. The fast distro path (apt/dnf/pacman/zypper). Gets
+    //      whatever version the distro pinned; on Debian sid that's
+    //      currently 9.2, which loads the shim fine via our 9.x ABI
+    //      guards.
+    //   2. The "demo" download from community.ardour.org. The
+    //      unpaid binary is fully featured but nags you to donate
+    //      and has limits on session save/export. Good enough for
+    //      trying Foyer end-to-end. For unrestricted use the user
+    //      donates at the same URL or builds from source.
+    //
+    // We don't pin a specific Ardour version in the URL — that
+    // would rot. The hint points the user at the download page; on
+    // headless installs they can curl + click-through manually.
+    let community_blurb = "# OR — download the demo binary from community.ardour.org\n\
+         # (fully featured, nags for donation, soft session save/export caps).\n\
+         # For unrestricted use, donate at https://community.ardour.org/download\n\
+         # or build from source.\n\
+         xdg-open https://community.ardour.org/download \
+         || open https://community.ardour.org/download \
+         || echo 'open https://community.ardour.org/download in a browser'";
+    Some(match family {
+        OsFamily::Debian => format!(
+            "# Distro path (Debian sid ships `ardour`, currently ~9.2):\n\
+                 sudo apt update && sudo apt install -y ardour\n\n\
+                 {community_blurb}"
+        ),
+        OsFamily::Fedora => format!(
+            "# Distro path:\n\
+                 sudo dnf install -y ardour\n\n\
+                 {community_blurb}"
+        ),
+        OsFamily::Arch => format!(
+            "# Distro path:\n\
+                 sudo pacman -S --noconfirm ardour\n\n\
+                 {community_blurb}"
+        ),
+        OsFamily::Suse => format!(
+            "# Distro path:\n\
+                 sudo zypper install -y ardour\n\n\
+                 {community_blurb}"
+        ),
+        OsFamily::Unknown => community_blurb.to_string(),
+    })
 }
 
 /// Run the pre-flight dependency checks the desktop wrapper renders
@@ -338,6 +541,7 @@ pub fn doctor(
 ) -> Vec<CheckResult> {
     let mut out = Vec::new();
     let dcfg = config.docker.clone().unwrap_or_default();
+    let os = OsProbe::detect();
 
     // 1. Container runtime.
     let runtime_pref = runtime_override.or(dcfg.runtime.as_deref());
@@ -349,6 +553,7 @@ pub fn doctor(
                 ok: true,
                 severity: CheckSeverity::Required,
                 detail: format!("found {} — will use this", p.display()),
+                install_command: None,
             });
             Some(p)
         }
@@ -361,6 +566,7 @@ pub fn doctor(
                 detail: format!(
                     "{e}\nInstall podman (recommended), docker, or nerdctl and re-run."
                 ),
+                install_command: install_runtime(os.family),
             });
             None
         }
@@ -390,6 +596,17 @@ pub fn doctor(
                     rt.display()
                 )
             },
+            install_command: if ok {
+                None
+            } else if rt.file_name().and_then(|s| s.to_str()) == Some("docker") {
+                Some(
+                    "sudo systemctl start docker && sudo usermod -aG docker $USER  \
+                     # log out / back in to pick up the group"
+                        .into(),
+                )
+            } else {
+                None
+            },
         });
     }
 
@@ -404,6 +621,7 @@ pub fn doctor(
                 detail: "Dummy backend runs entirely inside the container. \
                          No host JACK / PipeWire needed."
                     .into(),
+                install_command: None,
             });
         }
         DockerMode::Jack => {
@@ -420,28 +638,13 @@ pub fn doctor(
                             .any(|e| e.file_name().to_string_lossy().starts_with("jack"))
                     })
                     .unwrap_or(false);
-                let pipewire_running = Command::new("pgrep")
-                    .arg("-x")
-                    .arg("pipewire")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                let jackd_running = Command::new("pgrep")
-                    .arg("-x")
-                    .arg("jackd")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                let kind = match (pipewire_running, jackd_running) {
+                let jackd_running = is_running("jackd");
+                let kind = match (os.pipewire_running, jackd_running) {
                     (true, _) => "PipeWire (with JACK compat)",
                     (false, true) => "jackd",
                     (false, false) => "neither pipewire nor jackd",
                 };
-                let ok = socket_present || pipewire_running || jackd_running;
+                let ok = socket_present || os.pipewire_running || jackd_running;
                 out.push(CheckResult {
                     id: "jack-server".into(),
                     label: "JACK / PipeWire-JACK server on host".into(),
@@ -463,6 +666,15 @@ pub fn doctor(
                             jack_dir.display()
                         )
                     },
+                    install_command: if ok {
+                        None
+                    } else {
+                        // Recommend the stack matching what's
+                        // ALREADY on the host: pipewire-jack if
+                        // PipeWire is running (any version), else
+                        // the classic JACK 2 daemon.
+                        install_jack_stack(os.family, os.pipewire_running)
+                    },
                 });
             }
             #[cfg(not(target_os = "linux"))]
@@ -475,6 +687,7 @@ pub fn doctor(
                     detail: "--jack mode is Linux-only (Docker on macOS/Windows runs a VM, \
                              host JACK sockets don't reach into it). Use NetJACK instead."
                         .into(),
+                    install_command: None,
                 });
             }
         }
@@ -518,6 +731,7 @@ pub fn doctor(
                                  retry, but check the master is running and the port is open."
                             )
                         },
+                        install_command: None,
                     });
                 }
                 None => {
@@ -529,10 +743,115 @@ pub fn doctor(
                         detail: "No NetJACK host configured. Set `docker.netjack_host` in \
                                  config.yaml or export FOYER_NETJACK_HOST."
                             .into(),
+                        install_command: None,
                     });
                 }
             }
         }
+    }
+
+    out
+}
+
+/// Host-mode pre-flight: does this machine have a Foyer-compatible
+/// Ardour install, and is there an audio path to drive it? Mirrors
+/// the shape of `doctor()` so the picker's check-card UI can render
+/// it with the same code.
+pub fn host_doctor() -> Vec<CheckResult> {
+    let mut out = Vec::new();
+    let os = OsProbe::detect();
+
+    // 1. Ardour binary on PATH. We accept the major-pinned name
+    //    (`ardour9`), the bare `ardour`, or the headless variants —
+    //    the foyer-cli launcher already knows how to bridge between
+    //    them at run time.
+    let ardour = ["ardour9", "ardour", "hardour9", "hardour"]
+        .iter()
+        .find_map(|n| which(n));
+    match &ardour {
+        Some(p) => out.push(CheckResult {
+            id: "ardour".into(),
+            label: "Ardour binary".into(),
+            ok: true,
+            severity: CheckSeverity::Required,
+            detail: format!("found {} — will exec this from the launcher", p.display()),
+            install_command: None,
+        }),
+        None => out.push(CheckResult {
+            id: "ardour".into(),
+            label: "Ardour binary".into(),
+            ok: false,
+            severity: CheckSeverity::Required,
+            detail: "No `ardour9`/`ardour` on PATH. Host mode needs Ardour 9 \
+                     installed locally so foyer-server can spawn it via the shim."
+                .into(),
+            install_command: install_ardour(os.family),
+        }),
+    }
+
+    // 2. Foyer shim landed in Ardour's surfaces dir. install.sh's
+    //    canonical location on Linux is `~/.config/ardour9/surfaces/`.
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let shim = PathBuf::from(&home).join(".config/ardour9/surfaces/libfoyer_shim.so");
+        let ok = shim.is_file();
+        out.push(CheckResult {
+            id: "shim".into(),
+            label: "Foyer Studio shim plugin".into(),
+            ok,
+            severity: CheckSeverity::Warning,
+            detail: if ok {
+                format!("found {}", shim.display())
+            } else {
+                format!(
+                    "Shim not at {} — Ardour won't see Foyer Studio under \
+                     Preferences → Control Surfaces. Run `install.sh` (in your \
+                     foyer bundle) to drop it in.",
+                    shim.display()
+                )
+            },
+            install_command: if ok {
+                None
+            } else {
+                Some(
+                    "curl -fsSL https://raw.githubusercontent.com/hotspoons/foyer-studio/main/install.sh \
+                     | bash -s -- --latest-ci"
+                        .into(),
+                )
+            },
+        });
+    }
+
+    // 3. Audio server. Real audio path needs PipeWire-JACK, plain
+    //    JACK 2, or — at minimum — Ardour's ALSA backend. We can
+    //    only sniff the user-session daemons.
+    let jackd_running = is_running("jackd");
+    let server_kind = match (os.pipewire_running, jackd_running) {
+        (true, _) => Some("PipeWire (JACK compat available)"),
+        (false, true) => Some("jackd"),
+        (false, false) => None,
+    };
+    match server_kind {
+        Some(k) => out.push(CheckResult {
+            id: "audio-server".into(),
+            label: "Audio server (JACK / PipeWire)".into(),
+            ok: true,
+            severity: CheckSeverity::Warning,
+            detail: format!("{k} is running on the host."),
+            install_command: None,
+        }),
+        None => out.push(CheckResult {
+            id: "audio-server".into(),
+            label: "Audio server (JACK / PipeWire)".into(),
+            ok: false,
+            severity: CheckSeverity::Warning,
+            detail: "Neither PipeWire nor jackd are running. Ardour will fall \
+                     back to its ALSA / Dummy backends, but real low-latency \
+                     monitoring needs one of these up."
+                .into(),
+            install_command: install_jack_stack(os.family, os.pipewire_running),
+        }),
     }
 
     out
@@ -550,43 +869,9 @@ pub fn report_doctor(
 ) {
     let checks = doctor(config, mode, runtime_override, netjack_host_override);
     if json {
-        let entries: Vec<String> = checks
-            .iter()
-            .map(|c| {
-                let sev = match c.severity {
-                    CheckSeverity::Required => "required",
-                    CheckSeverity::Warning => "warning",
-                };
-                format!(
-                    "    {{\"id\":{id}, \"label\":{label}, \"ok\":{ok}, \"severity\":\"{sev}\", \"detail\":{detail}}}",
-                    id = json_str(&c.id),
-                    label = json_str(&c.label),
-                    ok = c.ok,
-                    sev = sev,
-                    detail = json_str(&c.detail),
-                )
-            })
-            .collect();
-        let any_required_failed = checks
-            .iter()
-            .any(|c| !c.ok && c.severity == CheckSeverity::Required);
-        println!(
-            "{{\n  \"mode\": \"{mode}\",\n  \"ok\": {ok},\n  \"checks\": [\n{checks}\n  ]\n}}",
-            mode = match mode {
-                DockerMode::Integrated => "integrated",
-                DockerMode::Jack => "jack",
-                DockerMode::Netjack => "netjack",
-            },
-            ok = !any_required_failed,
-            checks = entries.join(",\n"),
-        );
+        println!("{}", checks_to_json(&checks, mode_label(mode)));
     } else {
-        let mode_label = match mode {
-            DockerMode::Integrated => "integrated",
-            DockerMode::Jack => "jack",
-            DockerMode::Netjack => "netjack",
-        };
-        println!("foyer docker doctor — mode={mode_label}");
+        println!("foyer docker doctor — mode={}", mode_label(mode));
         for c in &checks {
             let marker = if c.ok { "✓" } else { "✗" };
             let sev = match c.severity {
@@ -608,6 +893,63 @@ pub fn report_doctor(
             println!("\nready to launch");
         }
     }
+}
+
+fn mode_label(mode: DockerMode) -> &'static str {
+    match mode {
+        DockerMode::Integrated => "integrated",
+        DockerMode::Jack => "jack",
+        DockerMode::Netjack => "netjack",
+    }
+}
+
+/// Serialize a check list to the JSON shape the desktop picker
+/// consumes. Exposed so the picker's refresh path (which spawns
+/// `foyer docker --doctor --json`) and the standalone host doctor
+/// share one formatter.
+pub fn checks_to_json(checks: &[CheckResult], mode_name: &str) -> String {
+    let entries: Vec<String> = checks
+        .iter()
+        .map(|c| {
+            let sev = match c.severity {
+                CheckSeverity::Required => "required",
+                CheckSeverity::Warning => "warning",
+            };
+            let install = match &c.install_command {
+                Some(s) => format!(", \"install_command\":{}", json_str(s)),
+                None => String::new(),
+            };
+            format!(
+                "    {{\"id\":{id}, \"label\":{label}, \"ok\":{ok}, \"severity\":\"{sev}\", \"detail\":{detail}{install}}}",
+                id = json_str(&c.id),
+                label = json_str(&c.label),
+                ok = c.ok,
+                sev = sev,
+                detail = json_str(&c.detail),
+                install = install,
+            )
+        })
+        .collect();
+    let any_required_failed = checks
+        .iter()
+        .any(|c| !c.ok && c.severity == CheckSeverity::Required);
+    format!(
+        "{{\n  \"mode\": \"{mode_name}\",\n  \"ok\": {ok},\n  \"checks\": [\n{checks}\n  ]\n}}",
+        ok = !any_required_failed,
+        checks = entries.join(",\n"),
+    )
+}
+
+/// Probe the host once, return an `os: { family, pretty_name }` blob
+/// shaped for `window.__doctor.os` on the picker side.
+pub fn os_to_json() -> String {
+    let probe = OsProbe::detect();
+    format!(
+        "{{\"family\":{family}, \"pretty_name\":{pretty}, \"pipewire_running\":{pw}}}",
+        family = json_str(probe.family.as_str()),
+        pretty = json_str(&probe.pretty_name),
+        pw = probe.pipewire_running,
+    )
 }
 
 /// Minimal JSON string escaper — enough for the field shapes

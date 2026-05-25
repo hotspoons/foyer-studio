@@ -23,26 +23,54 @@
         background: var(--bg);
         color: var(--text);
         font-family: system-ui, sans-serif;
-        font-size: 14px;
+        font-size: 13px;
+        line-height: 1.4;
         overflow: hidden;
       }
-      .page { display: none; padding: 20px 24px; box-sizing: border-box; height: 100%; overflow-y: auto; }
-      .page.active { display: block; }
-      h1 { margin: 0 0 10px 0; font-size: 18px; }
-      p.lede { margin: 0 0 18px 0; color: var(--mute); font-size: 12px; }
-      .row { display: flex; gap: 12px; }
-      .col { display: flex; flex-direction: column; gap: 12px; }
+      /* Each page is a vertical flex column so the actions bar pins to
+         the bottom regardless of window height. Inner `.content` caps
+         width on big windows so cards stay readable instead of
+         stretching into letterbox shapes. */
+      .page {
+        display: none;
+        height: 100%;
+        box-sizing: border-box;
+      }
+      .page.active {
+        display: flex;
+        flex-direction: column;
+      }
+      .content {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 20px 24px 8px 24px;
+        max-width: 1100px;
+        width: 100%;
+        margin: 0 auto;
+        box-sizing: border-box;
+      }
+      h1 { margin: 0 0 6px 0; font-size: 17px; }
+      p.lede { margin: 0 0 16px 0; color: var(--mute); font-size: 12px; }
+      .breadcrumb { font-size: 11px; color: var(--mute); margin-bottom: 6px; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; }
+      .row > * { flex: 1 1 0; min-width: 240px; }
       button.card {
-        flex: 1;
         background: var(--panel);
         color: var(--text);
         border: 1px solid var(--border);
         border-radius: 8px;
-        padding: 14px 16px;
+        padding: 12px 14px;
         text-align: left;
         font: inherit;
         cursor: pointer;
         transition: border-color 80ms, background 80ms;
+        /* Force content to stack top-down — WebKit default-aligns
+           button children to the vertical middle, which is what was
+           making the card titles float at different heights. */
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
       }
       button.card:hover:not(:disabled) {
         border-color: var(--border-hi);
@@ -57,28 +85,75 @@
         background: var(--panel-hi);
       }
       button.card h2 { margin: 0 0 4px 0; font-size: 13px; }
-      button.card .desc { font-size: 11px; color: var(--mute); }
-      .checks { margin-top: 10px; font-size: 11px; line-height: 1.5; }
-      .check { display: flex; gap: 6px; align-items: flex-start; }
-      .check.ok    .mark { color: var(--ok); }
-      .check.warn  .mark { color: var(--warn); }
-      .check.err   .mark { color: var(--err); }
+      button.card .desc { font-size: 11px; color: var(--mute); margin-bottom: 8px; }
+      .checks { font-size: 11px; line-height: 1.45; }
+      .check { display: flex; gap: 6px; align-items: flex-start; margin-bottom: 2px; }
+      .check.ok  .mark { color: var(--ok); }
+      .check.warn .mark { color: var(--warn); }
+      .check.err .mark { color: var(--err); }
       .check .mark { font-weight: 700; min-width: 12px; }
       .check .body { color: var(--mute); }
-      .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+      .install-hint {
+        margin-top: 10px;
+        padding: 8px 10px;
+        background: #0a0d12;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        font-size: 10.5px;
+        color: var(--mute);
+      }
+      .install-hint code {
+        display: block;
+        margin: 4px 0 6px 0;
+        padding: 6px 8px;
+        background: #161b22;
+        color: #e5e8ee;
+        border-radius: 4px;
+        white-space: pre-wrap;
+        word-break: break-all;
+        font-family: ui-monospace, "JetBrains Mono", monospace;
+        font-size: 10.5px;
+      }
+      .install-hint .install-actions {
+        display: flex; gap: 6px; margin-top: 4px;
+      }
+      .install-hint button {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 4px 10px;
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .install-hint button:hover { background: var(--panel-hi); border-color: var(--border-hi); }
+      .actions {
+        flex: 0 0 auto;
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 24px 14px 24px;
+        border-top: 1px solid var(--border);
+        background: var(--bg);
+      }
+      .actions .left { display: flex; gap: 8px; }
+      .actions .right { display: flex; gap: 8px; }
       .actions button {
         background: var(--panel);
         color: var(--text);
         border: 1px solid var(--border);
         border-radius: 6px;
-        padding: 8px 16px;
+        padding: 7px 14px;
         font: inherit;
+        font-size: 12px;
         cursor: pointer;
       }
       .actions button.primary { background: var(--border-hi); border-color: var(--border-hi); }
       .actions button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
       .actions button:hover:not(:disabled) { background: var(--panel-hi); }
-      .field { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+      .field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
       .field label { font-size: 11px; color: var(--mute); }
       .field input, .field select {
         background: var(--panel);
@@ -87,101 +162,167 @@
         border-radius: 4px;
         padding: 6px 8px;
         font: inherit;
+        font-size: 12px;
       }
       .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-      details { margin-top: 8px; }
+      details { margin-top: 6px; }
       details summary { font-size: 11px; color: var(--mute); cursor: pointer; }
       details pre {
         font-size: 10px; color: var(--mute);
         background: #0a0d12; padding: 6px 8px; border-radius: 4px;
         overflow-x: auto; white-space: pre-wrap;
+        margin: 4px 0 0 0;
       }
-      .breadcrumb { font-size: 11px; color: var(--mute); margin-bottom: 6px; }
+      .badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 3px;
+        font-size: 10px;
+        background: var(--panel-hi);
+        color: var(--mute);
+      }
+      .toast {
+        position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+        background: var(--panel); color: var(--text);
+        border: 1px solid var(--border-hi); border-radius: 6px;
+        padding: 6px 12px; font-size: 11px;
+        opacity: 0; transition: opacity 200ms;
+        pointer-events: none;
+      }
+      .toast.show { opacity: 1; }
     </style>
   </head>
   <body>
     <!-- Page 1: Host vs Docker -->
     <section id="page-mode" class="page active">
-      <h1>How should Foyer run?</h1>
-      <p class="lede">
-        Pick once — saved to <code>config.yaml</code>. Re-run with
-        <code>--reset-mode</code> to change later.
-      </p>
-      <div class="row">
-        <button class="card" data-act="pick:host">
-          <h2>Run on this machine (Host)</h2>
-          <div class="desc">Embeds the Foyer sidecar in this window. No containers.</div>
-        </button>
-        <button class="card" data-act="goto-docker">
-          <h2>Run in a container (Docker)</h2>
-          <div class="desc">Spawns <code>foyer docker</code> with a configured audio + network mode.</div>
-        </button>
+      <div class="content">
+        <h1>How should Foyer run?</h1>
+        <p class="lede">
+          Pick once — saved to <code>config.yaml</code>. Re-run with
+          <code>--reset-mode</code> to change later.
+        </p>
+        <div class="row">
+          <button class="card" data-act="goto-host">
+            <h2>Run on this machine (Host)</h2>
+            <div class="desc">Embeds the Foyer sidecar in this window. No containers; needs Ardour installed locally.</div>
+            <div id="host-mini-checks" class="checks"></div>
+          </button>
+          <button class="card" data-act="goto-docker">
+            <h2>Run in a container (Docker)</h2>
+            <div class="desc">Spawns <code>foyer docker</code> with a configured audio + network mode.</div>
+            <div id="docker-mini-checks" class="checks"></div>
+          </button>
+        </div>
+      </div>
+      <div class="actions">
+        <div class="left"><span class="badge" id="os-badge"></span></div>
+        <div class="right">
+          <button data-act="refresh">Re-check</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Page 1b: Host mode dependency review -->
+    <section id="page-host" class="page">
+      <div class="content">
+        <div class="breadcrumb">Host mode</div>
+        <h1>Run Foyer directly on this machine</h1>
+        <p class="lede">
+          The native shell will embed <code>foyer-server</code> in this
+          window and look for a local Ardour install (with the Foyer
+          shim) to attach to. The checks below tell you what to install
+          first.
+        </p>
+        <div id="host-checks-full"></div>
+      </div>
+      <div class="actions">
+        <div class="left"><button data-act="back:mode">Back</button></div>
+        <div class="right">
+          <button data-act="refresh">Re-check</button>
+          <button class="primary" id="host-launch" data-act="pick:host">Use Host mode</button>
+        </div>
       </div>
     </section>
 
     <!-- Page 2: Docker audio mode -->
     <section id="page-audio" class="page">
-      <div class="breadcrumb">Docker › Audio mode</div>
-      <h1>Pick an audio integration</h1>
-      <p class="lede">
-        Each option's pre-flight check ran when the picker opened.
-        Greyed-out modes are blocked by a missing dependency — see the
-        check details under each card.
-      </p>
-      <div class="row" id="audio-cards"></div>
+      <div class="content">
+        <div class="breadcrumb">Docker › Audio mode</div>
+        <h1>Pick an audio integration</h1>
+        <p class="lede">
+          Each option's pre-flight check ran when the picker opened.
+          Greyed-out modes are blocked by a missing dependency — copy
+          the suggested install command, run it, then hit Re-check.
+        </p>
+        <div class="row" id="audio-cards"></div>
+      </div>
       <div class="actions">
-        <button data-act="back:mode">Back</button>
-        <button class="primary" id="audio-next" disabled data-act="goto-network">Next</button>
+        <div class="left"><button data-act="back:mode">Back</button></div>
+        <div class="right">
+          <button data-act="refresh">Re-check</button>
+          <button class="primary" id="audio-next" disabled data-act="goto-network">Next</button>
+        </div>
       </div>
     </section>
 
     <!-- Page 3: Network + (conditional) NetJACK target -->
     <section id="page-network" class="page">
-      <div class="breadcrumb">Docker › Networking</div>
-      <h1>Choose a networking model</h1>
-      <p class="lede">
-        Host mode is lower latency and required for some discovery
-        protocols, but only works on Linux — Docker Desktop's VM
-        silently falls back to bridge. Bridge works everywhere.
-      </p>
-      <div class="row">
-        <button class="card" data-net="bridge">
-          <h2>Bridge (port mapping)</h2>
-          <div class="desc">Publishes the container's 3838 to a host port via the bridge driver. Works on any host.</div>
-        </button>
-        <button class="card" data-net="host">
-          <h2>Host networking</h2>
-          <div class="desc">Container shares the host's network namespace. Linux only.</div>
-        </button>
-      </div>
-      <div class="field" id="host-port-field">
-        <label for="host-port">Host port (bridge only — default 3838)</label>
-        <input id="host-port" type="number" value="3838" min="1" max="65535" />
-      </div>
-      <div id="netjack-fields" style="display:none">
-        <div class="grid2">
-          <div class="field">
-            <label for="netjack-host">NetJACK host</label>
-            <input id="netjack-host" type="text" placeholder="studio.local or IP" />
-          </div>
-          <div class="field">
-            <label for="netjack-port">NetJACK port</label>
-            <input id="netjack-port" type="number" value="19000" min="1" max="65535" />
+      <div class="content">
+        <div class="breadcrumb">Docker › Networking</div>
+        <h1>Choose a networking model</h1>
+        <p class="lede">
+          Host mode is lower latency and required for some discovery
+          protocols, but only works on Linux — Docker Desktop's VM
+          silently falls back to bridge. Bridge works everywhere.
+        </p>
+        <div class="row">
+          <button class="card" data-net="bridge">
+            <h2>Bridge (port mapping)</h2>
+            <div class="desc">Publishes the container's 3838 to a host port via the bridge driver. Works on any host.</div>
+          </button>
+          <button class="card" data-net="host">
+            <h2>Host networking</h2>
+            <div class="desc">Container shares the host's network namespace. Linux only.</div>
+          </button>
+        </div>
+        <div class="field" id="host-port-field">
+          <label for="host-port">Host port (bridge only — default 3838)</label>
+          <input id="host-port" type="number" value="3838" min="1" max="65535" />
+        </div>
+        <div id="netjack-fields" style="display:none">
+          <div class="grid2">
+            <div class="field">
+              <label for="netjack-host">NetJACK host</label>
+              <input id="netjack-host" type="text" placeholder="studio.local or IP" />
+            </div>
+            <div class="field">
+              <label for="netjack-port">NetJACK port</label>
+              <input id="netjack-port" type="number" value="19000" min="1" max="65535" />
+            </div>
           </div>
         </div>
       </div>
       <div class="actions">
-        <button data-act="back:audio">Back</button>
-        <button class="primary" id="net-launch" disabled data-act="launch">Launch</button>
+        <div class="left"><button data-act="back:audio">Back</button></div>
+        <div class="right">
+          <button class="primary" id="net-launch" disabled data-act="launch">Launch</button>
+        </div>
       </div>
     </section>
 
+    <div id="toast" class="toast"></div>
+
     <script>
-      // The Rust side embeds the doctor results for all three modes
-      // here before serving the page. Shape:
-      //   { integrated: { ok, checks: [...] }, jack: {...}, netjack: {...} }
-      // Each check: { id, label, ok, severity, detail }
-      const DOCTOR = window.__doctor || {};
+      // The Rust side embeds the doctor results before serving:
+      //   window.__doctor = {
+      //     os: {family, pretty_name},
+      //     host:      { ok, checks: [...] },
+      //     integrated:{ ok, checks: [...] },
+      //     jack:      { ok, checks: [...] },
+      //     netjack:   { ok, checks: [...] },
+      //   }
+      // Each check: { id, label, ok, severity, detail, install_command? }
+      let DOCTOR = window.__doctor || {};
 
       function pick(v) {
         if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(v);
@@ -191,12 +332,98 @@
           p.classList.toggle("active", p.id === pageId);
         }
       }
+      function escapeHtml(s) {
+        return String(s ?? "").replace(/[&<>"']/g, c =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      }
+      function firstLine(s) {
+        return String(s ?? "").split("\n")[0];
+      }
+      function showToast(msg) {
+        const t = document.getElementById("toast");
+        t.textContent = msg;
+        t.classList.add("show");
+        setTimeout(() => t.classList.remove("show"), 1600);
+      }
+      function copyToClipboard(text) {
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(text).then(
+            () => showToast("Copied to clipboard"),
+            () => showToast("Copy failed — select the text manually"),
+          );
+        } else {
+          showToast("Clipboard unavailable — select the text manually");
+        }
+      }
 
       // State
-      let selectedAudio = null;     // "integrated" | "jack" | "netjack"
-      let selectedNetwork = null;   // "bridge" | "host"
+      let selectedAudio = null;
+      let selectedNetwork = null;
 
-      // Build the audio mode cards from DOCTOR
+      function renderCheckList(checks) {
+        if (!checks || checks.length === 0) return '<em>No checks ran.</em>';
+        return checks.map(c => {
+          const cls = c.ok ? "ok" : (c.severity === "warning" ? "warn" : "err");
+          const mark = c.ok ? "✓" : (c.severity === "warning" ? "⚠" : "✗");
+          return `<div class="check ${cls}">
+                    <span class="mark">${mark}</span>
+                    <span class="body"><strong>${escapeHtml(c.label)}</strong>: ${escapeHtml(firstLine(c.detail))}</span>
+                  </div>`;
+        }).join("");
+      }
+      function renderInstallHints(checks) {
+        const blocking = (checks || []).filter(c => !c.ok && c.install_command);
+        if (blocking.length === 0) return "";
+        return blocking.map(c => `
+          <div class="install-hint">
+            <div><strong>${escapeHtml(c.label)}</strong> — suggested fix:</div>
+            <code>${escapeHtml(c.install_command)}</code>
+            <div class="install-actions">
+              <button data-copy="${escapeHtml(c.install_command)}">Copy</button>
+            </div>
+          </div>`).join("");
+      }
+
+      // ── Page 1 (Host vs Docker) compact summaries ────────────────
+      function renderMiniChecks() {
+        const host = DOCTOR.host || { ok: false, checks: [] };
+        const dock = anyDockerOk();
+        const hostEl = document.getElementById("host-mini-checks");
+        const dockEl = document.getElementById("docker-mini-checks");
+        hostEl.innerHTML = host.checks?.length
+          ? host.checks.slice(0, 3).map(c => {
+              const cls = c.ok ? "ok" : (c.severity === "warning" ? "warn" : "err");
+              const mark = c.ok ? "✓" : (c.severity === "warning" ? "⚠" : "✗");
+              return `<div class="check ${cls}"><span class="mark">${mark}</span><span class="body">${escapeHtml(c.label)}</span></div>`;
+            }).join("")
+          : "";
+        const modes = ["integrated", "jack", "netjack"];
+        dockEl.innerHTML = modes.map(m => {
+          const d = DOCTOR[m] || { ok: false };
+          const cls = d.ok ? "ok" : "err";
+          const mark = d.ok ? "✓" : "✗";
+          return `<div class="check ${cls}"><span class="mark">${mark}</span><span class="body">${escapeHtml(m)} mode${d.ok ? " — ready" : " — blocked"}</span></div>`;
+        }).join("");
+        document.getElementById("os-badge").textContent =
+          DOCTOR.os?.pretty_name ? `Detected: ${DOCTOR.os.pretty_name}` : "";
+      }
+      function anyDockerOk() {
+        return ["integrated", "jack", "netjack"].some(m => (DOCTOR[m] || {}).ok);
+      }
+
+      // ── Page 1b (Host mode detail) ──────────────────────────────
+      function renderHostPage() {
+        const host = DOCTOR.host || { ok: false, checks: [] };
+        const cont = document.getElementById("host-checks-full");
+        cont.innerHTML = `
+          <div class="checks">${renderCheckList(host.checks)}</div>
+          ${renderInstallHints(host.checks)}
+        `;
+        // Host mode launches even with warnings — but we surface them.
+        document.getElementById("host-launch").disabled = false;
+      }
+
+      // ── Page 2 (Docker audio mode cards) ────────────────────────
       const audio = [
         { id: "integrated", title: "Integrated (no host audio)",
           desc: "Dummy backend runs entirely inside the container. Works on any host." },
@@ -205,7 +432,6 @@
         { id: "netjack", title: "NetJACK (remote master)",
           desc: "Container connects to a NetJACK server over TCP. Cross-platform; pays network jitter." },
       ];
-
       function renderAudioCards() {
         const root = document.getElementById("audio-cards");
         root.innerHTML = "";
@@ -215,26 +441,13 @@
           const card = document.createElement("button");
           card.className = "card";
           card.disabled = blocked;
+          if (selectedAudio === a.id) card.classList.add("selected");
           card.dataset.audio = a.id;
-
-          const checksHtml = (d.checks || []).map(c => {
-            const cls = c.ok ? "ok" : (c.severity === "warning" ? "warn" : "err");
-            const mark = c.ok ? "✓" : (c.severity === "warning" ? "⚠" : "✗");
-            return `<div class="check ${cls}">
-                      <span class="mark">${mark}</span>
-                      <span class="body"><strong>${escapeHtml(c.label)}</strong>: ${escapeHtml(firstLine(c.detail))}</span>
-                    </div>`;
-          }).join("");
-
-          const detailHtml = (d.checks || []).filter(c => !c.ok).map(c =>
-            `[${c.severity}] ${c.label}\n${c.detail}`
-          ).join("\n\n");
-
           card.innerHTML = `
             <h2>${a.title}</h2>
             <div class="desc">${a.desc}</div>
-            <div class="checks">${checksHtml || '<em>No checks ran.</em>'}</div>
-            ${detailHtml ? `<details><summary>Why blocked?</summary><pre>${escapeHtml(detailHtml)}</pre></details>` : ""}
+            <div class="checks">${renderCheckList(d.checks)}</div>
+            ${renderInstallHints(d.checks)}
           `;
           if (!blocked) {
             card.addEventListener("click", () => {
@@ -248,42 +461,29 @@
         }
       }
 
-      function escapeHtml(s) {
-        return String(s || "").replace(/[&<>"']/g, c =>
-          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-      }
-      function firstLine(s) {
-        return String(s || "").split("\n")[0];
-      }
-
-      // Wire button events
+      // ── Event delegation ────────────────────────────────────────
       document.addEventListener("click", (ev) => {
+        const copy = ev.target.closest("[data-copy]");
+        if (copy) { copyToClipboard(copy.dataset.copy); ev.stopPropagation(); return; }
         const t = ev.target.closest("[data-act],[data-net]");
         if (!t) return;
-        if (t.dataset.act === "pick:host") return pick("host");
-        if (t.dataset.act === "goto-docker") {
-          renderAudioCards();
-          show("page-audio");
-          return;
-        }
-        if (t.dataset.act === "back:mode") return show("page-mode");
-        if (t.dataset.act === "goto-network") {
-          // Show / hide network-mode-dependent fields
+        const act = t.dataset.act;
+        if (act === "goto-host") { renderHostPage(); show("page-host"); return; }
+        if (act === "goto-docker") { renderAudioCards(); show("page-audio"); return; }
+        if (act === "back:mode") { renderMiniChecks(); show("page-mode"); return; }
+        if (act === "goto-network") {
           document.getElementById("netjack-fields").style.display =
             selectedAudio === "netjack" ? "" : "none";
-          // Default to bridge when nothing selected
           if (!selectedNetwork) selectNetwork("bridge");
           show("page-network");
           return;
         }
-        if (t.dataset.act === "back:audio") return show("page-audio");
-        if (t.dataset.net) {
-          selectNetwork(t.dataset.net);
-          return;
-        }
-        if (t.dataset.act === "launch") return submitLaunch();
+        if (act === "back:audio") return show("page-audio");
+        if (t.dataset.net) { selectNetwork(t.dataset.net); return; }
+        if (act === "pick:host") return pick("host");
+        if (act === "launch") return submitLaunch();
+        if (act === "refresh") return requestRefresh();
       });
-
       function selectNetwork(n) {
         selectedNetwork = n;
         for (const c of document.querySelectorAll('[data-net]')) {
@@ -293,7 +493,6 @@
           n === "bridge" ? "" : "none";
         validateLaunch();
       }
-
       function validateLaunch() {
         let ok = !!selectedAudio && !!selectedNetwork;
         if (selectedAudio === "netjack") {
@@ -303,28 +502,39 @@
         document.getElementById("net-launch").disabled = !ok;
       }
       document.addEventListener("input", validateLaunch);
-
       function submitLaunch() {
-        const payload = {
+        pick("docker:" + JSON.stringify({
           mode: selectedAudio,
           network: selectedNetwork,
           host_port: parseInt(document.getElementById("host-port").value, 10) || 3838,
           netjack_host: (document.getElementById("netjack-host").value || "").trim() || null,
           netjack_port: parseInt(document.getElementById("netjack-port").value, 10) || 19000,
-        };
-        pick("docker:" + JSON.stringify(payload));
+        }));
       }
+      function requestRefresh() {
+        showToast("Re-checking…");
+        pick("refresh");
+      }
+      // Rust pushes new doctor data back here after a refresh.
+      window.applyDoctor = function (next) {
+        DOCTOR = next || {};
+        renderMiniChecks();
+        renderAudioCards();
+        if (document.getElementById("page-host").classList.contains("active")) {
+          renderHostPage();
+        }
+        showToast("Updated");
+      };
 
       document.addEventListener("keydown", (ev) => {
-        // Quick path on the first page only.
         const onMode = document.getElementById("page-mode").classList.contains("active");
         if (!onMode) return;
-        if (ev.key === "h" || ev.key === "H") pick("host");
-        if (ev.key === "d" || ev.key === "D") {
-          renderAudioCards();
-          show("page-audio");
-        }
+        if (ev.key === "h" || ev.key === "H") { renderHostPage(); show("page-host"); }
+        if (ev.key === "d" || ev.key === "D") { renderAudioCards(); show("page-audio"); }
       });
+
+      // Initial render
+      renderMiniChecks();
     </script>
   </body>
 </html>

@@ -11,7 +11,22 @@
     ]
   },
   "features": {
-    "ghcr.io/devcontainers/features/git:1": {}
+    "ghcr.io/devcontainers/features/git:1": {},
+    // Docker-in-Docker so `foyer docker --integrated|--jack|--netjack`
+    // and the desktop wrapper's first-run mode picker can actually
+    // exercise the container path from inside this dev container.
+    // Without it `foyer docker --doctor` always reports "no container
+    // runtime found on PATH" and every audio mode card is blocked.
+    //
+    // `dockerDashComposeVersion: none` skips the slow docker-compose
+    // pull at provision time — Foyer's docker recipe doesn't use
+    // compose, so the extra install just costs disk + cold-start
+    // time. `moby: true` is the default and gives us the OSS dockerd
+    // engine rather than the Mirantis fork.
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "moby": true,
+      "dockerDashComposeVersion": "none"
+    }
   },
   "runArgs": [
     "--platform=${localEnv:DOCKER_DEFAULT_PLATFORM:linux/arm64}",

@@ -159,5 +159,7 @@ pub(crate) fn command_tag(cmd: &Command) -> &'static str {
         Command::RecoverDisabledScripts => "recover_disabled_scripts",
         Command::UiActionResult { .. } => "ui_action_result",
         Command::TestResetState => "test_reset_state",
+        Command::ListAssetPacks => "list_asset_packs",
+        Command::FetchAssetPack { .. } => "fetch_asset_pack",
     }
 }

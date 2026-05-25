@@ -1,0 +1,3402 @@
+{
+  "version": 1,
+  "source": "ext/sprunki-website/assets/project.json (decompiled TurboWarp/Scratch project)",
+  "assetRoot": "ext/sprunki-website/assets/",
+  "fileNamingNote": "All file values are content-addressed by md5; resolve as `${assetRoot}${file}`. svgs are vector character/UI art, wavs are 48 kHz stems.",
+  "categories": {
+    "drums": "Rhythm-section stems (kick, snare, cymbal, break, shaker).",
+    "bass": "Low-end bass stem.",
+    "melody": "Tonal stems (piano, organ, music-box, brass, arpeggio, square synth).",
+    "vocal": "Sung / spoken stems (hey lead, AI singing, choirs).",
+    "fx": "Non-pitched effect stems (whistle, vocal glitch, buildup riser).",
+    "phantom": "Hidden \"evil\" reveal character (Sprunki Phase 1 secret)."
+  },
+  "costumeBuckets": {
+    "idle": "Resting frames played on loop while the character is on stage but the slot is muted.",
+    "play": "Primary animation cycle synced to the primary sound loop.",
+    "alternate": "Phase-2 / 'evil' animation cycle synced to the alternate sound loop. Named `anim???` in source.",
+    "other": "Anything that didn't match the idle/anim/anim??? patterns (e.g. Sky blue's lone `bar` overlay frame)."
+  },
+  "soundBuckets": {
+    "primary": "Default loop fired when the character is placed.",
+    "alternate": "Phase-2 / 'evil' variant. Each character has 0–2 alternates; some (e.g. Yellow, Blue) have multiple alternate generations because the audio was re-cut."
+  },
+  "characters": [
+    {
+      "id": "oren",
+      "displayName": "Orange (Oren)",
+      "category": "drums",
+      "roleId": "drums-kick",
+      "roleLabel": "Kick drum",
+      "sounds": {
+        "primary": [
+          {
+            "name": "kick",
+            "file": "2ff9e556ae0b3cb4f9e4750dbe9b17d4.wav",
+            "rate": 48000,
+            "samples": 238500
+          }
+        ],
+        "alternate": [
+          {
+            "name": "kick3",
+            "file": "010667e9c7c5d755a22e2e04508088ed.wav",
+            "rate": 48000,
+            "samples": 443785
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "5f188f291a010091bd38162b7642e9f4.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "7f43606c2bb5773e80850a58b14574f9.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "7b6ec8b2454b1aa6133d54579c44c54c.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "4bcb1beebb183ea2011fa08140e87636.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "394b63197c3fe5b4954e7aa4e5d30c27.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "7392d7c090c806099c9140aaaaf89f5b.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "ce31253e12891ffaf177ed789c93f55b.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "f46ec2e9eb122836aa733b7c4f989540.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "7129bb76569c49aaa2029f0b178a7c3a.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "445e6bc3b3724ec8d16ce08faaf380dc.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "f6a682407233e075a0e79e2358a6c75e.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "f214304407e8b76f7d5eb35bb3e45397.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "raddy",
+      "displayName": "Red (Raddy)",
+      "category": "drums",
+      "roleId": "drums-snare",
+      "roleLabel": "Snare drum",
+      "sounds": {
+        "primary": [
+          {
+            "name": "snare",
+            "file": "ae111f7b2abb4ffe113d49e85cadcf7c.wav",
+            "rate": 48000,
+            "samples": 248400
+          }
+        ],
+        "alternate": [
+          {
+            "name": "snare3",
+            "file": "dfc4e0e27b844fefd14c04892a578aa0.wav",
+            "rate": 48000,
+            "samples": 553928
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "d7dc847b001632e8bdf1a390145f10ac.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "81db31f03946a06cda6672a136378790.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "7a79a7bb6be5c36ba78dc5ea3e4076ee.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "82f9ed328ac6adedbe0c71a05fe86ce1.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "90825947579f9483a56b643ab2808742.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "f496aca64564c8b04d91b2d492b7f1c5.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "0e2fd1cfbb2945a3843a1733565a4b1f.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "e06f929f494171aa6ba90bcf7986dca4.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "77b7ca46d5b9d15e73354a66e60bda3b.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "0d353a99139a9cccbe6d97973483242c.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "21dba1fb96be6f9de4b4456101954282.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "clukr",
+      "displayName": "Silver (Clukr)",
+      "category": "drums",
+      "roleId": "drums-cymbal",
+      "roleLabel": "Ride cymbal / hat",
+      "sounds": {
+        "primary": [
+          {
+            "name": "ride cymbal",
+            "file": "70a511bac6487b9dfb4b9420ad7e86f6.wav",
+            "rate": 48000,
+            "samples": 245100
+          }
+        ],
+        "alternate": [
+          {
+            "name": "ride cymbal2",
+            "file": "cfb7b02755c589d6a021459ccc2879a4.wav",
+            "rate": 48000,
+            "samples": 245100
+          },
+          {
+            "name": "knock knocn",
+            "file": "7168c28e0a595c468f461cedced06589.wav",
+            "rate": 48000,
+            "samples": 412928
+          },
+          {
+            "name": "knock knocn2",
+            "file": "489ddfc8c7c57c3c4a914ef814e98472.wav",
+            "rate": 48000,
+            "samples": 412928
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "b015564e47af15b260825f7d6af8c643.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "057c7e0f0b4d5038edf62ee970e1ebbe.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "3657d74e1a294681a1f291dd1ee7bf10.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "7b32656c3260f52dc911afb51b933a64.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "2a23ac405eef337b617b65e8c137962e.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "29c1e7f43bd068a4d2ed4383faacde27.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "01524dedba0bdd20d962798f1e50a509.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "d4ea2bea28c620f990eac9c951b7dff1.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "35566d525a3a9330a3e1666663185d58.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "2cbff498b30ae93737a8af3c89b389b0.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "2c888b9c21e4b4af780bf1b8b6486d0f.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "733ee5f4acce29617f0ca5736e85d406.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "9ae3716557bd659f5dc4aac8f59e7f6e.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fun-bot",
+      "displayName": "Fun Bot",
+      "category": "drums",
+      "roleId": "drums-break",
+      "roleLabel": "Amen break / glitch loop",
+      "sounds": {
+        "primary": [
+          {
+            "name": "amen",
+            "file": "5af077595ce5ece3c73a7cb302394015.wav",
+            "rate": 48000,
+            "samples": 230700
+          }
+        ],
+        "alternate": [
+          {
+            "name": "amen3",
+            "file": "9f2b469fe298e16a125fa3c28167df47.wav",
+            "rate": 48000,
+            "samples": 330642
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "4539a15043d037f0b70f71553b30c9cd.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "1a4f6f2468fd65af089e0556b19d940e.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "73c8c9982234c84b63766d64c80ed001.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "8e93dc84d8ea42fbfc692f29018e6012.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "3c5a4d1100c71937a230472417dc6b84.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "449c6cd7c7c61ab7db31b50055cdbc04.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "de33fde6697f49b635556e1badd202ba.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "91b14d4893c68aea56a60513dcde3556.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "09c152f7c8c7cc1a36fad24e0f65193d.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "684acf758277367837a79fa3da98c7b2.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "dc834ce27f202bb8084fd6129134cbc9.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "48ee2c4d530c8f75c299b6c2c390b3ed.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "25c565ce6df1cd0f5545df9e815fcf12.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "912b6279f95d7e87cfa5910132e569a1.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "34280900364799dd4e57cc1806abb657.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "4faceb40d4001626c1b65812006fef5a.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "9a0c7455ae6803ca9563501163ccbbff.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "c2c0d2e9f10aa4d90eeb9086da040891.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "vineria",
+      "displayName": "Green (Vineria)",
+      "category": "drums",
+      "roleId": "drums-shaker",
+      "roleLabel": "Shaker",
+      "sounds": {
+        "primary": [
+          {
+            "name": "shaky shaky",
+            "file": "7f08e76918d14fdfa46c4c61728808fc.wav",
+            "rate": 48000,
+            "samples": 242099
+          }
+        ],
+        "alternate": [
+          {
+            "name": "shakey",
+            "file": "9a64e35275249dafad42b40a2aedf53d.wav",
+            "rate": 48000,
+            "samples": 343285
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "876921f082afc3d621d511481167abc4.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "e6c8a300c38a43c2dbb90f64537e6cfd.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "38add8d0e41a04b9a5d14e855acbdaaa.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "bf614aba859b37bfd7213f67f92ed8ba.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "736c12fd29f778d567381c67a4c214ef.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "8ffd72fada67b9ebd8f10f95be6587b4.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "d84998fc888ff5404ea91bcab5bbc589.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "9f141b786d05d4c3b9c6f42e152dff7a.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "7a7506f1b2761f0d2e1bd07777ed1fe6.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "8da6a94cba1e18547efbd568e8398f6d.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "75410e9a167f71372a39d423de55e9fa.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "ecfd8e41101e0d559b9dfd0a912ad54e.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "08df184dc591c9c67082d8871bbaa6a9.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "270a8e8be43360898bccd0985a3dcf78.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "gray",
+      "displayName": "Gray (Gray)",
+      "category": "bass",
+      "roleId": "bass-low",
+      "roleLabel": "Bass",
+      "sounds": {
+        "primary": [
+          {
+            "name": "bass1",
+            "file": "ac76a6a92f290e7fac145dd9cf8c2b32.wav",
+            "rate": 48000,
+            "samples": 231300
+          }
+        ],
+        "alternate": [
+          {
+            "name": "bass2",
+            "file": "c2923c409173fa2ca34dc532a894f9f7.wav",
+            "rate": 48000,
+            "samples": 231300
+          },
+          {
+            "name": "bass3",
+            "file": "7ad41cc2db9d0d788120792fd804a8ba.wav",
+            "rate": 48000,
+            "samples": 344785
+          },
+          {
+            "name": "bass4",
+            "file": "2644a35847318d88e0cc230566e53a40.wav",
+            "rate": 48000,
+            "samples": 360214
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "2b0d707dc5b6ea94ca34186218819915.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "752ddb8b3986c55b8cfa8ff7e82d2c70.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "59eede4230ab01c5288e98a495703b94.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "7b9e756d2390d80af8aea3b244ecbae9.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "a674c20baa8bb65d46488bf3a84e3c37.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "57a24fbd9ee00fd3731779d2c5173251.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "3bf9d6f64caf91d384e7e0cd8c234bc1.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "9e9584f86f881a3d7e72f53ce7dbd1e8.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "becac4f2710b8ccfb70f462d651dbd32.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "621c3795f5d151fad36e187924698527.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "886f2379e69f33b29900d3a86d207ab0.svg"
+          },
+          {
+            "name": "anim10",
+            "file": "ba07e86822ad36c2d7235ce4879ef373.svg"
+          },
+          {
+            "name": "anim11",
+            "file": "0c693f1924511dacc26e71007e40d4a2.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "ad63e4009cbc362cba82b49d1079ad62.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "5744408fc830f15ba9cef82bb4cbcaf1.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "43ae651d1b91a272da095595c51f677d.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "088c276a81910d3ed9b86ecd91c6d0e7.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "7e0d06d8168f72bb6a155c67cd56e700.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "243f75b37dd2c5c087ec359f24673ad5.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "53b07f7b5b679508822b93447d35f764.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "daabd3f2bb4822ad45e63afaaf966a47.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "brud",
+      "displayName": "Brown (brud)",
+      "category": "fx",
+      "roleId": "fx-vocal-glitch",
+      "roleLabel": "Goofy vocal / glitch SFX",
+      "sounds": {
+        "primary": [
+          {
+            "name": "goofy ahh thing",
+            "file": "ef3c0e50f5c2ac26bfc5700fce42db63.wav",
+            "rate": 48000,
+            "samples": 230999
+          }
+        ],
+        "alternate": [
+          {
+            "name": "weird sound",
+            "file": "347dead247cb42851bb4f766ad2da762.wav",
+            "rate": 48000,
+            "samples": 330213
+          },
+          {
+            "name": "weird sound2",
+            "file": "d7dff4e0ca2d49846587f42fe1ee1c8f.wav",
+            "rate": 48000,
+            "samples": 330213
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "d8d68126b5adc22c77480dd7d6bef466.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "ea45f13a799706ddf7fb1b07422625a4.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "872792c52e3181209e0307c4b2a78897.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "8d804f94ad4149c42ca0c4923b719b79.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "ec954a0be3126da2552799cf415a0485.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "e4c8d359335490bf3c8c52010cbd09ff.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "1548c6d9a5dc2e7bf1ec567ec8924e6c.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "79accc0607a884099d08c57247bbe3d9.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "7fddf5dab621bb1cce90c2e25d2514d2.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "692065e87668aec7c87ee19b010351bc.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "3759155fe0d195a7b9f885bdc34b14e1.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "51e9e6032821c0756eca633500e03340.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "eb9bd9ec88dd4539baca146b5ee0daad.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "38bf140a375b3e686e6a5e72ba756bc5.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "5f2508d7416b5eb2fd500ee2e18320e7.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "9e4cc824105eca0301becf0ce416c9aa.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "1201b0d196d10f73094c7610b7fc5989.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "a5ff1eb07ea50bf7c26137616c7641b8.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "7e3afca1877d497b87badc248bf17a0c.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "garnold",
+      "displayName": "Gold (Garnold)",
+      "category": "melody",
+      "roleId": "melody-arpeggio",
+      "roleLabel": "Arpeggio synth",
+      "sounds": {
+        "primary": [
+          {
+            "name": "arpeg",
+            "file": "20dd7bff5b7f33e61e878d6e7b03e48c.wav",
+            "rate": 48000,
+            "samples": 230999
+          }
+        ],
+        "alternate": [
+          {
+            "name": "slow arpeg",
+            "file": "25db76755896bea9f2be69ba1ed2b862.wav",
+            "rate": 48000,
+            "samples": 445285
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "9601af13c89996f130ecc71a8eb0febc.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "a93b7e7c76b2c868e94e7c2029c10fe9.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "003f1bc693524d28a52895df3df3901b.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "37cf1f670f15b8fc6884042a05a1dfc7.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "8189f00e2d8a96b89d89a18b3622e047.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "91e7ea54df834e4b8c1227c1a4816939.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "578f7de8fe63411a2c0276367597b008.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "2ea9d6984444d7362c9c4f94a7966a97.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "30df8d09e6d3e0224fc7ecc27165e1d0.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "13c8822dc0688bb5ed2afa0de65baaf7.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "7b9ec2cb4b217eab8a7ec420635c5da6.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "4d94b42f29dabd62a7b6ff474ad865e5.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "3048e8b348073c20e46c5f75fb37e0fa.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "8cb55d3ecd664b7dcba0f977412d4f21.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "94e457f8cd7b42f8b2a17485f988e8a4.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "owakcx",
+      "displayName": "Lime (OWAKCX)",
+      "category": "fx",
+      "roleId": "fx-buildup",
+      "roleLabel": "Wind-up / buildup riser",
+      "sounds": {
+        "primary": [
+          {
+            "name": "wind up1",
+            "file": "793e0dde46587175bc6817a4cfd37699.wav",
+            "rate": 48000,
+            "samples": 245700
+          }
+        ],
+        "alternate": [
+          {
+            "name": "wind up2",
+            "file": "97d7c85d4f0acd1f12fa65afb27bb1a5.wav",
+            "rate": 48000,
+            "samples": 230700
+          },
+          {
+            "name": "better windup",
+            "file": "e7f583c38ef79d14bc048a333127e174.wav",
+            "rate": 48000,
+            "samples": 658500
+          },
+          {
+            "name": "big windup2",
+            "file": "ec7d9db5e1818f1a797dee7578ca97d9.wav",
+            "rate": 48000,
+            "samples": 330000
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "654ee2c380273f6f0a7e263a6d9b6b28.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "59d2bfa0836e768f07a72e753a489978.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "d0d629caf148a498747f9c111c4d4944.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "67e0a5672280be071ce3232adff8f56e.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "215b199309252035348e92dc8a8dcde5.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "f7cad846ce2223ea710aaf5b0786de15.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "99b2d43eb5f5662458a38ddbf7563105.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "d8d3ffe82b44484e00439d54a92e36cd.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "d3ad723e621bd55c4b7faa2a24478bf9.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "568b86e6c8c732571faa58d890ddd17e.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "0e00bba784963c40cbe2323d4fa96e32.svg"
+          },
+          {
+            "name": "anim10",
+            "file": "feff8ea97618df29495a578dcbe45dbd.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???1",
+            "file": "8c7574a48449189cd9a5420bb522fe1c.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "b35cd9f690c3c7f01bec48c0cbb3bd9a.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "4f284d048e6ed5e1ec4ed73a1a525184.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "cb752b12ec08e207d7d42a04f1fcc107.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "99aa0c15786c0a8d565fa020262d8135.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "182bf7013d7a87b9e256b27408c75c3f.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "cdf62f63cc2fbeebb53f626ddc3fc268.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "805aecc8ad0b574ec30a0de73fc8d364.svg"
+          },
+          {
+            "name": "anim???9",
+            "file": "444a1874a134edce3b3745bda7bbd854.svg"
+          },
+          {
+            "name": "anim???10",
+            "file": "08d3a110669a16efd42240d4e447f45c.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sky",
+      "displayName": "Sky blue (Sky)",
+      "category": "melody",
+      "roleId": "melody-musicbox",
+      "roleLabel": "Music box",
+      "sounds": {
+        "primary": [
+          {
+            "name": "music box1",
+            "file": "c39e54d80f08fd650cc23e04b733a83d.wav",
+            "rate": 48000,
+            "samples": 294899
+          }
+        ],
+        "alternate": [
+          {
+            "name": "music box2",
+            "file": "d56f8124c08bf51717a97780c4c77067.wav",
+            "rate": 48000,
+            "samples": 302700
+          },
+          {
+            "name": "music1",
+            "file": "d85f0f3f1411b871e9d5d2b14c6184f0.wav",
+            "rate": 48000,
+            "samples": 385499
+          },
+          {
+            "name": "music2",
+            "file": "40c9fa416e1e31fe84ee723549d5426f.wav",
+            "rate": 48000,
+            "samples": 418071
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "6ee7ba49eae48f5753deb07e0b32199b.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "67965ffc73229ff7ce85c3d800308af6.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "bc143e26b9501ce980e9e179024c55a9.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "21f6e03c5e95820a13b2205de8359983.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "2df8b48f909b1a48e99f0a778e0edd0b.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "8ef502f30ed37f7ec5ffd587ea9ad7b5.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "c8a1864e3de3eaf9becf2e9f596e9576.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "124459723b6396eaa9051840558eacca.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "84d14527c6201ee7cce34c86f2e933e6.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "468f0128f519bb5cbc1e7f75b9239a76.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "93e896b70ae273b6b43c8543c277b08f.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "e59c9000c0bc2a4887d3c69f4dae342e.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "43f070e452aadea32b4ba3c6286b4bad.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "b58facab2a384164e566515e47e073a9.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "ed4ee917aa17ba3c8454888f82ad3386.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "2d3d138a089f1075abe42e54df21a2a8.svg"
+          }
+        ],
+        "other": [
+          {
+            "name": "bar",
+            "file": "384f91727ed5e51fe8702361a0e8a25c.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mr-sun",
+      "displayName": "Mr. Sun",
+      "category": "melody",
+      "roleId": "melody-piano",
+      "roleLabel": "Piano",
+      "sounds": {
+        "primary": [
+          {
+            "name": "piano fixed finally1",
+            "file": "7aedd8c92bcff6a8c19c9ae73ca29c05.wav",
+            "rate": 48000,
+            "samples": 288000
+          }
+        ],
+        "alternate": [
+          {
+            "name": "piano fixed finally2",
+            "file": "d64c0b8be18d911eba4686b4981fb669.wav",
+            "rate": 48000,
+            "samples": 288000
+          },
+          {
+            "name": "piano new1",
+            "file": "cff73bda43f2ad689913599323b8d402.wav",
+            "rate": 48000,
+            "samples": 513000
+          },
+          {
+            "name": "piano new2",
+            "file": "014ba584c04fb0655bfeb6727ffe8256.wav",
+            "rate": 48000,
+            "samples": 508714
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "78203662c512913b3b4a16300cdf194a.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "d12897519365d274bb1092123157dd74.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "3e3a2a0021d43310ed74620bb233518b.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "58851b01385779cd9eb2bcf5b726f298.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "bb0cf81000d5d8e064c5e1231b1a04d2.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "c446ea2dfccd26f508ee71efa9e93791.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "cbaa1fe043c1b3a2d07deac47715b178.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "c079b7060d3ee57ab7ae836936af8300.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "6fd509f17d7ed6440b2518984fe103a5.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "9b0e2b231abd6c1371ccc5b1349b92c1.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "7d24a66b487cde7ad6189a26af58917f.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "50b8b552a99e6afd6682aae33df83a0a.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "a6f4f5ae3a5193b1686520f3ca4e9c9d.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "3044b6b567bc0b81d2183cb1e05a56f6.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "durple",
+      "displayName": "Purple (Durple)",
+      "category": "melody",
+      "roleId": "melody-brass",
+      "roleLabel": "Brass / horns",
+      "sounds": {
+        "primary": [
+          {
+            "name": "tromp new1",
+            "file": "a61d4acb6949d64706ec7246eefc7e96.wav",
+            "rate": 48000,
+            "samples": 231300
+          }
+        ],
+        "alternate": [
+          {
+            "name": "tromp new2",
+            "file": "d10ff60c2885d6eb682e8ad375a08612.wav",
+            "rate": 48000,
+            "samples": 231300
+          },
+          {
+            "name": "horns1",
+            "file": "d4559705743f97dfb16350a2e199ac41.wav",
+            "rate": 48000,
+            "samples": 578143
+          },
+          {
+            "name": "horns2",
+            "file": "9898ece4ca9a389e15dab39b981757ce.wav",
+            "rate": 48000,
+            "samples": 574071
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "89536b13f86fa5415b0d51716634fa9e.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "70a9972e0b69781017187642e8a2d7bd.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "4767571f3fa108616d22fe1fe412864f.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "84d98778bf55399b6f308cfad1091784.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "d3c7b8d629c4f4493a5e15872d2fdfb5.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "c05c276a4e105bf5e8e1c8fd6268b25a.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "16e7e7c0fde7cce06ade37deec452b76.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "b4fa32afc5410c06088296fdb04a60fa.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "e6a52c52b2e7a452a74972d571d4ba77.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "ef57346837f5252c4e7698aed067f02d.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "e6c513e1011a5af67d71840a9a5fde76.svg"
+          },
+          {
+            "name": "anim10",
+            "file": "b5c3c94ae6d752f32cb87df1a335e4af.svg"
+          },
+          {
+            "name": "anim11",
+            "file": "46594bafc86ab163fed27ba3bbaf29c1.svg"
+          },
+          {
+            "name": "anim12",
+            "file": "f4271aab34a695e26eb6f7adbfeb3565.svg"
+          },
+          {
+            "name": "anim13",
+            "file": "285c68a9b4d342ac86d21a19d48f61ac.svg"
+          },
+          {
+            "name": "anim14",
+            "file": "67239acc2199a21681763df4000a455d.svg"
+          },
+          {
+            "name": "anim15",
+            "file": "08ebc95124d4b19d5ca820af40bb0a5f.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "a420a8c6d770a3e964ae94e1e41bd55e.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "d7824f74368f27c3227b0749ae9e1af8.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "8ef0cc5d3a4523974b7b123e77b7abcc.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "c6a62d64fc2e57a0976c1b981baee01a.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "186f3c63ddecb201b77ecc86d8636d30.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "c452b267e2d79ddaa1e7902aa88d37e2.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "aa001dbb47f60177e758bab3522d471c.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "5fffcf256ba81c2f02e37921869894f7.svg"
+          },
+          {
+            "name": "anim???9",
+            "file": "0f8bf1d675102e9a0a5d0ccc7f9eca79.svg"
+          },
+          {
+            "name": "anim???11",
+            "file": "d1588d6ba97c41a278df2ce26a973e83.svg"
+          },
+          {
+            "name": "anim???10",
+            "file": "b087e8e87b5c61e845f567d0e3e2ed0f.svg"
+          },
+          {
+            "name": "anim???12",
+            "file": "915c4a74e00e678094b1b706966e140f.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mr-tree",
+      "displayName": "Mr. Tree",
+      "category": "melody",
+      "roleId": "melody-organ",
+      "roleLabel": "Organ",
+      "sounds": {
+        "primary": [
+          {
+            "name": "organ1",
+            "file": "d690ea637972fe97870d672dca854c80.wav",
+            "rate": 48000,
+            "samples": 253200
+          }
+        ],
+        "alternate": [
+          {
+            "name": "organ2",
+            "file": "81c754a5cfcf08ac3f91019a98906574.wav",
+            "rate": 48000,
+            "samples": 253200
+          },
+          {
+            "name": "slow organ1",
+            "file": "25657e6a259b97b2d0d4f9b24c1eba1e.wav",
+            "rate": 48000,
+            "samples": 432428
+          },
+          {
+            "name": "slow organ2",
+            "file": "9c67f8a107d42ff01b38fb0b222c133c.wav",
+            "rate": 48000,
+            "samples": 433285
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "1ccf355435482ae38d24bd5b948ef417.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "7b2e0217b2e1e623f5d0cec8230b492c.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "6de0edacbb5dfae68fcc8f4c18d52e31.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "07e737b35d6a6d08abcdf03b578d82d8.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "75dbe5dabdde8476aab2a8ffdde6af6f.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "e510b837d2c1ac3b33039414f2edfb6e.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "acea95dff466e691b961b547385ddc47.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "90f4afb1ff73ee4ed2fe5b1d3438ce75.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "e38e614c6c148f99bcf3840ff698e623.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "a6114f9bb59f2e20da26ff545073f816.svg"
+          }
+        ],
+        "alternate": []
+      }
+    },
+    {
+      "id": "simon",
+      "displayName": "Yellow (Simon)",
+      "category": "melody",
+      "roleId": "melody-square",
+      "roleLabel": "Square-wave synth",
+      "sounds": {
+        "primary": [
+          {
+            "name": "square1",
+            "file": "5a09fb11b6441a49fc732a93b3b86b00.wav",
+            "rate": 48000,
+            "samples": 231300
+          }
+        ],
+        "alternate": [
+          {
+            "name": "square2",
+            "file": "cd2290c8ad545070517a54f007060c68.wav",
+            "rate": 48000,
+            "samples": 231300
+          },
+          {
+            "name": "square new1",
+            "file": "6f69ede8c2c180e12261d088adf4b8b2.wav",
+            "rate": 48000,
+            "samples": 330000
+          },
+          {
+            "name": "square new2",
+            "file": "57f635c1d4fa2890299d33a8693f6629.wav",
+            "rate": 48000,
+            "samples": 329786
+          },
+          {
+            "name": "square old",
+            "file": "47b17dfa93445ecd1184cdfab4c0e09a.wav",
+            "rate": 48000,
+            "samples": 330000
+          },
+          {
+            "name": "square old2",
+            "file": "65b35bccccee72ec1afbcb69269e9d46.wav",
+            "rate": 48000,
+            "samples": 330000
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "543119325edb49e5294dd252d196b479.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "8c42261018dd75b744c8aaee4fb14aef.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "b9bcc18cb723e4ad40970c1555bdfa9e.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "24ee553af60b7cdf5e9df7ff52a97712.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "8c8d599b5c24e7ca6e59961afea99a97.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "6ee8d9d2af684aab7278f8d5f518e08c.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "199a02b3cae70cfa3bec3fb95395c76d.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "fce797298111f143fa9144c7f20c5f99.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "8f65ab6b31f90df8b168e73d89d7b866.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "cc90653c7cfc2270d5ad59fbfc75b8b2.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "2b3f173449b5d1646d6eb17856e10721.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "tunner",
+      "displayName": "Tan (Tunner)",
+      "category": "fx",
+      "roleId": "fx-whistle",
+      "roleLabel": "Whistle",
+      "sounds": {
+        "primary": [
+          {
+            "name": "whistle1",
+            "file": "92ed28220e031b247f5bcce8d0436130.wav",
+            "rate": 48000,
+            "samples": 236453
+          }
+        ],
+        "alternate": [
+          {
+            "name": "whistle2",
+            "file": "42132de97f842fb6725c7ce9ce35b3eb.wav",
+            "rate": 48000,
+            "samples": 239224
+          },
+          {
+            "name": "whistle3",
+            "file": "4eb9f3c28b6f5d78b1ea76a71df5cc43.wav",
+            "rate": 48000,
+            "samples": 427928
+          },
+          {
+            "name": "whistle4",
+            "file": "8c8b1362a6602d83b976d8faa8283555.wav",
+            "rate": 48000,
+            "samples": 422143
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "b8faa34280594a1de2cae550193055a1.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "9a27d2bd973f23b8628c54f033c6f893.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "4cb8f40249341a13697e570b04f51dc8.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "28ae30d93788b894dd420bde634ff952.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "b4b733b796ee5fc5ab37fc9fc6de4c42.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "3d466e5d88fb3b2cd32c28b849515f00.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "3066e6448e93951f914531d68e72f12e.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "5e9d5d55a848e14b2e24cc43cf5390a9.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "6735cd6c886b0667905b4af844216407.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "3add07bded4a334d7e094be901737931.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "a9af48c76738454ff4bedfdb77905c80.svg"
+          },
+          {
+            "name": "anim10",
+            "file": "0586c6c6e098c39693d8b48d2ca59c40.svg"
+          },
+          {
+            "name": "anim11",
+            "file": "f44a7b1a0cf487c24a5f5f036ec730cc.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???1",
+            "file": "adc07dd62de276bd686c8e6bde36567a.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "414b033546b579db4305365c5d613642.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "30b394f443a73b98a0cf5b3b5207eab4.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "5ebc62754044a0058b1928881d40b5ac.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "6369fe8c8ed038310382e536637d4e22.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "c4a02408ba60c5b4cab4ad878a4731c1.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "816211f7e8f3b1d30b062668be2e6cfd.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "16b1e3c1df44413ae552c3a6c65d99a4.svg"
+          },
+          {
+            "name": "anim???9",
+            "file": "1f45be40d4f9ebd2a4d360982564eb29.svg"
+          },
+          {
+            "name": "anim???10",
+            "file": "c5a3394bd6ca823bf57cfaa39a49a435.svg"
+          },
+          {
+            "name": "anim???11",
+            "file": "7d39ed670b83929f44f8db2d858b1946.svg"
+          },
+          {
+            "name": "anim???12",
+            "file": "880de3c79cbd8ec5f57dc26a050e8d35.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mr-fun-computer",
+      "displayName": "Mr. Fun Computer",
+      "category": "vocal",
+      "roleId": "vocal-ai",
+      "roleLabel": "AI singing / spoken",
+      "sounds": {
+        "primary": [
+          {
+            "name": "aising1",
+            "file": "cc85f2be1b1764358cd1ab84455d00a0.wav",
+            "rate": 48000,
+            "samples": 231599
+          }
+        ],
+        "alternate": [
+          {
+            "name": "aising2",
+            "file": "005fd69af635eeee88d2515b0ff1fd4d.wav",
+            "rate": 48000,
+            "samples": 230700
+          },
+          {
+            "name": "aispeak1",
+            "file": "2cafd1592fa01924b13f3cbffb1bdada.wav",
+            "rate": 48000,
+            "samples": 401142
+          },
+          {
+            "name": "aispeak2",
+            "file": "c8e1bfd11759410ffa43805419850dec.wav",
+            "rate": 48000,
+            "samples": 408428
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "a08bbafe2167b837995fd8bf79f5a27f.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "d895b92511c21488273c6dc18dca0b88.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "dd6b59aab59311141e9a9938877addf8.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "f20585176a9719fa4ba044b6079fab76.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "0863eb5004dbfacbfa626529e0b3e838.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "9eef684f2acd912398e57e2031bf6388.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "b6eeeb03c87641ec3be1d712e4c984a8.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "f1f3c9aac31868f74b9640fc9bb346d9.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "28683520d9ff0f4a242c2f2061e66a4a.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "cfd04b1781039ddcdd7cb55e0fabd3e2.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "09206f9957c594dffb1b6c7df1067810.svg"
+          },
+          {
+            "name": "anim10",
+            "file": "e990e63e58d889e59a82fdc423e84751.svg"
+          },
+          {
+            "name": "anim11",
+            "file": "d3500c8ab9c8c0def51a9721cb46d958.svg"
+          },
+          {
+            "name": "anim12",
+            "file": "831675e3af683589cf4d68796f599fea.svg"
+          },
+          {
+            "name": "anim13",
+            "file": "127a12f765b51f083b6dd1b077982221.svg"
+          },
+          {
+            "name": "anim14",
+            "file": "10666ce242c0b3c7f90201d6ace1bfa8.svg"
+          },
+          {
+            "name": "anim15",
+            "file": "66acecc7501f809768bd287ed7d7b159.svg"
+          },
+          {
+            "name": "anim16",
+            "file": "1891bf938bd5ef57963fb8cb6fcd346e.svg"
+          },
+          {
+            "name": "anim17",
+            "file": "b8a9c5a07c883cc03157c3a5009793b6.svg"
+          },
+          {
+            "name": "anim18",
+            "file": "70e4b1792cf8667b8d56be623d9477d3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "d33e0e88a6117d4793822c42d1331316.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "56837aae4a2edcce660dcff27a29db7b.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "33d93d8ce60a15b7e048492f12915886.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "0496314a53c3bd9ebcded22e07bb90db.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "dc190d82e3b2c6e77dbbaef2b8a1322d.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "35f71e5e8d33026ace2e365a5560e056.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "e0922cc823ec15335c47a2dec496c6d9.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "9515d4e8788f52d79af62d3e3ec87675.svg"
+          },
+          {
+            "name": "anim???9",
+            "file": "565e1dae8979df868c6fe69e60bc0041.svg"
+          },
+          {
+            "name": "anim???10",
+            "file": "ff4d4220b46620be3e215bcd657c58b6.svg"
+          },
+          {
+            "name": "anim???11",
+            "file": "7d2dbb3d74b39bf487dcdca5fcd7bd90.svg"
+          },
+          {
+            "name": "anim???12",
+            "file": "7e300e1ab98e8f2578afa0338f01fdc5.svg"
+          },
+          {
+            "name": "anim???13",
+            "file": "3a08547ba311662a9e09c9bf54f4da38.svg"
+          },
+          {
+            "name": "anim???14",
+            "file": "2198d86674637b5a460145d914aeee83.svg"
+          },
+          {
+            "name": "anim???15",
+            "file": "6b7549fc20107f5145089c735f051a66.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wenda",
+      "displayName": "White (Wenda)",
+      "category": "vocal",
+      "roleId": "vocal-hey",
+      "roleLabel": "\"Hey\" vocal lead",
+      "sounds": {
+        "primary": [
+          {
+            "name": "boring hey sound",
+            "file": "d3412e9a60ca1e4fb3db49587687ec28.wav",
+            "rate": 48000,
+            "samples": 230700
+          }
+        ],
+        "alternate": [
+          {
+            "name": "crazy",
+            "file": "3ff567bc278b8e218f4e028911fb3b17.wav",
+            "rate": 48000,
+            "samples": 330642
+          },
+          {
+            "name": "crazy unedited",
+            "file": "e5e938c53d6855c3e4d0ede6da8ec066.wav",
+            "rate": 48000,
+            "samples": 330428
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "16d88ed40d2540e0196ad94687a163c3.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "be8824af39117d9f76459b4fa1e0c49d.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "aeb8170a18b917b62af5860505618222.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "5fd356b60f9c19aec09c7ff72cf03be0.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "2d8a265f4b5c6091ea12ddd169553357.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "bf4fcd614db7eaa579ee89ded522a222.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "0a5d8dbec16488845cf0da1af4532ca1.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "ca0629b2f3563b68c54bff6e533560dd.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "467efc68e2d632d2424ea494b615df50.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "be7cc4c49866112fbcc16ed1450aa2ef.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "41ed6984d6f70856a4ca424d82faebef.svg"
+          },
+          {
+            "name": "anim10",
+            "file": "f53d071f4269443b137d1df3ecef84a4.svg"
+          },
+          {
+            "name": "anim11",
+            "file": "57d12023194adbc59125ebcbd79ab9a9.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "a79367eb6203e53c4c9c8cb2f1ae22b4.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "f07f62ac8d388b3942b2c62a3e86b4a4.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "9eb11d7970a64af7e74f4b1f477f2a36.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "ad00d71395c1d8d41185dcb07fd76457.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "2e396ac2ae5076a9f7655ab854b3f904.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "a1cda0870df1499c9d8ecccefba3d2c1.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "041051f118fe6eb3fe2c3d0e5b62dc8c.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "ad09a4b32d5db81bbe5890f9dfcef8c6.svg"
+          },
+          {
+            "name": "anim???9",
+            "file": "71d1bfb402ac3d80e442a82ad5a1cfe7.svg"
+          },
+          {
+            "name": "anim???10",
+            "file": "a6b64a080cbe2781b2f33a08e2c7628a.svg"
+          },
+          {
+            "name": "anim???11",
+            "file": "453e690627a45ac29678ad1afd006275.svg"
+          },
+          {
+            "name": "anim???12",
+            "file": "f6012d8b6c3ad2bac2658da5a18ef65c.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "pinki",
+      "displayName": "Pink (Pinki)",
+      "category": "vocal",
+      "roleId": "vocal-femchoir",
+      "roleLabel": "Female choir",
+      "sounds": {
+        "primary": [
+          {
+            "name": "femchoir1",
+            "file": "be1cb011ce50969caf9511048105f167.wav",
+            "rate": 48000,
+            "samples": 464400
+          }
+        ],
+        "alternate": [
+          {
+            "name": "femchoir2",
+            "file": "755b17efd1132952872dd572901b3566.wav",
+            "rate": 48000,
+            "samples": 504000
+          },
+          {
+            "name": "choir1",
+            "file": "2d95f722bf4b21913f02cde2faeb792a.wav",
+            "rate": 48000,
+            "samples": 443571
+          },
+          {
+            "name": "choir2",
+            "file": "7a3fe5b0d779187cf5e7d51cbf58e7e1.wav",
+            "rate": 48000,
+            "samples": 444428
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "4cf8eac32e710942a8ebc364559b1a44.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "527da1721c0526eadb401943bc496820.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "c452432337dc676558ae58b722890861.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "f8027d684c21b65d38c7c7fdd740a3c7.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "471267ab42bd48105127536c6c6611e0.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "dfdf8a753a14ae4d24d813ba2c949aea.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "e7256d86f3d34c43d40941d38f04b494.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "9683afeffd28c385e78f836d953a6bd4.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "836b6351348f9b41f40493a3cd43d1ca.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "94495ce54052062f5b42ea5a52753134.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "58f75423ee860871cf81127c9a670c6b.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "c55deaa4ba864bcae19a6f0aa8b09221.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "7a1fdd7b41a3ad85c84cbbcdc8b83fdc.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "ed5e25feb629304465b1f0e60d1f2d19.svg"
+          },
+          {
+            "name": "anim???6",
+            "file": "3af02223f608915e9103130353328b36.svg"
+          },
+          {
+            "name": "anim???7",
+            "file": "7b870bbbd999cd4fffdaaf8f71748ed9.svg"
+          },
+          {
+            "name": "anim???8",
+            "file": "2cea618e7c7c9085a5011ffa81fb8f45.svg"
+          },
+          {
+            "name": "anim???9",
+            "file": "75d1d8aa387f31f192e37ebdf7403a96.svg"
+          },
+          {
+            "name": "anim???10",
+            "file": "3fd5368ac0a2dca5723986f73ae385bb.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "jevin",
+      "displayName": "Blue (Jevin)",
+      "category": "vocal",
+      "roleId": "vocal-malechoir",
+      "roleLabel": "Male choir",
+      "sounds": {
+        "primary": [
+          {
+            "name": "new choir1",
+            "file": "a241da320fdf120b146456732065baa6.wav",
+            "rate": 48000,
+            "samples": 407699
+          }
+        ],
+        "alternate": [
+          {
+            "name": "new choir2",
+            "file": "c05fb970b4d75f940ab7a6dc54d672a8.wav",
+            "rate": 48000,
+            "samples": 419400
+          },
+          {
+            "name": "male choirnew1",
+            "file": "9da5d7aab8b5dbf2218dd812992e0cb7.wav",
+            "rate": 48000,
+            "samples": 633428
+          },
+          {
+            "name": "male choirnew2",
+            "file": "c1f2b3a9003dd753df82ce5e29f6affc.wav",
+            "rate": 48000,
+            "samples": 628714
+          },
+          {
+            "name": "choir1 old",
+            "file": "304cc4859cb39313ff0948047c5ff11e.wav",
+            "rate": 48000,
+            "samples": 452100
+          },
+          {
+            "name": "choir2 old",
+            "file": "ee4e3c3c7d03f577a31e16d85f142b3e.wav",
+            "rate": 48000,
+            "samples": 472200
+          },
+          {
+            "name": "male choir",
+            "file": "acaf6404c535865366f3ec3f5f4757a7.wav",
+            "rate": 48000,
+            "samples": 556286
+          },
+          {
+            "name": "male choir2",
+            "file": "1259ba8412c42cdade7048ca04e35f4a.wav",
+            "rate": 48000,
+            "samples": 535928
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "a43501db4b83e7684b7e6bbb0f735027.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "55da7779a61dee195eda9944cf299340.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "0d05728581b12314227f2b25166356be.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "e11778dac605674d786d25e58fa45d63.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "2b1dd1dd78e4136b0e8b4b1cd2266560.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "0378dc08fa7ad7240fe3703bf83ab4ad.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "69bc5d3d54732f431ba36d2572cd1c04.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "fa032860b13185f0abdb4e6baf8e9aa7.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "ac031947c90703b0fcaef6345f1fce84.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "79a43de851d6489f50ca89328372fa50.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "8d4d3aafbefe7afbcbe029c529ef1af6.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim???",
+            "file": "131e598e1a4c7d2e33ed13d92582dd66.svg"
+          },
+          {
+            "name": "anim???2",
+            "file": "ade4ef3d783deb40f6eff3577c871a62.svg"
+          },
+          {
+            "name": "anim???3",
+            "file": "cb89e9098edf6dcca67c8381b8e5522f.svg"
+          },
+          {
+            "name": "anim???4",
+            "file": "6039bdae58ce5cfb68483b64b9176f92.svg"
+          },
+          {
+            "name": "anim???5",
+            "file": "d4fe2304da2029b2a5438f9194aecc14.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "black",
+      "displayName": "Black?",
+      "category": "phantom",
+      "roleId": "phantom-creepy",
+      "roleLabel": "Hidden \"evil\" phantom",
+      "sounds": {
+        "primary": [
+          {
+            "name": "creepy1",
+            "file": "3b725f348a5b90f2190ff1c50709f1cd.wav",
+            "rate": 48000,
+            "samples": 623356
+          }
+        ],
+        "alternate": [
+          {
+            "name": "creepy2",
+            "file": "f064ef28df9cde45030240be85bb9c0d.wav",
+            "rate": 48000,
+            "samples": 624428
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "bedb9c366284888a3c28537c96ea7715.svg"
+          }
+        ],
+        "play": [],
+        "alternate": []
+      }
+    }
+  ],
+  "extras": [
+    {
+      "id": "return-e2",
+      "displayName": "Return e2",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [
+          {
+            "name": "return e2",
+            "file": "98861e46b08007b5d974df2aebd887b5.wav",
+            "rate": 48000,
+            "samples": 230700
+          }
+        ],
+        "alternate": []
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "fd0291b807f2d5fa19d56ad31838683e.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "8f9a44dc3688297f8e82fbc5f9e0e461.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "7d1d2002ae9703546d00619d2293712e.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "7a1b326276314161b4a21b8b11941eaa.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "9311d15ff45ae5ad3260e941ced00883.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "e18fee5114355b83bc236f21f8ebc3a1.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "8cfa5b79fd839fcb87e9eb4eec4ede33.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "bce0b8a3f18260ce1a957bdeaca409e9.svg"
+          }
+        ],
+        "alternate": [],
+        "other": [
+          {
+            "name": "placeholder",
+            "file": "ee4d8eb740eb231c69386a38faf87977.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lario",
+      "displayName": "Lario",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [
+          {
+            "name": "lario new1",
+            "file": "1807624f188b78c0994d6b4315fc29f7.wav",
+            "rate": 48000,
+            "samples": 231599
+          }
+        ],
+        "alternate": [
+          {
+            "name": "lario new2",
+            "file": "ed2facd41791db897a1d4380f5ee47dd.wav",
+            "rate": 48000,
+            "samples": 231599
+          },
+          {
+            "name": "super star1",
+            "file": "c99970cf18c70278abcc8962c6e18c46.wav",
+            "rate": 48000,
+            "samples": 231300
+          },
+          {
+            "name": "super star2",
+            "file": "ef30f301e8ab23a5ea2d3fc9dbfc8174.wav",
+            "rate": 48000,
+            "samples": 230700
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "e298bbc030c23fa19e5625c893d27d68.svg"
+          }
+        ],
+        "play": [],
+        "alternate": []
+      }
+    },
+    {
+      "id": "mars-b5",
+      "displayName": "Mars b5",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [
+          {
+            "name": "mars b5",
+            "file": "bfadfd069ef106f62811ba654549b355.wav",
+            "rate": 48000,
+            "samples": 330213
+          }
+        ],
+        "alternate": []
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "e0e0e55f26c22303d155695c29055a21.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "e60ede0b2448a22f756248344e324302.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "b5479dd6cb4fab34819cae8a8cc04606.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "8c765d7c514b17e782f17f797ccfc965.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "bea1ac0bb85aedc3614f18ef8179273a.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "115b733d890a0409d976a870eb5d1b59.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "14ae8c191c16917c4dd04f1ef35b70dc.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "8aa0bb21726bcdefca49a825f366e35e.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "f2a93016a29f900df73f14bbf23f0e8d.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "a8bf6f2f7af74634048c4eba89720ff9.svg"
+          },
+          {
+            "name": "anim10",
+            "file": "0bfccee922b386845f53fa9681580639.svg"
+          },
+          {
+            "name": "anim11",
+            "file": "01483273470cb6f96f1a017449dbbf72.svg"
+          }
+        ],
+        "alternate": [],
+        "other": [
+          {
+            "name": "placeholder",
+            "file": "2c44763c770f9512ef0e77dce47437d8.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "allooistika-meli-v6",
+      "displayName": "Allooistika meli v6",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [
+          {
+            "name": "that loud mofo1",
+            "file": "08d271696216aa4390f2ebe3a7f577f3.wav",
+            "rate": 48000,
+            "samples": 330000
+          }
+        ],
+        "alternate": [
+          {
+            "name": "that loud mofo2",
+            "file": "96d26a6fecd7423c48dd1a3761f373db.wav",
+            "rate": 48000,
+            "samples": 330213
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "56e8d7227140157e22e5c7dd5645d897.svg"
+          }
+        ],
+        "play": [],
+        "alternate": [],
+        "other": [
+          {
+            "name": "sprunki aloo v6",
+            "file": "0c45146df2a01c0f5f0499f903cc8462.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "lobotomy-kick",
+      "displayName": "lobotomy kick",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [],
+        "alternate": []
+      },
+      "costumes": {
+        "idle": [],
+        "play": [],
+        "alternate": [],
+        "other": [
+          {
+            "name": "3",
+            "file": "e9daca07426122a9032c24f295b66f84.svg"
+          },
+          {
+            "name": "4",
+            "file": "ec1ce96d49dd8400a2e62c28f28b6fd7.svg"
+          },
+          {
+            "name": "xm05s2iqszh01",
+            "file": "b6d5ca5e0dce4614f51b8bd69600cec6.svg"
+          },
+          {
+            "name": "xm05s2iqszh2",
+            "file": "5dd02e1277a9da1d31f993d87da750af.svg"
+          },
+          {
+            "name": "DnMzPcwh",
+            "file": "5e45fa7343e7facba30455c03b1c1012.jpg"
+          },
+          {
+            "name": "og",
+            "file": "8c098d4321b0bfc833a930112e56e35c.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "void-b4",
+      "displayName": "Void B4",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [
+          {
+            "name": "qip",
+            "file": "d44b2d74f28fb55f45c80412c61febf2.wav",
+            "rate": 48000,
+            "samples": 230999
+          }
+        ],
+        "alternate": []
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "41cf2813552e15e37690e8a2c341e65f.svg"
+          },
+          {
+            "name": "idle2",
+            "file": "816b90f95cab5f3819dafda812480114.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "1ac4a917f4edb5e693fe756df91abb07.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "d0fe8a07ebc5a0ceb2e43fd9be5e2179.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "6e0941522ca29368908eadb171da00ca.svg"
+          },
+          {
+            "name": "anim4",
+            "file": "fc7185ae852278e79400673421f4edbb.svg"
+          },
+          {
+            "name": "anim5",
+            "file": "a52b4fa557f7c6146e2267205cff4ec4.svg"
+          },
+          {
+            "name": "anim6",
+            "file": "61ee64be2f38e9501f19ec1cd0562b83.svg"
+          },
+          {
+            "name": "anim7",
+            "file": "c6b50865ab600c028aca33683d198340.svg"
+          },
+          {
+            "name": "anim8",
+            "file": "fe9953c9e50275d944a42734f4c05116.svg"
+          },
+          {
+            "name": "anim9",
+            "file": "09c455c9c0d98234fc8c5af36c57f0a8.svg"
+          },
+          {
+            "name": "anim10",
+            "file": "6cec8cf2f9436b50c902109ca2d82f0e.svg"
+          },
+          {
+            "name": "anim11",
+            "file": "9300efae5e5beba63c1d68ffbdb63528.svg"
+          },
+          {
+            "name": "anim12",
+            "file": "c3d37f47327b7e848ae04a0ef4ca0688.svg"
+          }
+        ],
+        "alternate": [],
+        "other": [
+          {
+            "name": "placeholder",
+            "file": "f11834bb3d99ff98d5803330d3b85c5d.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wekiddy-v1",
+      "displayName": "Wekiddy V1",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [
+          {
+            "name": "wekiddy1",
+            "file": "9a1b8d636a2b0de6326c2301075e83eb.wav",
+            "rate": 48000,
+            "samples": 230700
+          }
+        ],
+        "alternate": [
+          {
+            "name": "wekiddy2",
+            "file": "a4509e8497ab7270cc6c8da4f7490f96.wav",
+            "rate": 48000,
+            "samples": 230700
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "15993189b4bd243db5b2f2a40fea735a.svg"
+          }
+        ],
+        "play": [],
+        "alternate": []
+      }
+    },
+    {
+      "id": "singularity-v4",
+      "displayName": "Singularity V4",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [
+          {
+            "name": "singularity cries1",
+            "file": "6582bfbb9d3765dd91eb0a53db2dcd10.wav",
+            "rate": 48000,
+            "samples": 524785
+          }
+        ],
+        "alternate": [
+          {
+            "name": "singularity cries2",
+            "file": "d23b2f1dfd190c9b76d9c39251a1976f.wav",
+            "rate": 48000,
+            "samples": 519642
+          }
+        ]
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "3d1120068be1576dda83c4ce1be4ab03.svg"
+          }
+        ],
+        "play": [],
+        "alternate": [],
+        "other": [
+          {
+            "name": "blink",
+            "file": "2172457c913b7a0a00b7f1d8c7ace72f.svg"
+          },
+          {
+            "name": "blink2",
+            "file": "00e659093bbea72b8cb7ad8a3a0a4b4f.svg"
+          },
+          {
+            "name": "look",
+            "file": "0f7cda1440542aca2a41715d3552e60e.svg"
+          },
+          {
+            "name": "look2",
+            "file": "65885208a47721dbeb8fdaf7d4fee0e5.svg"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fanon-wenda",
+      "displayName": "fanon wenda",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [
+          {
+            "name": "sick ahh beat",
+            "file": "85a432de650c0de96bc65ef3076af852.wav",
+            "rate": 48000,
+            "samples": 330857
+          }
+        ],
+        "alternate": []
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "d49ba9e7f34f2759dc839592d4bdb41d.svg"
+          }
+        ],
+        "play": [],
+        "alternate": []
+      }
+    },
+    {
+      "id": "hey",
+      "displayName": "hey",
+      "category": "extra",
+      "roleId": "extra-fanon",
+      "roleLabel": "Fanon / unused (not in canonical 20)",
+      "sounds": {
+        "primary": [
+          {
+            "name": "pop",
+            "file": "83a9787d4cb6f3b7632b4ddfebf74367.wav",
+            "rate": 48000,
+            "samples": 1123
+          }
+        ],
+        "alternate": []
+      },
+      "costumes": {
+        "idle": [],
+        "play": [],
+        "alternate": [],
+        "other": [
+          {
+            "name": "costume1",
+            "file": "f229361c5a61ac0bdb7ded151cadb2bf.svg"
+          }
+        ]
+      }
+    }
+  ],
+  "stage": {
+    "backdrops": [
+      {
+        "name": "backdrop",
+        "file": "14d72105048d111457d80f1ce54658ff.svg"
+      },
+      {
+        "name": "backdropcute",
+        "file": "1c282eae03a608f17b842c01ceacf74e.svg"
+      },
+      {
+        "name": "backdropevil",
+        "file": "34358089db10be154fc3b8cee2812b85.svg"
+      },
+      {
+        "name": "scary-dark",
+        "file": "f5b5644cc3433984c6fc47147a65d338.png"
+      },
+      {
+        "name": "scary-dark2",
+        "file": "13466ba26c0381c2cbe8157755a1a04d.svg"
+      },
+      {
+        "name": "cocrea backgrond",
+        "file": "470d9d731904ad60cbad8748fd6448ca.svg"
+      },
+      {
+        "name": "cocrea backgrond2",
+        "file": "53530c0c914cdfd5c729815b54bb2452.png"
+      }
+    ]
+  },
+  "bars": {
+    "states": [
+      {
+        "name": "No color",
+        "file": "c4c0c42bace1cc50b430233792d05bb8.svg"
+      },
+      {
+        "name": "Color",
+        "file": "402b717ae2ca608f76c2bea7788b1338.svg"
+      },
+      {
+        "name": "Auto",
+        "file": "f044e2f3b3a566d5f1621eb84b0ee98b.svg"
+      }
+    ],
+    "popSound": "83a9787d4cb6f3b7632b4ddfebf74367.wav"
+  },
+  "icons": [
+    {
+      "name": "01-a",
+      "file": "ed8d8ed35a3d83d6a92ea2e6eb32235a.svg"
+    },
+    {
+      "name": "01-b",
+      "file": "a8537c58fc79e45ce91c18966856999b.svg"
+    },
+    {
+      "name": "01-c",
+      "file": "be776eec3eb735790c34bd3f004c8319.svg"
+    },
+    {
+      "name": "02-a",
+      "file": "6d67648ab2de791bd741a5ab68e9b9fa.svg"
+    },
+    {
+      "name": "02-b",
+      "file": "fa7cf4710ffce80070f7af4aa3f8d7f2.svg"
+    },
+    {
+      "name": "02-c",
+      "file": "645ffd2bba0d95f635b2045545c30e0e.svg"
+    },
+    {
+      "name": "03-a",
+      "file": "60a27d15faf05f1d5629eed89151b5d4.svg"
+    },
+    {
+      "name": "03-b",
+      "file": "92073a5ef372001c4307846d50421869.svg"
+    },
+    {
+      "name": "03-c",
+      "file": "99a7d0e0d881e95b6e9f6414a84bcfe9.svg"
+    },
+    {
+      "name": "04-a",
+      "file": "c23585a15963a45e79a0ea00b24e2a58.svg"
+    },
+    {
+      "name": "04-b",
+      "file": "97e511eede080c86148eb3c5625970a9.svg"
+    },
+    {
+      "name": "04-c",
+      "file": "f082858db80403c23a4310424d206501.svg"
+    },
+    {
+      "name": "05-a",
+      "file": "1a0fab1a41cf7a0e20caecff2287f22e.svg"
+    },
+    {
+      "name": "05-b",
+      "file": "606dc674df311e351c86a7352f6583f8.svg"
+    },
+    {
+      "name": "05-c",
+      "file": "2b8b3911088c2f7e0aa516f1da1b6f1a.svg"
+    },
+    {
+      "name": "06-a",
+      "file": "00959cc2612bfdd930fa03c883c6aeda.svg"
+    },
+    {
+      "name": "06-b",
+      "file": "af137ea9150e67c6adf5282a646c2cfc.svg"
+    },
+    {
+      "name": "06-c",
+      "file": "0a4e8ddb94d90bb6f18ee6acaf188963.svg"
+    },
+    {
+      "name": "07-a",
+      "file": "bafcea40784d4816670424ad15f6e41c.svg"
+    },
+    {
+      "name": "07-b",
+      "file": "850dfe13898e7a0d88887936fba86e37.svg"
+    },
+    {
+      "name": "07-c",
+      "file": "356b145ea37acb1a108821821c829463.svg"
+    },
+    {
+      "name": "08-a",
+      "file": "b230f8e43677270eef8b0be5cfbb1a87.svg"
+    },
+    {
+      "name": "08-b",
+      "file": "b7c5c3c038043c37427e1228d0d30386.svg"
+    },
+    {
+      "name": "08-c",
+      "file": "53fa332a91e43a0a43e8f30f2cbb47e7.svg"
+    },
+    {
+      "name": "09-a",
+      "file": "653b0cddac59eba8af02a844ed17bd8f.svg"
+    },
+    {
+      "name": "09-b",
+      "file": "15ffc913f1c1f24ffb9a2f603dd0fa45.svg"
+    },
+    {
+      "name": "09-c",
+      "file": "fdbf338e2221e6bb660dd1bdf1b3eaa3.svg"
+    },
+    {
+      "name": "10-a",
+      "file": "5e7c8ed0deded797dc9bbf11a540faef.svg"
+    },
+    {
+      "name": "10-b",
+      "file": "dbf8d1bae85b1feda0517f19fdc2bf3b.svg"
+    },
+    {
+      "name": "10-c",
+      "file": "7a03767d3a794b28d44a17708f344fe8.svg"
+    },
+    {
+      "name": "11-a",
+      "file": "cd58b0c5395822dadb1df2f1bb17025d.svg"
+    },
+    {
+      "name": "11-b",
+      "file": "530bc5abcc88d6c508c217e5a1008ba5.svg"
+    },
+    {
+      "name": "11-c",
+      "file": "95eb75c066cb8ce319a82b1d9df6b9af.svg"
+    },
+    {
+      "name": "12-a",
+      "file": "f596d50f4e95bcffbaa7f4e3b7949a46.svg"
+    },
+    {
+      "name": "12-b",
+      "file": "5d4a851aa3d53a2495e6c0662420b03b.svg"
+    },
+    {
+      "name": "12-c",
+      "file": "0fbf2a24952e002e8f02332b10a8be52.svg"
+    },
+    {
+      "name": "13-a",
+      "file": "a0597b08926456e2542afd1ec635643b.svg"
+    },
+    {
+      "name": "13-b",
+      "file": "28d1d850739af5c1dd08b800c21fe8e6.svg"
+    },
+    {
+      "name": "13-c",
+      "file": "73787e99bf6ce435215db359bf4e68e7.svg"
+    },
+    {
+      "name": "14-a",
+      "file": "b85c7e752913a38c5e08783987a20863.svg"
+    },
+    {
+      "name": "14-b",
+      "file": "23010e2f2362f3708af491dc9140b61b.svg"
+    },
+    {
+      "name": "14-c",
+      "file": "94178ef28745318a032bb290c888ec45.svg"
+    },
+    {
+      "name": "15-a",
+      "file": "643bee791d3ecb46b1e241592e314076.svg"
+    },
+    {
+      "name": "15-b",
+      "file": "c816ab6533009d067e70920ef51b561a.svg"
+    },
+    {
+      "name": "15-c",
+      "file": "d98b4def352124d05a065fe8cc28c60d.svg"
+    },
+    {
+      "name": "16-a",
+      "file": "0ae0f666e090c73ac1dfce0ac8ba8a20.svg"
+    },
+    {
+      "name": "16-b",
+      "file": "e8bf58b95094f72da3d257f9ad158c29.svg"
+    },
+    {
+      "name": "16-c",
+      "file": "18b6791438082999c6bf4e1393cc5ca7.svg"
+    },
+    {
+      "name": "17-a",
+      "file": "64912b79896a7ae4cc347cc82c00f741.svg"
+    },
+    {
+      "name": "17-b",
+      "file": "8ea7646ebccdf71a0dbdbc81c07453c9.svg"
+    },
+    {
+      "name": "17-c",
+      "file": "5ef8d7c2c90a94af1fcbff278f70e39b.svg"
+    },
+    {
+      "name": "18-a",
+      "file": "e308f9d71537eb7d8b61768a1e130792.svg"
+    },
+    {
+      "name": "18-b",
+      "file": "934e9ba469703552f17996c62f943206.svg"
+    },
+    {
+      "name": "18-c",
+      "file": "ae4953ed82e3e68da1d8b9662ccc3f6f.svg"
+    },
+    {
+      "name": "19-a",
+      "file": "916ed101af8b7aecbbf1e926c4d9d487.svg"
+    },
+    {
+      "name": "19-b",
+      "file": "e8a72cb25f5eaf26d057dfa32b5f45c3.svg"
+    },
+    {
+      "name": "19-c",
+      "file": "6d631ff079f6456cf7b4e021a8e0eab7.svg"
+    },
+    {
+      "name": "20-a",
+      "file": "f54342541b54074ffd15d59936ae5738.svg"
+    },
+    {
+      "name": "20-b",
+      "file": "76da9caabff1aa7dadc4e3935a146be6.svg"
+    },
+    {
+      "name": "20-c",
+      "file": "14e46ec3e2ba471c2adfe8f119052307.svg"
+    },
+    {
+      "name": "21-a",
+      "file": "28b260d523a1f17a49a2a28cd0b5d514.svg"
+    },
+    {
+      "name": "21-b",
+      "file": "42a327ebb234b1d624985bef37801f9c.svg"
+    },
+    {
+      "name": "21-c",
+      "file": "a0de68a4a67101e5c57e33ec6602b4c2.svg"
+    },
+    {
+      "name": "22-a",
+      "file": "4c84ae56e11f618174c1eb1c5e87df56.svg"
+    },
+    {
+      "name": "22-b",
+      "file": "4c84ae56e11f618174c1eb1c5e87df56.svg"
+    },
+    {
+      "name": "22-c",
+      "file": "c0bcb84950c985e6a7ce5cada124f052.svg"
+    },
+    {
+      "name": "25-a",
+      "file": "3df366891489451b5a794a2803422eee.svg"
+    },
+    {
+      "name": "25-b",
+      "file": "fca0d0133017937b5a6064f5e36d4c09.svg"
+    },
+    {
+      "name": "25-c",
+      "file": "888f6bd6d78fdc8094303b74bf204134.svg"
+    },
+    {
+      "name": "26-a",
+      "file": "017f5576044228228be1909fb5260976.svg"
+    },
+    {
+      "name": "26-b",
+      "file": "3315839439e6be99375718d2c856b333.svg"
+    },
+    {
+      "name": "26-c",
+      "file": "16768046e8c5b66de9aa7c141ac00e91.svg"
+    },
+    {
+      "name": "01-a-alt",
+      "file": "b8a4bb5aadbc54ab48984ee9357dd2e3.svg"
+    },
+    {
+      "name": "01-b-alt",
+      "file": "f9d9eb096b2e05c48d90d1eeb14a940b.svg"
+    },
+    {
+      "name": "01-c-alt",
+      "file": "3d81b0ffda1fa6e15355ba31758637df.svg"
+    },
+    {
+      "name": "02-a-alt",
+      "file": "5cbb9746b010727bf35562e545fc41d7.svg"
+    },
+    {
+      "name": "02-b-alt",
+      "file": "4e8d00d3bf9cae10ae7dcdb35037f278.svg"
+    },
+    {
+      "name": "02-c-alt",
+      "file": "d9d8b67835c6ac834dd33a29f7af87ea.svg"
+    },
+    {
+      "name": "03-a-alt",
+      "file": "4e9fc8955530004b8ec8bbd9a6326371.svg"
+    },
+    {
+      "name": "03-b-alt",
+      "file": "bef221718579a86be73d1202e4334f99.svg"
+    },
+    {
+      "name": "03-c-alt",
+      "file": "7b9601fac297cdbebda7127f22a347b7.svg"
+    },
+    {
+      "name": "04-a-alt",
+      "file": "ca60531bf56427ff2dd85b5ac48441fe.svg"
+    },
+    {
+      "name": "04-b-alt",
+      "file": "729ad3c8e3aeea08cc5a649c65960fde.svg"
+    },
+    {
+      "name": "04-c--alt",
+      "file": "f3c690217bc82c4cbf0feae2558d0e98.svg"
+    },
+    {
+      "name": "05-a-alt",
+      "file": "f9cbe5968d8edc9a1d8ffaa9f4d7eb7f.svg"
+    },
+    {
+      "name": "05-b-alt",
+      "file": "cbc8a506d0a5b0b5d2a2a2b4fd203bad.svg"
+    },
+    {
+      "name": "05-c-alt",
+      "file": "bd8b3c3996ba85029b61b1203893b0dd.svg"
+    },
+    {
+      "name": "06-a-alt",
+      "file": "1cf2cd62edbf7ba399ed2ffea9b1182e.svg"
+    },
+    {
+      "name": "06-b-alt",
+      "file": "483eba85fe7f62eea5455d07eb96e7fb.svg"
+    },
+    {
+      "name": "06-c-alt",
+      "file": "2fcc31a4746777909cc102ba52676f5b.svg"
+    },
+    {
+      "name": "07-a-alt",
+      "file": "27b3f896f38799540e8d6735f605dd88.svg"
+    },
+    {
+      "name": "07-b-alt",
+      "file": "5e7023c890c90f36b212e664273eebec.svg"
+    },
+    {
+      "name": "07-c-alt",
+      "file": "c18009c7b8fc5b0544b560d1182f5c4f.svg"
+    },
+    {
+      "name": "08-a-alt",
+      "file": "2f5fdefc2b1fcfa5fdea1514a587d06f.svg"
+    },
+    {
+      "name": "08-b-alt",
+      "file": "cdeaf9564951ecf3d93c1895f38bdc98.svg"
+    },
+    {
+      "name": "08-c-alt",
+      "file": "a3d6e28915890d5622d4f181d75bb670.svg"
+    },
+    {
+      "name": "09-a-alt",
+      "file": "e37a7ee99a794fbbec3ae303773acf93.svg"
+    },
+    {
+      "name": "09-b-alt",
+      "file": "1b7ec1035e5595d284719676109880d4.svg"
+    },
+    {
+      "name": "09-c-alt",
+      "file": "dc88da2bdd7b6a0e3adde4a49d807f5b.svg"
+    },
+    {
+      "name": "10-a-alt",
+      "file": "a4392c40d9831d84fb10071ce4782e91.svg"
+    },
+    {
+      "name": "10-b-alt",
+      "file": "38479fdca5cccb1c0290e7a451305167.svg"
+    },
+    {
+      "name": "10-c-alt",
+      "file": "55ddc38c1dfb45aa6d1e232f31e24971.svg"
+    },
+    {
+      "name": "11-a-alt",
+      "file": "48131c97f1dce533dd9d3f05c40b979b.svg"
+    },
+    {
+      "name": "11-b-alt",
+      "file": "705c7415f9a53f576f6d294573dfc54d.svg"
+    },
+    {
+      "name": "11-c-alt",
+      "file": "553dd7227caa4f45986f68efbefb5cd5.svg"
+    },
+    {
+      "name": "12-a-alt",
+      "file": "eb331984a1eb2b17b0b9a8feebdd1b6d.svg"
+    },
+    {
+      "name": "12-b-alt",
+      "file": "0aef13338cda95232875f1b07a867bd4.svg"
+    },
+    {
+      "name": "12-c-alt",
+      "file": "f0ac591c0220d26d33ced0474e433a45.svg"
+    },
+    {
+      "name": "13-a-alt",
+      "file": "9bfd376c8046b8741b90eddbfccbc01f.svg"
+    },
+    {
+      "name": "13-b-alt",
+      "file": "f090e4ff448126c05e069226f0661334.svg"
+    },
+    {
+      "name": "13-c-alt",
+      "file": "90ec1c083f92022b50dd2a9e8a01424e.svg"
+    },
+    {
+      "name": "14-a-alt",
+      "file": "54ed20d6fd155468aa6978e26e60462d.svg"
+    },
+    {
+      "name": "14-b-alt",
+      "file": "8475b78c280c237b0df2e80622b8a2e8.svg"
+    },
+    {
+      "name": "14-c-alt",
+      "file": "bbb7bf1d9fbff7b9d92df98279d7b73c.svg"
+    },
+    {
+      "name": "15-a-alt",
+      "file": "1586e4f17402fe47d2a52c7e27c0914d.svg"
+    },
+    {
+      "name": "15-b-alt",
+      "file": "52c8476f3980174504aa6f3f852f9ab0.svg"
+    },
+    {
+      "name": "15-c-alt",
+      "file": "575a829c92b3d90b9254642dbf1708b5.svg"
+    },
+    {
+      "name": "16-a-alt",
+      "file": "669c7aa6fb7de02e7b1f5ee8d7a4bc7f.svg"
+    },
+    {
+      "name": "16-b-alt",
+      "file": "64a03f92628c68568c269eabb89e7dab.svg"
+    },
+    {
+      "name": "16-c-alt",
+      "file": "ef6611d0ea489b8f72ea9ca708c42b12.svg"
+    },
+    {
+      "name": "17-a-alt",
+      "file": "11d8b7f4480fee5a4204879f11da604e.svg"
+    },
+    {
+      "name": "17-b-alt",
+      "file": "0f9bd0388bbcffb62b7fa414b10d7234.svg"
+    },
+    {
+      "name": "17-c-alt",
+      "file": "997abd758257b80f0c2148e5fd4f0fb8.svg"
+    },
+    {
+      "name": "18-a-alt",
+      "file": "1ff798c1b0c3debb0d38157ca149e35e.svg"
+    },
+    {
+      "name": "18-b-alt",
+      "file": "893508cfa99825e1e5b8ef8cb4baea0e.svg"
+    },
+    {
+      "name": "18-c-alt",
+      "file": "07021904b0ffaf6be3d643e66d576da6.svg"
+    },
+    {
+      "name": "19-a-alt",
+      "file": "7c812edd3af4d646516477a4a0f9011c.svg"
+    },
+    {
+      "name": "19-b-alt",
+      "file": "47cc770fffcbef35509f29215ed447bb.svg"
+    },
+    {
+      "name": "19-c-alt",
+      "file": "cdd0edc831652d7f55dc0f6e9e448644.svg"
+    },
+    {
+      "name": "20-a-alt",
+      "file": "0157416eaaba727e6e8d400bce9617d1.svg"
+    },
+    {
+      "name": "20-b-alt",
+      "file": "cbb4cac07722f63d13d3c26defe04950.svg"
+    },
+    {
+      "name": "20-c-alt",
+      "file": "66263737c6a6202c23d4ec5baee15da3.svg"
+    },
+    {
+      "name": "23-a",
+      "file": "06059e5ed1542a6c996354b3fef0b8ee.svg"
+    },
+    {
+      "name": "23-b",
+      "file": "a520704a61299ee01a7f8e0d53552e91.svg"
+    },
+    {
+      "name": "23-c",
+      "file": "69256e78f5bb6b3d869e3ddbc214e458.svg"
+    },
+    {
+      "name": "24-a",
+      "file": "49e97b5ddbc69031797ae2b61f048128.svg"
+    },
+    {
+      "name": "24-b",
+      "file": "2ff2c54027e13e7241be86a9927198f4.svg"
+    },
+    {
+      "name": "24-c",
+      "file": "a1f2120904b67721d12cc55e229c4d4e.svg"
+    },
+    {
+      "name": "27-a",
+      "file": "ac841a095faf4da962fbcf2c15a94369.svg"
+    },
+    {
+      "name": "27-b",
+      "file": "ac841a095faf4da962fbcf2c15a94369.svg"
+    },
+    {
+      "name": "27-b2",
+      "file": "bf9671c37d478823b85aa4f2f7b26de5.svg"
+    },
+    {
+      "name": "28-a",
+      "file": "6af5f3520e568961ba8ecb888faecc2a.svg"
+    },
+    {
+      "name": "28-b",
+      "file": "6af5f3520e568961ba8ecb888faecc2a.svg"
+    },
+    {
+      "name": "28-c",
+      "file": "c75f8947e45b12aa1fca64c702a870d7.svg"
+    },
+    {
+      "name": "hitbox",
+      "file": "d9eea6588c581362fa226b4dbda901e9.svg"
+    }
+  ]
+}

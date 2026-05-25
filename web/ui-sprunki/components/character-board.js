@@ -21,25 +21,50 @@ import {
   charactersByCategory,
   STEPS_PER_PATTERN,
 } from "./sound-catalog.js";
+import { idleCostumeUrl, playCostumeUrl } from "../sprunki-assets.js";
 
 export class CharacterBoard extends LitElement {
   static styles = characterBoardStyles;
 
   static properties = {
-    layout: { type: Object },
+    /** `{ [charId]: number[] }` — active step indices per character.
+     *  The shape mirrors the player-facing state in
+     *  `sprunkiStore`; the sequencer-bridge translates it into the
+     *  schema-correct `SequencerCell` shape before shipping. */
+    board: { type: Object },
     resolution: { type: Number },
+    /** When true, the OG sprunki asset pack has been downloaded
+     *  and we should render SVG art instead of emoji placeholders.
+     *  The parent app (sprunki-app) flips this on the
+     *  `AssetPackUpdated` event. */
+    assetsReady: { type: Boolean },
     _dragChar: { type: Object, state: true },
     _dragOverStep: { type: Number, state: true },
   };
 
   constructor() {
     super();
-    this.layout = { rows: {} };
+    this.board = {};
     this.resolution = 4;
+    this.assetsReady = false;
     /** @type {object|null} character being dragged from roster */
     this._dragChar = null;
     /** @type {number} step we're hovering over, or -1 */
     this._dragOverStep = -1;
+  }
+
+  /** Render the character's "face" — OG sprunki SVG art when the
+   *  asset pack is downloaded, emoji fallback otherwise. */
+  _renderCharFace(char, kind /* "idle" | "play" */) {
+    if (this.assetsReady) {
+      const url = kind === "play"
+        ? (playCostumeUrl(char.id) || idleCostumeUrl(char.id))
+        : idleCostumeUrl(char.id);
+      if (url) {
+        return html`<img class="char-art" src="${url}" alt="${char.name}" draggable="false" />`;
+      }
+    }
+    return html`<span class="char-emoji">${char.emoji}</span>`;
   }
 
   /* ── Drag handlers (roster → beat slot) ── */
@@ -109,13 +134,12 @@ export class CharacterBoard extends LitElement {
   /* ── Helpers ── */
 
   _getActiveCharsAt(stepIndex) {
-    const rows = this.layout?.rows || {};
+    const board = this.board || {};
     const active = [];
-    for (const [charId, row] of Object.entries(rows)) {
-      if (!row?.cells) continue;
-      const hasStep = row.cells.some(c => c.step === stepIndex && c.active !== false);
-      if (hasStep) {
-        const char = CHARACTERS.find(c => c.id === charId);
+    for (const [charId, steps] of Object.entries(board)) {
+      if (!Array.isArray(steps)) continue;
+      if (steps.includes(stepIndex)) {
+        const char = CHARACTERS.find((c) => c.id === charId);
         if (char) active.push(char);
       }
     }
@@ -123,9 +147,8 @@ export class CharacterBoard extends LitElement {
   }
 
   _isActive(charId, stepIndex) {
-    const row = this.layout?.rows?.[charId];
-    if (!row?.cells) return false;
-    return row.cells.some(c => c.step === stepIndex && c.active !== false);
+    const steps = this.board?.[charId];
+    return Array.isArray(steps) && steps.includes(stepIndex);
   }
 
   render() {
@@ -153,7 +176,7 @@ export class CharacterBoard extends LitElement {
                     @dragstart=${(e) => this._onDragStart(e, char)}
                     @dragend=${this._onDragEnd}
                   >
-                    <span class="chip-emoji">${char.emoji}</span>
+                    <span class="chip-emoji">${this._renderCharFace(char, "idle")}</span>
                     <span class="chip-name">${char.name}</span>
                   </div>
                 `)}
@@ -194,7 +217,7 @@ export class CharacterBoard extends LitElement {
                       title="${char.name} — click to remove"
                       @click=${(e) => this._onSlotClick(e, char.id, i)}
                     >
-                      ${char.emoji}
+                      ${this._renderCharFace(char, "play")}
                     </div>
                   `)}
                   ${isOver && !activeChars.length ? html`

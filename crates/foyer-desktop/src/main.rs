@@ -387,10 +387,18 @@ fn show_mode_picker() -> Result<()> {
     let event_loop: EventLoop<PickResult> =
         EventLoopBuilder::<PickResult>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    // Picker default: 980×640 so the dependency-check list, install
+    // hints, and three audio-mode cards have room to breathe; the
+    // user can grab any window edge to shrink it. `resizable(false)`
+    // is removed because some window managers (xpra-html5 in
+    // particular) ignore the flag and present the user with a
+    // resize handle anyway, leaving a fixed-content layout
+    // mismatched to the actual frame. Min 720×480 keeps the
+    // actions row visible even when squished.
     let window = WindowBuilder::new()
         .with_title("Foyer Studio — first launch")
-        .with_inner_size(tao::dpi::LogicalSize::new(640.0, 420.0))
-        .with_resizable(false)
+        .with_inner_size(tao::dpi::LogicalSize::new(980.0, 640.0))
+        .with_min_inner_size(tao::dpi::LogicalSize::new(720.0, 480.0))
         .build(&event_loop)?;
     let builder = WebViewBuilder::new()
         // Enable devtools so a white-screen failure mode is
@@ -439,7 +447,6 @@ fn show_mode_picker() -> Result<()> {
     };
     #[cfg(not(target_os = "linux"))]
     let webview = builder.build(&window)?;
-    let _ = webview; // hold the webview alive for the event loop
 
     event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -448,6 +455,19 @@ fn show_mode_picker() -> Result<()> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(PickResult::Refresh) => {
+                // Re-run all doctors and push the result back into
+                // the page via `window.applyDoctor(...)`. We embed
+                // the JSON directly in the script string — the JSON
+                // is already valid JS, and `evaluate_script` runs
+                // synchronously on the WebKit thread so the page
+                // sees fresh data before any further user click.
+                let json = build_doctor_payload();
+                let script = format!("window.applyDoctor({json});");
+                if let Err(e) = webview.evaluate_script(&script) {
+                    tracing::warn!("mode-picker refresh: evaluate_script failed: {e}");
+                }
+            }
             Event::UserEvent(choice) => {
                 if let Err(e) = persist_and_relaunch(choice) {
                     tracing::error!("persist + relaunch failed: {e}");
@@ -463,6 +483,11 @@ fn show_mode_picker() -> Result<()> {
 enum PickResult {
     Host,
     Docker(DockerWizardChoice),
+    /// Re-run all dependency probes and push the new doctor JSON
+    /// into the page via `window.applyDoctor(...)`. Fired by the
+    /// "Re-check" button on every picker page. Does not exit the
+    /// picker.
+    Refresh,
 }
 
 /// Wizard output — everything the docker page collected from the
@@ -490,6 +515,9 @@ fn default_host_port() -> u16 {
 fn parse_ipc_pick(body: &str) -> Option<PickResult> {
     if body == "host" {
         return Some(PickResult::Host);
+    }
+    if body == "refresh" {
+        return Some(PickResult::Refresh);
     }
     if let Some(rest) = body.strip_prefix("docker:") {
         match serde_json::from_str::<DockerWizardChoice>(rest) {
@@ -528,6 +556,13 @@ fn persist_and_relaunch(pick: PickResult) -> Result<()> {
             }
             config.docker = Some(dcfg);
         }
+        PickResult::Refresh => {
+            // Refresh never reaches persist_and_relaunch — the event
+            // loop intercepts it earlier. Defensive arm so a future
+            // refactor that funnels everything through here doesn't
+            // accidentally write config + exit on a refresh click.
+            return Ok(());
+        }
     }
     cfg::save(&config).context("save config.yaml after mode pick")?;
 
@@ -550,15 +585,27 @@ fn persist_and_relaunch(pick: PickResult) -> Result<()> {
 }
 
 /// Build the `window.__doctor = {...}` JSON blob the picker page
-/// reads to render its three audio-mode cards. We shell out to
-/// `foyer docker --<mode> --doctor --json` once per mode in
-/// parallel; if `foyer` itself isn't on PATH or fails, we emit a
-/// stub blob with every mode flagged as `ok: false` and the error
-/// inlined so the user sees what went wrong without a console.
+/// reads to render its dependency-check cards.
+///
+/// Spawns the following in parallel:
+///   - `foyer doctor-host --json` (returns `{os, host}`)
+///   - `foyer docker --integrated --doctor --json`
+///   - `foyer docker --jack       --doctor --json`
+///   - `foyer docker --netjack    --doctor --json`
+///
+/// Stub failure blobs replace anything that errors out so the
+/// picker UI renders an actionable card instead of going blank.
 fn build_doctor_payload() -> String {
     let foyer_bin = find_foyer_binary();
+
+    // Host probe in its own thread — emits an outer
+    // `{"os": ..., "host": ...}` object.
+    let host_bin = foyer_bin.clone();
+    let host_handle = std::thread::spawn(move || host_doctor_json(host_bin.as_deref()));
+
+    // Three docker-mode probes.
     let modes = ["integrated", "jack", "netjack"];
-    let handles: Vec<_> = modes
+    let mode_handles: Vec<_> = modes
         .iter()
         .map(|m| {
             let bin = foyer_bin.clone();
@@ -567,14 +614,63 @@ fn build_doctor_payload() -> String {
         })
         .collect();
 
+    // Splice host JSON open, append docker-mode fields, close.
+    let host_blob = host_handle
+        .join()
+        .unwrap_or_else(|_| "{\"os\":{},\"host\":{\"ok\":false,\"checks\":[]}}".into());
     let mut pairs: Vec<String> = Vec::with_capacity(3);
-    for h in handles {
+    for h in mode_handles {
         let (mode, json) = h
             .join()
             .unwrap_or_else(|_| ("?".into(), "{\"ok\":false,\"checks\":[]}".into()));
         pairs.push(format!("\"{mode}\": {json}"));
     }
-    format!("{{ {} }}", pairs.join(", "))
+    // The host blob looks like `{"os": {...}, "host": {...}}`. Strip
+    // the trailing brace and splice the docker-mode entries inside
+    // so the result is a single flat object the picker can index by
+    // mode name directly.
+    let host_trimmed = host_blob.trim();
+    let host_trimmed = host_trimmed
+        .strip_suffix('}')
+        .unwrap_or(host_trimmed)
+        .trim_end()
+        .trim_end_matches('\n');
+    format!("{}, {}\n}}", host_trimmed, pairs.join(", "))
+}
+
+fn host_doctor_json(foyer_bin: Option<&Path>) -> String {
+    let Some(bin) = foyer_bin else {
+        return format!(
+            "{{\"os\":{{}},\"host\":{}}}",
+            synth_failure(
+                "`foyer` binary not found",
+                "Install it (or rebuild the bundle) so the desktop shell can run \
+                 pre-flight checks. Looked next to foyer-desktop and on PATH.",
+            )
+        );
+    };
+    let out = std::process::Command::new(bin)
+        .args(["doctor-host", "--json"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_else(|e| {
+            format!(
+                "{{\"os\":{{}},\"host\":{}}}",
+                synth_failure("doctor-host returned non-UTF8 output", &e.to_string())
+            )
+        }),
+        Ok(o) => format!(
+            "{{\"os\":{{}},\"host\":{}}}",
+            synth_failure(
+                "foyer doctor-host exited non-zero",
+                &String::from_utf8_lossy(&o.stderr),
+            )
+        ),
+        Err(e) => format!(
+            "{{\"os\":{{}},\"host\":{}}}",
+            synth_failure("failed to spawn foyer doctor-host", &e.to_string())
+        ),
+    }
 }
 
 fn doctor_one(foyer_bin: Option<&Path>, mode: &str) -> String {

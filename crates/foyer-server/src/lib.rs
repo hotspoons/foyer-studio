@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod agent_render;
+pub mod asset_packs;
 mod session_director;
 mod spectrum;
 mod spectrum_director;
@@ -589,6 +590,14 @@ pub(crate) struct AppState {
     /// adding a second window for an existing peer is invisible to
     /// other clients' rosters.
     pub(crate) peers: RwLock<HashMap<String, foyer_schema::PeerInfo>>,
+    /// Whitelist + state for foreign-content asset packs (sprunki
+    /// game assets, future mod packs). Constructed once at boot;
+    /// per-pack state lives behind its own RwLock inside the
+    /// manager. WS layer calls into it via the FetchAssetPack /
+    /// ListAssetPacks command handlers and the greeting bundle
+    /// reads `list()` for the initial state. The HTTP layer mounts
+    /// `/asset-packs/` as a ServeDir on `asset_packs::root_dir()`.
+    pub(crate) asset_packs: Arc<asset_packs::AssetPackManager>,
     /// Per-connection registry, keyed by the server-assigned
     /// `connection_id`. Distinct from `peers`: this is one row per
     /// open WS, so secondary windows of the same logical user each
@@ -1062,6 +1071,7 @@ impl Server {
             // "LAN is trusted" baseline.
             roles_policy: RwLock::new(foyer_config::RolesConfig::bundled_default()),
             peers: RwLock::new(HashMap::new()),
+            asset_packs: Arc::new(asset_packs::AssetPackManager::new()),
             connections: RwLock::new(HashMap::new()),
             default_ui_variant: None,
             xpra_available: probe_xpra_available(),
@@ -1551,6 +1561,21 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
             xpra_html_dir.display()
         );
     }
+    // Foreign asset-pack mount. ServeDir is created against the
+    // shared root dir; subpacks live at `<root>/<pack-name>/...`,
+    // matching the schema's expected URL shape. ServeDir is
+    // tolerant of the dir not existing yet (returns 404 for
+    // everything underneath), so we can register it even on a
+    // first-run install where no packs have been downloaded —
+    // ServeDir will start serving the moment the asset_packs
+    // module finishes an extract.
+    let asset_pack_dir = asset_packs::root_dir();
+    std::fs::create_dir_all(&asset_pack_dir).ok();
+    tracing::info!(
+        "mounting asset-pack ServeDir at /asset-packs from {}",
+        asset_pack_dir.display()
+    );
+    router = router.nest_service("/asset-packs", ServeDir::new(&asset_pack_dir));
     // Static-asset fallback: overlays are tried first (in flag order),
     // then `web_root` as the last resort. Each overlay is composed
     // into the chain via `ServeDir::fallback`, so a miss in overlay[0]

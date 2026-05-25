@@ -9,6 +9,7 @@
 
 pub mod action;
 pub mod agent;
+pub mod asset_pack;
 pub mod audio;
 pub mod fs;
 pub mod i18n;
@@ -33,6 +34,7 @@ pub use agent::{
     AgentAutonomy, AgentConfigPublic, AgentMemoryInfo, AgentMessageRecord, AgentRole,
     AgentSessionInfo, AgentSkillInfo, AgentTemplateInfo, AgentToolCallRecord, AgentToolStatus,
 };
+pub use asset_pack::{AssetPackInfo, AssetPackState};
 pub use audio::{
     AudioCodec, AudioFormat, AudioPoolSource, AudioSource, AudioTransport, IceCandidate,
     LatencyReport, SampleFormat, SdpPayload,
