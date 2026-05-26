@@ -53,6 +53,13 @@ jobs:
   rust:
     name: rust (${{ matrix.os }} ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    # Default to bash on every matrix cell — windows-latest's default
+    # is pwsh, which can't parse the heredocs / `[ … ]` / `ldd | …`
+    # idioms downstream steps use. windows-latest ships Git for
+    # Windows so `bash` resolves to a real POSIX shell.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +87,16 @@ jobs:
             # which every Mac ships. No musl story; we only need
             # libopus static-linked (handled via OPUS_STATIC env).
             target: aarch64-apple-darwin
+          # Windows desktop shell — Foyer's audio shim is Linux/macOS
+          # only (Ardour doesn't run on Windows). Windows users drive
+          # the backend through Docker Desktop; foyer-desktop hosts the
+          # WebView and the mode-picker walks them through it on first
+          # launch. We ship MSVC x86_64; arm64-windows is rare enough
+          # that Prism emulation is fine until a runner exists.
+          - runner: windows-latest
+            os: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       # foyer-desktop (cargo test --workspace touches it) pulls in
@@ -177,55 +194,73 @@ jobs:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
           # crt-static makes Linux musl bake the C runtime into the
-          # binary. No-op on Apple targets (Mach-O always links
-          # libSystem dynamically and that's by design).
+          # binary; on Windows MSVC it switches to /MT (statically
+          # linked CRT, no vcruntime140.dll redist needed). No-op on
+          # Apple targets (Mach-O always links libSystem dynamically
+          # and that's by design).
           RUSTFLAGS: "-C target-feature=+crt-static -Dwarnings"
         run: |
           mkdir -p dist
+          bin_ext=""
+          if [ "${{ matrix.os }}" = "windows" ]; then bin_ext=".exe"; fi
           if [ "$RELEASE_BUILD" = "true" ]; then
             echo "::notice::Building foyer in RELEASE profile for ${{ matrix.target }} (slow on cache miss)"
             cargo build --release --target "${{ matrix.target }}" --bin foyer
-            cp "target/${{ matrix.target }}/release/foyer" dist/foyer
+            cp "target/${{ matrix.target }}/release/foyer$bin_ext" "dist/foyer$bin_ext"
           else
             echo "::notice::Building foyer in DEBUG profile for ${{ matrix.target }} (feature-branch fast path)"
             cargo build --target "${{ matrix.target }}" --bin foyer
-            cp "target/${{ matrix.target }}/debug/foyer" dist/foyer
+            cp "target/${{ matrix.target }}/debug/foyer$bin_ext" "dist/foyer$bin_ext"
           fi
           echo "==> binary linkage:"
-          file dist/foyer
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            ldd dist/foyer 2>&1 || echo "(static — no dynamic deps)"
-          else
-            otool -L dist/foyer 2>&1 || true
-          fi
-      # foyer-desktop (Linux only this round — macOS Cocoa shell
-      # ships later). Different build profile from `foyer`: tao+wry
-      # need to dynamically link to libgtk-3 + libwebkit2gtk-4.1, so
-      # we DON'T pass musl-target / +crt-static here. Build against
-      # the runner's default glibc target and ship as a dynamic
-      # binary; install.sh prints a per-distro hint for the runtime
-      # libs the user needs.
-      - name: Build foyer-desktop (linux only)
-        if: matrix.os == 'linux'
+          file "dist/foyer$bin_ext" || true
+          case "${{ matrix.os }}" in
+            linux)   ldd "dist/foyer$bin_ext" 2>&1 || echo "(static — no dynamic deps)" ;;
+            macos)   otool -L "dist/foyer$bin_ext" 2>&1 || true ;;
+            windows) echo "(linkage probe skipped on windows — dumpbin lives behind VS env)" ;;
+          esac
+      # foyer-desktop (tao+wry native window shell). Builds on all
+      # three OSes now. Linkage shape varies:
+      #   * Linux   — dynamic against libgtk-3 + libwebkit2gtk-4.1
+      #               (install.sh prints per-distro install hints).
+      #   * macOS   — links libSystem + WebKit framework (always-on).
+      #   * Windows — WebView2 runtime is the only extra dep; modern
+      #               Windows 11 ships it via Edge, Windows 10 boxes
+      #               older than the rolled-up update may need the
+      #               WebView2 evergreen runtime. install.ps1 will
+      #               warn on launch if it's missing.
+      # No musl-target / +crt-static here — Linux wry needs glibc;
+      # Windows WebView2-com pulls Win32 dynamic libs the way every
+      # other Windows app does.
+      - name: Build foyer-desktop
         env:
           # Quiet the warnings-as-errors gate — same shape the `rust`
           # job above uses, but no musl/+crt-static envs here.
           RUSTFLAGS: "-Dwarnings"
         run: |
+          bin_ext=""
+          if [ "${{ matrix.os }}" = "windows" ]; then bin_ext=".exe"; fi
           if [ "$RELEASE_BUILD" = "true" ]; then
-            echo "::notice::Building foyer-desktop in RELEASE profile (glibc-dynamic)"
+            echo "::notice::Building foyer-desktop in RELEASE profile"
             cargo build --release --bin foyer-desktop
-            cp target/release/foyer-desktop dist/foyer-desktop
+            cp "target/release/foyer-desktop$bin_ext" "dist/foyer-desktop$bin_ext"
           else
-            echo "::notice::Building foyer-desktop in DEBUG profile (glibc-dynamic)"
+            echo "::notice::Building foyer-desktop in DEBUG profile"
             cargo build --bin foyer-desktop
-            cp target/debug/foyer-desktop dist/foyer-desktop
+            cp "target/debug/foyer-desktop$bin_ext" "dist/foyer-desktop$bin_ext"
           fi
-          file dist/foyer-desktop
-          ldd dist/foyer-desktop || true
-          # Drop the icon + .desktop template alongside the binary
-          # so the downstream install.sh / release-bundle steps pick
-          # them up out of the same artifact directory.
+          file "dist/foyer-desktop$bin_ext" || true
+          case "${{ matrix.os }}" in
+            linux)   ldd "dist/foyer-desktop$bin_ext" || true ;;
+            macos)   otool -L "dist/foyer-desktop$bin_ext" || true ;;
+            windows) echo "(linkage probe skipped on windows)" ;;
+          esac
+      # Linux-only: stage the XDG icon + .desktop template alongside
+      # the binary so the downstream install.sh / release-bundle steps
+      # pick them up out of the same artifact directory.
+      - name: Stage Linux launcher artifacts
+        if: matrix.os == 'linux'
+        run: |
           # Use the mixer-fader logo (not the browser-tab favicon)
           # for the XDG menu entry — it scales up properly in the
           # Linux app grid. See scripts/release/bundle.sh for the

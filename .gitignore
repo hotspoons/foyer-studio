@@ -46,3 +46,5 @@ foyer-studio/sessions/*
 # holds project defaults like ARDOUR_TAG); `.env.local` is for local
 # overrides that shouldn't be shared.
 .env.local
+
+ scripts/dev/__pycache__/*

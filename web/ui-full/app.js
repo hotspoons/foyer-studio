@@ -58,13 +58,18 @@ import "./components/backend-lost-modal.js";
 import "./components/login-modal.js";
 import "./components/welcome-screen.js";
 // Plugin UI tag — ui-core's plugin-layer + floating-tiles render
-// `<foyer-plugin-panel>` but don't import it (the tag belongs to the
+// foyer-plugin-panel but don't import it (the tag belongs to the
 // UI layer). Without this side-effect import the plugin float's
 // body shows up as an empty black rectangle.
-import "./components/plugin-panel.js";
+//
+// Lifted to ui-core/widgets/ 2026-05-26 so the Sprunkadoo variant
+// can also embed the parameter panel without crossing the
+// three-tier line. Both variants side-effect import from the
+// shared location.
+import "foyer-ui-core/widgets/plugin-panel.js";
 // Native plugin GUI window — registers the `plugin-native-ui` kind
 // so plugin-panel.js's toggle can open it via `openWindow`.
-import "./components/plugin-native-ui-window.js";
+import "foyer-ui-core/widgets/plugin-native-ui-window.js";
 import { bootAutomation } from "./components/automation-panel.js";
 import { installBindingsRuntime } from "foyer-ui-core/layout/layout-bindings.js";
 import { installSlotKeybinds } from "foyer-ui-core/layout/slot-keybinds.js";

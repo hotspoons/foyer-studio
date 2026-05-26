@@ -1,0 +1,1256 @@
+{
+  "version": 2,
+  "label": "Foyer Originals",
+  "source": "Hand-authored Foyer Originals pack; rebuilt via scripts/dev/build-foyer-originals.py.",
+  "assetRoot": "",
+  "fileNamingNote": "All file values are pack-relative; served at /ui-sprunkadoo/builtin-assets/. Same shape as sprunki-assets.json so the consumer at sprunki-assets.js handles both manifests without conditionals.",
+  "categories": {
+    "drums": "Rhythm-section characters (kick, snare, hat, kit, shaker).",
+    "bass": "Low-end character.",
+    "melody": "Tonal characters (piano, organ, music-box, brass, arp, square).",
+    "vocal": "Sung / spoken characters (hey, AI, choirs).",
+    "fx": "Non-pitched effect characters (whistle, glitch, riser).",
+    "phantom": "Hidden 'evil' phantom \u2014 visible only with scary mode unlocked."
+  },
+  "costumeBuckets": {
+    "idle": "Safe resting frame (default mode). One entry per character.",
+    "idle_alternate": "Horror-mode resting frame. Surfaced only when scary mode is unlocked + enabled.",
+    "play": "Safe play cycle (3 frames per character).",
+    "alternate": "Horror-mode play cycle (3 frames per character). Surfaced only when scary mode is on.",
+    "other": "Reserved."
+  },
+  "characters": [
+    {
+      "id": "oren",
+      "displayName": "Foyer Oren",
+      "category": "drums",
+      "roleLabel": "Kick drum",
+      "color": "#ff6f00",
+      "animation": {
+        "kind": "bob",
+        "amplitude": 4
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/oren-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/oren-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/oren-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/oren-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/oren-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/oren-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/oren-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/oren-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/oren-icon.svg",
+        "pressed": "characters/oren-icon-pressed.svg",
+        "dimmed": "characters/oren-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "raddy",
+      "displayName": "Foyer Raddy",
+      "category": "drums",
+      "roleLabel": "Snare drum",
+      "color": "#b30000",
+      "animation": {
+        "kind": "bob",
+        "amplitude": 4
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/raddy-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/raddy-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/raddy-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/raddy-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/raddy-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/raddy-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/raddy-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/raddy-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/raddy-icon.svg",
+        "pressed": "characters/raddy-icon-pressed.svg",
+        "dimmed": "characters/raddy-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "clukr",
+      "displayName": "Foyer Clukr",
+      "category": "drums",
+      "roleLabel": "Hi-hat",
+      "color": "#c5c8cb",
+      "animation": {
+        "kind": "bob",
+        "amplitude": 4
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/clukr-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/clukr-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/clukr-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/clukr-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/clukr-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/clukr-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/clukr-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/clukr-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/clukr-icon.svg",
+        "pressed": "characters/clukr-icon-pressed.svg",
+        "dimmed": "characters/clukr-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "fun-bot",
+      "displayName": "Foyer Bot",
+      "category": "drums",
+      "roleLabel": "Drum kit",
+      "color": "#f7c548",
+      "animation": {
+        "kind": "bob",
+        "amplitude": 4
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/fun-bot-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/fun-bot-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/fun-bot-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/fun-bot-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/fun-bot-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/fun-bot-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/fun-bot-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/fun-bot-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/fun-bot-icon.svg",
+        "pressed": "characters/fun-bot-icon-pressed.svg",
+        "dimmed": "characters/fun-bot-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "vineria",
+      "displayName": "Foyer Vineria",
+      "category": "drums",
+      "roleLabel": "Shaker",
+      "color": "#3acb52",
+      "animation": {
+        "kind": "bob",
+        "amplitude": 4
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/vineria-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/vineria-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/vineria-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/vineria-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/vineria-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/vineria-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/vineria-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/vineria-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/vineria-icon.svg",
+        "pressed": "characters/vineria-icon-pressed.svg",
+        "dimmed": "characters/vineria-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "gray",
+      "displayName": "Foyer Gray",
+      "category": "bass",
+      "roleLabel": "Bass",
+      "color": "#808080",
+      "animation": {
+        "kind": "sway",
+        "amplitude": 3
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/gray-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/gray-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/gray-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/gray-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/gray-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/gray-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/gray-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/gray-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/gray-icon.svg",
+        "pressed": "characters/gray-icon-pressed.svg",
+        "dimmed": "characters/gray-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "brud",
+      "displayName": "Foyer Brud",
+      "category": "fx",
+      "roleLabel": "Vox glitch",
+      "color": "#7a4a1f",
+      "animation": {
+        "kind": "look",
+        "amplitude": 2
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/brud-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/brud-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/brud-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/brud-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/brud-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/brud-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/brud-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/brud-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/brud-icon.svg",
+        "pressed": "characters/brud-icon-pressed.svg",
+        "dimmed": "characters/brud-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "garnold",
+      "displayName": "Foyer Garnold",
+      "category": "melody",
+      "roleLabel": "Arpeggio",
+      "color": "#ffd000",
+      "animation": {
+        "kind": "sway",
+        "amplitude": 3
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/garnold-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/garnold-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/garnold-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/garnold-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/garnold-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/garnold-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/garnold-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/garnold-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/garnold-icon.svg",
+        "pressed": "characters/garnold-icon-pressed.svg",
+        "dimmed": "characters/garnold-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "owakcx",
+      "displayName": "Foyer Owakcx",
+      "category": "fx",
+      "roleLabel": "Riser",
+      "color": "#caff2a",
+      "animation": {
+        "kind": "look",
+        "amplitude": 2
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/owakcx-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/owakcx-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/owakcx-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/owakcx-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/owakcx-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/owakcx-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/owakcx-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/owakcx-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/owakcx-icon.svg",
+        "pressed": "characters/owakcx-icon-pressed.svg",
+        "dimmed": "characters/owakcx-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "sky",
+      "displayName": "Foyer Sky",
+      "category": "melody",
+      "roleLabel": "Music box",
+      "color": "#7ec8e3",
+      "animation": {
+        "kind": "sway",
+        "amplitude": 3
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/sky-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/sky-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/sky-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/sky-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/sky-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/sky-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/sky-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/sky-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/sky-icon.svg",
+        "pressed": "characters/sky-icon-pressed.svg",
+        "dimmed": "characters/sky-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "mr-sun",
+      "displayName": "Foyer Sunny",
+      "category": "melody",
+      "roleLabel": "Piano",
+      "color": "#ffd200",
+      "animation": {
+        "kind": "sway",
+        "amplitude": 3
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/mr-sun-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/mr-sun-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/mr-sun-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/mr-sun-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/mr-sun-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/mr-sun-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/mr-sun-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/mr-sun-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/mr-sun-icon.svg",
+        "pressed": "characters/mr-sun-icon-pressed.svg",
+        "dimmed": "characters/mr-sun-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "durple",
+      "displayName": "Foyer Durple",
+      "category": "melody",
+      "roleLabel": "Brass",
+      "color": "#7d2dbd",
+      "animation": {
+        "kind": "sway",
+        "amplitude": 3
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/durple-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/durple-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/durple-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/durple-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/durple-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/durple-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/durple-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/durple-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/durple-icon.svg",
+        "pressed": "characters/durple-icon-pressed.svg",
+        "dimmed": "characters/durple-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "mr-tree",
+      "displayName": "Foyer Treebo",
+      "category": "melody",
+      "roleLabel": "Organ",
+      "color": "#3a7a26",
+      "animation": {
+        "kind": "sway",
+        "amplitude": 3
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/mr-tree-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/mr-tree-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/mr-tree-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/mr-tree-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/mr-tree-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/mr-tree-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/mr-tree-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/mr-tree-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/mr-tree-icon.svg",
+        "pressed": "characters/mr-tree-icon-pressed.svg",
+        "dimmed": "characters/mr-tree-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "simon",
+      "displayName": "Foyer Simon",
+      "category": "melody",
+      "roleLabel": "Square wave",
+      "color": "#ffe93a",
+      "animation": {
+        "kind": "sway",
+        "amplitude": 3
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/simon-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/simon-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/simon-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/simon-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/simon-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/simon-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/simon-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/simon-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/simon-icon.svg",
+        "pressed": "characters/simon-icon-pressed.svg",
+        "dimmed": "characters/simon-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "tunner",
+      "displayName": "Foyer Tunner",
+      "category": "fx",
+      "roleLabel": "Whistle",
+      "color": "#d8b27a",
+      "animation": {
+        "kind": "look",
+        "amplitude": 2
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/tunner-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/tunner-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/tunner-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/tunner-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/tunner-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/tunner-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/tunner-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/tunner-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/tunner-icon.svg",
+        "pressed": "characters/tunner-icon-pressed.svg",
+        "dimmed": "characters/tunner-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "mr-fun-computer",
+      "displayName": "Foyer Comp",
+      "category": "vocal",
+      "roleLabel": "AI vocal",
+      "color": "#272a32",
+      "animation": {
+        "kind": "look",
+        "amplitude": 2
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/mr-fun-computer-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/mr-fun-computer-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/mr-fun-computer-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/mr-fun-computer-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/mr-fun-computer-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/mr-fun-computer-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/mr-fun-computer-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/mr-fun-computer-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/mr-fun-computer-icon.svg",
+        "pressed": "characters/mr-fun-computer-icon-pressed.svg",
+        "dimmed": "characters/mr-fun-computer-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "wenda",
+      "displayName": "Foyer Wenda",
+      "category": "vocal",
+      "roleLabel": "Hey vocal",
+      "color": "#f4f4f4",
+      "animation": {
+        "kind": "look",
+        "amplitude": 2
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/wenda-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/wenda-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/wenda-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/wenda-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/wenda-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/wenda-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/wenda-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/wenda-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/wenda-icon.svg",
+        "pressed": "characters/wenda-icon-pressed.svg",
+        "dimmed": "characters/wenda-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "pinki",
+      "displayName": "Foyer Pinki",
+      "category": "vocal",
+      "roleLabel": "Female choir",
+      "color": "#ff80c0",
+      "animation": {
+        "kind": "look",
+        "amplitude": 2
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/pinki-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/pinki-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/pinki-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/pinki-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/pinki-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/pinki-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/pinki-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/pinki-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/pinki-icon.svg",
+        "pressed": "characters/pinki-icon-pressed.svg",
+        "dimmed": "characters/pinki-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "jevin",
+      "displayName": "Foyer Jevin",
+      "category": "vocal",
+      "roleLabel": "Male choir",
+      "color": "#3548d6",
+      "animation": {
+        "kind": "look",
+        "amplitude": 2
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/jevin-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/jevin-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/jevin-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/jevin-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/jevin-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/jevin-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/jevin-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/jevin-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/jevin-icon.svg",
+        "pressed": "characters/jevin-icon-pressed.svg",
+        "dimmed": "characters/jevin-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "black",
+      "displayName": "Foyer Phantom",
+      "category": "phantom",
+      "roleLabel": "Phantom",
+      "color": "#181420",
+      "animation": {
+        "kind": "bob",
+        "amplitude": 3
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/black-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/black-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/black-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/black-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/black-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/black-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/black-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/black-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/black-icon.svg",
+        "pressed": "characters/black-icon-pressed.svg",
+        "dimmed": "characters/black-icon-dimmed.svg"
+      }
+    },
+    {
+      "id": "flower",
+      "displayName": "Foyer Flower",
+      "category": "melody",
+      "roleLabel": "Flower",
+      "color": "#a85cd9",
+      "animation": {
+        "kind": "sway",
+        "amplitude": 3
+      },
+      "costumes": {
+        "idle": [
+          {
+            "name": "idle",
+            "file": "characters/flower-idle.svg"
+          }
+        ],
+        "idle_alternate": [
+          {
+            "name": "idle2",
+            "file": "characters/flower-horror-idle.svg"
+          }
+        ],
+        "play": [
+          {
+            "name": "anim",
+            "file": "characters/flower-play1.svg"
+          },
+          {
+            "name": "anim2",
+            "file": "characters/flower-play2.svg"
+          },
+          {
+            "name": "anim3",
+            "file": "characters/flower-play3.svg"
+          }
+        ],
+        "alternate": [
+          {
+            "name": "anim_h",
+            "file": "characters/flower-horror-play1.svg"
+          },
+          {
+            "name": "anim_h2",
+            "file": "characters/flower-horror-play2.svg"
+          },
+          {
+            "name": "anim_h3",
+            "file": "characters/flower-horror-play3.svg"
+          }
+        ]
+      },
+      "icon": {
+        "normal": "characters/flower-icon.svg",
+        "pressed": "characters/flower-icon-pressed.svg",
+        "dimmed": "characters/flower-icon-dimmed.svg"
+      }
+    }
+  ],
+  "stage": {
+    "backdrop": "backdrop.svg",
+    "backdrop_horror": "backdrop-horror.svg"
+  },
+  "empty_slot": {
+    "file": "empty.svg",
+    "file_horror": "empty-horror.svg"
+  },
+  "buttons": {
+    "base": "button-base.svg",
+    "solo": "button-solo.svg",
+    "mute": "button-mute.svg",
+    "remove": "button-remove.svg"
+  }
+}

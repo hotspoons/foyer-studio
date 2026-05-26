@@ -9,6 +9,7 @@
 #include "pbd/pthread_utils.h"
 #include "ardour/async_midi_port.h"
 #include "ardour/audioengine.h"
+#include "ardour/rc_configuration.h"
 #include "ardour/session.h"
 #include "ardour/session_event.h"
 
@@ -61,6 +62,33 @@ FoyerShim::set_active (bool yn)
 		return 0;
 	}
 	if (yn) {
+		// Suppress Ardour's interactive instrument-setup dialogs.
+		//
+		// When the shim adds a multi-output instrument (avldrums,
+		// any plugin with `has_output_presets`) via Route::add_processor,
+		// the Route fires the global PluginSetup signal asking
+		// "should we replace the existing instrument? fan-out the
+		// outputs?". The Editor connects a handler that pops a
+		// GtkDialog to ask the user.
+		//
+		// Problem: the signal is emitted from our shim's UI thread
+		// (FoyerShim), not the Ardour GTK thread. The dialog
+		// constructor calls CairoWidget::set_dirty() which aborts
+		// with SIGABRT when invoked off-thread (witnessed
+		// 2026-05-25 — full crash stack in docs/SPRUNKADOO_HANDOFF.md).
+		//
+		// Both prefs default to true in rc_configuration_vars.inc.h.
+		// We flip them OFF in-memory at shim activation; the Config
+		// object isn't auto-persisted to the user's RC file unless
+		// `save_state()` is called, so this doesn't corrupt the
+		// user's saved preferences. If the user runs Ardour
+		// standalone (without Foyer) in a fresh process, their
+		// prefs are restored from disk.
+		if (ARDOUR::Config) {
+			ARDOUR::Config->set_ask_replace_instrument (false);
+			ARDOUR::Config->set_ask_setup_instrument (false);
+		}
+
 		_ipc->start ();
 		_bridge->start ();
 		// Register a virtual MIDI source port for the browser bridge.

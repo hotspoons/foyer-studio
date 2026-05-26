@@ -69,6 +69,12 @@ pub struct DockerCmdArgs {
 #[derive(Debug, Clone)]
 pub struct PlannedInvocation {
     pub runtime: PathBuf,
+    /// Optional env vars to set before invoking the runtime binary.
+    /// Currently only used by `runtime_kind=colima` to flip
+    /// DOCKER_HOST onto Colima's socket so the shared `docker` CLI
+    /// doesn't talk to Docker Desktop's daemon by mistake. `run()`
+    /// applies these via `Command::env()` before spawn.
+    pub envs: Vec<(String, String)>,
     pub args: Vec<String>,
     /// One-line human-readable form (`podman run --rm -it …`) for
     /// logs and the dry-run path.
@@ -84,11 +90,15 @@ pub fn run(config: &Config, args: DockerCmdArgs) -> Result<()> {
     }
 
     tracing::info!("launching container: {}", plan.pretty);
-    let status = Command::new(&plan.runtime)
-        .args(&plan.args)
+    let mut cmd = Command::new(&plan.runtime);
+    cmd.args(&plan.args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    for (k, v) in &plan.envs {
+        cmd.env(k, v);
+    }
+    let status = cmd
         .status()
         .with_context(|| format!("spawn {}", plan.runtime.display()))?;
     if !status.success() {
@@ -110,6 +120,21 @@ pub fn assemble(config: &Config, args: &DockerCmdArgs) -> Result<PlannedInvocati
     let dcfg = config.docker.clone().unwrap_or_default();
     let runtime = resolve_runtime(args.runtime_override.as_deref(), dcfg.runtime.as_deref())
         .context("no container runtime found")?;
+    // runtime_kind drives the DOCKER_HOST override — for Colima we
+    // MUST point the docker CLI at `~/.colima/default/docker.sock`,
+    // else it talks to whichever daemon happens to own
+    // `/var/run/docker.sock` (Docker Desktop on a co-installed Mac).
+    // Other kinds either have their own CLI shim (OrbStack) or use
+    // the default socket (Docker Desktop, Engine, Podman). The user
+    // can always set DOCKER_HOST manually in their shell to override.
+    let mut envs: Vec<(String, String)> = Vec::new();
+    if let Some(kind_id) = dcfg.runtime_kind.as_deref() {
+        if let Some(kind) = RuntimeKind::from_id(kind_id) {
+            if let Some(dh) = kind.docker_host_override() {
+                envs.push(("DOCKER_HOST".into(), dh));
+            }
+        }
+    }
     let image = args
         .image_override
         .clone()
@@ -301,6 +326,7 @@ pub fn assemble(config: &Config, args: &DockerCmdArgs) -> Result<PlannedInvocati
 
     Ok(PlannedInvocation {
         runtime,
+        envs,
         args: cmd_args,
         pretty,
     })
@@ -1000,6 +1026,421 @@ fn resolve_runtime(
          or set `docker.runtime` in config.yaml.",
         RUNTIME_PROBE_ORDER.join(", ")
     ))
+}
+
+// ───────────────────────── runtime detection ─────────────────────────
+//
+// The picker on macOS + Windows needs to show the user which container
+// runtimes are installed AND running, defaulting to the right one for
+// the OS:
+//
+//   * Docker Desktop on macOS — `/Applications/Docker.app` + the docker
+//     CLI in `/usr/local/bin`. Uses the default unix socket.
+//   * Colima on macOS — `which colima` + `~/.colima/default/docker.sock`
+//     present. DOCKER_HOST must be set to point at that socket because
+//     the system docker CLI looks at `/var/run/docker.sock` by default.
+//   * OrbStack on macOS — `/Applications/OrbStack.app`. Bundles its
+//     own docker CLI shim that picks up the OrbStack socket from
+//     `~/.orbstack/run/docker.sock` automatically when called from
+//     OrbStack's PATH-prefix install.
+//   * Podman / Podman Desktop — `which podman`. Cross-platform.
+//   * Docker Engine on Linux — `which docker` + `/var/run/docker.sock`,
+//     no Docker Desktop wrapper. The classic linux-server install.
+//
+// We surface every detected runtime to the picker; the user picks the
+// one they want. The choice writes a `runtime_kind` into config.yaml
+// so the CLI's `assemble()` can set DOCKER_HOST appropriately at
+// run time without re-probing.
+
+/// Container-runtime flavor. Drives the picker's per-OS card UI and
+/// determines whether `assemble()` needs to inject a DOCKER_HOST
+/// override before invoking the docker CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeKind {
+    /// Docker Desktop (macOS + Windows) — the GUI app from docker.com.
+    DockerDesktop,
+    /// Plain Docker Engine (Linux servers, devcontainers). No GUI.
+    DockerEngine,
+    /// Colima (macOS) — Lima VM + Docker socket.
+    Colima,
+    /// OrbStack (macOS) — fast modern Lima-style alternative.
+    Orbstack,
+    /// Podman CLI. No GUI. Linux / macOS.
+    Podman,
+    /// Podman Desktop (the GUI app from podman-desktop.io). Sits on
+    /// top of `podman` but adds a tray icon and machine management.
+    PodmanDesktop,
+    /// nerdctl — Containerd's CLI shim. Linux-only in practice.
+    Nerdctl,
+}
+
+impl RuntimeKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            RuntimeKind::DockerDesktop => "Docker Desktop",
+            RuntimeKind::DockerEngine => "Docker Engine",
+            RuntimeKind::Colima => "Colima",
+            RuntimeKind::Orbstack => "OrbStack",
+            RuntimeKind::Podman => "Podman",
+            RuntimeKind::PodmanDesktop => "Podman Desktop",
+            RuntimeKind::Nerdctl => "nerdctl",
+        }
+    }
+
+    /// CLI binary name used to invoke this runtime. Multiple kinds
+    /// share the same binary (Docker Desktop + Docker Engine both use
+    /// `docker`; Podman + Podman Desktop both use `podman`).
+    /// Unused today — the picker writes `runtime_kind` to config and
+    /// the existing `resolve_runtime` path falls through to PATH
+    /// probes — but kept for the eventual "the user picked kind X
+    /// but only kind Y's binary is on PATH" reconciliation pass.
+    #[allow(dead_code)]
+    pub fn binary_name(self) -> &'static str {
+        match self {
+            RuntimeKind::DockerDesktop | RuntimeKind::DockerEngine => "docker",
+            RuntimeKind::Colima | RuntimeKind::Orbstack => "docker",
+            RuntimeKind::Podman | RuntimeKind::PodmanDesktop => "podman",
+            RuntimeKind::Nerdctl => "nerdctl",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            RuntimeKind::DockerDesktop => "docker_desktop",
+            RuntimeKind::DockerEngine => "docker_engine",
+            RuntimeKind::Colima => "colima",
+            RuntimeKind::Orbstack => "orbstack",
+            RuntimeKind::Podman => "podman",
+            RuntimeKind::PodmanDesktop => "podman_desktop",
+            RuntimeKind::Nerdctl => "nerdctl",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<RuntimeKind> {
+        Some(match id {
+            "docker_desktop" => RuntimeKind::DockerDesktop,
+            "docker_engine" => RuntimeKind::DockerEngine,
+            "colima" => RuntimeKind::Colima,
+            "orbstack" => RuntimeKind::Orbstack,
+            "podman" => RuntimeKind::Podman,
+            "podman_desktop" => RuntimeKind::PodmanDesktop,
+            "nerdctl" => RuntimeKind::Nerdctl,
+            _ => return None,
+        })
+    }
+
+    /// DOCKER_HOST override the picker should bake into the env when
+    /// invoking this runtime, if any. None means "use the binary's
+    /// own default socket" (Docker Desktop's CLI auto-finds its own,
+    /// OrbStack's CLI shim auto-finds its own, plain Docker Engine
+    /// hits `/var/run/docker.sock`). Colima is the one runtime that
+    /// shares the `docker` binary with Docker Desktop but ships its
+    /// own socket — without this env override, `docker ps` would talk
+    /// to Docker Desktop's daemon instead of Colima's.
+    pub fn docker_host_override(self) -> Option<String> {
+        match self {
+            RuntimeKind::Colima => {
+                // Default Colima profile socket. `colima start
+                // --profile foo` ships at `~/.colima/foo/docker.sock`;
+                // power users will hand-edit config.yaml in that case.
+                let home = std::env::var("HOME").ok()?;
+                Some(format!("unix://{home}/.colima/default/docker.sock"))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One row in the picker's runtime card list. `installed=true` means
+/// the binary / app bundle / sentinel directory is present; `running`
+/// means we can additionally confirm the daemon is responsive (socket
+/// exists, etc.). The picker greys out cards that aren't installed,
+/// shows a yellow "needs starting" banner on installed-but-not-running,
+/// and lets the user click any installed card to make it the default.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuntimeProbe {
+    pub kind_id: String,
+    pub label: String,
+    pub installed: bool,
+    pub running: bool,
+    /// Hint we suggest if `installed=false`. macOS Homebrew, Windows
+    /// winget, Linux distro pkg.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_command: Option<String>,
+    /// Extra one-line context the picker shows under the label
+    /// (path of the binary, path of the socket, error text from a
+    /// probe). Empty when nothing to add.
+    pub detail: String,
+    /// Suggested default for this OS. The picker pre-selects the
+    /// first installed-AND-default runtime in the list; if none of
+    /// the defaults are installed it falls back to the first
+    /// installed one regardless.
+    pub default_on_this_os: bool,
+}
+
+/// Probe every container runtime we know about. Returns one
+/// `RuntimeProbe` per kind, ordered so the OS-canonical default lands
+/// first (picker uses the order for tab focus + initial selection).
+///
+/// Cheap — pure FS + PATH probes, no subprocesses. The picker calls
+/// this on first render + on every "Re-check" click.
+pub fn detect_runtimes() -> Vec<RuntimeProbe> {
+    let mut out: Vec<RuntimeProbe> = Vec::new();
+    // OS-canonical default order. macOS leads with Docker Desktop
+    // (most common); Windows is Docker-Desktop-only in practice;
+    // Linux defaults to plain Docker Engine. Podman is offered on
+    // every OS as a non-default alternative.
+    let order: &[RuntimeKind] = if cfg!(target_os = "macos") {
+        &[
+            RuntimeKind::DockerDesktop,
+            RuntimeKind::Colima,
+            RuntimeKind::Orbstack,
+            RuntimeKind::PodmanDesktop,
+            RuntimeKind::Podman,
+        ]
+    } else if cfg!(target_os = "windows") {
+        &[RuntimeKind::DockerDesktop, RuntimeKind::Podman]
+    } else {
+        &[
+            RuntimeKind::DockerEngine,
+            RuntimeKind::Podman,
+            RuntimeKind::Nerdctl,
+            RuntimeKind::PodmanDesktop,
+        ]
+    };
+    for (i, kind) in order.iter().enumerate() {
+        out.push(probe_runtime(*kind, /* default_on_this_os = */ i == 0));
+    }
+    out
+}
+
+fn probe_runtime(kind: RuntimeKind, default_on_this_os: bool) -> RuntimeProbe {
+    let home = std::env::var("HOME").ok();
+    let (installed, running, detail) = match kind {
+        RuntimeKind::DockerDesktop => probe_docker_desktop(home.as_deref()),
+        RuntimeKind::DockerEngine => probe_docker_engine(),
+        RuntimeKind::Colima => probe_colima(home.as_deref()),
+        RuntimeKind::Orbstack => probe_orbstack(home.as_deref()),
+        RuntimeKind::Podman => probe_podman(),
+        RuntimeKind::PodmanDesktop => probe_podman_desktop(),
+        RuntimeKind::Nerdctl => probe_nerdctl(),
+    };
+    RuntimeProbe {
+        kind_id: kind.id().into(),
+        label: kind.label().into(),
+        installed,
+        running,
+        install_command: if installed {
+            None
+        } else {
+            install_command_for_runtime(kind)
+        },
+        detail,
+        default_on_this_os,
+    }
+}
+
+fn probe_docker_desktop(_home: Option<&str>) -> (bool, bool, String) {
+    // macOS: app bundle in /Applications.
+    if cfg!(target_os = "macos") {
+        let app = PathBuf::from("/Applications/Docker.app");
+        if app.is_dir() {
+            let running = PathBuf::from("/var/run/docker.sock").exists();
+            return (
+                true,
+                running,
+                if running {
+                    "/Applications/Docker.app (daemon running)".into()
+                } else {
+                    "/Applications/Docker.app (daemon not running — open the app)".into()
+                },
+            );
+        }
+        return (false, false, "Not installed at /Applications/Docker.app".into());
+    }
+    // Windows: ProgramFiles install dir + the docker CLI on PATH.
+    if cfg!(target_os = "windows") {
+        let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".into());
+        let app = PathBuf::from(format!("{pf}\\Docker\\Docker\\Docker Desktop.exe"));
+        if app.is_file() {
+            // Windows can't probe the unix socket; rely on docker CLI
+            // existence as a weaker "running" signal. The user can
+            // launch Docker Desktop from the picker if not running.
+            let running = which("docker").is_some();
+            return (
+                true,
+                running,
+                "Docker Desktop installed in Program Files".into(),
+            );
+        }
+        return (false, false, "Not installed — get it from docker.com".into());
+    }
+    // Linux: Docker Desktop is technically supported but unusual on
+    // server distros. Probe the well-known install path but don't
+    // surface as a default.
+    let app = PathBuf::from("/opt/docker-desktop");
+    if app.is_dir() {
+        return (true, false, "/opt/docker-desktop installed".into());
+    }
+    (false, false, "Not installed (Linux servers usually use Docker Engine)".into())
+}
+
+fn probe_docker_engine() -> (bool, bool, String) {
+    // Distinct from Docker Desktop: this is the open-source dockerd
+    // running directly on the host. Only meaningful on Linux. We
+    // detect it by `docker` on PATH AND the absence of a Docker
+    // Desktop app bundle nearby — on macOS/Windows that's always
+    // Docker Desktop, so we mark not-installed there to avoid
+    // duplicate runtime cards.
+    if !cfg!(target_os = "linux") {
+        return (false, false, "Docker Engine is Linux-only".into());
+    }
+    match which("docker") {
+        Some(p) => {
+            let running = PathBuf::from("/var/run/docker.sock").exists()
+                || PathBuf::from("/run/docker.sock").exists();
+            (
+                true,
+                running,
+                if running {
+                    format!("{} (socket present)", p.display())
+                } else {
+                    format!("{} (no daemon socket)", p.display())
+                },
+            )
+        }
+        None => (false, false, "`docker` not on PATH".into()),
+    }
+}
+
+fn probe_colima(home: Option<&str>) -> (bool, bool, String) {
+    let Some(home) = home else {
+        return (false, false, "$HOME not set".into());
+    };
+    let colima_bin = which("colima");
+    let sock = PathBuf::from(format!("{home}/.colima/default/docker.sock"));
+    match colima_bin {
+        Some(p) => {
+            let running = sock.exists();
+            (
+                true,
+                running,
+                if running {
+                    format!("{} (socket at {})", p.display(), sock.display())
+                } else {
+                    format!("{} (not started — run `colima start`)", p.display())
+                },
+            )
+        }
+        None => (false, false, "`colima` not on PATH (brew install colima)".into()),
+    }
+}
+
+fn probe_orbstack(home: Option<&str>) -> (bool, bool, String) {
+    if !cfg!(target_os = "macos") {
+        return (false, false, "OrbStack is macOS-only".into());
+    }
+    let app = PathBuf::from("/Applications/OrbStack.app");
+    if !app.is_dir() {
+        return (false, false, "Not installed — get it from orbstack.dev".into());
+    }
+    let Some(home) = home else {
+        return (true, false, "OrbStack installed; $HOME unset".into());
+    };
+    let sock = PathBuf::from(format!("{home}/.orbstack/run/docker.sock"));
+    let running = sock.exists();
+    (
+        true,
+        running,
+        if running {
+            format!("/Applications/OrbStack.app (socket at {})", sock.display())
+        } else {
+            "/Applications/OrbStack.app (not running — open the app)".into()
+        },
+    )
+}
+
+fn probe_podman() -> (bool, bool, String) {
+    match which("podman") {
+        Some(p) => {
+            // `podman` is rootless by default; treat "binary present"
+            // as "running" because the CLI spins the daemon up on
+            // demand. macOS / Windows needs `podman machine start`
+            // first — we can't probe that cheaply without spawning.
+            (true, true, format!("{} on PATH", p.display()))
+        }
+        None => (false, false, "`podman` not on PATH".into()),
+    }
+}
+
+fn probe_podman_desktop() -> (bool, bool, String) {
+    // Podman Desktop sits on top of plain `podman`. We probe the GUI
+    // bundle to distinguish "user installed the GUI" from "user
+    // installed the CLI only" — same `podman` binary either way.
+    let candidates: Vec<PathBuf> = if cfg!(target_os = "macos") {
+        vec![PathBuf::from("/Applications/Podman Desktop.app")]
+    } else if cfg!(target_os = "windows") {
+        let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".into());
+        vec![PathBuf::from(format!("{pf}\\Podman Desktop"))]
+    } else {
+        vec![
+            PathBuf::from("/opt/podman-desktop"),
+            PathBuf::from("/usr/share/podman-desktop"),
+        ]
+    };
+    let app = candidates.into_iter().find(|p| p.is_dir());
+    match app {
+        Some(p) => (
+            true,
+            which("podman").is_some(),
+            format!("{} (podman CLI {})", p.display(),
+                    if which("podman").is_some() { "present" } else { "missing" }),
+        ),
+        None => (false, false, "Podman Desktop not installed".into()),
+    }
+}
+
+fn probe_nerdctl() -> (bool, bool, String) {
+    match which("nerdctl") {
+        Some(p) => (true, true, format!("{} on PATH", p.display())),
+        None => (false, false, "`nerdctl` not on PATH".into()),
+    }
+}
+
+fn install_command_for_runtime(kind: RuntimeKind) -> Option<String> {
+    if cfg!(target_os = "macos") {
+        return Some(match kind {
+            RuntimeKind::DockerDesktop => "brew install --cask docker".into(),
+            RuntimeKind::Colima => {
+                "brew install colima docker  # then: colima start".into()
+            }
+            RuntimeKind::Orbstack => "brew install --cask orbstack".into(),
+            RuntimeKind::Podman => "brew install podman  # then: podman machine init && podman machine start".into(),
+            RuntimeKind::PodmanDesktop => "brew install --cask podman-desktop".into(),
+            RuntimeKind::Nerdctl => "brew install lima-additional-guestagents nerdctl  # rare on macOS".into(),
+            RuntimeKind::DockerEngine => return None,
+        });
+    }
+    if cfg!(target_os = "windows") {
+        return Some(match kind {
+            RuntimeKind::DockerDesktop => "winget install -e --id Docker.DockerDesktop".into(),
+            RuntimeKind::Podman => "winget install -e --id RedHat.Podman".into(),
+            RuntimeKind::PodmanDesktop => "winget install -e --id RedHat.Podman-Desktop".into(),
+            _ => return None,
+        });
+    }
+    // Linux — generic family-aware suggestions. We don't have the
+    // OsFamily here without re-detecting; defer to the existing
+    // install_runtime() hint which the picker already shows under
+    // the Docker doctor card.
+    None
+}
+
+/// JSON serialization for the runtime probe list, consumed by the
+/// mode-picker WebView via `window.__doctor.runtimes`.
+pub fn runtimes_to_json(runtimes: &[RuntimeProbe]) -> String {
+    serde_json::to_string(runtimes).unwrap_or_else(|_| "[]".into())
 }
 
 fn which(name: &str) -> Option<PathBuf> {

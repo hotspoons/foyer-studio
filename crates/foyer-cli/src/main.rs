@@ -138,6 +138,11 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::DoctorRuntimes => {
+            let runtimes = docker_cmd::detect_runtimes();
+            println!("{}", docker_cmd::runtimes_to_json(&runtimes));
+            Ok(())
+        }
         Command::Backends => {
             println!("config: {}", config_path(cli.config.as_deref())?.display());
             println!("default_backend: {}", config.default_backend);

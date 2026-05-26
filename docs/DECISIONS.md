@@ -2603,3 +2603,62 @@ the annoyance is a feature. We do not want a music producer
 coming back to a mix the AI silently rewrote because their last
 session left it in Yolo and they forgot.
 
+## 52. Cross-OS desktop shell — Linux+macOS+Windows binaries, but only Linux/macOS run native Ardour
+
+`foyer-desktop` (tao + wry native window shell) now compiles and
+ships on three OSes. Backend story splits along OS lines:
+
+  * **Linux** — Host mode (foyer-server in-process, talks to local
+    Ardour via the shim socket) OR Docker mode. Both available;
+    picker defaults to whichever the host environment can actually
+    run.
+  * **macOS** — Host mode (native Ardour 9.x via the shim) OR
+    Docker mode (Desktop or Colima). Native is the low-latency
+    path; plugin UIs are native Cocoa windows that pop up next to
+    foyer-desktop's WebView. Docker mode keeps the xpra-projected
+    plugin-UI experience.
+  * **Windows** — **Docker Desktop only.** Ardour doesn't have a
+    Windows build; the shim is Linux/macOS-only. Windows users
+    drive Foyer's backend from a Linux container and the native
+    shell hosts the WebView pointed at that container's published
+    port.
+
+This split shapes a few smaller decisions:
+
+  * `install.sh` redirects Windows users (MINGW/MSYS uname) to
+    `install.ps1`. We don't try to coerce bash on Windows into
+    writing registry / Start Menu / PATH — PowerShell is the right
+    tool. The two installers ship as siblings, both repo-mirror'd
+    so a `curl | bash` works on Linux/macOS and `irm | iex` works
+    on Windows.
+  * `scripts/release/bundle.sh` ships per-OS zip shapes. Linux
+    carries the XDG icon + .desktop template. macOS optionally
+    carries an `.icns` (when the bundler step has produced one)
+    and lets install.sh build the `.app` wrapper. Windows zips
+    just the .exe — install.ps1 writes the Start Menu shortcut
+    directly via WScript.Shell, no templated .lnk in the artifact.
+  * `foyer-desktop`'s mode-picker (`crates/foyer-desktop/src/
+    mode_picker.html`) needs per-OS arms in the audio-mode page so
+    Windows hides the Host card entirely and macOS surfaces both
+    Docker Desktop and Colima as runtime choices. (That UI work is
+    M2 of the cross-OS plan — this ADR locks in the *split*; the
+    picker copy follows.)
+  * macOS native-Ardour mode (M3 of the plan) lets the user
+    download Ardour from `community.ardour.org` via a wry sub-
+    window. Our panel above the iframe is *loud* about donating —
+    Ardour is donationware, the demo cuts out after 10 min, and
+    the full version is via their store. We auto-click the
+    "free demo" radio + scrape the nonce only when the user
+    explicitly picks "just the demo"; the default flow takes them
+    through the donation page. UA identifies as Foyer so their
+    install stats stay honest.
+
+**Failure mode if re-litigated.** "Just ship Linux + macOS, drop
+Windows." Half of the audio-producer market is on Windows and we
+ship a CONTROL SURFACE — the backend doesn't have to be local for
+it to be useful. Docker Desktop is universal enough that
+"download Docker Desktop, install Foyer Studio" is a five-click
+onboard. Refusing Windows because Ardour can't run there is the
+control-surface vendor saying "sorry, you can't be a customer
+because your DAW isn't a Linux daemon."
+

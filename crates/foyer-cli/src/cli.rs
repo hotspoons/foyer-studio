@@ -219,6 +219,12 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Probe every container runtime we know about (Docker Desktop,
+    /// Colima, OrbStack, Podman, Podman Desktop, nerdctl) and report
+    /// which are installed + running. Drives the desktop mode
+    /// picker's runtime-selection page on macOS / Windows. Always
+    /// emits JSON — the picker is the only consumer.
+    DoctorRuntimes,
     /// Print the resolved config and exit.
     Backends,
     /// Print the path to config.yaml (creating it if it doesn't exist).

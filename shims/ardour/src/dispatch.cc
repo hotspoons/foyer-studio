@@ -2864,7 +2864,24 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				Evoral::event_id_t target = 0;
 				try { target = static_cast<Evoral::event_id_t> (std::stoi (snap.id.substr (dot + 1))); }
 				catch (...) { return; }
-				auto pc = model->find_patch_change (target);
+				// Try find_patch_change first — fast path for PCs with
+				// proper event ids. If that misses (the PC was added
+				// via diff->add() which left id=0, common for seeded
+				// PCs and any AddPatchChange before this fix), walk
+				// model->patch_changes() and match by id directly.
+				// Without this fallback, clients can never remove the
+				// seeded tick-0 patch_change that overrides program
+				// on every loop wrap. 2026-05-26 fix.
+				std::shared_ptr<Evoral::PatchChange<Temporal::Beats>> pc =
+				    model->find_patch_change (target);
+				if (!pc) {
+					for (auto const& candidate : model->patch_changes ()) {
+						if (candidate && candidate->id () == target) {
+							pc = candidate;
+							break;
+						}
+					}
+				}
 				if (!pc) return;
 				auto* diff = model->new_patch_change_diff_command ("foyer delete patch change");
 				diff->remove (pc);
@@ -3669,7 +3686,21 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				}
 				playlist->add_region (region, Temporal::timepos_t (
 					static_cast<Temporal::samplepos_t> (cmd_at_u64 (snap))));
-				foyer_seed_default_region_patch_change (shim->session (), track, region);
+				// Seed-default-patch-change retired 2026-05-26.
+				// Seeding a PatchChange at tick 0 made every new
+				// region carry a program-change event that fired
+				// on every loop wrap and overrode the track-level
+				// MidiPgmChangeAutomation. The seeded PC's Evoral
+				// event-id never got a unique value (diff-add
+				// leaves it at 0), so subsequent DeletePatchChange
+				// / UpdatePatchChange commands couldn't address it
+				// by id — Foyer clients had no way to remove it.
+				// Net effect: kid drags Tree (organ) onto a slot,
+				// hears organ for one bar, then the loop wraps,
+				// the stale program-0 PC fires, and the synth
+				// reverts to piano. The track-level
+				// MidiPgmChangeAutomation already governs the
+				// program; we don't need the in-region PC seed.
 				shim->session ().set_dirty ();
 				// Playlist's RegionAdded signal fires an echo back
 				// to the sidecar, which forwards RegionsList.

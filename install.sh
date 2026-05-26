@@ -107,6 +107,26 @@ detect_target() {
             # --verify passes.
             SURFACES_DIR="$HOME/Library/Preferences/Ardour9/surfaces"
             ;;
+        MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            # Windows reached through Git Bash, MSYS2, Cygwin, or a
+            # plain WSL forwarder. We don't try to coerce bash into
+            # writing the registry / Start Menu / PATH — PowerShell
+            # is the right entrypoint there. Redirect, don't die.
+            cat >&2 <<EOF
+install.sh: Windows detected ($uname_s).
+
+Run the PowerShell installer instead:
+
+  irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex
+
+(One-liner; no admin needed. Installs to %LOCALAPPDATA%\\Foyer Studio
+and adds a Start Menu shortcut.)
+
+Foyer's Ardour shim is Linux/macOS-only — Windows users run the
+backend via Docker Desktop. install.ps1 will set that up for you.
+EOF
+            exit 2
+            ;;
         *) die "unsupported OS: $uname_s" ;;
     esac
     case "$uname_m" in
@@ -243,12 +263,112 @@ macos_fixup_shim() {
     fi
 }
 
+# Wrap the freshly installed foyer-desktop binary in a minimal `.app`
+# bundle so macOS treats it as a first-class app. The bundle lives
+# inside $PREFIX (per-user, no sudo) AND we symlink it into
+# ~/Applications/ so Spotlight + Launchpad index it without the user
+# dragging anything around.
+#
+# Layout:
+#   $PREFIX/Foyer Studio.app/
+#     Contents/
+#       Info.plist
+#       MacOS/foyer-desktop     (copy of the installed binary, not a
+#                                symlink — relative dylib lookups
+#                                under @executable_path resolve here)
+#       Resources/AppIcon.icns  (only if $icon_src points at an .icns;
+#                                we accept .svg too and skip silently)
+#
+# Ad-hoc-sign the bundle so Gatekeeper accepts it without a
+# notarization detour. Stripping the quarantine xattr happens at the
+# top-level install_files step.
+macos_make_app_bundle() {
+    local icon_src="$1"
+    local app_root="$PREFIX/Foyer Studio.app"
+    local contents="$app_root/Contents"
+    local macos_dir="$contents/MacOS"
+    local res_dir="$contents/Resources"
+
+    rm -rf "$app_root"
+    mkdir -p "$macos_dir" "$res_dir"
+    install -m 0755 "$BIN_DIR/foyer-desktop" "$macos_dir/foyer-desktop"
+
+    # Bundle id mirrors the GitHub org/project shape so a future
+    # signed/notarized build can register the same id without
+    # collisions. CFBundleVersion gets stamped from the foyer binary's
+    # --version output when available.
+    local version
+    version="$("$BIN_DIR/foyer" --version 2>/dev/null | awk '{print $2}' | head -1)"
+    [ -n "$version" ] || version="0.0.0"
+    cat > "$contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>foyer-desktop</string>
+    <key>CFBundleIdentifier</key><string>com.patapsco.foyer-studio</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>Foyer Studio</string>
+    <key>CFBundleDisplayName</key><string>Foyer Studio</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>$version</string>
+    <key>CFBundleVersion</key><string>$version</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>CFBundleIconFile</key><string>AppIcon.icns</string>
+</dict>
+</plist>
+EOF
+
+    # Drop in the icon if the bundle shipped one. We accept .icns
+    # straight; the .svg fallback that Linux uses can't be installed
+    # as-is (Finder ignores SVG icons) so we just skip and let the
+    # bundle render with the generic app glyph until release.yml
+    # produces a real .icns.
+    if [ -n "$icon_src" ] && [ -f "$icon_src" ]; then
+        case "$icon_src" in
+            *.icns) install -m 0644 "$icon_src" "$res_dir/AppIcon.icns" ;;
+            *) note "bundle icon is not .icns — using system default" ;;
+        esac
+    fi
+
+    # Ad-hoc sign so Gatekeeper accepts the bundle when launched via
+    # double-click. Without this the user gets a "Foyer Studio cannot
+    # be opened because the developer cannot be verified" prompt and
+    # has to right-click → Open the first time.
+    xattr -dr com.apple.quarantine "$app_root" 2>/dev/null || true
+    if codesign --force --deep --sign - "$app_root" 2>/dev/null; then
+        note "ad-hoc signed $app_root"
+    else
+        note "WARN: codesign failed on $app_root — Gatekeeper may prompt on first launch"
+    fi
+
+    # Symlink into ~/Applications so Spotlight + Launchpad index it
+    # without requiring sudo to write into /Applications. The folder
+    # exists by default on macOS; mkdir is just defensive.
+    local user_apps="$HOME/Applications"
+    mkdir -p "$user_apps"
+    rm -f "$user_apps/Foyer Studio.app" 2>/dev/null || true
+    ln -s "$app_root" "$user_apps/Foyer Studio.app"
+    note "linked $user_apps/Foyer Studio.app -> $app_root"
+}
+
 install_files() {
     local source_dir="$1"
     local foyer_src="$source_dir/foyer"
     local desktop_bin_src="$source_dir/foyer-desktop"
     local desktop_entry_src="$source_dir/foyer-studio.desktop"
-    local icon_src="$source_dir/foyer-studio.svg"
+    # Linux uses the SVG (XDG hicolor consumes scalable); macOS prefers
+    # an .icns the bundler dropped in. Both are optional; falling
+    # through to "no icon" is fine.
+    local icon_src=""
+    if [ "$OS" = "macos" ] && [ -f "$source_dir/AppIcon.icns" ]; then
+        icon_src="$source_dir/AppIcon.icns"
+    elif [ -f "$source_dir/foyer-studio.svg" ]; then
+        icon_src="$source_dir/foyer-studio.svg"
+    fi
     local shim_src="$source_dir/libfoyer_shim.$SHIM_EXT"
     [ -x "$foyer_src" ] || [ -f "$foyer_src" ] || die "missing $foyer_src in bundle"
 
@@ -256,10 +376,12 @@ install_files() {
     install -m 0755 "$foyer_src" "$BIN_DIR/foyer"
     note "installed $BIN_DIR/foyer"
 
-    # Linux-only: foyer-desktop binary + XDG menu integration. macOS
-    # gets the CLI only this round — Cocoa wrapper polish lands
-    # separately. The bundle is the source of truth; absent the
-    # foyer-desktop file the install just keeps moving.
+    # foyer-desktop: Linux installs the binary + XDG menu entries
+    # (per the .desktop file shipped in the bundle); macOS additionally
+    # wraps it in a `.app` bundle so Spotlight / Launchpad / Dock work.
+    # The release zip is the source of truth — absent the
+    # foyer-desktop file the install just keeps moving. Windows path
+    # goes through install.ps1 instead.
     if [ "$OS" = "linux" ] && [ -f "$desktop_bin_src" ]; then
         install -m 0755 "$desktop_bin_src" "$BIN_DIR/foyer-desktop"
         note "installed $BIN_DIR/foyer-desktop"
@@ -304,6 +426,22 @@ install_files() {
             note "bundle missing foyer-studio.desktop — skipping menu integration"
         fi
     elif [ "$OS" = "linux" ]; then
+        note "bundle has no foyer-desktop binary — installing CLI only."
+        note "  build it locally with: cargo build --release --bin foyer-desktop"
+    fi
+
+    # macOS desktop install: drop the binary in $BIN_DIR and wrap it
+    # in a minimal `.app` bundle next to it so Spotlight, Launchpad,
+    # and the Dock find it. Also symlink the bundle into
+    # ~/Applications/ (which Spotlight indexes by default — no sudo
+    # needed). For a system-wide /Applications install we ship a
+    # separate .dmg with a drag-to-Applications target (see
+    # scripts/release/macos-dmg.sh).
+    if [ "$OS" = "macos" ] && [ -f "$desktop_bin_src" ]; then
+        install -m 0755 "$desktop_bin_src" "$BIN_DIR/foyer-desktop"
+        note "installed $BIN_DIR/foyer-desktop"
+        macos_make_app_bundle "$icon_src"
+    elif [ "$OS" = "macos" ]; then
         note "bundle has no foyer-desktop binary — installing CLI only."
         note "  build it locally with: cargo build --release --bin foyer-desktop"
     fi
@@ -526,6 +664,19 @@ Native window shell installed — launch it from your application menu
   foyer-desktop
 EOF
     fi
+    if [ "$OS" = "macos" ] && [ -d "$PREFIX/Foyer Studio.app" ]; then
+        cat <<EOF
+
+Native window shell installed. Launch from:
+  Spotlight (⌘-space, "Foyer Studio")
+  Launchpad / ~/Applications/Foyer Studio.app
+  or open "$PREFIX/Foyer Studio.app"
+
+To install system-wide for every user on this Mac, drag the bundle
+into /Applications. (We'll ship a .dmg with this drag step pre-wired
+in a future release.)
+EOF
+    fi
 
     # macOS: shim lives in the per-user surfaces dir, ad-hoc signed
     # with @executable_path-relative load commands. Ardour scans this
@@ -588,12 +739,12 @@ do_uninstall() {
         note "removed $foyer_path"
     fi
 
-    # foyer-desktop + XDG entries (Linux only — install.sh never
-    # wrote them on macOS so the removes are no-ops there).
+    # foyer-desktop + per-OS menu/launcher integration.
     if [ -f "$BIN_DIR/foyer-desktop" ]; then
         rm -f "$BIN_DIR/foyer-desktop"
         note "removed $BIN_DIR/foyer-desktop"
     fi
+    # Linux: XDG menu + icon.
     if [ -f "$DESKTOP_FILE" ]; then
         rm -f "$DESKTOP_FILE"
         note "removed $DESKTOP_FILE"
@@ -607,6 +758,19 @@ do_uninstall() {
         if command -v gtk-update-icon-cache >/dev/null 2>&1; then
             gtk-update-icon-cache -q -t \
                 "$XDG_DATA_HOME_RESOLVED/icons/hicolor" 2>/dev/null || true
+        fi
+    fi
+    # macOS: .app bundle + ~/Applications symlink.
+    if [ "$OS" = "macos" ]; then
+        local app_root="$PREFIX/Foyer Studio.app"
+        local user_app_link="$HOME/Applications/Foyer Studio.app"
+        if [ -L "$user_app_link" ] || [ -e "$user_app_link" ]; then
+            rm -rf "$user_app_link"
+            note "removed $user_app_link"
+        fi
+        if [ -d "$app_root" ]; then
+            rm -rf "$app_root"
+            note "removed $app_root"
         fi
     fi
 

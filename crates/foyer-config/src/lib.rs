@@ -253,6 +253,17 @@ pub struct DockerConfig {
     /// for hosts with multiple runtimes installed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Flavor of the runtime above, when the bare binary name doesn't
+    /// disambiguate. macOS users with Docker Desktop AND Colima
+    /// installed both invoke `docker` — we need `runtime_kind` to
+    /// know which daemon socket to talk to. Picker writes this when
+    /// the user clicks a runtime card; CLI's `assemble()` reads it
+    /// and sets DOCKER_HOST appropriately before spawning. Free-form
+    /// string instead of a strongly-typed enum so we can extend
+    /// without a config-version bump; valid values mirror
+    /// `foyer_cli::docker_cmd::RuntimeKind::id()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_kind: Option<String>,
     /// Container image reference. Default
     /// `ghcr.io/hotspoons/foyer-studio:latest`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

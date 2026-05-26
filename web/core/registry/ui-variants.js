@@ -42,6 +42,7 @@
  */
 
 const _variants = new Map();
+const _aliases = new Map();
 
 /**
  * Register a UI variant. Idempotent — re-registering the same id
@@ -53,6 +54,17 @@ export function registerUiVariant(v) {
     throw new Error("registerUiVariant: need { id, boot, match, label }");
   }
   _variants.set(v.id, v);
+  // Register aliases so legacy URLs like `?ui=sprunki` keep
+  // resolving after a rename. Stored alongside the canonical
+  // entry — getUiVariant follows the alias indirection without
+  // exposing two entries to listUiVariants.
+  if (Array.isArray(v.aliases)) {
+    for (const a of v.aliases) {
+      if (typeof a === "string" && a && !_variants.has(a)) {
+        _aliases.set(a, v.id);
+      }
+    }
+  }
 }
 
 /** List all registered variants, in registration order. */
@@ -60,9 +72,11 @@ export function listUiVariants() {
   return Array.from(_variants.values());
 }
 
-/** Look up a variant by id. */
+/** Look up a variant by id (or alias). */
 export function getUiVariant(id) {
-  return _variants.get(id) || null;
+  if (_variants.has(id)) return _variants.get(id);
+  const canonical = _aliases.get(id);
+  return canonical ? _variants.get(canonical) || null : null;
 }
 
 /** Build the env snapshot used for auto-detection. */

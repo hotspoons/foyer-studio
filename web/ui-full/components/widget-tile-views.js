@@ -23,7 +23,7 @@ import { spawnWindowKind } from "foyer-ui-core/widgets/window.js";
 import "./track-editor-modal.js";
 import "./midi-editor.js";
 import "./beat-sequencer.js";
-import "./plugin-panel.js";
+import "foyer-ui-core/widgets/plugin-panel.js";
 import "./console-view.js";
 import "./diagnostics.js";
 import "./midi-devices-panel.js";

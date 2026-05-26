@@ -244,6 +244,35 @@
       </div>
     </section>
 
+    <!-- Page 1c: Docker runtime picker (macOS / Windows only).
+         Linux skips straight from Page 1 to Page 2 — the Linux flow
+         doesn't distinguish "which container runtime" because every
+         server distro that's running Docker is running Docker Engine
+         on the host's docker socket. Picker state tracks
+         `selectedRuntime` (a kind_id like "docker_desktop" /
+         "colima"); each card carries an `install_command` for the
+         user to copy when the runtime isn't installed yet. -->
+    <section id="page-runtime" class="page">
+      <div class="content">
+        <div class="breadcrumb">Docker › Container runtime</div>
+        <h1>Pick a container runtime</h1>
+        <p class="lede">
+          Foyer's backend runs inside a Linux container. Pick which
+          container engine on this Mac/PC should host it. Greyed-out
+          cards aren't installed yet — copy the install command, run
+          it in a terminal, then hit Re-check.
+        </p>
+        <div class="row" id="runtime-cards"></div>
+      </div>
+      <div class="actions">
+        <div class="left"><button data-act="back:mode">Back</button></div>
+        <div class="right">
+          <button data-act="refresh">Re-check</button>
+          <button class="primary" id="runtime-next" disabled data-act="goto-audio">Next</button>
+        </div>
+      </div>
+    </section>
+
     <!-- Page 2: Docker audio mode -->
     <section id="page-audio" class="page">
       <div class="content">
@@ -257,7 +286,7 @@
         <div class="row" id="audio-cards"></div>
       </div>
       <div class="actions">
-        <div class="left"><button data-act="back:mode">Back</button></div>
+        <div class="left"><button id="audio-back" data-act="back:mode">Back</button></div>
         <div class="right">
           <button data-act="refresh">Re-check</button>
           <button class="primary" id="audio-next" disabled data-act="goto-network">Next</button>
@@ -359,6 +388,15 @@
       // State
       let selectedAudio = null;
       let selectedNetwork = null;
+      // Runtime-kind id (matches `RuntimeKind::id()` on the Rust
+      // side). Only relevant on macOS / Windows; Linux flows skip
+      // the runtime page and leave this as null. Submitted to the
+      // Rust side in the docker wizard payload.
+      let selectedRuntime = null;
+      // Cached host_os pushed in alongside the doctor JSON so the
+      // picker can branch its flow without sniffing navigator.platform
+      // (which is unreliable under WebKit/xpra).
+      const HOST_OS = (window.__doctor && window.__doctor.host_os) || "linux";
 
       function renderCheckList(checks) {
         if (!checks || checks.length === 0) return '<em>No checks ran.</em>';
@@ -390,13 +428,29 @@
         const dock = anyDockerOk();
         const hostEl = document.getElementById("host-mini-checks");
         const dockEl = document.getElementById("docker-mini-checks");
-        hostEl.innerHTML = host.checks?.length
-          ? host.checks.slice(0, 3).map(c => {
-              const cls = c.ok ? "ok" : (c.severity === "warning" ? "warn" : "err");
-              const mark = c.ok ? "✓" : (c.severity === "warning" ? "⚠" : "✗");
-              return `<div class="check ${cls}"><span class="mark">${mark}</span><span class="body">${escapeHtml(c.label)}</span></div>`;
-            }).join("")
-          : "";
+        // Windows: Foyer's Ardour shim doesn't build for Windows
+        // (Ardour itself doesn't run there), so Host mode is
+        // unavailable. Surface that explicitly + disable the card
+        // so a kid clicking around doesn't end up in a dead-end.
+        const hostCard = document.querySelector('[data-act="goto-host"]');
+        if (HOST_OS === "windows") {
+          hostCard.disabled = true;
+          hostCard.title = "Host mode requires local Ardour, which isn't available on Windows.";
+          hostEl.innerHTML = `
+            <div class="check err"><span class="mark">✗</span><span class="body">
+              Ardour doesn't run on Windows. Use Docker mode →
+            </span></div>`;
+        } else {
+          hostCard.disabled = false;
+          hostCard.title = "";
+          hostEl.innerHTML = host.checks?.length
+            ? host.checks.slice(0, 3).map(c => {
+                const cls = c.ok ? "ok" : (c.severity === "warning" ? "warn" : "err");
+                const mark = c.ok ? "✓" : (c.severity === "warning" ? "⚠" : "✗");
+                return `<div class="check ${cls}"><span class="mark">${mark}</span><span class="body">${escapeHtml(c.label)}</span></div>`;
+              }).join("")
+            : "";
+        }
         const modes = ["integrated", "jack", "netjack"];
         dockEl.innerHTML = modes.map(m => {
           const d = DOCTOR[m] || { ok: false };
@@ -421,6 +475,70 @@
         `;
         // Host mode launches even with warnings — but we surface them.
         document.getElementById("host-launch").disabled = false;
+      }
+
+      // ── Page 1c (Docker runtime cards — macOS / Windows only) ───
+      function renderRuntimeCards() {
+        const root = document.getElementById("runtime-cards");
+        const runtimes = Array.isArray(DOCTOR.runtimes) ? DOCTOR.runtimes : [];
+        if (runtimes.length === 0) {
+          root.innerHTML = `
+            <div class="install-hint">
+              No runtime probe data — the Foyer CLI's
+              <code>doctor-runtimes</code> subcommand didn't return.
+              Try Re-check.
+            </div>`;
+          document.getElementById("runtime-next").disabled = true;
+          return;
+        }
+        root.innerHTML = "";
+        // Pre-select: prior choice if it's still present, else the
+        // first installed+default, else the first installed runtime.
+        if (selectedRuntime && !runtimes.some(r => r.kind_id === selectedRuntime && r.installed)) {
+          selectedRuntime = null;
+        }
+        if (!selectedRuntime) {
+          const def = runtimes.find(r => r.installed && r.default_on_this_os);
+          selectedRuntime = (def || runtimes.find(r => r.installed) || {}).kind_id || null;
+        }
+        for (const r of runtimes) {
+          const card = document.createElement("button");
+          card.className = "card";
+          card.disabled = !r.installed;
+          if (selectedRuntime === r.kind_id) card.classList.add("selected");
+          card.dataset.runtime = r.kind_id;
+          const statusBadge = r.installed
+            ? (r.running
+                ? `<span class="check ok"><span class="mark">✓</span><span class="body">Installed and running</span></span>`
+                : `<span class="check warn"><span class="mark">⚠</span><span class="body">Installed but daemon not running</span></span>`)
+            : `<span class="check err"><span class="mark">✗</span><span class="body">Not installed</span></span>`;
+          const installBlock = (!r.installed && r.install_command)
+            ? `<div class="install-hint">
+                 <div><strong>Install:</strong></div>
+                 <code>${escapeHtml(r.install_command)}</code>
+                 <div class="install-actions">
+                   <button data-copy="${escapeHtml(r.install_command)}">Copy</button>
+                 </div>
+               </div>`
+            : "";
+          card.innerHTML = `
+            <h2>${escapeHtml(r.label)}${r.default_on_this_os ? ' <span class="badge">default</span>' : ''}</h2>
+            <div class="desc">${escapeHtml(r.detail)}</div>
+            <div class="checks">${statusBadge}</div>
+            ${installBlock}
+          `;
+          if (r.installed) {
+            card.addEventListener("click", () => {
+              selectedRuntime = r.kind_id;
+              for (const c of root.querySelectorAll(".card")) c.classList.remove("selected");
+              card.classList.add("selected");
+              document.getElementById("runtime-next").disabled = false;
+            });
+          }
+          root.appendChild(card);
+        }
+        document.getElementById("runtime-next").disabled =
+          !selectedRuntime || !runtimes.some(r => r.kind_id === selectedRuntime && r.installed);
       }
 
       // ── Page 2 (Docker audio mode cards) ────────────────────────
@@ -468,9 +586,35 @@
         const t = ev.target.closest("[data-act],[data-net]");
         if (!t) return;
         const act = t.dataset.act;
-        if (act === "goto-host") { renderHostPage(); show("page-host"); return; }
-        if (act === "goto-docker") { renderAudioCards(); show("page-audio"); return; }
+        if (act === "goto-host") {
+          // Windows can't run Ardour locally — block the host path
+          // entirely and surface why. The Page-1 card is already
+          // disabled there, but defensive arm catches keyboard
+          // shortcut + future entrypoints.
+          if (HOST_OS === "windows") {
+            showToast("Host mode needs local Ardour — not available on Windows");
+            return;
+          }
+          renderHostPage();
+          show("page-host");
+          return;
+        }
+        if (act === "goto-docker") {
+          // macOS / Windows: pick a container runtime first.
+          // Linux: skip straight to the audio-mode page (every
+          // distro that has Docker has it on one well-known socket).
+          if (HOST_OS === "macos" || HOST_OS === "windows") {
+            renderRuntimeCards();
+            show("page-runtime");
+          } else {
+            renderAudioCards();
+            show("page-audio");
+          }
+          return;
+        }
+        if (act === "goto-audio") { renderAudioCards(); show("page-audio"); return; }
         if (act === "back:mode") { renderMiniChecks(); show("page-mode"); return; }
+        if (act === "back:runtime") { renderRuntimeCards(); show("page-runtime"); return; }
         if (act === "goto-network") {
           document.getElementById("netjack-fields").style.display =
             selectedAudio === "netjack" ? "" : "none";
@@ -509,12 +653,30 @@
           host_port: parseInt(document.getElementById("host-port").value, 10) || 3838,
           netjack_host: (document.getElementById("netjack-host").value || "").trim() || null,
           netjack_port: parseInt(document.getElementById("netjack-port").value, 10) || 19000,
+          // Linux pickers don't visit page-runtime so selectedRuntime
+          // stays null; serializing it as null on the wire is fine,
+          // the Rust side falls back to PATH probes.
+          runtime_kind: selectedRuntime,
         }));
       }
       function requestRefresh() {
         showToast("Re-checking…");
         pick("refresh");
       }
+      // Wire the audio page's Back button to point at the runtime
+      // page on macOS / Windows so back-navigation actually returns
+      // the user to their previous step. Linux skips page-runtime
+      // entirely and keeps the default back:mode wiring.
+      function wireAudioBackTarget() {
+        const back = document.getElementById("audio-back");
+        if (!back) return;
+        if (HOST_OS === "macos" || HOST_OS === "windows") {
+          back.dataset.act = "back:runtime";
+        } else {
+          back.dataset.act = "back:mode";
+        }
+      }
+
       // Rust pushes new doctor data back here after a refresh.
       window.applyDoctor = function (next) {
         DOCTOR = next || {};
@@ -522,6 +684,9 @@
         renderAudioCards();
         if (document.getElementById("page-host").classList.contains("active")) {
           renderHostPage();
+        }
+        if (document.getElementById("page-runtime").classList.contains("active")) {
+          renderRuntimeCards();
         }
         showToast("Updated");
       };
@@ -535,6 +700,7 @@
 
       // Initial render
       renderMiniChecks();
+      wireAudioBackTarget();
     </script>
   </body>
 </html>

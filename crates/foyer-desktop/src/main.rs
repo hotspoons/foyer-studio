@@ -94,20 +94,23 @@ enum Backend {
 }
 
 fn main() -> Result<()> {
-    // Clean baseline — we previously stacked half a dozen
-    // `WEBKIT_DISABLE_*` env vars + `HardwareAccelerationPolicy::Never`
-    // in pursuit of xpra compatibility, and the WebView still rendered
-    // as a solid white surface (DOM populated, devtools work,
-    // context menus paint — only the page content area is blank).
-    // Those layered workarounds were the *cause*, not the cure: with
-    // hardware acceleration policy forced to Never on webkit2gtk 2.4x,
-    // the page rendering surface allocates but never commits, while
-    // peripheral GTK widgets (inspector, menu) keep painting through
-    // their own paths. See [docs/DECISIONS.md] follow-up.
+    // Linux-only env priming. Clean baseline — we previously stacked
+    // half a dozen `WEBKIT_DISABLE_*` env vars +
+    // `HardwareAccelerationPolicy::Never` in pursuit of xpra
+    // compatibility, and the WebView still rendered as a solid white
+    // surface (DOM populated, devtools work, context menus paint —
+    // only the page content area is blank). Those layered workarounds
+    // were the *cause*, not the cure: with hardware acceleration
+    // policy forced to Never on webkit2gtk 2.4x, the page rendering
+    // surface allocates but never commits, while peripheral GTK
+    // widgets (inspector, menu) keep painting through their own
+    // paths. See [docs/DECISIONS.md] follow-up.
     //
     // Strategy: trust WebKit's default acceleration pipeline. The
     // only env var we still want is `GDK_BACKEND=x11` because GTK
-    // auto-pick of Wayland fails hard under xpra.
+    // auto-pick of Wayland fails hard under xpra. macOS uses WKWebView
+    // (no GDK), Windows uses WebView2 — neither reads this.
+    #[cfg(target_os = "linux")]
     if std::env::var_os("GDK_BACKEND").is_none() {
         // Safety: pre-thread-spawn env mutation.
         unsafe { std::env::set_var("GDK_BACKEND", "x11") };
@@ -503,6 +506,12 @@ struct DockerWizardChoice {
     netjack_host: Option<String>,
     #[serde(default)]
     netjack_port: Option<u16>,
+    /// Runtime flavor (`docker_desktop` | `colima` | `orbstack` |
+    /// `podman` | `podman_desktop` | `docker_engine` | `nerdctl`).
+    /// macOS + Windows pickers always set this; Linux pickers may
+    /// omit (the existing PATH-probe fallback picks one).
+    #[serde(default)]
+    runtime_kind: Option<String>,
 }
 
 fn default_host_port() -> u16 {
@@ -550,6 +559,11 @@ fn persist_and_relaunch(pick: PickResult) -> Result<()> {
             dcfg.mode = Some(choice.mode);
             dcfg.network = Some(choice.network);
             dcfg.host_port = Some(choice.host_port);
+            // Runtime kind: macOS / Windows pickers always submit
+            // one (the user clicked a card). Linux pickers may
+            // submit None, in which case we leave `runtime_kind`
+            // unset and the CLI falls back to PATH probes.
+            dcfg.runtime_kind = choice.runtime_kind.clone();
             if matches!(choice.mode, DockerMode::Netjack) {
                 dcfg.netjack_host = choice.netjack_host.clone();
                 dcfg.netjack_port = choice.netjack_port;
@@ -568,8 +582,10 @@ fn persist_and_relaunch(pick: PickResult) -> Result<()> {
 
     // Re-exec self with the new config in place. On Unix `exec`
     // replaces the current process so the user only ever sees one
-    // window; on Windows we'd spawn + exit. For now `cfg!(unix)`
-    // is fine — `foyer-desktop` doesn't target Windows yet.
+    // window. On Windows there is no exec — spawn a fresh child and
+    // exit; the window briefly closes and re-opens, but
+    // CreateProcess inherits the same console / stdio shape so the
+    // user sees a single window flicker, not a stuck zombie.
     let exe = std::env::current_exe().context("locate current exe")?;
     #[cfg(unix)]
     {
@@ -589,6 +605,7 @@ fn persist_and_relaunch(pick: PickResult) -> Result<()> {
 ///
 /// Spawns the following in parallel:
 ///   - `foyer doctor-host --json` (returns `{os, host}`)
+///   - `foyer doctor-runtimes` (returns the runtime-kind array)
 ///   - `foyer docker --integrated --doctor --json`
 ///   - `foyer docker --jack       --doctor --json`
 ///   - `foyer docker --netjack    --doctor --json`
@@ -602,6 +619,13 @@ fn build_doctor_payload() -> String {
     // `{"os": ..., "host": ...}` object.
     let host_bin = foyer_bin.clone();
     let host_handle = std::thread::spawn(move || host_doctor_json(host_bin.as_deref()));
+
+    // Runtime probe — emits a JSON array of {kind_id, label,
+    // installed, running, ...} that the picker renders as runtime
+    // cards on macOS / Windows. Cheap (pure FS probes), so we run it
+    // every time the picker re-renders.
+    let runtimes_bin = foyer_bin.clone();
+    let runtimes_handle = std::thread::spawn(move || runtimes_doctor_json(runtimes_bin.as_deref()));
 
     // Three docker-mode probes.
     let modes = ["integrated", "jack", "netjack"];
@@ -618,7 +642,23 @@ fn build_doctor_payload() -> String {
     let host_blob = host_handle
         .join()
         .unwrap_or_else(|_| "{\"os\":{},\"host\":{\"ok\":false,\"checks\":[]}}".into());
-    let mut pairs: Vec<String> = Vec::with_capacity(3);
+    let runtimes_blob = runtimes_handle.join().unwrap_or_else(|_| "[]".into());
+    let mut pairs: Vec<String> = Vec::with_capacity(4);
+    pairs.push(format!("\"runtimes\": {runtimes_blob}"));
+    // Surface the host platform so the picker can branch UI on it
+    // (windows hides the host card, macOS shows native-Ardour sub-
+    // mode, linux mirrors today's flow). We avoid relying on
+    // navigator.platform because the WebView's UA isn't always
+    // representative of the host — webkit2gtk reports linux even
+    // when xpra'd to a remote display.
+    let host_os = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+    pairs.push(format!("\"host_os\": \"{host_os}\""));
     for h in mode_handles {
         let (mode, json) = h
             .join()
@@ -626,9 +666,8 @@ fn build_doctor_payload() -> String {
         pairs.push(format!("\"{mode}\": {json}"));
     }
     // The host blob looks like `{"os": {...}, "host": {...}}`. Strip
-    // the trailing brace and splice the docker-mode entries inside
-    // so the result is a single flat object the picker can index by
-    // mode name directly.
+    // the trailing brace and splice the extra fields inside so the
+    // result is a single flat object the picker can index by name.
     let host_trimmed = host_blob.trim();
     let host_trimmed = host_trimmed
         .strip_suffix('}')
@@ -636,6 +675,19 @@ fn build_doctor_payload() -> String {
         .trim_end()
         .trim_end_matches('\n');
     format!("{}, {}\n}}", host_trimmed, pairs.join(", "))
+}
+
+fn runtimes_doctor_json(foyer_bin: Option<&Path>) -> String {
+    let Some(bin) = foyer_bin else { return "[]".into() };
+    let out = std::process::Command::new(bin)
+        .args(["doctor-runtimes"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            String::from_utf8(o.stdout).unwrap_or_else(|_| "[]".into())
+        }
+        _ => "[]".into(),
+    }
 }
 
 fn host_doctor_json(foyer_bin: Option<&Path>) -> String {
@@ -765,10 +817,22 @@ impl Drop for ChildGuard {
     fn drop(&mut self) {
         let Ok(mut guard) = self.0.lock() else { return };
         if let Some(mut child) = guard.take() {
-            // Try graceful shutdown first.
+            // Try graceful shutdown first. On unix that's SIGTERM —
+            // `foyer docker` traps it, sends SIGTERM into the
+            // container's PID 1, and the runtime's `--rm` cleans up.
+            // On Windows there is no SIGTERM equivalent for arbitrary
+            // child processes (CTRL_BREAK_EVENT only crosses console
+            // groups, which we don't share); fall back to the std
+            // Child::kill (TerminateProcess) immediately. The Docker
+            // Desktop daemon reaps the container's --rm out of band,
+            // so abrupt termination of the `foyer docker` shim is OK.
             #[cfg(unix)]
             unsafe {
                 libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+            }
+            #[cfg(windows)]
+            {
+                let _ = child.kill();
             }
             // Wait up to 5 s for the runtime to tear the container
             // down; if it doesn't, escalate to kill.
