@@ -222,17 +222,28 @@
       </div>
     </section>
 
-    <!-- Page 1b: Host mode dependency review -->
+    <!-- Page 1b: Host mode dependency review + sub-mode picker.
+         Two flavors of Host mode:
+           * native_ardour — spawn the local Ardour install as a
+             child, attach foyer-server to its shim socket, real
+             low-latency audio. Requires the right Ardour version.
+           * stub — foyer-server with the dummy backend; demo /
+             no-audio. Always available, useful when Ardour isn't
+             installed yet.
+         The picker renders a sub-mode card pair and a
+         dependency-status row for each. Selecting one + clicking
+         "Use Host mode" submits the sub-mode along with the host
+         pick. -->
     <section id="page-host" class="page">
       <div class="content">
         <div class="breadcrumb">Host mode</div>
         <h1>Run Foyer directly on this machine</h1>
         <p class="lede">
-          The native shell will embed <code>foyer-server</code> in this
-          window and look for a local Ardour install (with the Foyer
-          shim) to attach to. The checks below tell you what to install
-          first.
+          Foyer's sidecar runs inside this window. Pick whether to
+          attach a local Ardour for real audio, or run the demo
+          backend.
         </p>
+        <div class="row" id="host-submode-cards"></div>
         <div id="host-checks-full"></div>
       </div>
       <div class="actions">
@@ -466,7 +477,12 @@
       }
 
       // ── Page 1b (Host mode detail) ──────────────────────────────
+      // Sub-mode state. Defaults to native-Ardour when the install
+      // probe says it's there; falls back to stub otherwise so the
+      // launch button is never disabled on a fresh boot.
+      let selectedHostSubMode = null;
       function renderHostPage() {
+        renderHostSubModeCards();
         const host = DOCTOR.host || { ok: false, checks: [] };
         const cont = document.getElementById("host-checks-full");
         cont.innerHTML = `
@@ -475,6 +491,87 @@
         `;
         // Host mode launches even with warnings — but we surface them.
         document.getElementById("host-launch").disabled = false;
+      }
+      function renderHostSubModeCards() {
+        const root = document.getElementById("host-submode-cards");
+        const ard = DOCTOR.ardour || {};
+        const versionLabel = ard.version
+          ? `${ard.version}${ard.version_ok ? " (ABI matches)" : ` (expected ${ard.expected_version || "9.x"})`}`
+          : "version unknown";
+        const nativeStatus = ard.installed
+          ? (ard.version_ok
+              ? `<span class="check ok"><span class="mark">✓</span><span class="body">Ardour ${escapeHtml(versionLabel)} at ${escapeHtml(ard.binary || "")}</span></span>`
+              : `<span class="check warn"><span class="mark">⚠</span><span class="body">Ardour found (${escapeHtml(versionLabel)}) — may crash on connect</span></span>`)
+          : `<span class="check err"><span class="mark">✗</span><span class="body">Ardour not installed — download below</span></span>`;
+        // macOS gets the in-window download button; Linux users
+        // already have an apt/dnf/pacman copy in their install-hint
+        // block above so we just show the link.
+        const downloadBtn = (HOST_OS === "macos" && !ard.installed)
+          ? `<div class="install-hint">
+               <div><strong>Ardour is donationware.</strong> Please consider supporting the
+               project at <a href="https://community.ardour.org/donate" target="_blank">community.ardour.org/donate</a>
+               — the demo build cuts audio after 10 minutes per session;
+               donors get unrestricted use plus a signed/notarized build.</div>
+               <div class="install-actions" style="margin-top:8px">
+                 <button data-act="download-ardour" class="primary">Download Ardour demo</button>
+                 <button data-act="refresh">Re-check after installing</button>
+               </div>
+             </div>`
+          : "";
+        // Default selection — prefer native if installed + ABI-OK,
+        // otherwise stub.
+        if (!selectedHostSubMode) {
+          selectedHostSubMode = (ard.installed && ard.version_ok) ? "native_ardour" : "stub";
+        }
+        const cards = [
+          {
+            id: "native_ardour",
+            title: "Native Ardour (low latency)",
+            desc: "Launches Ardour on this machine, connects through Foyer's shim. Real audio, real plugins, real-time monitoring.",
+            footer: nativeStatus,
+            blocked: !ard.installed || !ard.version_ok,
+          },
+          {
+            id: "stub",
+            title: "Demo backend (no audio)",
+            desc: "Runs Foyer's stub sidecar. Everything works EXCEPT the audio path — useful for exploring the UI without installing Ardour.",
+            footer: `<span class="check ok"><span class="mark">✓</span><span class="body">Always available</span></span>`,
+            blocked: false,
+          },
+        ];
+        root.innerHTML = "";
+        for (const c of cards) {
+          const btn = document.createElement("button");
+          btn.className = "card";
+          btn.disabled = c.blocked;
+          if (selectedHostSubMode === c.id) btn.classList.add("selected");
+          btn.dataset.hostsub = c.id;
+          btn.innerHTML = `
+            <h2>${escapeHtml(c.title)}</h2>
+            <div class="desc">${escapeHtml(c.desc)}</div>
+            <div class="checks">${c.footer}</div>
+          `;
+          if (!c.blocked) {
+            btn.addEventListener("click", () => {
+              selectedHostSubMode = c.id;
+              for (const x of root.querySelectorAll(".card")) x.classList.remove("selected");
+              btn.classList.add("selected");
+            });
+          }
+          root.appendChild(btn);
+        }
+        // Append the Ardour-download panel BELOW the cards so it's
+        // not buried in the dependency-checks block.
+        const extra = document.createElement("div");
+        extra.innerHTML = downloadBtn;
+        root.parentNode.insertBefore(extra, document.getElementById("host-checks-full"));
+        // Clean up stale download panels from previous renders.
+        for (const sib of [...root.parentNode.children]) {
+          if (sib !== extra && sib.dataset && sib.dataset.ardourPanel === "1") {
+            sib.remove();
+          }
+        }
+        if (downloadBtn) extra.dataset.ardourPanel = "1";
       }
 
       // ── Page 1c (Docker runtime cards — macOS / Windows only) ───
@@ -624,7 +721,14 @@
         }
         if (act === "back:audio") return show("page-audio");
         if (t.dataset.net) { selectNetwork(t.dataset.net); return; }
-        if (act === "pick:host") return pick("host");
+        if (act === "pick:host") {
+          // Submit the host sub-mode along with the parent
+          // selection. Defaults to stub if for some reason the
+          // sub-mode picker never landed.
+          const sub = selectedHostSubMode || "stub";
+          return pick("host:" + JSON.stringify({ sub_mode: sub }));
+        }
+        if (act === "download-ardour") return pick("download-ardour");
         if (act === "launch") return submitLaunch();
         if (act === "refresh") return requestRefresh();
       });

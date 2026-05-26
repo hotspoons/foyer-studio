@@ -23,6 +23,7 @@ use clap::Parser;
 use foyer_backend_host::discovery;
 use foyer_config::{self as cfg, BackendKind, Config};
 
+mod ardour_locate;
 mod ardour_xml;
 mod cli;
 mod docker_cmd;
@@ -141,6 +142,15 @@ async fn main() -> Result<()> {
         Command::DoctorRuntimes => {
             let runtimes = docker_cmd::detect_runtimes();
             println!("{}", docker_cmd::runtimes_to_json(&runtimes));
+            Ok(())
+        }
+        Command::DoctorArdour => {
+            // Picker eats the failure path (no Ardour installed) as
+            // `{"installed": false, ...}` rather than a non-zero
+            // exit, so the wizard can render an install card
+            // instead of crashing the doctor sweep.
+            let loc = ardour_locate::locate(None).ok();
+            println!("{}", ardour_locate::locate_to_json(loc.as_ref()));
             Ok(())
         }
         Command::Backends => {

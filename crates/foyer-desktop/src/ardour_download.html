@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Foyer Studio — Download Ardour</title>
+    <style>
+      :root {
+        --bg: #0e1116;
+        --panel: #161b22;
+        --panel-hi: #1f262f;
+        --border: #1f2630;
+        --text: #e5e8ee;
+        --mute: #8a93a3;
+        --accent: #6c8cff;
+        --ok: #4ade80;
+        --err: #f87171;
+      }
+      html, body { margin: 0; padding: 0; height: 100%; }
+      body {
+        background: var(--bg); color: var(--text);
+        font-family: system-ui, sans-serif; font-size: 13px;
+        display: flex; flex-direction: column;
+      }
+      header {
+        padding: 18px 22px; background: var(--panel);
+        border-bottom: 1px solid var(--border);
+      }
+      h1 { margin: 0 0 4px 0; font-size: 16px; }
+      p.lede { margin: 0; color: var(--mute); font-size: 12px; }
+      .pitch {
+        margin: 14px 22px; padding: 14px 18px;
+        background: linear-gradient(180deg, #1c2340 0%, #161b32 100%);
+        border-left: 3px solid var(--accent); border-radius: 6px;
+      }
+      .pitch strong { color: #fff; }
+      .pitch a { color: var(--accent); }
+      .actions {
+        display: flex; gap: 10px; flex-wrap: wrap;
+        padding: 0 22px 12px 22px;
+      }
+      button {
+        padding: 8px 14px; border-radius: 6px;
+        border: 1px solid var(--border); background: var(--panel);
+        color: var(--text); cursor: pointer; font: inherit;
+      }
+      button.primary {
+        background: var(--accent); border-color: var(--accent); color: #fff;
+      }
+      button:hover { background: var(--panel-hi); }
+      button.primary:hover { filter: brightness(1.1); }
+      .status {
+        padding: 8px 22px; font-size: 12px; color: var(--mute);
+      }
+      .status.err { color: var(--err); }
+      .status.ok  { color: var(--ok); }
+      iframe {
+        flex: 1; width: 100%; border: 0;
+        background: #fff;
+      }
+      .frame-wrap { flex: 1; position: relative; }
+      .frame-wrap.empty::before {
+        content: "Ardour's download page lives at community.ardour.org. Click ‘Open in iframe’ to load it inline, or ‘Open in default browser’ if your WebView can't render it.";
+        position: absolute; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        text-align: center; padding: 20px; color: var(--mute);
+      }
+      .small { font-size: 11px; color: var(--mute); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Download Ardour for macOS</h1>
+      <p class="lede">
+        Foyer's native-Ardour mode needs a local Ardour install. The
+        community build is donationware — please consider supporting
+        the project.
+      </p>
+    </header>
+
+    <div class="pitch">
+      <strong>Ardour is donationware.</strong>
+      Foyer Studio is a separate project that integrates with Ardour.
+      The Ardour developers ask for a one-time
+      <a href="https://community.ardour.org/donate" target="_blank">$45 donation</a>
+      to support the engine you'll be using — donors receive a
+      signed/notarized build with no 10-minute audio cutoff. The free
+      demo IS fully functional (every feature works), but audio
+      silences after ~10&nbsp;minutes per launch as a nag. For
+      production use we strongly recommend donating.
+    </div>
+
+    <div class="actions">
+      <button class="primary" data-act="open-donate">Donate &amp; download (recommended)</button>
+      <button data-act="open-demo">Just the free demo</button>
+      <button data-act="iframe-demo">Load demo page inline</button>
+      <button data-act="back">← Back to picker</button>
+    </div>
+
+    <div id="status" class="status"></div>
+    <div class="frame-wrap empty" id="frame-wrap"></div>
+
+    <script>
+      // Three navigation outcomes:
+      //   1. "Donate & download" — opens community.ardour.org/donate
+      //      in the user's default browser. Hard cut-out so we
+      //      don't try to game their donation flow.
+      //   2. "Just the free demo" — opens the download page in the
+      //      default browser; user clicks through manually. Safe
+      //      fallback when the in-iframe scriptlet route fails.
+      //   3. "Load demo page inline" — iframes the download page
+      //      inside this window and (best-effort) tries to extract
+      //      the resulting .dmg URL once the user has clicked
+      //      through. The Rust side downloads + mounts + installs.
+      //
+      // Why three options instead of one slick "magic install":
+      // Ardour's community page is donationware-respecting by
+      // design — they want eyes on the donation prompt. We don't
+      // auto-bypass anything. The inline iframe + auto-extract is
+      // an *optional* convenience for users who explicitly chose
+      // the demo route; everyone else routes through their browser
+      // to see the full donation experience.
+      const DOWNLOAD_URL_DEMO =
+        "https://community.ardour.org/download?platform=mac&architecture=arm64&type=compiled&paymentSelection=options";
+      const DOWNLOAD_URL_DONATE =
+        "https://community.ardour.org/donate";
+
+      function ipc(msg) {
+        if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(msg);
+      }
+      function setStatus(text, cls) {
+        const el = document.getElementById("status");
+        el.textContent = text;
+        el.className = "status" + (cls ? " " + cls : "");
+      }
+
+      function openExternal(url) {
+        // Wry's IPC trampoline handles the external open via a
+        // dedicated `open-external:` message the Rust side parses
+        // out. Most webview backends DO support a regular
+        // window.open(url, "_blank") but its reliability varies
+        // (WebKit2GTK opens in same frame; WebView2 spawns a
+        // detached IE host). Using IPC keeps the behaviour
+        // consistent across all three OSes.
+        ipc("open-external:" + url);
+      }
+
+      document.addEventListener("click", (ev) => {
+        const t = ev.target.closest("[data-act]");
+        if (!t) return;
+        const act = t.dataset.act;
+        if (act === "open-donate") return openExternal(DOWNLOAD_URL_DONATE);
+        if (act === "open-demo")   return openExternal(DOWNLOAD_URL_DEMO);
+        if (act === "iframe-demo") return loadIframe();
+        if (act === "back")        return ipc("ardour-download-back");
+      });
+
+      function loadIframe() {
+        const wrap = document.getElementById("frame-wrap");
+        wrap.classList.remove("empty");
+        wrap.innerHTML = "";
+        const f = document.createElement("iframe");
+        f.id = "demo-frame";
+        // ardour's community page uses a server-rendered form. We
+        // load it inside our WebView so cookies + same-origin land
+        // on their domain — this is the same trust model as
+        // opening their page in a regular browser, just inside
+        // our window.
+        f.src = DOWNLOAD_URL_DEMO;
+        f.referrerPolicy = "no-referrer-when-downgrade";
+        f.addEventListener("load", () => {
+          setStatus("Page loaded — click the free-download radio and submit. We'll try to capture the resulting .dmg URL.", "ok");
+          tryWireScraper(f);
+        });
+        wrap.appendChild(f);
+        setStatus("Loading community.ardour.org…");
+      }
+
+      // Best-effort nonce / form scraper. Ardour's download page
+      // structure has historically been a single <form> with a
+      // hidden nonce field and a radio group keyed by donation
+      // amount; on submit it POSTs and the response is the .dmg
+      // download. We watch for the iframe to navigate to a
+      // resource that ends in `.dmg` and ship the URL to Rust.
+      //
+      // TODO(M3.3): If Ardour changes their flow, this scraper
+      // silently fails and the user just downloads via their
+      // browser (the two other buttons above). Worth re-validating
+      // on each Ardour release.
+      function tryWireScraper(frame) {
+        let lastUrl = null;
+        const tick = setInterval(() => {
+          let u = null;
+          try { u = frame.contentWindow?.location?.href || null; }
+          catch (_) { /* cross-origin after the POST — opaque, expected */ }
+          if (u && u !== lastUrl) {
+            lastUrl = u;
+            if (/\.dmg($|\?)/i.test(u)) {
+              setStatus("Capturing download — handing to Foyer for install…", "ok");
+              ipc("ardour-dmg-url:" + u);
+              clearInterval(tick);
+            }
+          }
+        }, 750);
+        // Stop after 10 minutes — the user has either downloaded
+        // by then or moved on.
+        setTimeout(() => clearInterval(tick), 10 * 60 * 1000);
+      }
+    </script>
+  </body>
+</html>

@@ -11,7 +11,22 @@
 import { LitElement, html, css } from "lit";
 import { sprunkiStore, resetSprunkiStore } from "../state-store.js";
 import { getPatch, PATCHES } from "../patches.js";
+import {
+  instrumentCatalog,
+  onPluginCatalog,
+  pluginByUri,
+  refreshPluginCatalog,
+} from "../plugin-catalog.js";
+import {
+  fetchPresetsForInstance,
+  onPresets,
+  presetsForUri,
+} from "../plugin-presets.js";
 import "./chord-strip.js";
+import "./searchable-select.js";
+// Plugin parameter panel — moved to ui-core/widgets/ 2026-05-26 so
+// Sprunkadoo can embed it for the "Tweak" affordance on each costume.
+import "foyer-ui-core/widgets/plugin-panel.js";
 
 // Full GM Level 1 instrument bank, grouped by family. Each entry is
 // `{ id, label }`; the dropdown groups them under <optgroup>s so a
@@ -118,6 +133,13 @@ export class SprunkiPreferencesModal extends LitElement {
      *  Replaces the native confirm() so the kid sees the same red-X
      *  visual language as every other Sprunkadoo modal. */
     _confirmingClear: { type: Boolean, state: true },
+    /** Catalog tick — bump on plugin/preset cache updates so the
+     *  selects re-render with fresh options. */
+    _catRev: { type: Number, state: true },
+    /** When set, render the parameter-panel modal for the named
+     *  patch id. Picks up the LIVE PluginInstance whose URI matches
+     *  the costume's effective instrument URI. */
+    _tweakPatchId: { type: String, state: true },
   };
   static styles = css`
     :host {
@@ -301,6 +323,121 @@ export class SprunkiPreferencesModal extends LitElement {
       color: #fff;
     }
     .reset-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* Wide costume row — label on row 1, multi-control strip on row 2.
+       Lets the plugin/program/preset selects expand to readable widths
+       even with long entries like "Surge XT (Surge Synth Team)". */
+    .patch-row-wide {
+      display: block;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .patch-row-wide:last-child { border-bottom: 0; }
+    .patch-row-wide .patch-row-label {
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .patch-row-wide .patch-row-label .swatch {
+      width: 14px; height: 14px;
+      border-radius: 4px;
+      flex: 0 0 14px;
+    }
+    .patch-row-wide .patch-name {
+      font-size: 13px;
+      font-weight: 700;
+      color: #e5e8ee;
+    }
+    .patch-controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr auto auto;
+      gap: 6px;
+      align-items: center;
+    }
+    .control-spacer {
+      /* Reserves the GM-picker column when the active plugin doesn't
+         honour GM program changes, so the rest of the row stays
+         column-aligned across siblings. */
+    }
+    .plugin-picker,
+    .preset-picker,
+    .prog-picker {
+      min-width: 0;
+      width: 100%;
+    }
+    .patch-row-error {
+      margin-top: 6px;
+      padding: 6px 10px;
+      background: rgba(229, 77, 58, 0.14);
+      border: 1px solid rgba(229, 77, 58, 0.45);
+      border-radius: 6px;
+      color: #ffb8ab;
+      font: 500 12px system-ui, sans-serif;
+    }
+    .tweak-btn {
+      background: rgba(108, 92, 255, 0.18);
+      border: 1px solid rgba(108, 92, 255, 0.45);
+      color: #d8d5ff;
+      padding: 6px 12px;
+      border-radius: 7px;
+      font: 600 12px system-ui, sans-serif;
+      cursor: pointer;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .tweak-btn:hover:not(:disabled) {
+      background: rgba(108, 92, 255, 0.34);
+      color: #fff;
+    }
+    .tweak-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .catalog-loading {
+      padding: 8px 0;
+      color: rgba(255,255,255,0.55);
+    }
+
+    /* Tweak modal — full foyer-plugin-panel embedded for the costume's
+       currently-loaded plugin. */
+    .tweak-veil {
+      position: fixed; inset: 0;
+      background: rgba(8, 10, 16, 0.78);
+      z-index: 10000;
+      display: grid; place-items: center;
+    }
+    .tweak-panel {
+      background: #161b22;
+      border: 1px solid #2a3140;
+      border-radius: 12px;
+      width: min(760px, 96vw);
+      max-height: 86vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+    }
+    .tweak-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .tweak-title {
+      font: 800 14px system-ui, sans-serif;
+      color: #fff;
+    }
+    .tweak-plugin-panel {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .tweak-empty {
+      padding: 24px;
+      color: rgba(255,255,255,0.7);
+    }
+    .tweak-header .close {
+      position: static;
+      width: 30px; height: 30px;
+    }
     .slot-row-label {
       font-size: 12px; font-weight: 600; color: #e5e8ee;
     }
@@ -415,9 +552,24 @@ export class SprunkiPreferencesModal extends LitElement {
     this._rev = 0;
     this._showAdvanced = false;
     this._confirmingClear = false;
+    this._catRev = 0;
+    this._tweakPatchId = null;
+    this._presetUnsubs = new Map();   // uri -> unsubscribe fn
+    this._catalogUnsub = null;
+    // patchId -> { uri, at } for the most recent failed instrument
+    // load. Shown as an inline error under the affected row so the
+    // kid sees why their pick "did nothing." Cleared on next change.
+    this._loadFails = new Map();
     this._listener = () => { this._rev++; this.requestUpdate(); };
     this._onHostClick = (e) => this._onBackdropClick(e);
     this._onKey = (e) => { if (e.key === "Escape") this._close(); };
+    this._onPluginLoadFailed = (e) => {
+      const { patchId, uri } = e.detail || {};
+      if (!patchId) return;
+      this._loadFails.set(patchId, { uri, at: Date.now() });
+      this._rev++;
+      this.requestUpdate();
+    };
   }
   connectedCallback() {
     super.connectedCallback();
@@ -425,10 +577,21 @@ export class SprunkiPreferencesModal extends LitElement {
     this._store.addEventListener("parental-changed", this._listener);
     this._store.addEventListener("asset-source-changed", this._listener);
     this._store.addEventListener("patch-override-changed", this._listener);
+    // Plugin catalog — re-render the Advanced section as instruments
+    // land in the scan. The catalog is a lazy global; if nothing has
+    // kicked it off yet we trigger a fetch now so the picker isn't
+    // empty when the kid opens prefs the first time.
+    this._catalogUnsub = onPluginCatalog(() => {
+      this._catRev++;
+      this.requestUpdate();
+    });
+    const f = globalThis.__foyer;
+    if (f?.ws) refreshPluginCatalog(f.ws);
     // Click on the dimmed backdrop (= the host element itself,
     // not the inner panel) dismisses. ESC also dismisses.
     this.addEventListener("click", this._onHostClick);
     document.addEventListener("keydown", this._onKey);
+    globalThis.addEventListener?.("sprunki-plugin-load-failed", this._onPluginLoadFailed);
   }
   disconnectedCallback() {
     super.disconnectedCallback();
@@ -436,8 +599,12 @@ export class SprunkiPreferencesModal extends LitElement {
     this._store.removeEventListener("parental-changed", this._listener);
     this._store.removeEventListener("asset-source-changed", this._listener);
     this._store.removeEventListener("patch-override-changed", this._listener);
+    if (this._catalogUnsub) this._catalogUnsub();
+    for (const unsub of this._presetUnsubs.values()) unsub();
+    this._presetUnsubs.clear();
     this.removeEventListener("click", this._onHostClick);
     document.removeEventListener("keydown", this._onKey);
+    globalThis.removeEventListener?.("sprunki-plugin-load-failed", this._onPluginLoadFailed);
   }
 
   _close() {
@@ -537,18 +704,59 @@ export class SprunkiPreferencesModal extends LitElement {
    *  override on the patch (not the slot) and re-applies the
    *  effective program to every slot currently holding the
    *  costume. */
-  _onPickPatchProgram(patchId, gmProgram, gmChannel) {
+  // ── per-costume override event dispatchers ────────────────────
+  _dispatchOverridePatch(patchId, patch) {
     this.dispatchEvent(new CustomEvent("patch-override-change", {
-      detail: { patchId, gmProgram, gmChannel },
+      detail: { patchId, patch },
+      bubbles: true, composed: true,
+    }));
+  }
+  _onPickPatchPlugin(patchId, instrumentUri, defaultUri) {
+    // Clear any prior failure note — the kid is trying a different
+    // plugin now, the "couldn't load" line for the previous attempt
+    // is no longer relevant.
+    if (this._loadFails.has(patchId)) {
+      this._loadFails.delete(patchId);
+    }
+    // If the kid picks the patch's declared default, clear the
+    // override entirely (no point storing a setting that matches
+    // the patch). Otherwise set instrument_uri AND drop any stale
+    // preset_id / params (different plugin, different param schema).
+    if (!instrumentUri || instrumentUri === defaultUri) {
+      this._dispatchOverridePatch(patchId, {
+        instrument_uri: null, preset_id: null, params: null,
+      });
+    } else {
+      this._dispatchOverridePatch(patchId, {
+        instrument_uri: instrumentUri,
+        preset_id: null,
+        params: null,
+      });
+    }
+  }
+  _onPickPatchProgram(patchId, gmProgram, gmChannel) {
+    if (gmProgram == null) {
+      this._dispatchOverridePatch(patchId, { gm_program: null, gm_channel: null });
+    } else {
+      this._dispatchOverridePatch(patchId, {
+        gm_program: Number(gmProgram) | 0,
+        gm_channel: gmChannel != null ? (Number(gmChannel) | 0) : 0,
+      });
+    }
+  }
+  _onPickPatchPreset(patchId, presetId) {
+    this._dispatchOverridePatch(patchId, {
+      preset_id: presetId || null,
+    });
+  }
+  _onResetOverride(patchId) {
+    this.dispatchEvent(new CustomEvent("patch-override-change", {
+      detail: { patchId, patch: null },
       bubbles: true, composed: true,
     }));
   }
 
-  /** Fires `open-arranger` — the parent app handles mounting
-   *  the (yet-to-be-built) arrangement modal. For now this
-   *  alerts so the kid sees the affordance exists; the modal
-   *  itself ships next pass. Plan is in
-   *  docs/SPRUNKADOO_VISION.md → "Arrangement editor". */
+  /** Fires `open-arranger`. */
   _onOpenArranger() {
     this.dispatchEvent(new CustomEvent("open-arranger", {
       bubbles: true, composed: true,
@@ -556,88 +764,244 @@ export class SprunkiPreferencesModal extends LitElement {
   }
 
   _renderAdvanced() {
-    // Per-COSTUME overrides — one row per patch in the catalog,
-    // independent of which slots currently hold the costume. The
-    // kid sets "Sun → Music Box" once and every slot wearing Sun
-    // plays Music Box. Survives sessions.
     const drums = PATCHES.filter((p) => p.mode === "drum");
     const pitched = PATCHES.filter((p) => p.mode !== "drum");
+    const catalog = instrumentCatalog();
+    const catalogLoaded = catalog.length > 0;
     return html`
       <div class="section">
-        <div class="section-label">Advanced — per-costume sound override</div>
+        <div class="section-label">Advanced — per-costume sound</div>
         <div class="small advanced-intro">
-          Pick a different GM instrument (or drum kit) for each
-          costume. Applies to every sprunki on stage wearing that
-          costume.
+          Each costume binds to a specific synth or drum plugin. Pick a
+          different plugin to change the actual sound source; pick a
+          preset for plugins that ship them; press <strong>Tweak</strong>
+          to dial in parameters by hand. Overrides apply to every
+          sprunki on stage wearing that costume and survive sessions.
         </div>
+        ${!catalogLoaded ? html`
+          <div class="catalog-loading small">Scanning installed instrument plugins…</div>
+        ` : ""}
         <div class="patch-group-label">Drums</div>
-        ${drums.map((p) => this._renderPatchRow(p))}
+        ${drums.map((p) => this._renderPatchRow(p, catalog))}
         <div class="patch-group-label">Pitched</div>
-        ${pitched.map((p) => this._renderPatchRow(p))}
+        ${pitched.map((p) => this._renderPatchRow(p, catalog))}
       </div>
     `;
   }
 
-  _renderPatchRow(patch) {
-    const isDrums = (patch.gm_channel ?? 0) === 9;
-    const override = this._store.patchOverride(patch.id);
-    const effectiveProg = override?.gm_program ?? patch.gm_program ?? 0;
-    const channel = override?.gm_channel ?? patch.gm_channel ?? 0;
-    const isCustomized = !!override;
+  /** One costume row in the Advanced section. Layout (LTR):
+   *    [swatch + label]  [Plugin ▾]  [GM ▾ if gmsynth-class]
+   *    [Preset ▾]  [Tweak]  [Reset]
+   */
+  _renderPatchRow(patch, catalog) {
+    const override = this._store.patchOverride(patch.id) || {};
+    const effectiveUri = override.instrument_uri || patch.instrument_uri;
+    const effectivePlugin = pluginByUri(effectiveUri);
+    const isCustomized = Object.keys(override).length > 0;
+    // GM program picker is only meaningful for plugins that respond
+    // to MIDI bank/program (gmsynth / fluidsynth). AvlDrums and
+    // friends ignore it — hide the dropdown for those.
+    const isProgrammable = effectiveUri === "http://gareus.org/oss/lv2/gmsynth"
+                        || effectiveUri === "urn:ardour:a-fluidsynth";
+    const channel = override.gm_channel ?? patch.gm_channel ?? 0;
+    const effectiveProg = override.gm_program ?? patch.gm_program ?? 0;
+    // Resolve a live PluginInstance for the preset + tweak views.
+    const liveInstance = this._findLiveInstanceForUri(effectiveUri);
+    // Hydrate preset listener + auto-fetch when we have a live
+    // instance for the costume's effective plugin.
+    if (liveInstance && effectiveUri) {
+      const ws = globalThis.__foyer?.ws;
+      if (ws) fetchPresetsForInstance(ws, effectiveUri, liveInstance.id);
+      if (!this._presetUnsubs.has(effectiveUri)) {
+        const unsub = onPresets(effectiveUri, () => {
+          this._catRev++;
+          this.requestUpdate();
+        });
+        this._presetUnsubs.set(effectiveUri, unsub);
+      }
+    }
+    const presets = effectiveUri ? presetsForUri(effectiveUri) : [];
+
+    const failure = this._loadFails.get(patch.id);
+    const failedPlugin = failure ? pluginByUri(failure.uri) : null;
+
     return html`
-      <div class="patch-row" style="--cc:${patch.color || "#666"};">
+      <div class="patch-row patch-row-wide" style="--cc:${patch.color || "#666"};">
         <div class="patch-row-label">
           <span class="swatch" style="background:${patch.color || "#444"};"></span>
           <span class="patch-name">${patch.label}</span>
-          <small>
-            ${isDrums ? `kit ${effectiveProg}` : `GM ${effectiveProg}`}
-            ${isCustomized ? html`<span class="badge">CUSTOM</span>` : ""}
-          </small>
+          ${isCustomized ? html`<span class="badge">CUSTOM</span>` : ""}
         </div>
-        ${isDrums
-          ? this._renderDrumKitPicker(patch.id, effectiveProg)
-          : this._renderGmPicker(patch.id, effectiveProg, channel)}
-        <button
-          class="reset-btn"
-          title=${isCustomized ? "Restore the default sound for this costume" : "Already default"}
-          ?disabled=${!isCustomized}
-          @click=${() => this._onPickPatchProgram(patch.id, null, null)}
-        >Reset</button>
+        <div class="patch-controls">
+          ${this._renderPluginPicker(patch, catalog, effectiveUri)}
+          ${isProgrammable
+            ? this._renderGmPicker(patch.id, effectiveProg, channel)
+            : html`<span class="control-spacer"></span>`}
+          ${this._renderPresetPicker(patch.id, presets, override.preset_id, !liveInstance)}
+          <button
+            class="tweak-btn"
+            ?disabled=${!liveInstance}
+            title=${liveInstance
+              ? `Open the parameter panel for ${effectivePlugin?.name || "this plugin"}`
+              : "Drop this costume on a stage slot to see parameters"}
+            @click=${() => { this._tweakPatchId = patch.id; }}
+          >Tweak</button>
+          <button
+            class="reset-btn"
+            ?disabled=${!isCustomized}
+            title=${isCustomized ? "Restore default plugin + program + preset" : "Already default"}
+            @click=${() => this._onResetOverride(patch.id)}
+          >Reset</button>
+        </div>
+        ${failure ? html`
+          <div class="patch-row-error">
+            Couldn't load ${failedPlugin?.name || failure.uri}. Try a different plugin.
+          </div>
+        ` : ""}
       </div>
+    `;
+  }
+
+  /** Plugin picker — every installed instrument from the live
+   *  catalog, grouped by vendor for easy scanning. Falls back to
+   *  the patch's declared instrument if the catalog hasn't loaded
+   *  yet. */
+  _renderPluginPicker(patch, catalog, effectiveUri) {
+    // Group entries by vendor (or "Other" if missing).
+    const byVendor = new Map();
+    for (const p of catalog) {
+      const v = p.vendor || "Other";
+      if (!byVendor.has(v)) byVendor.set(v, []);
+      byVendor.get(v).push(p);
+    }
+    const vendors = Array.from(byVendor.keys()).sort();
+    for (const v of vendors) byVendor.get(v).sort((a, b) => a.name.localeCompare(b.name));
+    const haveEffective = catalog.some((p) => p.uri === effectiveUri);
+    const items = [];
+    // Pin the patch's declared default to the very top so the kid can
+    // always see "what came stock" without scrolling. Also covers the
+    // case where the catalog scan hasn't yet surfaced the default URI.
+    if (patch.instrument_uri) {
+      const def = catalog.find((p) => p.uri === patch.instrument_uri);
+      items.push({
+        value: patch.instrument_uri,
+        label: def?.name || patch.instrument_uri,
+        sublabel: "default",
+        group: "",
+      });
+    }
+    if (!haveEffective && effectiveUri && effectiveUri !== patch.instrument_uri) {
+      items.push({ value: effectiveUri, label: effectiveUri, group: "" });
+    }
+    for (const v of vendors) {
+      for (const p of byVendor.get(v)) {
+        if (p.uri === patch.instrument_uri) continue;  // already pinned at top
+        items.push({
+          value: p.uri || "",
+          label: p.name,
+          group: v,
+        });
+      }
+    }
+    return html`
+      <sprunki-searchable-select
+        class="plugin-picker"
+        title="Instrument plugin for this costume"
+        placeholder="Pick an instrument"
+        .items=${items}
+        .value=${effectiveUri || ""}
+        @change=${(e) => this._onPickPatchPlugin(patch.id, e.detail.value, patch.instrument_uri)}
+      ></sprunki-searchable-select>
     `;
   }
 
   _renderGmPicker(patchId, effectiveProg, channel) {
+    // For drum-channel slots (channel=9) show the GM Level 1 drum
+    // kits (only fluidsynth honours these); for everything else,
+    // the full 128 GM melodic instruments grouped by family.
+    if (channel === 9) {
+      const items = GM_DRUM_KITS.map((k) => ({
+        value: String(k.id),
+        label: k.label,
+      }));
+      return html`
+        <sprunki-searchable-select
+          class="prog-picker"
+          title="GM drum kit (only honoured by fluidsynth; AvlDrums ignores)"
+          placeholder="Pick a drum kit"
+          .items=${items}
+          .value=${String(effectiveProg ?? "")}
+          @change=${(e) => this._onPickPatchProgram(patchId, Number(e.detail.value), 9)}
+        ></sprunki-searchable-select>
+      `;
+    }
+    const items = [];
+    for (const fam of GM_FAMILIES) {
+      for (const [id, label] of fam.programs) {
+        items.push({
+          value: String(id),
+          label: `${String(id).padStart(3, "0")} · ${label}`,
+          group: fam.label,
+        });
+      }
+    }
     return html`
-      <select
+      <sprunki-searchable-select
         class="prog-picker"
-        @change=${(e) => this._onPickPatchProgram(patchId, Number(e.currentTarget.value), channel ?? 0)}
-      >
-        ${GM_FAMILIES.map((fam) => html`
-          <optgroup label=${fam.label}>
-            ${fam.programs.map(([id, label]) => html`
-              <option value=${id} ?selected=${id === effectiveProg}>
-                ${String(id).padStart(3, "0")} · ${label}
-              </option>
-            `)}
-          </optgroup>
-        `)}
-      </select>
+        title="GM program (instrument family)"
+        placeholder="Pick a patch"
+        .items=${items}
+        .value=${String(effectiveProg ?? "")}
+        @change=${(e) => this._onPickPatchProgram(patchId, Number(e.detail.value), channel ?? 0)}
+      ></sprunki-searchable-select>
     `;
   }
-  _renderDrumKitPicker(patchId, effectiveProg) {
+
+  _renderPresetPicker(patchId, presets, currentId, disabled) {
+    if (disabled) {
+      return html`
+        <sprunki-searchable-select
+          class="preset-picker"
+          disabled
+          placeholder="— Drop costume to see presets —"
+          .items=${[]}
+          .value=${""}
+        ></sprunki-searchable-select>
+      `;
+    }
+    const items = [
+      { value: "", label: "— No preset —", group: "" },
+      ...presets.map((p) => ({
+        value: p.id,
+        label: `${p.is_factory ? "" : "★ "}${p.name}`,
+        group: p.bank || (p.is_factory ? "Factory" : "User"),
+      })),
+    ];
     return html`
-      <select
-        class="prog-picker"
-        @change=${(e) => this._onPickPatchProgram(patchId, Number(e.currentTarget.value), 9)}
-      >
-        ${GM_DRUM_KITS.map((k) => html`
-          <option value=${k.id} ?selected=${k.id === effectiveProg}>
-            ${k.label}
-          </option>
-        `)}
-      </select>
+      <sprunki-searchable-select
+        class="preset-picker"
+        title="Plugin preset"
+        placeholder="Pick a preset"
+        .items=${items}
+        .value=${currentId || ""}
+        @change=${(e) => this._onPickPatchPreset(patchId, e.detail.value)}
+      ></sprunki-searchable-select>
     `;
+  }
+
+  /** Walk the stage for a slot whose track has a plugin matching
+   *  `uri` loaded. We need a LIVE PluginInstance for the preset
+   *  list and the parameter panel — neither has meaning without a
+   *  running plugin to talk to. */
+  _findLiveInstanceForUri(uri) {
+    if (!uri) return null;
+    const f = globalThis.__foyer;
+    const tracks = f?.store?.state?.session?.tracks || [];
+    for (const t of tracks) {
+      const p = (t.plugins || []).find((pl) => pl?.uri === uri);
+      if (p) return { ...p, trackId: t.id, trackName: t.name };
+    }
+    return null;
   }
 
   _onBackdropClick(e) {
@@ -748,6 +1112,53 @@ export class SprunkiPreferencesModal extends LitElement {
           <button class="danger" @click=${this._onClearAll}>Clear all</button>
         </div>
         ${this._confirmingClear ? this._renderClearConfirm() : ""}
+        ${this._tweakPatchId ? this._renderTweakModal() : ""}
+      </div>
+    `;
+  }
+
+  /** Inline modal: full foyer-plugin-panel for the costume's
+   *  currently-loaded plugin instance. The kid tweaks parameters
+   *  here; control_set lands on the live plugin and the override
+   *  store grabs the resulting values via the control listener so
+   *  they survive reloads. */
+  _renderTweakModal() {
+    const patch = getPatch(this._tweakPatchId);
+    if (!patch) {
+      this._tweakPatchId = null;
+      return "";
+    }
+    const effectiveUri = this._store.patchOverride(patch.id)?.instrument_uri
+                      || patch.instrument_uri;
+    const instance = this._findLiveInstanceForUri(effectiveUri);
+    return html`
+      <div class="tweak-veil" @click=${(e) => { if (e.target === e.currentTarget) this._tweakPatchId = null; }}>
+        <div class="tweak-panel" @click=${(e) => e.stopPropagation()}>
+          <div class="tweak-header">
+            <div class="tweak-title">Tweak — ${patch.label}</div>
+            <button class="close" title="Close (Esc)" @click=${() => { this._tweakPatchId = null; }}>
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor"
+                   stroke-width="3" fill="none" stroke-linecap="round">
+                <line x1="6" y1="6" x2="18" y2="18"/>
+                <line x1="18" y1="6" x2="6" y2="18"/>
+              </svg>
+            </button>
+          </div>
+          ${instance ? html`
+            <foyer-plugin-panel
+              class="tweak-plugin-panel"
+              .plugin=${instance}
+              .trackName=${instance.trackName || ""}
+              track-id=${instance.trackId || ""}
+            ></foyer-plugin-panel>
+          ` : html`
+            <div class="tweak-empty small">
+              No live plugin instance found for this costume. Drop this
+              sprunki onto a stage slot and the parameter panel will
+              wake up.
+            </div>
+          `}
+        </div>
       </div>
     `;
   }

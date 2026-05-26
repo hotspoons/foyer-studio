@@ -2662,3 +2662,95 @@ onboard. Refusing Windows because Ardour can't run there is the
 control-surface vendor saying "sorry, you can't be a customer
 because your DAW isn't a Linux daemon."
 
+## 53. Mode picker page sequence is OS-keyed, not feature-keyed
+
+The first-launch picker (`crates/foyer-desktop/src/mode_picker.html`)
+walks the user through different sets of pages depending on the
+host OS:
+
+  * **Linux**: page-mode → page-host OR (page-audio → page-network).
+    Mirrors today's flow; we don't show a runtime-picker page
+    because every Linux box that has Docker has Docker Engine on
+    the canonical `/var/run/docker.sock`.
+  * **macOS**: page-mode → page-host (with native-Ardour vs stub
+    sub-cards) OR (page-runtime → page-audio → page-network). The
+    runtime page is new: Docker Desktop / Colima / OrbStack /
+    Podman Desktop cards, populated by `foyer doctor-runtimes`
+    JSON. Picking a runtime writes `docker.runtime_kind` into
+    config.yaml so the CLI's `assemble()` can set DOCKER_HOST
+    appropriately at launch.
+  * **Windows**: page-mode (Host card hard-disabled) → page-runtime
+    (Docker Desktop only realistically) → page-audio → page-network.
+
+The shape is driven by a `host_os` field the Rust side injects
+into `window.__doctor` before serving the HTML, so the page-
+sequence logic stays a single readable JS branch instead of a
+build-time-templated tangle.
+
+**Failure mode if re-litigated.** "Show every page on every OS;
+let users figure it out." Tried it informally — the docker-runtime
+selection is a no-op on Linux (the answer is always "the docker
+socket on /var/run/docker.sock") and renders as a confusing
+"pick from a list of one" card. Same for the host-mode native-
+Ardour vs stub sub-pick on Windows, where there is no native-
+Ardour option. Branching on `host_os` keeps each OS's path
+linear and minimal.
+
+## 54. ABI matrix shim lookup, single-entry today
+
+`crates/foyer-cli/src/shim_install.rs` exposes a `SHIM_TABLE`
+const slice + a `pick_shim_for(version)` lookup. Today the table
+has one entry (the build's `FOYER_ARDOUR_VERSION` shim), but
+`ensure_ardour_ready` already routes through `pick_shim_for` with
+the installed Ardour's reported version as the lookup key. When
+we add a second ABI band — say a 9.6 shim alongside 9.5 — only
+the build script needs to change to emit a multi-entry table; the
+runtime + install paths stay put.
+
+The build-script change is intentionally not done yet (one shim,
+one table entry, no environment variable yet) — adding the
+`FOYER_BUNDLED_SHIMS=9.5=/path/a,9.6=/path/b` parser ships with
+the first real second ABI we need to support, so we don't carry
+unused-feature code in the meantime.
+
+**Failure mode if re-litigated.** "Just keep using SHIM_BYTES
+directly until we have a real second ABI." Done that. Each time
+someone added an Ardour-related code path it grew a side-channel
+about which shim to use ("we're on 9.5", "we're on 9.5 but the
+user has 9.6", "the doctor says 9.6 but we still install the 9.5
+blob"). One central `pick_shim_for(...)` is cheaper than three
+divergent if-branches discovered six months later.
+
+## 55. Ardour's macOS download flow goes through user consent, never auto-bypass
+
+macOS users who pick native-Ardour but don't have Ardour installed
+can hit a "Download Ardour" button in the picker. The button
+opens `foyer-desktop/src/ardour_download.html` in the SAME WebView,
+not a sub-window — three explicit choices:
+
+  1. **Donate & download** — opens `community.ardour.org/donate`
+     in the default browser. Hard cut-out; we don't game the
+     donation flow.
+  2. **Just the free demo** — opens the download page in the
+     default browser. Safe fallback, user clicks through
+     manually.
+  3. **Load demo page inline** — iframes the download page and
+     polls the iframe's URL for a `.dmg` token. When it lands,
+     Rust downloads + `hdiutil attach` + ditto into
+     `~/Applications/` + ejects. Best-effort.
+
+We DO NOT auto-bypass Ardour's donation page. They're a tiny
+volunteer project funded by donations; we're a separate project
+that benefits enormously from their engine. The picker copy is
+loud about the $45 ask + the 10-minute audio cutoff on the free
+build. UA stays as "Foyer-Studio" so Ardour's install stats stay
+honest.
+
+**Failure mode if re-litigated.** "Auto-detect the nonce and
+just download silently — better UX." It's worse UX because it
+takes a working donation pipeline (their primary revenue) and
+makes it invisible. Foyer's value-add is the control surface;
+Ardour is the engine we're using; treating their funding path
+as a thing to route around is the wrong way to behave as
+neighbors in the open-source ecosystem.
+

@@ -29,6 +29,7 @@ import "./components/style-picker.js";
 import { BARS_PER_PATTERN, DEFAULT_BPM, DEFAULT_PATTERNS } from "./components/sound-catalog.js";
 import { sprunkiStore } from "./state-store.js";
 import { ensureSprunkiStage, provisionOneSlot } from "./setup.js";
+import { refreshPluginCatalog } from "./plugin-catalog.js";
 import { pushAllLayouts, pushSlotLayout } from "./sequencer-bridge.js";
 import { loadSprunkiManifest, probeAssetBase, invalidateAssetBase } from "./sprunki-assets.js";
 import { levelDb } from "./components/sprunki-stage.js";
@@ -107,9 +108,6 @@ export class SprunkiApp extends LitElement {
     /** Style currently applied (or null). Set when the kid picks one
      *  from the picker; the picker's trigger tints to this color. */
     _activeStyleId: { type: String, state: true },
-    /** Style waiting for kid confirmation (when applying would
-     *  clobber custom beats). Null when the confirm modal is closed. */
-    _styleConfirm: { type: Object, state: true },
   };
 
   constructor() {
@@ -125,7 +123,6 @@ export class SprunkiApp extends LitElement {
     this._interiorSlotId = null;
     this._rev = 0;
     this._activeStyleId = null;
-    this._styleConfirm = null;
     this._levels = {};   // slotId → dBFS
     this._storeListener = () => { this._rev++; this.requestUpdate(); };
   }
@@ -408,6 +405,11 @@ export class SprunkiApp extends LitElement {
     const before = (f.store?.state?.session?.tracks || []).length;
     await ensureSprunkiStage(f.store, f.ws, this._store);
     pushAllLayouts(f.ws, this._store.stage, this._harmony());
+    // Kick off the plugin catalog scan in the background — the
+    // Advanced section's instrument picker reads from it. Don't
+    // await; the kid can use the rest of the UI while LV2/VST
+    // discovery finishes.
+    refreshPluginCatalog(f.ws);
     const tempo = f.store.get?.("transport.tempo");
     if (!tempo || Number(tempo) <= 0) {
       f.ws.controlSet?.("transport.tempo", DEFAULT_BPM);
@@ -532,34 +534,64 @@ export class SprunkiApp extends LitElement {
     }
     if (kind === "style-applied") {
       // Bulk rewrite — every slot's patch + every slot's boards
-      // changed at once. Run the full provision sweep so each
-      // slot's instrument plugin is verified/swapped, then push
-      // all layouts in a single batch. Mirrors _onTracksInvalidated.
+      // just changed. We treat the apply as 7 INDEPENDENT slot
+      // re-provisions in parallel, using the same `provisionOneSlot`
+      // path the drag-from-palette flow uses. That path is well-
+      // exercised in production: it handles patch swaps idempotently,
+      // re-validates the track id against the live snapshot, and
+      // swaps the instrument plugin when the patch family changes.
+      //
+      // Why not the heavier `ensureSprunkiStage` path: that one runs
+      // a single Promise.all'd sweep behind a global mutex
+      // (`_provisionInFlight`); when boot's call is still in flight
+      // (slow Ardour open, cold session_snapshot) our style apply
+      // chains behind it and the user sees an unexplained ~5 s lag
+      // before anything audible changes. Per-slot is also resilient
+      // to ONE slot failing without bringing the others down.
+      //
+      // Order of operations per slot:
+      //   1. provisionOneSlot — ensures patch's instrument plugin
+      //      is loaded on the slot's MIDI track.
+      //   2. _applyPatchProgramToSlot — re-sends the GM program so
+      //      gmsynth-on-gmsynth swaps (piano→organ) actually flip.
+      //   3. pushSlotLayout — writes the new board into the region.
+      //   4. reconcile ingress — Phantom (mic) / Performer (keys).
       const ws = f?.ws;
       const store = f?.store;
-      if (ws && store) {
-        ensureSprunkiStage(store, ws, this._store)
-          .then(() => {
-            // Re-apply each slot's effective program so a patch
-            // swap (e.g. piano → organ on the same gmsynth track)
-            // actually flips the GM bank/program. ensurePatchInstrument
-            // skips program-apply when the URI is already loaded.
-            for (const slot of this._store.stage) {
+      if (!ws || !store) {
+        this._rev++;
+        this.requestUpdate();
+        return;
+      }
+      const slotIds = this._store.stage.map((s) => s.id);
+      console.info(
+        `[sprunki] applying style ${ev.detail?.styleId} to ${slotIds.length} slots`,
+      );
+      Promise.all(
+        slotIds.map((slotId) =>
+          provisionOneSlot(store, ws, this._store, slotId)
+            .then(() => {
+              const slot = this._store.slotById(slotId);
+              if (!slot) return;
               if (slot.patch_id && slot.track_id) {
                 this._applyPatchProgramToSlot(slot);
+                pushSlotLayout(ws, slot, this._harmony());
+              } else if (!slot.patch_id) {
+                // Cleared slot (cast was shorter than stage). Clear
+                // the region so the old beat doesn't keep playing.
+                pushSlotLayout(ws, slot, this._harmony());
               }
-            }
-            pushAllLayouts(ws, this._store.stage, this._harmony());
-          })
-          .then(() => {
-            // Re-arm audio + MIDI ingress for any slot now holding
-            // an ingress-capable patch (Phantom mic, Performer keys).
-            return Promise.all(
-              this._store.stage.map((s) => this._reconcileIngressForSlot(s.id)),
-            );
-          })
-          .catch((err) => console.warn("[sprunki] style apply failed:", err));
-      }
+            })
+            .then(() => this._reconcileIngressForSlot(slotId))
+            .catch((err) =>
+              console.warn(`[sprunki] style apply failed for ${slotId}:`, err),
+            ),
+        ),
+      ).then(() => {
+        console.info("[sprunki] style apply complete");
+        this._rev++;
+        this.requestUpdate();
+      });
       this._rev++;
       this.requestUpdate();
       return;
@@ -1196,13 +1228,40 @@ export class SprunkiApp extends LitElement {
       program: gmProgram | 0,
     });
   };
-  /** Per-costume override picker fired from the Advanced section.
-   *  Saves the override in the store and re-applies the effective
-   *  program to every slot currently holding that costume. */
+  /** Per-costume override fired from the Advanced section. Accepts
+   *  either the legacy `{ gmProgram, gmChannel }` shape OR the new
+   *  `{ patch }` partial-merge shape (instrument_uri / preset_id /
+   *  params). Re-provisions every slot wearing the costume so a
+   *  plugin swap actually swaps the plugin chain. */
   _onPatchOverrideChange = (ev) => {
-    const { patchId, gmProgram, gmChannel } = ev.detail;
-    this._store.setPatchOverride(patchId, gmProgram, gmChannel);
-    this._applyPatchProgramToAllSlotsWith(patchId);
+    const { patchId, patch, gmProgram, gmChannel } = ev.detail;
+    if (patch !== undefined) {
+      // New shape: partial patch (or null to clear entirely).
+      this._store.patchOverridePatch(patchId, patch);
+    } else {
+      // Legacy gmProgram-only call site.
+      this._store.setPatchOverride(patchId, gmProgram, gmChannel);
+    }
+    // Re-apply across every slot wearing this costume. If the
+    // override changed the instrument_uri, the slot needs a real
+    // re-provision (add new plugin, drop old). Otherwise the
+    // program / preset / params can land via the lighter path.
+    const touchedPluginUri = patch && (
+      Object.prototype.hasOwnProperty.call(patch, "instrument_uri")
+    );
+    for (const slot of this._store.stage) {
+      if (slot.patch_id !== patchId) continue;
+      if (touchedPluginUri) {
+        // Run the full provision flow so the new plugin lands +
+        // the old one is removed.
+        const f = globalThis.__foyer;
+        provisionOneSlot(f?.store, f?.ws, this._store, slot.id)
+          .then(() => this._applyPatchProgramToSlot(slot))
+          .catch((err) => console.warn("[sprunki] override re-provision failed:", err));
+      } else {
+        this._applyPatchProgramToSlot(slot);
+      }
+    }
   };
   /** Push the EFFECTIVE program (override || patch default) for a
    *  single slot. No-op when the slot has no track or the patch is
@@ -1365,39 +1424,26 @@ export class SprunkiApp extends LitElement {
     this.requestUpdate();
   };
 
-  // Style picker — popover in the toolbar emits `style-picked`. We
-  // decide whether to confirm (kid has authored beats → destructive)
-  // or apply immediately. The applyStyle store call rewrites every
-  // slot's patch + per-row pattern in one shot, then fires a single
-  // `stage-changed` event with `kind: "style-applied"` which our
-  // _onStageChanged drives through a full re-provision + push.
+  // Style picker — popover in the toolbar emits `style-picked`. The
+  // store's applyStyle is edit-respecting: every slot whose boards
+  // still match the patch default gets the style cast; customized
+  // slots survive. BPM + chord progression apply globally regardless.
+  // No confirm modal — the destructive case is gone.
   _onStylePicked = (ev) => {
     const styleId = ev.detail?.styleId;
     const style = getStyle(styleId);
     if (!style) return;
-    if (this._store.hasCustomBoards()) {
-      this._styleConfirm = style;
-      this.requestUpdate();
-      return;
-    }
-    this._applyStyleNow(style);
-  };
-  _onStyleConfirm = () => {
-    const style = this._styleConfirm;
-    this._styleConfirm = null;
-    if (style) this._applyStyleNow(style);
-  };
-  _onStyleCancel = () => {
-    this._styleConfirm = null;
-    this.requestUpdate();
-  };
-  _applyStyleNow(style) {
-    if (!this._store.applyStyle(style)) return;
+    const summary = this._store.applyStyle(style);
+    if (!summary) return;
     this._activeStyleId = style.id;
     if (typeof style.bpm === "number" && style.bpm > 0) {
       this._applyTempoDebounced(style.bpm);
     }
-  }
+    console.info(
+      `[sprunki] style "${style.label}" — changed ${summary.changed}/${summary.total} slot(s), ` +
+      `kept ${summary.skipped} user-edited slot(s)`,
+    );
+  };
 
   _selectPattern(id) {
     this._patternId = id;
@@ -1632,6 +1678,7 @@ export class SprunkiApp extends LitElement {
       <div class="sprunki-main">
         <sprunki-stage
           .slots=${stage}
+          .activeArrangementId=${this._store.activeArrangementId}
           .assetsReady=${this._sprunkiAssetsReady}
           .scaryMode=${this._store.scaryMode}
           .slotControls=${this._slotControlsMap()}
@@ -1689,13 +1736,6 @@ export class SprunkiApp extends LitElement {
           @close=${() => { this._parentalGateOpen = false; this.requestUpdate(); }}
           @unlocked=${() => { this._parentalGateOpen = false; this.requestUpdate(); }}
         ></sprunki-parental-gate-modal>
-      ` : ""}
-      ${this._styleConfirm ? html`
-        <sprunkadoo-style-confirm
-          .style_=${this._styleConfirm}
-          @confirm=${this._onStyleConfirm}
-          @cancel=${this._onStyleCancel}
-        ></sprunkadoo-style-confirm>
       ` : ""}
     `;
   }

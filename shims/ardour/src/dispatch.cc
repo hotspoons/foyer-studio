@@ -2152,18 +2152,29 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					             << "}" << endmsg;
 					const bool on = snap.value >= 0.5;
 					if (snap.id == "transport.playing") {
+						// Idempotent: only act if the desired state differs
+						// from the current state. transport_play(false)
+						// has a nasty side effect — when called while
+						// rolling+looping it cancels loop playback (the
+						// "spacebar pauses the loop without fully stopping"
+						// Ardour behavior, see BasicUI::transport_play).
+						// A booting client that fires set_loop_range
+						// (which auto-starts roll via loop_toggle) and
+						// then a redundant transport.playing=true ended
+						// up with loop disabled mid-boot — playing once
+						// then running past the loop end.
+						const bool rolling = session.transport_state_rolling ();
 						if (on) {
-							// Record user intent BEFORE calling transport_play —
-							// Ardour's TransportStateChange fires synchronously
-							// inside request_roll on this thread (event loop)
-							// in some cases, so the SignalBridge grace-window
-							// check needs the timestamp already set.
 							shim->signal_bridge ().note_user_play_request ();
-							PBD::warning << "foyer_shim: calling transport_play(false)" << endmsg;
-							shim->transport_play (false);
+							if (!rolling) {
+								PBD::warning << "foyer_shim: calling request_roll()" << endmsg;
+								session.request_roll ();
+							}
 						} else {
-							PBD::warning << "foyer_shim: calling transport_stop()" << endmsg;
-							shim->transport_stop ();
+							if (rolling) {
+								PBD::warning << "foyer_shim: calling request_stop()" << endmsg;
+								session.request_stop ();
+							}
 						}
 					} else if (snap.id == "transport.recording") {
 						const bool recording = session.actively_recording ();
@@ -2174,8 +2185,13 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 					} else if (snap.id == "transport.looping") {
 						const bool looping = session.get_play_loop ();
 						if (on != looping) {
-							PBD::warning << "foyer_shim: calling loop_toggle() (current=" << looping << ")" << endmsg;
-							shim->loop_toggle ();
+							// `request_play_loop(yn, false)` toggles loop
+							// enable WITHOUT changing transport speed.
+							// loop_toggle() bundles a request_roll on
+							// enable, which surprises callers that already
+							// manage playback separately.
+							PBD::warning << "foyer_shim: calling request_play_loop(" << on << ", false) (current=" << looping << ")" << endmsg;
+							session.request_play_loop (on, false);
 						}
 					} else if (snap.id == "transport.position") {
 						PBD::warning << "foyer_shim: calling request_locate(" << snap.value << ")" << endmsg;
@@ -4724,7 +4740,15 @@ Dispatcher::on_control_frame (const std::vector<std::uint8_t>& buf)
 				if (snap.has_loop_enabled) {
 					const bool looping = session.get_play_loop ();
 					if (looping != snap.loop_enabled) {
-						shim->loop_toggle ();
+						// Use request_play_loop(yn, false) — sets the loop
+						// enable flag without rolling/stopping transport.
+						// loop_toggle() also auto-starts playback on enable
+						// (BasicUI default), which collides with the
+						// caller's subsequent transport.playing ControlSet:
+						// rolling+looping + transport_play(false) cancels
+						// loop playback, leaving the session playing once
+						// then running past the loop window.
+						session.request_play_loop (snap.loop_enabled, false);
 					}
 				}
 				auto bytes = msgpack_out::encode_transport_state (session);

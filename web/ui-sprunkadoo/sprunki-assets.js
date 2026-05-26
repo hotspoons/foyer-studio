@@ -41,6 +41,15 @@ const SOURCES = {
     // don't carry the md5 lookup table around.
     emptyFile:           "empty.svg",
     emptyHorrorFile:     "empty-horror.svg",
+    // Idle gaze variants for the empty placeholder — same scheme as
+    // populated sprunkis. Stage cycles between them on the same
+    // randomized scheduler so empty slots blink + look around via
+    // hard sprite swaps (no inline SVG, no CSS keyframes).
+    emptyVariantFiles: {
+      "blink":      "empty-idle-blink.svg",
+      "look-left":  "empty-idle-look-left.svg",
+      "look-right": "empty-idle-look-right.svg",
+    },
     backdropFile:        "backdrop.svg",
     backdropHorrorFile:  "backdrop-horror.svg",
     muteButtonFiles: {
@@ -131,6 +140,28 @@ export function ogCharacterById(sprunkiId) {
   const m = _st().manifest;
   if (!m || !sprunkiId) return null;
   return m.characters.find((c) => c.id === sprunkiId) || null;
+}
+
+/** Idle-gaze variants for a character — { blink, lookLeft, lookRight }
+ *  URLs. Each entry is null if the manifest doesn't ship that variant
+ *  (older OG manifest that predates the idle_variants bucket).
+ *  Used by sprunki-stage to cycle a populated sprunki through
+ *  randomized blink + look-around frames while it's not actively
+ *  playing music. */
+export function idleVariantsFor(sprunkiId) {
+  const og = ogCharacterById(sprunkiId);
+  const base = _st().resolvedBase;
+  if (!og || !base) return { blink: null, lookLeft: null, lookRight: null };
+  const variants = og.costumes?.idle_variants || [];
+  const lookup = (name) => {
+    const entry = variants.find((v) => v.name === name);
+    return entry?.file ? `${base}${entry.file}` : null;
+  };
+  return {
+    blink:     lookup("blink"),
+    lookLeft:  lookup("look-left"),
+    lookRight: lookup("look-right"),
+  };
 }
 
 /** Per-character animation profile from the manifest. Returns an
@@ -225,10 +256,21 @@ export function allAlternatePlayCostumeUrlsFor(sprunkiId) {
  *  uses the dedicated empty.svg sprite via `emptySprunkiUrl()`. */
 export const EMPTY_SLOT_SPRUNKI_ID = "raddy";
 
-export function emptySprunkiUrl({ scary = false } = {}) {
+/** URL for the empty-slot placeholder sprite.
+ *
+ *  When `gaze` is one of `"blink"`, `"look-left"`, `"look-right"`,
+ *  returns the matching idle-variant sprite (only available on the
+ *  built-in pack — the OG pack has just the single empty Polo, so
+ *  the variant falls back to the base sprite there). Used by the
+ *  stage's per-slot idle scheduler to cycle empty slots through
+ *  the same blink/look-around variants as costumed sprunkis. */
+export function emptySprunkiUrl({ scary = false, gaze = null } = {}) {
   const cfg = _cfg();
   const base = _st().resolvedBase;
   if (!base) return null;
+  if (!scary && gaze && cfg.emptyVariantFiles?.[gaze]) {
+    return `${base}${cfg.emptyVariantFiles[gaze]}`;
+  }
   const file = scary && cfg.emptyHorrorFile ? cfg.emptyHorrorFile : cfg.emptyFile;
   return `${base}${file}`;
 }

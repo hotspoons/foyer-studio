@@ -70,6 +70,22 @@ jobs:
             arch: arm64
             with_shim: true
             target: aarch64-apple-darwin
+          # Windows: Foyer's Ardour shim is Linux/macOS-only because
+          # Ardour itself doesn't run on Windows. Windows users drive
+          # Foyer's backend via Docker Desktop; we ship the foyer +
+          # foyer-desktop binaries so the desktop shell + install.ps1
+          # work locally.
+          - runner: windows-latest
+            os_label: windows
+            arch: x86_64
+            with_shim: false
+            target: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        # Windows runner defaults to pwsh; we use bash idioms in the
+        # build / bundle steps. windows-latest ships Git Bash so
+        # `shell: bash` resolves cross-platform.
+        shell: bash
     env:
       ASSET_NAME: foyer-${{ matrix.os_label }}-${{ matrix.arch }}.zip
     steps:
@@ -212,14 +228,16 @@ jobs:
           # dynamically and that's by design).
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: |
+          bin_ext=""
+          if [ "${{ matrix.os_label }}" = "windows" ]; then bin_ext=".exe"; fi
           cargo build --release --target "${{ matrix.target }}" --bin foyer
           echo "==> binary linkage:"
-          file "target/${{ matrix.target }}/release/foyer"
-          if [ "${{ matrix.os_label }}" = "linux" ]; then
-            ldd "target/${{ matrix.target }}/release/foyer" 2>&1 || echo "(static — no dynamic deps)"
-          else
-            otool -L "target/${{ matrix.target }}/release/foyer" 2>&1 || true
-          fi
+          file "target/${{ matrix.target }}/release/foyer$bin_ext" || true
+          case "${{ matrix.os_label }}" in
+            linux)   ldd "target/${{ matrix.target }}/release/foyer$bin_ext" 2>&1 || echo "(static — no dynamic deps)" ;;
+            macos)   otool -L "target/${{ matrix.target }}/release/foyer$bin_ext" 2>&1 || true ;;
+            windows) echo "(linkage probe skipped on windows — dumpbin lives behind VS env)" ;;
+          esac
 
       - name: Build shim
         if: matrix.with_shim
@@ -229,24 +247,56 @@ jobs:
             -DFOYER_ARDOUR_SOURCE="$PWD/ext/ardour"
           cmake --build shims/ardour/cmake-build -j
 
+      # foyer-desktop builds against the runner's default toolchain
+      # target (NOT the musl target used for `foyer`) — wry / tao
+      # need to dynamically link GTK / WKWebView / WebView2 + their
+      # transitive C runtime. The resulting binary lives at
+      # target/release/foyer-desktop on every OS; bundle.sh picks it
+      # up via FOYER_DESKTOP_BIN.
+      - name: Build foyer-desktop
+        env:
+          RUSTFLAGS: ""
+        run: |
+          bin_ext=""
+          if [ "${{ matrix.os_label }}" = "windows" ]; then bin_ext=".exe"; fi
+          cargo build --release --bin foyer-desktop
+          ls -la "target/release/foyer-desktop$bin_ext"
+
       - name: Bundle release zip
         env:
           OS_LABEL: ${{ matrix.os_label }}
           ARCH: ${{ matrix.arch }}
-          # Tells bundle.sh where to find the binary for this target;
-          # it lives under target/<triple>/release/, not target/release/
-          # because we build with `cargo build --target ...`.
-          FOYER_BIN: ${{ github.workspace }}/target/${{ matrix.target }}/release/foyer
+          # Tells bundle.sh where to find the binaries for this target;
+          # `foyer` lives under target/<triple>/release/ because we
+          # build with `cargo build --target ...`. `foyer-desktop`
+          # lives under target/release/ (default-target build).
+          FOYER_BIN: ${{ github.workspace }}/target/${{ matrix.target }}/release/foyer${{ matrix.os_label == 'windows' && '.exe' || '' }}
+          FOYER_DESKTOP_BIN: ${{ github.workspace }}/target/release/foyer-desktop${{ matrix.os_label == 'windows' && '.exe' || '' }}
           # Tells bundle.sh to ship a foyer-only zip when there's no
           # shim for this platform yet.
           FOYER_SKIP_SHIM: ${{ matrix.with_shim && '0' || '1' }}
         run: ./scripts/release/bundle.sh
 
-      - name: Upload artifact
+      - name: Build macOS .dmg
+        if: matrix.os_label == 'macos'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: ./scripts/release/macos-dmg.sh
+
+      - name: Upload artifact (zip)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ASSET_NAME }}
           path: dist/${{ env.ASSET_NAME }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload artifact (dmg)
+        if: matrix.os_label == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: foyer-macos-${{ matrix.arch }}.dmg
+          path: dist/foyer-macos-${{ matrix.arch }}.dmg
           if-no-files-found: error
           retention-days: 14
 
@@ -271,11 +321,15 @@ jobs:
       - name: Stage release assets
         run: |
           mkdir -p release-assets
-          # Each artifact upload was a directory named foyer-*.zip
-          # containing the actual zip; merge-multiple flattens but the
-          # zip files land at dist/foyer-*.zip.
+          # Each artifact upload was a directory named foyer-*.zip /
+          # foyer-*.dmg containing the actual file; merge-multiple
+          # flattens but the files land at dist/foyer-*.{zip,dmg}.
           cp dist/foyer-*.zip release-assets/
+          # .dmg is macOS-only; the `|| true` keeps the step happy
+          # on dispatch-runs that skip the macOS cell entirely.
+          cp dist/foyer-*.dmg release-assets/ 2>/dev/null || true
           cp install.sh release-assets/install.sh
+          cp install.ps1 release-assets/install.ps1
           ls -la release-assets/
 
       - name: Determine release tag

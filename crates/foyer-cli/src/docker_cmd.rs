@@ -1257,7 +1257,11 @@ fn probe_docker_desktop(_home: Option<&str>) -> (bool, bool, String) {
                 },
             );
         }
-        return (false, false, "Not installed at /Applications/Docker.app".into());
+        return (
+            false,
+            false,
+            "Not installed at /Applications/Docker.app".into(),
+        );
     }
     // Windows: ProgramFiles install dir + the docker CLI on PATH.
     if cfg!(target_os = "windows") {
@@ -1274,7 +1278,11 @@ fn probe_docker_desktop(_home: Option<&str>) -> (bool, bool, String) {
                 "Docker Desktop installed in Program Files".into(),
             );
         }
-        return (false, false, "Not installed — get it from docker.com".into());
+        return (
+            false,
+            false,
+            "Not installed — get it from docker.com".into(),
+        );
     }
     // Linux: Docker Desktop is technically supported but unusual on
     // server distros. Probe the well-known install path but don't
@@ -1283,7 +1291,11 @@ fn probe_docker_desktop(_home: Option<&str>) -> (bool, bool, String) {
     if app.is_dir() {
         return (true, false, "/opt/docker-desktop installed".into());
     }
-    (false, false, "Not installed (Linux servers usually use Docker Engine)".into())
+    (
+        false,
+        false,
+        "Not installed (Linux servers usually use Docker Engine)".into(),
+    )
 }
 
 fn probe_docker_engine() -> (bool, bool, String) {
@@ -1333,7 +1345,11 @@ fn probe_colima(home: Option<&str>) -> (bool, bool, String) {
                 },
             )
         }
-        None => (false, false, "`colima` not on PATH (brew install colima)".into()),
+        None => (
+            false,
+            false,
+            "`colima` not on PATH (brew install colima)".into(),
+        ),
     }
 }
 
@@ -1343,7 +1359,11 @@ fn probe_orbstack(home: Option<&str>) -> (bool, bool, String) {
     }
     let app = PathBuf::from("/Applications/OrbStack.app");
     if !app.is_dir() {
-        return (false, false, "Not installed — get it from orbstack.dev".into());
+        return (
+            false,
+            false,
+            "Not installed — get it from orbstack.dev".into(),
+        );
     }
     let Some(home) = home else {
         return (true, false, "OrbStack installed; $HOME unset".into());
@@ -1394,8 +1414,15 @@ fn probe_podman_desktop() -> (bool, bool, String) {
         Some(p) => (
             true,
             which("podman").is_some(),
-            format!("{} (podman CLI {})", p.display(),
-                    if which("podman").is_some() { "present" } else { "missing" }),
+            format!(
+                "{} (podman CLI {})",
+                p.display(),
+                if which("podman").is_some() {
+                    "present"
+                } else {
+                    "missing"
+                }
+            ),
         ),
         None => (false, false, "Podman Desktop not installed".into()),
     }
@@ -1412,13 +1439,15 @@ fn install_command_for_runtime(kind: RuntimeKind) -> Option<String> {
     if cfg!(target_os = "macos") {
         return Some(match kind {
             RuntimeKind::DockerDesktop => "brew install --cask docker".into(),
-            RuntimeKind::Colima => {
-                "brew install colima docker  # then: colima start".into()
-            }
+            RuntimeKind::Colima => "brew install colima docker  # then: colima start".into(),
             RuntimeKind::Orbstack => "brew install --cask orbstack".into(),
-            RuntimeKind::Podman => "brew install podman  # then: podman machine init && podman machine start".into(),
+            RuntimeKind::Podman => {
+                "brew install podman  # then: podman machine init && podman machine start".into()
+            }
             RuntimeKind::PodmanDesktop => "brew install --cask podman-desktop".into(),
-            RuntimeKind::Nerdctl => "brew install lima-additional-guestagents nerdctl  # rare on macOS".into(),
+            RuntimeKind::Nerdctl => {
+                "brew install lima-additional-guestagents nerdctl  # rare on macOS".into()
+            }
             RuntimeKind::DockerEngine => return None,
         });
     }

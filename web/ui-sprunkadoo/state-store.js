@@ -110,7 +110,7 @@ function defaultStage() {
   const out = [];
   for (let i = 0; i < DEFAULT_STAGE_SLOT_COUNT; i++) {
     const t = i / (DEFAULT_STAGE_SLOT_COUNT - 1);
-    const x = 0.12 + t * 0.76;
+    const x = 0.15 + t * 0.70;
     const y = 0.85;
     out.push(newSlot(`slot.${i}`, x, y, null));
   }
@@ -766,14 +766,24 @@ class SprunkiStore extends EventTarget {
     return true;
   }
 
-  // ── style (whole-cast rewrite) ──────────────────────────────────
+  // ── style (whole-cast rewrite, edit-respecting) ─────────────────
   //
-  // Picking a style flips every stage slot's patch + per-row step
-  // pattern + bpm + chord progression to a coherent vibe. The cast
-  // array in `style-catalog.js` is applied to stage[0..N) in array
-  // order; any tail slots beyond the cast length get CLEARED. This
-  // is destructive — `hasCustomBoards()` exists so callers can
-  // confirm before applying.
+  // Picking a style flips the cast: each stage slot's patch + per-
+  // row step pattern + bpm + chord progression coalesce to a coherent
+  // vibe. The cast array in `style-catalog.js` is applied to
+  // stage[0..N) in array order.
+  //
+  // **Respecting user edits** — applyStyle compares each slot's
+  // current board to `patchDefaultBoard(currentPatch)`. If they
+  // differ (the kid toggled cells in the interior editor), that
+  // slot is left alone — its instrument AND beat are preserved.
+  // Empty/default slots get the style cast. Tail slots beyond the
+  // cast length are cleared.
+  //
+  // BPM + progression are global session settings, so they apply
+  // regardless of how many slots were skipped — even a fully-
+  // customized stage benefits from the tempo/progression flip
+  // when the user picks a new style.
 
   /** Tile a 1-bar (16-step) pattern across BARS_PER_PATTERN bars,
    *  same logic as `patchDefaultBoard`. A style's cast authors at
@@ -790,46 +800,42 @@ class SprunkiStore extends EventTarget {
     return out;
   }
 
-  /** True if ANY slot's authored boards (any arrangement, any row)
-   *  diverge from the patch's default. Newly-assigned slots match
-   *  their patch's default by construction, so this only fires
-   *  after the kid has toggled cells in the interior editor. */
-  hasCustomBoards() {
-    for (const slot of this._state.stage) {
-      if (!slot.patch_id) continue;
-      const patch = getPatch(slot.patch_id);
-      if (!patch) continue;
-      const seed = patchDefaultBoard(patch);
-      const seedJson = JSON.stringify(seed);
-      const arrIds = Object.keys(slot.boards || {});
-      if (arrIds.length === 0) continue;
-      for (const arrId of arrIds) {
-        const board = slot.boards[arrId] || {};
-        // An empty stored board is equivalent to "untouched" — the
-        // bridge falls back to the patch default in that case.
-        if (Object.keys(board).length === 0) continue;
-        // Normalize step lists for stable comparison (some toggles
-        // can leave them in non-sorted order even though the store
-        // sorts on insert; harmless to re-sort).
-        const norm = {};
-        for (const [rowId, steps] of Object.entries(board)) {
-          norm[rowId] = [...(steps || [])].sort((a, b) => a - b);
-        }
-        if (JSON.stringify(norm) !== seedJson) return true;
+  /** Slot-level customization check. A slot is "customized" if it
+   *  has a patch AND any of its arrangement boards diverge from
+   *  `patchDefaultBoard(patch)`. We compare against the JSON of the
+   *  default rather than per-row so a partially-edited slot
+   *  (one row toggled, others untouched) still counts as customized.
+   *
+   *  Slots without a patch — gray polos the kid hasn't dressed yet
+   *  — are NOT customized; they accept whatever the style sends. */
+  _slotIsCustomized(slot) {
+    if (!slot || !slot.patch_id) return false;
+    const patch = getPatch(slot.patch_id);
+    if (!patch) return false;
+    const seed = patchDefaultBoard(patch);
+    const seedJson = JSON.stringify(seed);
+    for (const board of Object.values(slot.boards || {})) {
+      if (!board || Object.keys(board).length === 0) continue;
+      const norm = {};
+      for (const [rowId, steps] of Object.entries(board)) {
+        norm[rowId] = [...(steps || [])].sort((a, b) => a - b);
       }
+      if (JSON.stringify(norm) !== seedJson) return true;
     }
     return false;
   }
 
-  /** Apply a style: rewrite each slot's patch_id + per-arrangement
-   *  boards in stage[] order, set tempo + progression, then fire a
-   *  single `stage-changed` event with `kind: "style-applied"`. The
-   *  app shell handles that kind by re-provisioning instruments and
-   *  pushing all layouts in one batch.
+  /** Apply a style. Walks the stage left-to-right; each slot whose
+   *  boards still match the patch default gets the style's cast
+   *  entry written in. Customized slots are skipped (their patch +
+   *  beats survive). Tail slots beyond the cast are cleared only
+   *  when they aren't customized.
    *
-   *  Returns true if the stage actually changed. The caller is
-   *  responsible for any user confirmation (use `hasCustomBoards()`
-   *  to decide). */
+   *  BPM + progression apply globally regardless of skipped slots.
+   *
+   *  Returns a summary object so the caller can show a toast:
+   *    { changed: number, skipped: number, total: number }
+   *  Or `false` when the call was a no-op (no stage, invalid style). */
   applyStyle(style) {
     if (!style || !Array.isArray(style.cast)) return false;
     const stage = this._state.stage;
@@ -838,24 +844,36 @@ class SprunkiStore extends EventTarget {
     const arrIds = (this._state.arrangements || []).map((a) => a.id);
     if (arrIds.length === 0) arrIds.push(this.activeArrangementId);
 
+    let changed = 0;
+    let skipped = 0;
+
     const next = stage.map((slot, idx) => {
+      if (this._slotIsCustomized(slot)) {
+        skipped++;
+        return slot;
+      }
       const entry = style.cast[idx];
       if (!entry || !getPatch(entry.patch_id)) {
-        // Tail beyond the cast — clear the slot. (Same shape as
-        // clearSlot but in-place so we only emit one event.)
+        // Tail slot beyond the cast — clear it so the new style's
+        // arrangement isn't muddied by a leftover instrument. (Only
+        // cleared slots that weren't customized; customized ones
+        // are already short-circuited above.)
         if (!slot.patch_id) return slot;
+        changed++;
         return { ...slot, patch_id: null, boards: {} };
       }
+      // Style cast wins: write the patch + tiled board for every
+      // arrangement so multi-part songs stay coherent on the new
+      // vibe. (If the kid had multiple arrangements, they get the
+      // same beat on each — they can edit per-part afterward.)
       const board = {};
       for (const [rowId, oneBar] of Object.entries(entry.board || {})) {
         if (!Array.isArray(oneBar) || oneBar.length === 0) continue;
         board[rowId] = this._tilePattern(oneBar);
       }
-      // Author the style's board onto EVERY arrangement so multi-part
-      // songs stay coherent. The kid can edit per-part later from
-      // the interior editor.
       const boards = {};
       for (const arrId of arrIds) boards[arrId] = { ...board };
+      changed++;
       return {
         ...slot,
         patch_id: entry.patch_id,
@@ -869,7 +887,9 @@ class SprunkiStore extends EventTarget {
     // shell pulls `bpm` off the event detail and pushes it through
     // the debounced control_set path. Progression chords are local
     // — we update them directly here so the harmony-changed event
-    // fans out the same way a manual prefs change would.
+    // fans out the same way a manual prefs change would. Both
+    // apply EVEN WHEN every slot was skipped, because they affect
+    // the whole song's feel.
     if (style.progressionId) {
       const prog = buildProgression(style.progressionId, this._state.key);
       const sec = {};
@@ -882,12 +902,18 @@ class SprunkiStore extends EventTarget {
 
     this._persist();
     this.dispatchEvent(new CustomEvent("stage-changed", {
-      detail: { kind: "style-applied", styleId: style.id, bpm: style.bpm },
+      detail: {
+        kind: "style-applied",
+        styleId: style.id,
+        bpm: style.bpm,
+        changed,
+        skipped,
+      },
     }));
     if (style.progressionId) {
       this.dispatchEvent(new CustomEvent("harmony-changed"));
     }
-    return true;
+    return { changed, skipped, total: stage.length };
   }
 
   // ── arrangements (multi-part song builder) ──────────────────────
@@ -1152,22 +1178,43 @@ class SprunkiStore extends EventTarget {
     return v ? { ...v } : null;
   }
   /** Effective program for a slot holding `patch` — override if
-   *  one is set for that patch, otherwise the patch's default. */
+   *  one is set for that patch, otherwise the patch's default.
+   *  Only meaningful when the active instrument is GM-program-aware
+   *  (gmsynth / fluidsynth). Plugins like AvlDrums ignore program
+   *  changes; their "kit" comes from picking a different plugin via
+   *  effectivePatchInstrument(). */
   effectivePatchProgram(patch) {
     if (!patch) return null;
     const ov = this.patchOverride(patch.id);
-    if (ov) return { gm_program: ov.gm_program, gm_channel: ov.gm_channel ?? patch.gm_channel ?? 0 };
+    if (ov && typeof ov.gm_program === "number") {
+      return { gm_program: ov.gm_program, gm_channel: ov.gm_channel ?? patch.gm_channel ?? 0 };
+    }
     if (typeof patch.gm_program !== "number") return null;
     return { gm_program: patch.gm_program, gm_channel: patch.gm_channel ?? 0 };
   }
-  /** Set or clear an override. Pass null to clear. Returns true if
-   *  the override actually changed (callers use this to gate a
-   *  set_track_midi_patch push). */
-  setPatchOverride(patchId, gmProgram, gmChannel = null) {
+  /** Effective instrument URI for a costume — override if the kid
+   *  picked a different plugin via the Advanced section, else the
+   *  patch's declared default. */
+  effectivePatchInstrumentUri(patch) {
+    if (!patch) return null;
+    const ov = this.patchOverride(patch.id);
+    return ov?.instrument_uri || patch.instrument_uri || null;
+  }
+  /** Effective preset id for a costume, or null if no override. */
+  effectivePatchPresetId(patch) {
+    if (!patch) return null;
+    return this.patchOverride(patch.id)?.preset_id || null;
+  }
+
+  /** Apply a partial override patch. Pass null to clear the entire
+   *  override for this patch. Keys present in `patch` are set;
+   *  keys with value `null` (within `patch`) are deleted from the
+   *  override. Returns true if anything actually changed. */
+  patchOverridePatch(patchId, patch) {
     if (!patchId) return false;
-    const cur = this._state.patchOverrides[patchId];
-    if (gmProgram == null) {
-      if (!cur) return false;
+    const cur = this._state.patchOverrides[patchId] || {};
+    if (patch === null) {
+      if (!this._state.patchOverrides[patchId]) return false;
       const next = { ...this._state.patchOverrides };
       delete next[patchId];
       this._state.patchOverrides = next;
@@ -1177,20 +1224,35 @@ class SprunkiStore extends EventTarget {
       }));
       return true;
     }
-    const program = Number(gmProgram) | 0;
-    const channel = gmChannel != null
-      ? (Number(gmChannel) | 0)
-      : (cur?.gm_channel ?? 0);
-    if (cur && cur.gm_program === program && cur.gm_channel === channel) return false;
+    const merged = { ...cur };
+    let changed = false;
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null || v === undefined) {
+        if (k in merged) { delete merged[k]; changed = true; }
+      } else if (merged[k] !== v) {
+        merged[k] = v;
+        changed = true;
+      }
+    }
+    if (!changed) return false;
     this._state.patchOverrides = {
       ...this._state.patchOverrides,
-      [patchId]: { gm_program: program, gm_channel: channel },
+      [patchId]: merged,
     };
     this._persist();
     this.dispatchEvent(new CustomEvent("patch-override-changed", {
-      detail: { patchId, override: { gm_program: program, gm_channel: channel } },
+      detail: { patchId, override: merged },
     }));
     return true;
+  }
+
+  /** Back-compat: old GM-program-only setter. Pass null to clear. */
+  setPatchOverride(patchId, gmProgram, gmChannel = null) {
+    if (gmProgram == null) return this.patchOverridePatch(patchId, null);
+    return this.patchOverridePatch(patchId, {
+      gm_program: Number(gmProgram) | 0,
+      gm_channel: gmChannel != null ? (Number(gmChannel) | 0) : 0,
+    });
   }
 
   // ── asset source (built-in vs OG archive.org pack) ──────────────

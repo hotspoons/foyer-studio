@@ -72,7 +72,7 @@ HEAD_RY = 72       # ~8% wider than tall (78/72 ≈ 1.08, half as oval as before
 # trapezoid; the bottom flares out. No separate neck rectangle.
 BODY_TOP_HALF = 24                   # half-width at the very top (neck)
 BODY_BOT_HALF = 38                   # half-width at the bottom (clipped)
-BODY_TOP_Y = HEAD_CY + HEAD_RY - 6   # body starts at the chin
+BODY_TOP_Y = HEAD_CY + HEAD_RY - 22  # body starts well inside the head; the head's outline arc runs through the upper body region forming the chin/neck transition (matches OG sprunki — the seam at -6 left visible gray-on-gray separation between head and body)
 BODY_BOT_Y = VB_H + 8                # extends past stage bottom
 
 # Kept aliases — some legacy crown code still references BCX/DOME_TOP_Y.
@@ -279,10 +279,16 @@ def render_body(body: str, horror: bool = False) -> str:
     s += (f'<path d="{body_path}" fill="none" '
           f'stroke="{OUTLINE}" stroke-width="3"/>')
 
-    # ── HEAD ── (drawn last so it covers the top of the body)
+    # ── HEAD FILL ── (drawn over the body so the upper trapezoid is
+    # hidden inside the head). NOTE: we draw fill HERE, but defer the
+    # stroke until AFTER chin shadow + with a clip that excludes the
+    # body trapezoid. Otherwise the head's bottom arc draws a visible
+    # black curve THROUGH the body region (the "egg-on-trapezoid"
+    # disconnect Rich flagged on gray, where head + body share a
+    # color and the only visible separator was the inner head stroke).
     s += (f'<ellipse cx="{HEAD_CX}" cy="{HEAD_CY}" '
           f'rx="{HEAD_RX}" ry="{HEAD_RY}" '
-          f'fill="{body}" stroke="{OUTLINE}" stroke-width="3.4"/>')
+          f'fill="{body}" stroke="none"/>')
     # Chin shadow — a thin SLIVER of darker color hugging the bottom
     # 50% of the chin curve. Not a beard, not a soft gradient — a
     # narrow band that reads as the underside of the chin in shadow.
@@ -304,6 +310,25 @@ def render_body(body: str, horror: bool = False) -> str:
           f'stroke="{chin_sh}" stroke-width="3.4" fill="none" '
           f'stroke-linecap="round" opacity="0.7"/>'
           f'</g>')
+    # ── HEAD STROKE — clipped to NOT-BODY region ──
+    # The head outline draws everywhere EXCEPT inside the body
+    # trapezoid, so the head's lower arc curves smoothly into the
+    # body's side edges (matching the OG silhouette) instead of
+    # cutting across the body region. Uses evenodd fill rule: a
+    # full-canvas rect minus the body trapezoid path.
+    s += (
+        f'<defs><clipPath id="head-stroke-not-body">'
+        f'<path d="M0 0 L{VB_W} 0 L{VB_W} {VB_H} L0 {VB_H} Z '
+        f'{body_path}" clip-rule="evenodd"/>'
+        f'</clipPath></defs>'
+    )
+    s += (
+        f'<g clip-path="url(#head-stroke-not-body)">'
+        f'<ellipse cx="{HEAD_CX}" cy="{HEAD_CY}" '
+        f'rx="{HEAD_RX}" ry="{HEAD_RY}" '
+        f'fill="none" stroke="{OUTLINE}" stroke-width="3.4"/>'
+        f'</g>'
+    )
     if horror:
         # Hairline cracks on the head
         s += (f'<path d="M{HEAD_CX-20} {HEAD_CY-30} l8 14 l-4 14 '
@@ -585,63 +610,167 @@ def render_crown(style: str, body: str) -> str:
         # accessory.
         return s
     elif style == "hiHatCymbal":
-        # Brass cymbal seen from a slight 3/4 top-down angle. The
-        # wide flat disc, the raised center bell, and the concentric
-        # grooves are what make it READ as a cymbal vs. a hat.
+        # Clukr — hi-hat. TWO brass cymbals stacked (upper open at a
+        # slight tilt, lower closed flat) on a steel stand-rod, with
+        # a felt washer between them. Reads as a real hi-hat from a
+        # drum kit, not just a single brass disc.
         brass = "#e9c449"
         brass_hl = "#fff4a8"
         brass_sh = "#8a6a14"
-        cy_y = head_top - 6           # disc center y, just above head
-        # Main disc — wide oval (rx >> ry) showing the disc tilted
-        # almost flat toward the viewer.
-        s += (f'<ellipse cx="{HEAD_CX}" cy="{cy_y}" rx="60" ry="14" '
-              f'fill="{brass}" stroke="{OUTLINE}" stroke-width="2.8"/>')
-        # Concentric grooves — the etched rings of a real cymbal.
-        # All ellipses share the disc's center but with smaller rx
-        # and proportionally smaller ry.
-        for r in (52, 44, 36, 26, 18):
-            s += (f'<ellipse cx="{HEAD_CX}" cy="{cy_y}" '
-                  f'rx="{r}" ry="{r * 14 / 60:.1f}" '
-                  f'fill="none" stroke="{brass_sh}" '
-                  f'stroke-width="0.8" opacity="0.55"/>')
-        # Center bell — small raised dome at the disc center
-        s += (f'<ellipse cx="{HEAD_CX}" cy="{cy_y-2}" rx="10" ry="4" '
-              f'fill="{brass_hl}" stroke="{OUTLINE}" stroke-width="1.8"/>')
-        # Tiny highlight inside the bell — sells the metallic shine
-        s += (f'<ellipse cx="{HEAD_CX-3}" cy="{cy_y-3}" rx="3" ry="1.2" '
-              f'fill="#fff" opacity="0.85"/>')
-        # Bright top-edge crescent — the catch-light along the disc's
-        # upper rim
-        s += (f'<path d="M{HEAD_CX-50} {cy_y-7} '
-              f'Q{HEAD_CX} {cy_y-12}, {HEAD_CX+50} {cy_y-7}" '
-              f'stroke="{brass_hl}" stroke-width="1.8" fill="none"/>')
-        # Underside shadow along the disc's lower rim
-        s += (f'<path d="M{HEAD_CX-50} {cy_y+7} '
-              f'Q{HEAD_CX} {cy_y+11}, {HEAD_CX+50} {cy_y+7}" '
-              f'stroke="{brass_sh}" stroke-width="1.6" fill="none"/>')
+        rod = "#3a414c"
+        rod_hl = "#7a818d"
+        felt = "#c0392b"
+        # Steel rod running through both cymbals + a clutch nut on top.
+        rod_x = HEAD_CX
+        s += (
+            f'<line x1="{rod_x}" y1="{head_top-2}" '
+            f'x2="{rod_x}" y2="{head_top-26}" '
+            f'stroke="{rod}" stroke-width="3.4" stroke-linecap="round"/>'
+            f'<line x1="{rod_x - 0.7}" y1="{head_top-4}" '
+            f'x2="{rod_x - 0.7}" y2="{head_top-24}" '
+            f'stroke="{rod_hl}" stroke-width="0.9" opacity="0.7"/>'
+        )
+        # Lower (closed) cymbal — flatter, slightly darker / brassier.
+        low_y = head_top + 6
+        s += (
+            f'<ellipse cx="{HEAD_CX}" cy="{low_y}" rx="58" ry="10" '
+            f'fill="{brass}" stroke="{OUTLINE}" stroke-width="2.6"/>'
+        )
+        for r in (50, 42, 34, 24):
+            s += (
+                f'<ellipse cx="{HEAD_CX}" cy="{low_y}" '
+                f'rx="{r}" ry="{r * 10 / 58:.1f}" '
+                f'fill="none" stroke="{brass_sh}" '
+                f'stroke-width="0.7" opacity="0.55"/>'
+            )
+        # Bright catch-light along the lower cymbal's upper edge
+        s += (
+            f'<path d="M{HEAD_CX-46} {low_y-5} '
+            f'Q{HEAD_CX} {low_y-9}, {HEAD_CX+46} {low_y-5}" '
+            f'stroke="{brass_hl}" stroke-width="1.4" fill="none"/>'
+        )
+        # Red felt washer (clutch felt) on the rod, sitting on top
+        # of the lower cymbal.
+        s += (
+            f'<rect x="{rod_x-5}" y="{low_y-7}" width="10" height="5" '
+            f'rx="1" fill="{felt}" stroke="{OUTLINE}" stroke-width="1.2"/>'
+        )
+        # Upper (open) cymbal — tilted forward, narrower-ry but
+        # slightly larger-rx so it reads as raised above the lower.
+        up_y = head_top - 8
+        s += (
+            f'<ellipse cx="{HEAD_CX}" cy="{up_y}" rx="62" ry="9" '
+            f'fill="{brass}" stroke="{OUTLINE}" stroke-width="2.8"/>'
+        )
+        for r in (54, 46, 38, 28, 18):
+            s += (
+                f'<ellipse cx="{HEAD_CX}" cy="{up_y}" '
+                f'rx="{r}" ry="{r * 9 / 62:.1f}" '
+                f'fill="none" stroke="{brass_sh}" '
+                f'stroke-width="0.8" opacity="0.55"/>'
+            )
+        # Bell + bell highlight (raised dome at upper cymbal's center)
+        s += (
+            f'<ellipse cx="{HEAD_CX}" cy="{up_y-2}" rx="10" ry="3.6" '
+            f'fill="{brass_hl}" stroke="{OUTLINE}" stroke-width="1.6"/>'
+            f'<ellipse cx="{HEAD_CX-3}" cy="{up_y-3}" rx="3" ry="1.2" '
+            f'fill="#fff" opacity="0.85"/>'
+        )
+        # Catch-light along upper cymbal's upper rim
+        s += (
+            f'<path d="M{HEAD_CX-50} {up_y-5} '
+            f'Q{HEAD_CX} {up_y-9}, {HEAD_CX+50} {up_y-5}" '
+            f'stroke="{brass_hl}" stroke-width="1.6" fill="none"/>'
+        )
+        # Clutch top-nut on the rod above the upper cymbal
+        s += (
+            f'<rect x="{rod_x-3}" y="{head_top-28}" width="6" height="6" '
+            f'rx="1" fill="{rod}" stroke="{OUTLINE}" stroke-width="1.2"/>'
+        )
 
     elif style == "antennae":
-        # Two tall thin antennae with round bulb tips. Knobs are
-        # body-colored so they read as part of the character.
-        knob = lighten(body, 0.30)
-        for x in (76, 124):
-            s += (f'<line x1="{x}" y1="{head_top+10}" x2="{x}" y2="{head_top-22}" '
-                  f'stroke="{darken(body, 0.55)}" stroke-width="3.2" '
-                  f'stroke-linecap="round"/>')
-            s += (f'<circle cx="{x}" cy="{head_top-28}" r="9" '
-                  f'fill="{knob}" stroke="{darken(body, 0.6)}" stroke-width="2.4"/>')
-            s += f'<circle cx="{x-2}" cy="{head_top-30}" r="2.6" fill="#fff" opacity="0.8"/>'
+        # Oren — kick drummer. Two felt mallets sticking up from the
+        # head: wooden shaft, fat cream-felt head with a stitched
+        # band. Reads as proper percussion gear, not generic antennae.
+        wood = "#7a4a1f"
+        wood_dark = "#4d2d10"
+        felt = "#f1ead4"
+        felt_shadow = "#c8bf9a"
+        for sign in (-1, 1):
+            base_x = HEAD_CX + sign * 24
+            tip_x = HEAD_CX + sign * 30
+            # Wooden shaft — slightly angled outward like crossed
+            # mallets on a band kit.
+            s += (
+                f'<line x1="{base_x}" y1="{head_top+12}" '
+                f'x2="{tip_x}" y2="{head_top-18}" '
+                f'stroke="{wood}" stroke-width="4.4" stroke-linecap="round"/>'
+                # Inner wood grain highlight
+                f'<line x1="{base_x - sign * 0.6}" y1="{head_top+10}" '
+                f'x2="{tip_x - sign * 0.6}" y2="{head_top-16}" '
+                f'stroke="{wood_dark}" stroke-width="1" '
+                f'stroke-linecap="round" opacity="0.6"/>'
+            )
+            # Felt mallet head — chunky oval with a darker stitch
+            # line running across the equator.
+            head_cx = tip_x + sign * 2
+            head_cy = head_top - 25
+            s += (
+                f'<ellipse cx="{head_cx}" cy="{head_cy}" rx="11" ry="10" '
+                f'fill="{felt}" stroke="#3a2a14" stroke-width="2.2"/>'
+                # Stitched seam across the felt
+                f'<path d="M{head_cx-9} {head_cy+1} q9 4 18 0" '
+                f'stroke="{felt_shadow}" stroke-width="1.4" '
+                f'fill="none" stroke-dasharray="2 2"/>'
+                # Highlight on the felt
+                f'<ellipse cx="{head_cx-3}" cy="{head_cy-3}" rx="3" ry="2.4" '
+                f'fill="#ffffff" opacity="0.6"/>'
+            )
 
     elif style == "horns":
-        # Two devil-style horn spikes at the top corners of the dome.
-        for sign, anchor in ((-1, BCX-32), (1, BCX+32)):
-            tip_x = anchor + sign * 8
-            tip_y = head_top - 38
-            s += (f'<path d="M{anchor-12} {head_top+10} '
-                  f'Q{anchor-2} {head_top-10}, {tip_x} {tip_y} '
-                  f'Q{anchor+8} {head_top}, {anchor+12} {head_top+12} Z" '
-                  f'fill="{darken(body, 0.5)}" stroke="{darken(body, 0.7)}" '
-                  f'stroke-width="2.2" stroke-linejoin="round"/>')
+        # Raddy — snare drummer. Two thin wooden drumsticks crossed
+        # behind the head, plus a small steel tension-lug accent on
+        # the headband. The sticks read as part of his silhouette so
+        # he's instantly identifiable as the percussion player.
+        wood = "#a06a32"
+        wood_dark = "#5c3b14"
+        tip_color = "#dec39a"
+        # Two sticks crossing in an X behind the head.
+        for sign in (-1, 1):
+            butt_x = HEAD_CX + sign * 50
+            butt_y = head_top + 32
+            tip_x  = HEAD_CX - sign * 18
+            tip_y  = head_top - 32
+            # Shaft
+            s += (
+                f'<line x1="{butt_x}" y1="{butt_y}" '
+                f'x2="{tip_x}" y2="{tip_y}" '
+                f'stroke="{wood}" stroke-width="4.4" stroke-linecap="round"/>'
+                # Wood-grain highlight
+                f'<line x1="{butt_x - sign * 0.6}" y1="{butt_y - 1}" '
+                f'x2="{tip_x - sign * 0.6}" y2="{tip_y - 1}" '
+                f'stroke="{wood_dark}" stroke-width="0.9" '
+                f'stroke-linecap="round" opacity="0.55"/>'
+            )
+            # Drumstick tip (oval bead at the striking end)
+            s += (
+                f'<ellipse cx="{tip_x}" cy="{tip_y}" rx="4.6" ry="5.4" '
+                f'fill="{tip_color}" stroke="{wood_dark}" stroke-width="1.4" '
+                f'transform="rotate({sign * -22} {tip_x} {tip_y})"/>'
+            )
+            # Drumstick butt (flat end)
+            s += (
+                f'<circle cx="{butt_x}" cy="{butt_y}" r="3.2" '
+                f'fill="{wood_dark}" stroke="#2a1808" stroke-width="1.2"/>'
+            )
+        # Small chrome tension lug riveted to the forehead — reads
+        # as "snare hardware" at a glance.
+        s += (
+            f'<rect x="{HEAD_CX-7}" y="{head_top+18}" width="14" height="6" '
+            f'rx="1.4" fill="#cdd4de" stroke="#0d1018" stroke-width="1.4"/>'
+            f'<circle cx="{HEAD_CX-3}" cy="{head_top+21}" r="1" fill="#0d1018"/>'
+            f'<circle cx="{HEAD_CX+3}" cy="{head_top+21}" r="1" fill="#0d1018"/>'
+        )
 
     elif style == "catEars":
         # Two prominent pointed cat ears anchored to the top corners
@@ -673,34 +802,167 @@ def render_crown(style: str, body: str) -> str:
                   f'fill="{inner}" opacity="0.85"/>')
 
     elif style == "tvMonitor":
-        # Visor / monitor strip across the upper face area + two
-        # short antennae poking up. The visor is part of the head;
-        # the eyes peek out through the screen.
-        s += (f'<rect x="{BCX-46}" y="{head_top+24}" width="92" height="56" '
-              f'rx="10" fill="#1a1f28" stroke="#0a0d14" stroke-width="2.4"/>')
-        # Scanlines hint
-        for sy in (head_top+30, head_top+44, head_top+58):
-            s += (f'<line x1="{BCX-42}" y1="{sy}" x2="{BCX+42}" y2="{sy}" '
-                  f'stroke="#3a4350" stroke-width="0.8" opacity="0.5"/>')
-        # Glow dot in the corner
-        s += f'<circle cx="{BCX-40}" cy="{head_top+30}" r="2.2" fill="#5fff88"/>'
-        # Two antennae
-        for x_off in (-22, 22):
-            s += (f'<line x1="{BCX+x_off}" y1="{head_top+10}" '
-                  f'x2="{BCX+x_off}" y2="{head_top-18}" '
-                  f'stroke="#1a1f28" stroke-width="3" stroke-linecap="round"/>')
-            s += (f'<circle cx="{BCX+x_off}" cy="{head_top-22}" r="5" '
-                  f'fill="#bcc4d0" stroke="#0a0d14" stroke-width="1.8"/>')
+        # Fun-bot — drum-kit robot. Brushed-metal dome helmet riveted
+        # over the upper head, side speaker cans like vintage cans
+        # headphones, LED status strip across the brow ridge, and a
+        # tall radio antenna with a blinking lamp on top. Designed to
+        # read as ROBOT instantly without obscuring the polo face.
+        plate_top_y = head_top - 4        # dome above the head (clamped so antenna fits viewBox)
+        plate_bot_y = head_top + 14       # ends WELL above the brow line
+        plate_left  = HEAD_CX - 64
+        plate_right = HEAD_CX + 64
+        # Helmet dome — taller arc with a flat brow edge.
+        s += (
+            f'<path d="M{plate_left} {plate_bot_y} '
+            f'Q{HEAD_CX} {plate_top_y - 22}, {plate_right} {plate_bot_y} '
+            f'L{plate_right - 4} {plate_bot_y + 5} '
+            f'L{plate_left + 4} {plate_bot_y + 5} Z" '
+            f'fill="#8590a0" stroke="#0d1018" stroke-width="2.6"/>'
+        )
+        # Brushed-metal highlight ribbon along the dome's apex.
+        s += (
+            f'<path d="M{plate_left + 14} {plate_bot_y - 6} '
+            f'Q{HEAD_CX} {plate_top_y - 14}, {plate_right - 14} {plate_bot_y - 6}" '
+            f'stroke="#dfe5ec" stroke-width="3.2" fill="none" '
+            f'stroke-linecap="round" opacity="0.78"/>'
+        )
+        # Plate seam — horizontal line where the helmet meets the
+        # head, with rivets along it.
+        s += (
+            f'<line x1="{plate_left + 4}" y1="{plate_bot_y + 1}" '
+            f'x2="{plate_right - 4}" y2="{plate_bot_y + 1}" '
+            f'stroke="#0d1018" stroke-width="1.6"/>'
+        )
+        for dx in (-46, -22, 0, 22, 46):
+            s += (
+                f'<circle cx="{HEAD_CX + dx}" cy="{plate_bot_y + 1}" r="2.6" '
+                f'fill="#3a414c" stroke="#0d1018" stroke-width="0.8"/>'
+                f'<circle cx="{HEAD_CX + dx - 0.7}" cy="{plate_bot_y + 0.3}" '
+                f'r="0.9" fill="#cdd4de" opacity="0.9"/>'
+            )
+        # LED status strip — five colored windows inside the dome.
+        led_y = plate_bot_y - 10
+        for i, color in enumerate(("#ff5050", "#ffae3b", "#ffd042", "#5fff88", "#5fd0ff")):
+            lx = HEAD_CX - 28 + i * 14
+            s += (
+                f'<rect x="{lx-4}" y="{led_y-3.5}" width="8" height="7" '
+                f'rx="1.4" fill="{color}" stroke="#0d1018" stroke-width="0.7"/>'
+                f'<rect x="{lx-2.4}" y="{led_y-3}" width="3" height="2" '
+                f'fill="#fff" opacity="0.8"/>'
+            )
+        # Speaker cans — vintage headphone-style ovals on each side
+        # of the head, attached to the dome by a small arc bar.
+        for sign in (-1, 1):
+            cx = HEAD_CX + sign * 74
+            cy = HEAD_CY - 12
+            # Headband arc from the dome edge to the can.
+            s += (
+                f'<path d="M{HEAD_CX + sign * 60} {plate_bot_y + 5} '
+                f'Q{HEAD_CX + sign * 72} {cy - 10}, '
+                f'{cx} {cy - 6}" '
+                f'stroke="#5a626f" stroke-width="3.4" fill="none" '
+                f'stroke-linecap="round"/>'
+            )
+            # Outer ear-can shell.
+            s += (
+                f'<ellipse cx="{cx}" cy="{cy}" rx="9" ry="14" '
+                f'fill="#5a626f" stroke="#0d1018" stroke-width="2.2"/>'
+                # Inner driver — dark cone with a small highlight.
+                f'<ellipse cx="{cx}" cy="{cy}" rx="5" ry="9" '
+                f'fill="#181c24" stroke="#0d1018" stroke-width="1"/>'
+                f'<ellipse cx="{cx - sign * 1.4}" cy="{cy - 3}" rx="1.6" ry="2.4" '
+                f'fill="#aeb6c2" opacity="0.7"/>'
+            )
+        # Antenna — tall radio mast with two telescoping sections
+        # and a glowing red lamp.
+        ant_x = HEAD_CX
+        ant_base_y = plate_top_y - 6      # base nut sits on dome apex
+        ant_mid_y = plate_top_y - 16
+        ant_top_y = max(8, plate_top_y - 28)  # clamp so lamp stays inside viewBox
+        # Base nut on the dome apex.
+        s += (
+            f'<rect x="{ant_x - 6}" y="{ant_base_y - 2}" width="12" height="10" '
+            f'rx="1.4" fill="#5a626f" stroke="#0d1018" stroke-width="1.4"/>'
+            f'<line x1="{ant_x - 5}" y1="{ant_base_y + 3}" '
+            f'x2="{ant_x + 5}" y2="{ant_base_y + 3}" '
+            f'stroke="#0d1018" stroke-width="0.8"/>'
+        )
+        # Lower telescope section — thicker.
+        s += (
+            f'<line x1="{ant_x}" y1="{ant_base_y - 2}" '
+            f'x2="{ant_x}" y2="{ant_mid_y}" '
+            f'stroke="#3a414c" stroke-width="5" stroke-linecap="round"/>'
+        )
+        # Upper telescope section — thinner.
+        s += (
+            f'<line x1="{ant_x}" y1="{ant_mid_y}" '
+            f'x2="{ant_x}" y2="{ant_top_y + 4}" '
+            f'stroke="#5a626f" stroke-width="3" stroke-linecap="round"/>'
+        )
+        # Antenna lamp — red bulb with halo + white hot-spot.
+        s += (
+            f'<circle cx="{ant_x}" cy="{ant_top_y}" r="14" '
+            f'fill="#ff3838" opacity="0.22"/>'
+            f'<circle cx="{ant_x}" cy="{ant_top_y}" r="9" '
+            f'fill="#ff3838" stroke="#0d1018" stroke-width="2"/>'
+            f'<circle cx="{ant_x - 2.4}" cy="{ant_top_y - 2.4}" r="2.8" '
+            f'fill="#fff5f5" opacity="0.88"/>'
+        )
 
     elif style == "leafSpike":
-        # One pointed leaf growing out the top, slight curl.
-        s += (f'<path d="M{BCX} {head_top+12} '
-              f'C{BCX-16} {head_top-10}, {BCX-12} {head_top-46}, {BCX+2} {head_top-50} '
-              f'C{BCX+18} {head_top-44}, {BCX+18} {head_top-10}, {BCX} {head_top+12} Z" '
-              f'fill="#7adf6a" stroke="#244e1c" stroke-width="2.2"/>')
-        # Vein
-        s += (f'<path d="M{BCX} {head_top+10} Q{BCX+2} {head_top-20}, {BCX+1} {head_top-46}" '
-              f'stroke="#244e1c" stroke-width="1.4" fill="none"/>')
+        # Vineria — shaker. A wooden maraca / seed-pod shaker sitting
+        # on top of the head: a chubby ovoid gourd body with woven
+        # straps, a short handle, and a few visible "rattle" dots
+        # painted on the side. Reads as a percussion shaker, not a
+        # plant. Body color stays green (vine motif) so the shaker
+        # has a "natural-gourd painted-green" feel.
+        gourd_cx = HEAD_CX
+        gourd_cy = head_top - 14
+        gourd = "#8fd76b"          # painted-gourd green-cream
+        gourd_hl = "#d4ffb8"
+        strap = "#7a4a1f"
+        strap_dk = "#3a2008"
+        seed = "#3e2a14"
+        # Wooden handle below the gourd, peeking just above the head.
+        s += (
+            f'<rect x="{gourd_cx-6}" y="{head_top-2}" width="12" height="14" '
+            f'rx="2" fill="{strap}" stroke="{strap_dk}" stroke-width="2"/>'
+            f'<line x1="{gourd_cx-3}" y1="{head_top}" '
+            f'x2="{gourd_cx-3}" y2="{head_top+10}" '
+            f'stroke="{strap_dk}" stroke-width="0.7" opacity="0.5"/>'
+        )
+        # Gourd body — bigger chubby vertical oval so it reads as a
+        # proper hand-held maraca, not a tiny ornament.
+        s += (
+            f'<ellipse cx="{gourd_cx}" cy="{gourd_cy}" rx="28" ry="22" '
+            f'fill="{gourd}" stroke="#244e1c" stroke-width="2.8"/>'
+            # Highlight crescent on the upper-left
+            f'<path d="M{gourd_cx-18} {gourd_cy-10} '
+            f'Q{gourd_cx-22} {gourd_cy}, {gourd_cx-18} {gourd_cy+12}" '
+            f'stroke="{gourd_hl}" stroke-width="3.4" fill="none" '
+            f'stroke-linecap="round" opacity="0.75"/>'
+        )
+        # Woven leather strap wrapping the lower portion — two thin
+        # lines following the gourd's bottom curve, with stitched
+        # dashed overlay.
+        for dy in (8, 13):
+            s += (
+                f'<path d="M{gourd_cx-26} {gourd_cy+dy} '
+                f'Q{gourd_cx} {gourd_cy+dy+3}, {gourd_cx+26} {gourd_cy+dy}" '
+                f'stroke="{strap}" stroke-width="2.6" fill="none" '
+                f'stroke-linecap="round"/>'
+                f'<path d="M{gourd_cx-26} {gourd_cy+dy} '
+                f'Q{gourd_cx} {gourd_cy+dy+3}, {gourd_cx+26} {gourd_cy+dy}" '
+                f'stroke="{strap_dk}" stroke-width="0.7" fill="none" '
+                f'stroke-dasharray="3 2" opacity="0.7"/>'
+            )
+        # Decorative speckle pattern painted across the upper gourd
+        # — diagonal scatter, NOT in a face triangle.
+        for dx, dy in ((-16, -8), (-9, -13), (-3, -6), (5, -11), (12, -4), (17, -10)):
+            s += (
+                f'<circle cx="{gourd_cx + dx}" cy="{gourd_cy + dy}" r="1.6" '
+                f'fill="{seed}" opacity="0.85"/>'
+            )
 
     elif style == "headphones":
         # Curved headphones band over the top of the head with two
@@ -716,15 +978,52 @@ def render_crown(style: str, body: str) -> str:
                   f'rx="3" fill="#4a5260"/>')
 
     elif style == "glitchSparks":
-        # Jagged static bursts radiating from the top + a few
-        # offset color-shift slabs across the body's upper region.
-        s += '<g opacity="0.92">'
-        # Top-mounted zigzag bursts
-        s += (f'<path d="M{BCX-30} {head_top-10} l8 -12 l-4 -2 l12 -16 l-2 8 l10 -12 l-4 6 l10 -8 l-4 12 l8 -2" '
-              f'stroke="#0ff" stroke-width="2" fill="none" stroke-linejoin="round"/>')
-        s += (f'<path d="M{BCX+8} {head_top-14} l-4 -10 l6 -2 l-2 -8 l8 4 l-2 -12 l8 8 l-2 -4 l8 12" '
-              f'stroke="#f0f" stroke-width="2" fill="none" stroke-linejoin="round"/>')
-        s += "</g>"
+        # Brud — vox glitch. A glitched-out broken-TV crown: stacked
+        # scanline strips with RGB chromatic-aberration offsets,
+        # plus a few "datamosh" lightning shards bursting upward.
+        # Reads as a literal corrupted video signal.
+        # Stacked CRT-style scanline strips that read as a hovering
+        # video band of broken signal.
+        strip_x = BCX - 40
+        strip_w = 80
+        strip_h = 4
+        for i, y_off in enumerate((0, 8, 16, 24)):
+            y = head_top - 6 - y_off
+            # Cyan strip
+            s += (
+                f'<rect x="{strip_x - 2}" y="{y}" '
+                f'width="{strip_w}" height="{strip_h}" '
+                f'fill="#0fffff" opacity="0.55"/>'
+            )
+            # Magenta strip offset right (chromatic aberration)
+            s += (
+                f'<rect x="{strip_x + 2}" y="{y}" '
+                f'width="{strip_w}" height="{strip_h}" '
+                f'fill="#ff34c8" opacity="0.55"/>'
+            )
+            # Central yellow noise strip
+            s += (
+                f'<rect x="{strip_x}" y="{y + 1}" '
+                f'width="{strip_w}" height="{strip_h - 1.5}" '
+                f'fill="#ffe34a" opacity="0.75"/>'
+            )
+        # Two jagged lightning shards bursting upward through the
+        # strips — drawn AFTER so they sit on top.
+        s += (
+            f'<path d="M{BCX-22} {head_top-4} l4 -12 l-6 -2 l8 -14 l-2 -6 '
+            f'l10 -10 l-2 8 l8 -6" '
+            f'stroke="#ffffff" stroke-width="2.2" fill="none" '
+            f'stroke-linejoin="miter" stroke-linecap="round"/>'
+            f'<path d="M{BCX+8} {head_top-8} l-4 -8 l6 -2 l-2 -10 l8 4 '
+            f'l-2 -10 l8 6 l-2 -2 l6 10" '
+            f'stroke="#ffffff" stroke-width="2.2" fill="none" '
+            f'stroke-linejoin="miter" stroke-linecap="round"/>'
+        )
+        # A single broken-pixel dot floating off the top
+        s += (
+            f'<rect x="{BCX-2}" y="{head_top-38}" width="4" height="4" '
+            f'fill="#ff34c8" stroke="#ffffff" stroke-width="0.6"/>'
+        )
         # Cyan + magenta glitch slabs on body
         s += (f'<rect x="{BCX-44}" y="{EYE_Y-26}" width="28" height="4" '
               f'fill="#0ff" opacity="0.55"/>')
@@ -732,221 +1031,677 @@ def render_crown(style: str, body: str) -> str:
               f'fill="#f0f" opacity="0.55"/>')
 
     elif style == "pixelCrown":
-        # Crown of square pixel blocks along the top of the dome.
-        block_y = head_top - 4
-        for i, w in enumerate([10, 14, 18, 14, 10]):
-            bx = BCX - 35 + i * 14
-            h = 10 + (i % 2) * 8
-            s += (f'<rect x="{bx}" y="{block_y-h}" width="{w}" height="{h+10}" '
-                  f'fill="{lighten(body, 0.20)}" stroke="{darken(body, 0.55)}" '
-                  f'stroke-width="2"/>')
-        # Single jewel pixel in the middle
-        s += f'<rect x="{BCX-4}" y="{block_y-14}" width="8" height="8" fill="#ff4a6e"/>'
+        # Garnold — arpeggio. A chunky 8-bit pixel crown: stair-step
+        # silhouette built from beefy gold blocks with darker shadow
+        # sides, three jewel-pixel insets, and a single "1-up"
+        # sparkle. Reads as a retro game crown, fitting an
+        # arpeggiator (lots of staccato notes climbing).
+        gold = "#ffd042"
+        gold_dk = "#a87800"
+        gold_dk2 = "#6a4a00"
+        gold_hl = "#fff4a8"
+        # Crown silhouette — drawn as one stair-step path so the
+        # pixel-art chunkiness reads at any zoom. Three peaks of
+        # different heights.
+        s += (
+            f'<path d="'
+            f'M{BCX-40} {head_top+10} '
+            f'L{BCX-40} {head_top-8} '
+            f'L{BCX-26} {head_top-8} '
+            f'L{BCX-26} {head_top-20} '
+            f'L{BCX-12} {head_top-20} '
+            f'L{BCX-12} {head_top-32} '
+            f'L{BCX+12} {head_top-32} '
+            f'L{BCX+12} {head_top-20} '
+            f'L{BCX+26} {head_top-20} '
+            f'L{BCX+26} {head_top-8} '
+            f'L{BCX+40} {head_top-8} '
+            f'L{BCX+40} {head_top+10} Z'
+            f'" fill="{gold}" stroke="{gold_dk2}" stroke-width="3" '
+            f'stroke-linejoin="miter"/>'
+        )
+        # Pixel-shadow strip along the bottom for 8-bit volume.
+        s += (
+            f'<rect x="{BCX-37}" y="{head_top+4}" width="74" height="6" '
+            f'fill="{gold_dk}" opacity="0.75"/>'
+        )
+        # Three gemstone pixels — chunky 6x6 squares set into the
+        # crown at the peaks. Center is red, sides are cyan.
+        for cx, color in (
+            (BCX - 19, "#5fd0ff"),
+            (BCX, "#ff4a6e"),
+            (BCX + 19, "#5fd0ff"),
+        ):
+            cy = head_top - 14 if cx == BCX else head_top - 2
+            s += (
+                f'<rect x="{cx-4}" y="{cy-4}" width="8" height="8" '
+                f'fill="{color}" stroke="{gold_dk2}" stroke-width="1.2"/>'
+                # Inner highlight pixel (single pixel of light)
+                f'<rect x="{cx-3}" y="{cy-3}" width="2" height="2" '
+                f'fill="#ffffff" opacity="0.85"/>'
+            )
+        # Sparkle pixel — single bright star above the center peak.
+        s += (
+            f'<rect x="{BCX-1}" y="{head_top-40}" width="2" height="2" fill="{gold_hl}"/>'
+            f'<rect x="{BCX-3}" y="{head_top-38}" width="2" height="2" fill="{gold_hl}"/>'
+            f'<rect x="{BCX+1}" y="{head_top-38}" width="2" height="2" fill="{gold_hl}"/>'
+            f'<rect x="{BCX-1}" y="{head_top-36}" width="2" height="2" fill="{gold_hl}"/>'
+        )
 
     elif style == "rocketTop":
-        # Conical rocket nose-cone on top + small fins peeking out
-        # the sides of the body.
-        s += (f'<path d="M{BCX-16} {head_top+22} '
-              f'L{BCX} {head_top-48} '
-              f'L{BCX+16} {head_top+22} Z" '
-              f'fill="{lighten(body, 0.15)}" stroke="{darken(body, 0.55)}" '
-              f'stroke-width="2.4" stroke-linejoin="round"/>')
-        s += (f'<circle cx="{BCX}" cy="{head_top-12}" r="4.5" '
-              f'fill="#ff4a3a" stroke="#7a1c12" stroke-width="1.6"/>')
-        # Small thruster fins on body sides
+        # Owakcx — riser. A literal RISING ARROW glyph on top of the
+        # head: a chunky chevron-style upward arrow with a glowing
+        # trail at its base, suggesting "pitch sliding up" /
+        # "intensifying riser sweep". Plus two little energy
+        # particles trailing on either side.
+        rocket = lighten(body, 0.30)
+        rocket_dk = darken(body, 0.55)
+        rocket_hl = "#ffffff"
+        # Arrow shaft + head (a fat chevron pointing UP).
+        s += (
+            f'<path d="'
+            f'M{BCX} {head_top - 44} '
+            f'L{BCX - 22} {head_top - 14} '
+            f'L{BCX - 10} {head_top - 14} '
+            f'L{BCX - 10} {head_top + 16} '
+            f'L{BCX + 10} {head_top + 16} '
+            f'L{BCX + 10} {head_top - 14} '
+            f'L{BCX + 22} {head_top - 14} Z" '
+            f'fill="{rocket}" stroke="{rocket_dk}" stroke-width="2.6" '
+            f'stroke-linejoin="miter"/>'
+        )
+        # Inner highlight stripe down the shaft.
+        s += (
+            f'<line x1="{BCX-4}" y1="{head_top-32}" '
+            f'x2="{BCX-4}" y2="{head_top+12}" '
+            f'stroke="{rocket_hl}" stroke-width="2" opacity="0.75"/>'
+        )
+        # Glow burst at the arrow's tip.
+        s += (
+            f'<circle cx="{BCX}" cy="{head_top-44}" r="6" '
+            f'fill="{rocket_hl}" opacity="0.55"/>'
+            f'<circle cx="{BCX}" cy="{head_top-44}" r="3" fill="{rocket_hl}"/>'
+        )
+        # Two upward energy whoosh trails on either side of the
+        # shaft — small curved lines suggesting motion.
         for sign in (-1, 1):
-            s += (f'<path d="M{BCX+sign*BW_HALF-sign*2} {EYE_Y+40} '
-                  f'l{sign*22} 6 l{-sign*4} 18 l{-sign*16} -6 Z" '
-                  f'fill="{darken(body, 0.45)}" stroke="{darken(body, 0.65)}" '
-                  f'stroke-width="1.8"/>')
+            s += (
+                f'<path d="M{BCX + sign * 26} {head_top + 4} '
+                f'q{sign * 4} -16 {sign * -2} -28" '
+                f'stroke="{rocket_dk}" stroke-width="2.6" '
+                f'fill="none" stroke-linecap="round" opacity="0.8"/>'
+                f'<path d="M{BCX + sign * 32} {head_top + 8} '
+                f'q{sign * 6} -10 {sign * 2} -18" '
+                f'stroke="{rocket_dk}" stroke-width="2" '
+                f'fill="none" stroke-linecap="round" opacity="0.55"/>'
+            )
 
     elif style == "cloudPuff":
-        # A puffy cloud overlapping the top of the dome — the head
-        # peeks out from inside the cloud.
-        s += '<g>'
-        for (cx, cy, r) in [
-            (BCX-30, head_top+10, 22),
-            (BCX, head_top-6, 28),
-            (BCX+30, head_top+8, 24),
-            (BCX-12, head_top+18, 18),
-            (BCX+18, head_top+20, 20),
-        ]:
-            s += (f'<circle cx="{cx}" cy="{cy}" r="{r}" '
-                  f'fill="#fff" stroke="#b0c8de" stroke-width="2"/>')
-        s += "</g>"
+        # Sky — music box. A brass windup key sticks out the top of
+        # the head with a triangular slot, suggesting "wind me up to
+        # play". Below it, a small painted ballerina silhouette
+        # would be too tiny; we settle for the key + a slim brass
+        # base plate so the head reads as an actual music box.
+        brass = "#e9c449"
+        brass_dk = "#8a6a14"
+        brass_hl = "#fff4a8"
+        # Brass base plate on the head — small rectangle riveted in.
+        s += (
+            f'<rect x="{BCX-22}" y="{head_top+10}" width="44" height="10" '
+            f'rx="2" fill="{brass}" stroke="{brass_dk}" stroke-width="2"/>'
+            # Two rivets
+            f'<circle cx="{BCX-15}" cy="{head_top+15}" r="1.6" fill="{brass_dk}"/>'
+            f'<circle cx="{BCX+15}" cy="{head_top+15}" r="1.6" fill="{brass_dk}"/>'
+        )
+        # Vertical key shaft.
+        s += (
+            f'<rect x="{BCX-2.5}" y="{head_top-24}" width="5" height="36" '
+            f'fill="{brass}" stroke="{brass_dk}" stroke-width="1.6"/>'
+        )
+        # Figure-eight key bow (the classic music-box wind-up "wing"
+        # shape) — two big circles side by side on a horizontal axis,
+        # connected through the shaft. Reads instantly as a wind-up
+        # key from any size.
+        bow_y = head_top - 30
+        for sign in (-1, 1):
+            cx = BCX + sign * 11
+            s += (
+                f'<circle cx="{cx}" cy="{bow_y}" r="11" '
+                f'fill="{brass}" stroke="{brass_dk}" stroke-width="2"/>'
+                # Inner thumb-hole on each wing
+                f'<circle cx="{cx}" cy="{bow_y}" r="5" '
+                f'fill="#3a2a08" stroke="{brass_dk}" stroke-width="1.4"/>'
+                # Highlight on the wing
+                f'<path d="M{cx-6} {bow_y-7} q-1 8 5 9" '
+                f'stroke="{brass_hl}" stroke-width="2" fill="none" '
+                f'stroke-linecap="round" opacity="0.8"/>'
+            )
+        # Tiny shaft cap where the wings meet the shaft.
+        s += (
+            f'<rect x="{BCX-3}" y="{bow_y+7}" width="6" height="6" '
+            f'fill="{brass}" stroke="{brass_dk}" stroke-width="1.4"/>'
+        )
 
     elif style == "sunRays":
-        # Wavy sun rays around the entire upper head — alternating
-        # long/short spikes radiating outward.
-        cx_c, cy_c = BCX, head_top + 14
-        for ang_deg in range(-90, 90, 18):
-            length = 28 if ang_deg % 36 == 0 else 22
-            import math
-            ang = math.radians(ang_deg - 90)
-            tx = cx_c + math.cos(ang) * (BW_HALF + length)
-            ty = cy_c + math.sin(ang) * (BW_HALF + length)
-            mx = cx_c + math.cos(ang) * (BW_HALF + length * 0.35)
-            my = cy_c + math.sin(ang) * (BW_HALF + length * 0.35)
-            # Tapered ray
-            perp_ang = ang + math.pi / 2
-            half_w = 5
-            x1 = mx + math.cos(perp_ang) * half_w
-            y1 = my + math.sin(perp_ang) * half_w
-            x2 = mx - math.cos(perp_ang) * half_w
-            y2 = my - math.sin(perp_ang) * half_w
-            s += (f'<path d="M{x1:.1f} {y1:.1f} L{tx:.1f} {ty:.1f} '
-                  f'L{x2:.1f} {y2:.1f} Z" '
-                  f'fill="#ffd84a" stroke="#a87800" stroke-width="1.6" '
-                  f'stroke-linejoin="round"/>')
+        # Mr-Sun — piano. Reimagined as a tiny grand-piano-keyboard
+        # hat: a wood-rim slab sitting on top of the head with an
+        # alternating black/white key strip + a music-note flag
+        # poking up. Reads as "piano" instantly, not as a sun.
+        wood = "#5a3a1a"
+        wood_dk = "#2a1a08"
+        # Wood frame slab (top of grand piano lid in profile).
+        s += (
+            f'<rect x="{BCX-50}" y="{head_top-12}" width="100" height="24" '
+            f'rx="3" fill="{wood}" stroke="{wood_dk}" stroke-width="2.4"/>'
+            # Lighter top edge highlight
+            f'<rect x="{BCX-48}" y="{head_top-11}" width="96" height="3" '
+            f'fill="#7a5230" opacity="0.85"/>'
+        )
+        # White keys strip — eight bordered rects forming the keyboard.
+        key_y = head_top - 2
+        key_w = 11
+        key_h = 12
+        for i in range(8):
+            kx = BCX - 44 + i * key_w
+            s += (
+                f'<rect x="{kx}" y="{key_y}" width="{key_w}" height="{key_h}" '
+                f'fill="#ffffff" stroke="{wood_dk}" stroke-width="1.4"/>'
+            )
+        # Black keys — sharp/flat pattern (no black key between E-F
+        # and B-C). For the 8 white keys (one octave + 1) the black
+        # keys sit between keys 0-1, 1-2, 3-4, 4-5, 5-6.
+        bk_w = 6
+        bk_h = 8
+        for i in (0, 1, 3, 4, 5):
+            bkx = BCX - 44 + (i + 1) * key_w - bk_w / 2
+            s += (
+                f'<rect x="{bkx}" y="{key_y}" width="{bk_w}" height="{bk_h}" '
+                f'fill="#0a0d14" stroke="{wood_dk}" stroke-width="1"/>'
+            )
+        # Music-note flag sticking up from the wood frame.
+        nx = BCX + 26
+        s += (
+            f'<line x1="{nx}" y1="{head_top-12}" x2="{nx}" y2="{head_top-38}" '
+            f'stroke="{wood_dk}" stroke-width="2.4" stroke-linecap="round"/>'
+            f'<path d="M{nx} {head_top-38} q12 4 8 16 q-2 -10 -8 -10" '
+            f'fill="{wood_dk}" stroke="{wood_dk}" stroke-width="1.4" '
+            f'stroke-linejoin="round"/>'
+            f'<ellipse cx="{nx-4}" cy="{head_top-12}" rx="6" ry="4" '
+            f'transform="rotate(-22 {nx-4} {head_top-12})" '
+            f'fill="{wood_dk}"/>'
+        )
 
     elif style == "wizardHat":
-        # Tall pointed wizard hat with a band + star.
-        s += (f'<path d="M{BCX-30} {head_top+14} '
-              f'L{BCX+2} {head_top-66} '
-              f'L{BCX+30} {head_top+14} Z" '
-              f'fill="{darken(body, 0.25)}" stroke="{darken(body, 0.6)}" '
-              f'stroke-width="2.4" stroke-linejoin="round"/>')
-        # Band
-        s += (f'<rect x="{BCX-32}" y="{head_top+10}" width="64" height="8" '
-              f'fill="{lighten(body, 0.25)}" stroke="{darken(body, 0.6)}" '
-              f'stroke-width="2"/>')
-        # Star
-        s += (f'<path d="M{BCX-3} {head_top-30} l3 -8 l3 8 l8 1 l-6 5 l2 8 l-7 -4 '
-              f'l-7 4 l2 -8 l-6 -5 z" fill="#ffe34a" stroke="#7a5500" '
-              f'stroke-width="1.4"/>')
+        # Durple — brass. Trumpet/horn flare growing OUT of the top
+        # of the head: a wide flared brass bell with a couple of
+        # piston valves visible, like an upside-down trumpet bell
+        # acting as the character's "hat". Reads as a brass
+        # instrument, not a wizard.
+        brass = "#e9c449"
+        brass_dk = "#8a6a14"
+        brass_hl = "#fff4a8"
+        # Bell flare — wide trapezoid that widens upward, with curled
+        # rim at the top.
+        s += (
+            f'<path d="M{BCX-14} {head_top+14} '
+            f'L{BCX-42} {head_top-22} '
+            f'L{BCX+42} {head_top-22} '
+            f'L{BCX+14} {head_top+14} Z" '
+            f'fill="{brass}" stroke="{brass_dk}" stroke-width="2.6" '
+            f'stroke-linejoin="round"/>'
+        )
+        # Top rim (the curled lip of the trumpet bell).
+        s += (
+            f'<ellipse cx="{BCX}" cy="{head_top-24}" rx="44" ry="7" '
+            f'fill="{brass_hl}" stroke="{brass_dk}" stroke-width="2.4"/>'
+            # Inner dark mouth showing the bell interior
+            f'<ellipse cx="{BCX}" cy="{head_top-22}" rx="38" ry="5" '
+            f'fill="#3a2a08"/>'
+            # Catch-light along the rim
+            f'<path d="M{BCX-36} {head_top-28} q36 -4 72 0" '
+            f'stroke="#ffffff" stroke-width="1.4" fill="none" opacity="0.65"/>'
+        )
+        # Brass shaft sheen line down the bell's left side.
+        s += (
+            f'<path d="M{BCX-28} {head_top-18} L{BCX-12} {head_top+10}" '
+            f'stroke="{brass_hl}" stroke-width="3" '
+            f'stroke-linecap="round" opacity="0.7"/>'
+        )
+        # Two piston valves on the bell's lower-left — small caps
+        # poking out at angles to suggest the trumpet body wrapping
+        # around the head.
+        for dx in (-6, 6):
+            s += (
+                f'<rect x="{BCX+dx-3}" y="{head_top+4}" width="6" height="10" '
+                f'rx="1" fill="{brass}" stroke="{brass_dk}" stroke-width="1.6"/>'
+                f'<rect x="{BCX+dx-3}" y="{head_top+4}" width="6" height="3" '
+                f'fill="{brass_hl}" opacity="0.7"/>'
+            )
 
     elif style == "treeCanopy":
-        # Bunch of leafy bushes forming a leaf canopy crown.
-        s += '<g>'
-        for (cx, cy, r) in [
-            (BCX-30, head_top+4, 20),
-            (BCX-6, head_top-14, 26),
-            (BCX+22, head_top-6, 22),
-            (BCX+34, head_top+12, 18),
-            (BCX-18, head_top+16, 16),
-        ]:
-            s += (f'<circle cx="{cx}" cy="{cy}" r="{r}" '
-                  f'fill="#2f7a2a" stroke="#143518" stroke-width="2"/>')
-        # Lighter inner highlights
-        for (cx, cy, r) in [(BCX-26, head_top-2, 6), (BCX+18, head_top-12, 7)]:
-            s += (f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="#67c252" opacity="0.6"/>')
-        s += "</g>"
+        # Mr-Tree — organ. A row of cathedral organ pipes standing
+        # up from a brass base plate. Five pipes of varying heights
+        # for the visual rhythm; each pipe has a mouth slot near
+        # the base where the air whistles out.
+        brass = "#c8a040"
+        brass_dk = "#6a4a14"
+        pipe_dk = "#3a4a3a"
+        pipe_md = "#5a7a5a"
+        pipe_hl = "#9ac49a"
+        # Brass mounting base plate.
+        s += (
+            f'<rect x="{BCX-44}" y="{head_top+8}" width="88" height="12" '
+            f'rx="2" fill="{brass}" stroke="{brass_dk}" stroke-width="2.2"/>'
+            f'<line x1="{BCX-42}" y1="{head_top+10}" x2="{BCX+42}" y2="{head_top+10}" '
+            f'stroke="#ffe49a" stroke-width="1.2" opacity="0.7"/>'
+        )
+        # Five organ pipes — varying heights, clamped so the tallest
+        # stays inside the SVG viewBox (top = y=0).
+        pipe_heights = [30, 40, 48, 40, 30]
+        pipe_w = 14
+        for i, h in enumerate(pipe_heights):
+            px = BCX - 35 + i * 18
+            top_y = head_top + 8 - h
+            # Pipe body (cylinder approximated with rect + cap arc).
+            s += (
+                f'<rect x="{px - pipe_w/2}" y="{top_y}" '
+                f'width="{pipe_w}" height="{h}" '
+                f'fill="{pipe_md}" stroke="#1a2a1a" stroke-width="2"/>'
+                # Top cap arc (slight rounding)
+                f'<path d="M{px - pipe_w/2} {top_y} '
+                f'q{pipe_w/2} -4 {pipe_w} 0 Z" '
+                f'fill="{pipe_dk}" stroke="#1a2a1a" stroke-width="1.6"/>'
+                # Catch-light along the left side
+                f'<line x1="{px - pipe_w/2 + 2}" y1="{top_y + 4}" '
+                f'x2="{px - pipe_w/2 + 2}" y2="{top_y + h - 8}" '
+                f'stroke="{pipe_hl}" stroke-width="1.4" opacity="0.8"/>'
+                # Mouth slot — the windway near the base of the pipe.
+                f'<rect x="{px - 4}" y="{head_top + 2}" width="8" height="3" '
+                f'fill="#0a1a0a"/>'
+            )
 
     elif style == "squareWave":
-        # Square-wave zigzag block crest along the top edge of the dome.
+        # Simon — square wave. A bold, oscilloscope-style square wave
+        # trace running across the top of the head with a thick
+        # neon-yellow stroke and a darker underglow. Reads as a
+        # synth waveform schematic, not a generic zigzag crest.
         outline = darken(body, 0.6)
-        s += (f'<path d="M{BCX-44} {head_top+18} '
-              f'L{BCX-44} {head_top-10} L{BCX-30} {head_top-10} '
-              f'L{BCX-30} {head_top+8} L{BCX-16} {head_top+8} '
-              f'L{BCX-16} {head_top-16} L{BCX-2} {head_top-16} '
-              f'L{BCX-2} {head_top+6} L{BCX+12} {head_top+6} '
-              f'L{BCX+12} {head_top-12} L{BCX+26} {head_top-12} '
-              f'L{BCX+26} {head_top+10} L{BCX+44} {head_top+10} '
-              f'L{BCX+44} {head_top+18} Z" '
-              f'fill="{lighten(body, 0.10)}" stroke="{outline}" stroke-width="2"/>')
+        wave = "#ffe34a"
+        wave_dk = "#a87800"
+        glow = "#fff4a8"
+        base_y = head_top + 8
+        # Underglow shadow path (slightly offset down) for depth.
+        s += (
+            f'<path d="M{BCX-44} {base_y+2} '
+            f'L{BCX-44} {head_top-12} L{BCX-22} {head_top-12} '
+            f'L{BCX-22} {base_y+2} L{BCX} {base_y+2} '
+            f'L{BCX} {head_top-22} L{BCX+22} {head_top-22} '
+            f'L{BCX+22} {base_y+2} L{BCX+44} {base_y+2}" '
+            f'stroke="{wave_dk}" stroke-width="6" fill="none" '
+            f'stroke-linejoin="miter" stroke-linecap="butt" opacity="0.6"/>'
+        )
+        # Main bright square-wave trace (two cycles + 1 partial).
+        s += (
+            f'<path d="M{BCX-44} {base_y} '
+            f'L{BCX-44} {head_top-14} L{BCX-22} {head_top-14} '
+            f'L{BCX-22} {base_y} L{BCX} {base_y} '
+            f'L{BCX} {head_top-24} L{BCX+22} {head_top-24} '
+            f'L{BCX+22} {base_y} L{BCX+44} {base_y}" '
+            f'stroke="{wave}" stroke-width="4" fill="none" '
+            f'stroke-linejoin="miter" stroke-linecap="butt"/>'
+        )
+        # Thin inner highlight along the trace for extra glow.
+        s += (
+            f'<path d="M{BCX-44} {base_y} '
+            f'L{BCX-44} {head_top-14} L{BCX-22} {head_top-14} '
+            f'L{BCX-22} {base_y} L{BCX} {base_y} '
+            f'L{BCX} {head_top-24} L{BCX+22} {head_top-24} '
+            f'L{BCX+22} {base_y} L{BCX+44} {base_y}" '
+            f'stroke="{glow}" stroke-width="1.4" fill="none" '
+            f'stroke-linejoin="miter" stroke-linecap="butt" opacity="0.9"/>'
+        )
+        # Two endcap nodes — small circles at the wave's start + end
+        # for the "patched into an oscilloscope" feel.
+        s += (
+            f'<circle cx="{BCX-44}" cy="{base_y}" r="3.2" '
+            f'fill="{wave}" stroke="{outline}" stroke-width="1.6"/>'
+            f'<circle cx="{BCX+44}" cy="{base_y}" r="3.2" '
+            f'fill="{wave}" stroke="{outline}" stroke-width="1.6"/>'
+        )
 
     elif style == "fedora":
-        # Detective fedora — low cylinder crown + wide brim + band.
+        # Tunner — whistler. A detective fedora with a chrome
+        # whistle pinned to the band on a tiny lanyard — visually
+        # connects "whistler character" to the headwear instead of
+        # just being a generic hat.
+        brim = "#5a3a1a"
+        crown_c = "#8a5a32"
+        crown_dk = "#3a2008"
+        band = "#2a1808"
+        chrome = "#cdd4de"
+        chrome_dk = "#5a626f"
         # Brim
-        s += (f'<ellipse cx="{BCX}" cy="{head_top+16}" rx="58" ry="9" '
-              f'fill="#7a4a1f" stroke="#3a2008" stroke-width="2.2"/>')
+        s += (
+            f'<ellipse cx="{BCX}" cy="{head_top+16}" rx="58" ry="9" '
+            f'fill="{brim}" stroke="{crown_dk}" stroke-width="2.4"/>'
+        )
         # Crown body
-        s += (f'<path d="M{BCX-32} {head_top+16} L{BCX-32} {head_top-22} '
-              f'Q{BCX} {head_top-32}, {BCX+32} {head_top-22} '
-              f'L{BCX+32} {head_top+16} Z" '
-              f'fill="#a07042" stroke="#3a2008" stroke-width="2.2"/>')
-        # Band
-        s += (f'<rect x="{BCX-32}" y="{head_top+4}" width="64" height="8" '
-              f'fill="#3a2008"/>')
+        s += (
+            f'<path d="M{BCX-32} {head_top+16} L{BCX-32} {head_top-22} '
+            f'Q{BCX} {head_top-32}, {BCX+32} {head_top-22} '
+            f'L{BCX+32} {head_top+16} Z" '
+            f'fill="{crown_c}" stroke="{crown_dk}" stroke-width="2.4"/>'
+        )
+        # Hatband
+        s += (
+            f'<rect x="{BCX-32}" y="{head_top+4}" width="64" height="8" '
+            f'fill="{band}"/>'
+        )
         # Pinch on top
-        s += (f'<path d="M{BCX-12} {head_top-20} q12 -8 24 0" '
-              f'stroke="#3a2008" stroke-width="1.6" fill="none"/>')
+        s += (
+            f'<path d="M{BCX-12} {head_top-20} q12 -8 24 0" '
+            f'stroke="{crown_dk}" stroke-width="1.6" fill="none"/>'
+        )
+        # Tin whistle pinned to the right side of the hatband.
+        # A chrome cylindrical pipe with a mouthpiece + finger hole.
+        wx = BCX + 14
+        wy = head_top + 8
+        s += (
+            # Lanyard cord
+            f'<path d="M{BCX+8} {head_top+8} q4 6 12 8" '
+            f'stroke="{band}" stroke-width="1.4" fill="none"/>'
+            # Whistle body
+            f'<rect x="{wx}" y="{wy}" width="22" height="6" rx="2.4" '
+            f'fill="{chrome}" stroke="{chrome_dk}" stroke-width="1.4"/>'
+            # Highlight stripe
+            f'<line x1="{wx+2}" y1="{wy+1.5}" x2="{wx+20}" y2="{wy+1.5}" '
+            f'stroke="#ffffff" stroke-width="0.9" opacity="0.85"/>'
+            # Mouthpiece notch
+            f'<rect x="{wx-2}" y="{wy+1}" width="3" height="4" rx="0.6" '
+            f'fill="{chrome_dk}" stroke="#0d1018" stroke-width="0.8"/>'
+            # Two finger holes
+            f'<circle cx="{wx+10}" cy="{wy+3}" r="1.1" fill="{chrome_dk}"/>'
+            f'<circle cx="{wx+15}" cy="{wy+3}" r="1.1" fill="{chrome_dk}"/>'
+        )
+        # Sound puff coming out the whistle's mouthpiece end.
+        s += (
+            f'<path d="M{wx-6} {wy+3} q-4 -2 -8 0 q4 1 0 4 q-4 -1 0 -4" '
+            f'fill="none" stroke="{chrome_dk}" stroke-width="1.2" '
+            f'opacity="0.6"/>'
+        )
 
     elif style == "crtMonitor":
-        # Full CRT-monitor head replacement: a boxy retro monitor
-        # frame covering the upper face. Eyes are LED-style dots
-        # inside the screen instead of normal eyes (we still emit
-        # the normal face — the monitor frames AROUND them).
-        s += (f'<rect x="{BCX-54}" y="{head_top-6}" width="108" height="118" '
-              f'rx="10" fill="#1a1f28" stroke="#0a0d14" stroke-width="2.6"/>')
-        # Screen
-        s += (f'<rect x="{BCX-46}" y="{head_top+2}" width="92" height="100" '
-              f'rx="6" fill="#0a3a2a" stroke="#3a5040" stroke-width="2"/>')
+        # Mr-Fun-Computer — AI vocal. A retro CRT monitor SITTING on
+        # top of the head (not covering the face). Beige plastic
+        # shell, curved green phosphor screen with scrolling code,
+        # vent slits, a power LED, and a faint screen glow halo.
+        plastic = "#cdc6b0"          # beige plastic
+        plastic_dk = "#7a7560"
+        plastic_sh = "#a8a294"
+        screen_bg = "#0a2418"
+        screen_fg = "#8fff8a"        # green phosphor text
+        # Outer monitor box — chunky, slight perspective with the
+        # bottom edge slightly wider than the top (CRT body curve).
+        s += (
+            f'<path d="M{BCX-44} {head_top-4} '
+            f'L{BCX-48} {head_top-40} '
+            f'L{BCX+48} {head_top-40} '
+            f'L{BCX+44} {head_top-4} Z" '
+            f'fill="{plastic}" stroke="#3a3520" stroke-width="2.6" '
+            f'stroke-linejoin="round"/>'
+        )
+        # Plastic edge highlight along the top
+        s += (
+            f'<line x1="{BCX-44}" y1="{head_top-38}" '
+            f'x2="{BCX+44}" y2="{head_top-38}" '
+            f'stroke="#ffffff" stroke-width="1.2" opacity="0.55"/>'
+        )
+        # Curved CRT screen — green phosphor with subtle barrel-edge
+        # darkening at the corners.
+        scr_left   = BCX - 38
+        scr_right  = BCX + 38
+        scr_top    = head_top - 36
+        scr_bot    = head_top - 8
+        s += (
+            f'<rect x="{scr_left}" y="{scr_top}" '
+            f'width="{scr_right-scr_left}" height="{scr_bot-scr_top}" '
+            f'rx="4" fill="{screen_bg}" stroke="#0a3a2a" stroke-width="1.6"/>'
+        )
         # Scanlines
-        for sy in range(int(head_top+10), int(head_top+98), 8):
-            s += (f'<line x1="{BCX-44}" y1="{sy}" x2="{BCX+44}" y2="{sy}" '
-                  f'stroke="#0c4a36" stroke-width="0.7" opacity="0.6"/>')
-        # Status LEDs in the bottom-right of the bezel
-        s += f'<circle cx="{BCX+38}" cy="{head_top+108}" r="2.2" fill="#5fff88"/>'
-        s += f'<circle cx="{BCX+30}" cy="{head_top+108}" r="2.2" fill="#ffe34a"/>'
+        for sy in range(int(scr_top+3), int(scr_bot-2), 3):
+            s += (
+                f'<line x1="{scr_left+2}" y1="{sy}" x2="{scr_right-2}" y2="{sy}" '
+                f'stroke="#0c4a36" stroke-width="0.6" opacity="0.55"/>'
+            )
+        # Faux scrolling terminal text — three short green bars at
+        # offset x positions (suggests command output).
+        s += (
+            f'<rect x="{scr_left+4}" y="{scr_top+4}" width="14" height="2.5" fill="{screen_fg}"/>'
+            f'<rect x="{scr_left+4}" y="{scr_top+10}" width="22" height="2.5" fill="{screen_fg}"/>'
+            f'<rect x="{scr_left+4}" y="{scr_top+16}" width="10" height="2.5" fill="{screen_fg}"/>'
+            f'<rect x="{scr_left+4}" y="{scr_top+22}" width="18" height="2.5" fill="{screen_fg}"/>'
+            # Blinking cursor block at the end of the last line
+            f'<rect x="{scr_left+24}" y="{scr_top+22}" width="3" height="2.5" '
+            f'fill="{screen_fg}" opacity="0.85"/>'
+        )
+        # Vent slits along the right side of the bezel
+        for vx in (BCX + 24, BCX + 28, BCX + 32):
+            s += (
+                f'<line x1="{vx}" y1="{head_top-6}" x2="{vx}" y2="{head_top-14}" '
+                f'stroke="{plastic_dk}" stroke-width="1.2"/>'
+            )
+        # Power LED
+        s += (
+            f'<circle cx="{BCX-30}" cy="{head_top-7}" r="2" fill="#5fff88"/>'
+            f'<circle cx="{BCX-30}" cy="{head_top-7}" r="3" fill="#5fff88" opacity="0.25"/>'
+        )
 
     elif style == "megaphone":
-        # Conical megaphone shape on top — narrow at the head, wide
-        # at the open end.
-        s += (f'<path d="M{BCX-10} {head_top+18} '
-              f'L{BCX-32} {head_top-30} '
-              f'L{BCX+32} {head_top-30} '
-              f'L{BCX+10} {head_top+18} Z" '
-              f'fill="#cfd6e2" stroke="#5a6068" stroke-width="2.4" '
-              f'stroke-linejoin="round"/>')
-        # Inner shadow
-        s += (f'<path d="M{BCX-26} {head_top-26} L{BCX+26} {head_top-26} '
-              f'L{BCX+8} {head_top+14} L{BCX-8} {head_top+14} Z" '
-              f'fill="#7a8390" opacity="0.5"/>')
-        # Sound waves coming out the front
-        for r in (22, 32, 42):
-            s += (f'<path d="M{BCX+38} {head_top-32+r*0.3} '
-                  f'q12 {r*0.7} 0 {r}" '
-                  f'stroke="#ffe34a" stroke-width="2.2" fill="none" '
-                  f'opacity="0.8"/>')
+        # Wenda — "Hey!" vocal. A big megaphone tilted slightly so
+        # it reads as a real handheld bullhorn rather than a cone
+        # balanced on her head. Includes trigger handle, mouthpiece,
+        # speaker grille, and three sound waves blasting out.
+        body_c = "#e8ecf2"
+        body_dk = "#5a6068"
+        body_sh = "#a0a8b4"
+        accent = "#ff5050"
+        grille = "#5a6068"
+        # Tilt the entire megaphone group so the bell points up-right
+        # — gives it personality (she's shouting toward the audience).
+        s += f'<g transform="rotate(-12 {BCX} {head_top+4})">'
+        # Conical bell, wider at the top.
+        s += (
+            f'<path d="M{BCX-12} {head_top+8} '
+            f'L{BCX-38} {head_top-32} '
+            f'L{BCX+38} {head_top-32} '
+            f'L{BCX+12} {head_top+8} Z" '
+            f'fill="{body_c}" stroke="{body_dk}" stroke-width="2.6" '
+            f'stroke-linejoin="round"/>'
+        )
+        # Speaker grille — three inner curved lines suggesting the
+        # circular grille inside the bell.
+        for dy in (-26, -22, -18):
+            s += (
+                f'<path d="M{BCX-32} {head_top+dy} '
+                f'q32 4 64 0" '
+                f'stroke="{grille}" stroke-width="1.2" fill="none" '
+                f'opacity="0.7"/>'
+            )
+        # Bell rim highlight
+        s += (
+            f'<path d="M{BCX-36} {head_top-30} q36 -4 72 0" '
+            f'stroke="#ffffff" stroke-width="1.4" fill="none" opacity="0.85"/>'
+        )
+        # Body / barrel — short cylinder behind the bell.
+        s += (
+            f'<rect x="{BCX-12}" y="{head_top+6}" width="24" height="14" '
+            f'rx="3" fill="{body_sh}" stroke="{body_dk}" stroke-width="2"/>'
+        )
+        # Red trigger button on the side of the barrel.
+        s += (
+            f'<rect x="{BCX-4}" y="{head_top+10}" width="8" height="6" '
+            f'rx="1.2" fill="{accent}" stroke="#7a1c12" stroke-width="1.2"/>'
+        )
+        s += '</g>'
+        # Sound wave arcs blasting out the bell (drawn AFTER the
+        # rotated group so they sit "in front" pointing forward).
+        for r in (20, 32, 44):
+            s += (
+                f'<path d="M{BCX+34} {head_top-32+r*0.25} '
+                f'q14 {r*0.7} 0 {r*1.1}" '
+                f'stroke="#ffe34a" stroke-width="2.6" fill="none" '
+                f'stroke-linecap="round" opacity="0.85"/>'
+            )
 
     elif style == "bigBow":
-        # Big asymmetric bow on top of the head, ribbon trails to the
-        # sides.
-        s += (f'<g transform="translate({BCX} {head_top-14})">')
-        # Left loop
-        s += ('<path d="M0 0 q-22 -16 -30 -2 q-6 14 6 22 q18 10 24 -2 Z" '
-              'fill="#ff6aa3" stroke="#7a1c3e" stroke-width="2.4"/>')
-        # Right loop
-        s += ('<path d="M0 0 q22 -16 30 -2 q6 14 -6 22 q-18 10 -24 -2 Z" '
-              'fill="#ff6aa3" stroke="#7a1c3e" stroke-width="2.4"/>')
-        # Center knot
-        s += ('<rect x="-7" y="-8" width="14" height="16" rx="3" '
-              'fill="#ffa6c8" stroke="#7a1c3e" stroke-width="2"/>')
-        # Ribbon trails
-        s += ('<path d="M-3 8 Q-14 28 -12 40 L-4 36 Q-4 22 0 12 Z" '
-              'fill="#ff6aa3" stroke="#7a1c3e" stroke-width="1.6"/>')
-        s += ('<path d="M3 8 Q14 28 12 40 L4 36 Q4 22 0 12 Z" '
-              'fill="#ff6aa3" stroke="#7a1c3e" stroke-width="1.6"/>')
+        # Pinki — female choir. A two-tone satin ribbon bow with
+        # inner highlight curls and ribbon trails. Bigger, more
+        # detailed than the single-tone version — reads as a real
+        # silk bow with depth.
+        bow = "#ff6aa3"
+        bow_dk = "#7a1c3e"
+        bow_hl = "#ffc6e0"
+        gem = "#ffe34a"
+        s += f'<g transform="translate({BCX} {head_top-12})">'
+        # Left bow loop
+        s += (
+            '<path d="M0 0 q-26 -18 -34 -2 q-8 16 6 24 q20 12 28 -4 Z" '
+            f'fill="{bow}" stroke="{bow_dk}" stroke-width="2.4"/>'
+            # Inner crease highlight inside the loop
+            f'<path d="M-6 -2 q-16 -10 -22 2" '
+            f'stroke="{bow_hl}" stroke-width="2" fill="none" '
+            f'stroke-linecap="round" opacity="0.85"/>'
+        )
+        # Right bow loop (mirrored)
+        s += (
+            '<path d="M0 0 q26 -18 34 -2 q8 16 -6 24 q-20 12 -28 -4 Z" '
+            f'fill="{bow}" stroke="{bow_dk}" stroke-width="2.4"/>'
+            f'<path d="M6 -2 q16 -10 22 2" '
+            f'stroke="{bow_hl}" stroke-width="2" fill="none" '
+            f'stroke-linecap="round" opacity="0.85"/>'
+        )
+        # Center knot with a gem
+        s += (
+            f'<rect x="-8" y="-9" width="16" height="18" rx="3.5" '
+            f'fill="{bow_hl}" stroke="{bow_dk}" stroke-width="2"/>'
+            # Knot vertical seams
+            f'<line x1="-5" y1="-7" x2="-5" y2="7" stroke="{bow_dk}" stroke-width="1.2" opacity="0.6"/>'
+            f'<line x1="5" y1="-7" x2="5" y2="7" stroke="{bow_dk}" stroke-width="1.2" opacity="0.6"/>'
+            # Center gemstone — small yellow diamond
+            f'<path d="M0 -4 l4 4 l-4 4 l-4 -4 z" fill="{gem}" stroke="{bow_dk}" stroke-width="1"/>'
+        )
+        # Ribbon trails — left and right, with slight curl
+        s += (
+            f'<path d="M-4 9 Q-18 30 -14 44 L-6 40 Q-6 24 0 12 Z" '
+            f'fill="{bow}" stroke="{bow_dk}" stroke-width="1.8"/>'
+            f'<path d="M-8 22 q-2 6 4 8" '
+            f'stroke="{bow_hl}" stroke-width="1.6" fill="none" opacity="0.7"/>'
+        )
+        s += (
+            f'<path d="M4 9 Q18 30 14 44 L6 40 Q6 24 0 12 Z" '
+            f'fill="{bow}" stroke="{bow_dk}" stroke-width="1.8"/>'
+            f'<path d="M8 22 q2 6 -4 8" '
+            f'stroke="{bow_hl}" stroke-width="1.6" fill="none" opacity="0.7"/>'
+        )
         s += "</g>"
 
     elif style == "topHat":
-        # Classic tall top hat: brim + cylinder.
+        # Jevin — male choir. Classic tall top hat with a gold band
+        # and a TREBLE CLEF emblem on the band (signals "choir
+        # singer" / "music performer" instead of generic dandy).
+        hat = "#1a1f3a"
+        hat_hl = "#3a4068"
         # Brim
-        s += (f'<ellipse cx="{BCX}" cy="{head_top+16}" rx="56" ry="8" '
-              f'fill="#0a0a18" stroke="#000" stroke-width="2.2"/>')
+        s += (
+            f'<ellipse cx="{BCX}" cy="{head_top+16}" rx="56" ry="8" '
+            f'fill="#0a0a18" stroke="#000" stroke-width="2.2"/>'
+        )
         # Cylinder
-        s += (f'<rect x="{BCX-30}" y="{head_top-44}" width="60" height="60" '
-              f'fill="#1a1f3a" stroke="#000" stroke-width="2.4"/>')
-        # Yellow band
-        s += (f'<rect x="{BCX-30}" y="{head_top+4}" width="60" height="8" '
-              f'fill="#ffd200" stroke="#7a5500" stroke-width="1.4"/>')
+        s += (
+            f'<rect x="{BCX-30}" y="{head_top-44}" width="60" height="60" '
+            f'fill="{hat}" stroke="#000" stroke-width="2.4"/>'
+        )
+        # Vertical highlight stripe on the cylinder's left side
+        s += (
+            f'<rect x="{BCX-28}" y="{head_top-42}" width="3" height="50" '
+            f'fill="{hat_hl}" opacity="0.6"/>'
+        )
+        # Gold hatband
+        s += (
+            f'<rect x="{BCX-30}" y="{head_top+2}" width="60" height="9" '
+            f'fill="#ffd200" stroke="#7a5500" stroke-width="1.4"/>'
+        )
+        # Treble clef on the band, centered. Drawn as a stylized
+        # curl: vertical stem + an S-curve loop at the top + a
+        # circle wrap at the bottom.
+        clef_x = BCX
+        clef_y = head_top + 7
+        s += (
+            f'<path d="M{clef_x} {clef_y-6} '
+            f'q3 -3 0 -7 q-4 -2 -5 4 q-1 8 6 11 q8 4 5 12 q-2 5 -7 4 '
+            f'q-4 -1 -4 -5" '
+            f'stroke="#7a5500" stroke-width="2" fill="none" '
+            f'stroke-linecap="round"/>'
+            f'<circle cx="{clef_x-3}" cy="{clef_y+15}" r="3" '
+            f'fill="#7a5500"/>'
+        )
 
     elif style == "wispySmoke":
-        # Translucent wisps of smoke curling up from the head — the
-        # phantom's signature.
-        s += '<g opacity="0.85">'
-        s += (f'<path d="M{BCX-26} {head_top+14} '
-              f'q-6 -22 14 -28 q-14 -16 8 -32 q10 -2 14 6" '
-              f'stroke="#8a78c8" stroke-width="4" fill="none" '
-              f'stroke-linecap="round"/>')
-        s += (f'<path d="M{BCX+10} {head_top+8} '
-              f'q14 -16 -2 -30 q22 -6 22 -22" '
-              f'stroke="#5a4a8a" stroke-width="3" fill="none" '
-              f'stroke-linecap="round" opacity="0.7"/>')
-        s += (f'<circle cx="{BCX-26}" cy="{head_top-48}" r="6" fill="#8a78c8" opacity="0.55"/>')
-        s += (f'<circle cx="{BCX+24}" cy="{head_top-36}" r="5" fill="#5a4a8a" opacity="0.5"/>')
-        s += "</g>"
+        # Black phantom — eerier ectoplasm crown. A pair of horns
+        # carved out of glowing purple smoke, with a sinister red
+        # eye-glow floating between them, plus a few wisp tendrils
+        # trailing off into the air.
+        smoke_lt = "#a890e0"
+        smoke_md = "#7a64b8"
+        smoke_dk = "#4a3a78"
+        eye_red = "#ff3838"
+        # Two curling horn-shaped wisps rising off each side of the
+        # head — drawn as filled crescent-ish blobs so they have
+        # mass, not just thin lines.
+        for sign in (-1, 1):
+            base_x = BCX + sign * 14
+            tip_x = BCX + sign * 30
+            mid_x = BCX + sign * 22
+            s += (
+                f'<path d="M{base_x} {head_top+4} '
+                f'C{base_x + sign * 4} {head_top-8}, '
+                f'{mid_x - sign * 6} {head_top-22}, '
+                f'{mid_x} {head_top-30} '
+                f'C{tip_x + sign * 2} {head_top-38}, '
+                f'{tip_x + sign * 4} {head_top-22}, '
+                f'{tip_x} {head_top-8} '
+                f'C{base_x + sign * 14} {head_top}, '
+                f'{base_x + sign * 6} {head_top+4}, '
+                f'{base_x} {head_top+4} Z" '
+                f'fill="{smoke_md}" opacity="0.85"/>'
+                # Inner lighter wisp accent
+                f'<path d="M{base_x + sign * 4} {head_top-2} '
+                f'C{mid_x - sign * 2} {head_top-16}, '
+                f'{mid_x} {head_top-26}, '
+                f'{tip_x - sign * 2} {head_top-22}" '
+                f'stroke="{smoke_lt}" stroke-width="3" fill="none" '
+                f'stroke-linecap="round" opacity="0.55"/>'
+            )
+        # Central glowing red eye floating between the horns.
+        s += (
+            f'<circle cx="{BCX}" cy="{head_top-20}" r="12" '
+            f'fill="{eye_red}" opacity="0.18"/>'
+            f'<circle cx="{BCX}" cy="{head_top-20}" r="6" '
+            f'fill="{eye_red}" stroke="#0a0a18" stroke-width="1.6"/>'
+            f'<circle cx="{BCX-1.5}" cy="{head_top-22}" r="1.8" '
+            f'fill="#ffe0e0" opacity="0.9"/>'
+        )
+        # Tendril wisps trailing off the head's sides.
+        s += (
+            f'<path d="M{BCX-44} {head_top+30} '
+            f'q-4 -8 4 -14 q8 -4 0 -12" '
+            f'stroke="{smoke_dk}" stroke-width="2.4" fill="none" '
+            f'stroke-linecap="round" opacity="0.6"/>'
+            f'<path d="M{BCX+38} {head_top+34} '
+            f'q6 -8 -2 -14 q-8 -4 2 -10" '
+            f'stroke="{smoke_dk}" stroke-width="2" fill="none" '
+            f'stroke-linecap="round" opacity="0.55"/>'
+        )
 
     elif style == "petalHead":
         # Flower-petal head — five large petals around the top of
@@ -1000,7 +1755,8 @@ POSES = {
 
 
 # ── full character render — body + crown + face, posed ─────────────
-def render_character_pose(char, pose: str, horror: bool = False) -> str:
+def render_character_pose(char, pose: str, horror: bool = False,
+                          gaze: str = "chill") -> str:
     cid, name, cat, role, body, crown_style = char[:6]
     face_style = char_face_style(char)
     mouth_style = char_mouth_style(char)
@@ -1040,7 +1796,7 @@ def render_character_pose(char, pose: str, horror: bool = False) -> str:
                              face_style=face_style,
                              mouth_style=mouth_style,
                              phantom=phantom, body=body,
-                             eye_color=eye_color)
+                             eye_color=eye_color, gaze=gaze)
 
     inner += "</g>"  # close transform group
     inner += "</g>"  # close char group
@@ -1163,16 +1919,20 @@ def render_icon_dimmed(char) -> str:
 
 
 # ── shared sprites ──────────────────────────────────────────────────
-def render_empty() -> str:
+def render_empty(gaze: str = "chill") -> str:
     """Empty slot Polo — same silhouette + polo-style face as the
     cast, but a near-white ash color clearly distinct from any
-    populated body color, and the closed `blink` gaze so the slot
-    reads as "asleep / waiting" vs "awake chill"."""
+    populated body color.
+
+    `gaze` parameter lets the UI swap between idle / blink /
+    look-left / look-right sprite variants on the same randomized
+    schedule as costumed sprunkis (frame-based blinks, no inline
+    SVG / CSS keyframes — single source of truth lives here)."""
     EMPTY_COLOR = "#e8ecef"
     inner = render_body(EMPTY_COLOR)
     inner += render_face(
         face_style="default", mouth_style="flat",
-        phantom=False, body=EMPTY_COLOR, gaze="blink",
+        phantom=False, body=EMPTY_COLOR, gaze=gaze,
         eye_color=EMPTY_COLOR,
     )
     return svg_doc(inner)
@@ -1365,6 +2125,15 @@ def main() -> None:
         "empty_slot": {
             "file":        "empty.svg",
             "file_horror": "empty-horror.svg",
+            # Idle gaze variants for empty slots — same naming
+            # convention as character `idle_variants`. The UI cycles
+            # through them on a randomized per-slot timer so empty
+            # slots blink + look around like the rest of the cast.
+            "variants": {
+                "blink":      "empty-idle-blink.svg",
+                "look-left":  "empty-idle-look-left.svg",
+                "look-right": "empty-idle-look-right.svg",
+            },
         },
         "buttons": {
             "base":   "button-base.svg",
@@ -1384,6 +2153,17 @@ def main() -> None:
             ("play3", f"{cid}-play3.svg"),
         ]:
             (CHAR_DIR / fname).write_text(render_character_pose(char, pose))
+        # Idle gaze variants — same pose as `idle` but with the eyes
+        # in a different state. The UI cycles between them on a slow
+        # randomized per-slot timer so each sprunki blinks and looks
+        # around independently while not making music.
+        for gaze, fname in [
+            ("blink",      f"{cid}-idle-blink.svg"),
+            ("look-left",  f"{cid}-idle-look-left.svg"),
+            ("look-right", f"{cid}-idle-look-right.svg"),
+        ]:
+            (CHAR_DIR / fname).write_text(
+                render_character_pose(char, "idle", gaze=gaze))
         # Horror-mode costumes
         for pose, fname in [
             ("idle",  f"{cid}-horror-idle.svg"),
@@ -1405,6 +2185,11 @@ def main() -> None:
             "animation": animation_profile_for(cat),
             "costumes": {
                 "idle": [{"name": "idle", "file": f"characters/{cid}-idle.svg"}],
+                "idle_variants": [
+                    {"name": "blink",      "file": f"characters/{cid}-idle-blink.svg"},
+                    {"name": "look-left",  "file": f"characters/{cid}-idle-look-left.svg"},
+                    {"name": "look-right", "file": f"characters/{cid}-idle-look-right.svg"},
+                ],
                 "idle_alternate": [
                     {"name": "idle2", "file": f"characters/{cid}-horror-idle.svg"},
                 ],
@@ -1427,6 +2212,9 @@ def main() -> None:
         })
 
     (OUT / "empty.svg").write_text(render_empty())
+    (OUT / "empty-idle-blink.svg").write_text(render_empty(gaze="blink"))
+    (OUT / "empty-idle-look-left.svg").write_text(render_empty(gaze="look-left"))
+    (OUT / "empty-idle-look-right.svg").write_text(render_empty(gaze="look-right"))
     (OUT / "empty-horror.svg").write_text(render_empty_horror())
     (OUT / "backdrop.svg").write_text(render_backdrop())
     (OUT / "backdrop-horror.svg").write_text(render_backdrop_horror())

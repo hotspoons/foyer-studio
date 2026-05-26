@@ -52,6 +52,48 @@ pub const SHIM_STAMP: &str = env!("FOYER_BUNDLED_SHIM_STAMP");
 /// `FOYER_ARDOUR_VERSION=…` if you've rebuilt the shim yourself.
 pub const ARDOUR_VERSION: &str = env!("FOYER_ARDOUR_VERSION");
 
+/// ABI-matrix scaffolding. Today the build embeds a single shim
+/// targeting `ARDOUR_VERSION`, but the runtime exposes a table API
+/// (`pick_shim_for`) so we can grow into a multi-shim build without
+/// touching every call site. Each entry is `(major_minor, bytes,
+/// stamp)`; `pick_shim_for("9.5")` walks the table for an exact
+/// match. Future build.rs will populate this from a
+/// `FOYER_BUNDLED_SHIMS=9.5=/a/path,9.6=/b/path` env var.
+///
+/// Today's single entry is the same `SHIM_BYTES` blob; runtime
+/// behavior is unchanged. The point of the table is that
+/// `pick_shim_for` now exists, so the desktop launcher's native-
+/// Ardour mode can ask for "the shim for the installed Ardour's
+/// version" and either get it or fail loudly instead of silently
+/// installing the wrong ABI.
+pub struct ShimEntry {
+    /// major.minor — "9.5", "9.6", etc.
+    pub abi: &'static str,
+    pub bytes: &'static [u8],
+    pub stamp: &'static str,
+}
+
+pub static SHIM_TABLE: &[ShimEntry] = &[ShimEntry {
+    abi: env!("FOYER_ARDOUR_VERSION"),
+    bytes: SHIM_BYTES,
+    stamp: SHIM_STAMP,
+}];
+
+/// Pick a shim blob for the given Ardour version. Matches on
+/// `major.minor` — patch differences are ABI-stable per upstream
+/// Ardour. Returns None when no embedded shim covers this version;
+/// the desktop wrapper surfaces that to the user as "Ardour X.Y is
+/// not in the ABI matrix this Foyer build was compiled with —
+/// download a matching Foyer build, or rebuild from source against
+/// your Ardour."
+pub fn pick_shim_for(version: &str) -> Option<&'static ShimEntry> {
+    if !SHIM_PRESENT {
+        return None;
+    }
+    let want = major_minor(version);
+    SHIM_TABLE.iter().find(|e| major_minor(e.abi) == want)
+}
+
 /// Outcome of `ensure_ardour_ready`. The CLI prints an `Err` with a
 /// formatted message and exits non-zero; an `Ok` returns the binary
 /// path the caller should spawn (Ardour itself), plus the surfaces-
@@ -81,9 +123,20 @@ pub fn ensure_ardour_ready(ardour_binary_override: Option<&Path>) -> Result<Aard
     }
     let binary = resolve_ardour_binary(ardour_binary_override)
         .context("Ardour executable not found on this system")?;
-    check_version_compat(&binary);
+    let installed_version = check_version_compat(&binary);
+    // ABI matrix lookup — pick the embedded shim whose major.minor
+    // matches the installed Ardour. Today's build embeds a single
+    // shim so this always resolves to that one; future multi-ABI
+    // builds will branch here. Falls back to the default entry when
+    // version detection failed (Ardour --version returned garbage)
+    // so we don't paint ourselves into a corner over a parse hiccup.
+    let entry = installed_version
+        .as_deref()
+        .and_then(pick_shim_for)
+        .or_else(|| SHIM_TABLE.first());
+    let entry = entry.ok_or_else(|| anyhow!("no embedded shim available for this Foyer build"))?;
     let shim_installed_at =
-        install_shim_if_stale().context("failed to install embedded Ardour shim")?;
+        install_shim_entry(entry).context("failed to install embedded Ardour shim")?;
     Ok(AardourReady {
         binary,
         shim_installed_at,
@@ -155,25 +208,24 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Spawn `ardour --version` and warn (but don't fail) on a
-/// major.minor mismatch against the embedded shim. Ardour 9.x's
-/// libardour ABI is loosely stable across patch versions, so a
-/// `9.2 vs 9.2.1` skew is fine but `9.2 vs 10.x` is asking for a
-/// segfault. The actual install proceeds either way — the user
-/// chose this Ardour, and we shouldn't second-guess; just log it.
-fn check_version_compat(binary: &Path) {
+/// Spawn `ardour --version`, warn on a major.minor mismatch against
+/// the embedded shim, AND return the parsed version-shaped token so
+/// the caller can plug it into `pick_shim_for` for the ABI-matrix
+/// lookup. Returns None when version detection fails — caller falls
+/// back to whatever the build's default shim is.
+fn check_version_compat(binary: &Path) -> Option<String> {
     let out = Command::new(binary).arg("--version").output();
     let stdout = match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        _ => return,
+        _ => return None,
     };
     // Lines look like `ardour9 9.2.0` or `Ardour 9.2`. Extract the
     // first version-shaped token and compare on major.minor.
     let installed = stdout
         .split_whitespace()
         .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.'));
-    let Some(installed) = installed else { return };
-    let installed_mm = major_minor(installed);
+    let installed = installed?.to_string();
+    let installed_mm = major_minor(&installed);
     let expected_mm = major_minor(ARDOUR_VERSION);
     if installed_mm != expected_mm {
         tracing::warn!(
@@ -183,6 +235,7 @@ fn check_version_compat(binary: &Path) {
              against your installed version (see shims/ardour/README.md)."
         );
     }
+    Some(installed)
 }
 
 fn major_minor(v: &str) -> (u32, u32) {
@@ -197,7 +250,7 @@ fn major_minor(v: &str) -> (u32, u32) {
 /// "Stale" = the sibling `.stamp` file's contents don't match
 /// `SHIM_STAMP`, so an upgraded Foyer overwrites yesterday's shim
 /// without the user knowing. Permission errors propagate.
-fn install_shim_if_stale() -> Result<PathBuf> {
+fn install_shim_entry(entry: &ShimEntry) -> Result<PathBuf> {
     let surfaces = ardour_surfaces_dir()?;
     std::fs::create_dir_all(&surfaces)
         .with_context(|| format!("create surfaces dir {}", surfaces.display()))?;
@@ -205,17 +258,18 @@ fn install_shim_if_stale() -> Result<PathBuf> {
     let shim_path = surfaces.join(&shim_name);
     let stamp_path = surfaces.join(format!("{shim_name}.stamp"));
     let installed_stamp = std::fs::read_to_string(&stamp_path).unwrap_or_default();
-    if shim_path.is_file() && installed_stamp.trim() == SHIM_STAMP {
+    if shim_path.is_file() && installed_stamp.trim() == entry.stamp {
         // Already current. Idempotent fast path.
         return Ok(shim_path);
     }
-    std::fs::write(&shim_path, SHIM_BYTES)
+    std::fs::write(&shim_path, entry.bytes)
         .with_context(|| format!("write shim to {}", shim_path.display()))?;
-    std::fs::write(&stamp_path, SHIM_STAMP)
+    std::fs::write(&stamp_path, entry.stamp)
         .with_context(|| format!("write stamp to {}", stamp_path.display()))?;
     tracing::info!(
-        "installed embedded Ardour shim ({} bytes) at {}",
-        SHIM_BYTES.len(),
+        "installed embedded Ardour shim ({} bytes, ABI {}) at {}",
+        entry.bytes.len(),
+        entry.abi,
         shim_path.display()
     );
     Ok(shim_path)

@@ -225,6 +225,13 @@ pub enum Command {
     /// picker's runtime-selection page on macOS / Windows. Always
     /// emits JSON — the picker is the only consumer.
     DoctorRuntimes,
+    /// Discover a locally-installed Ardour and probe its version
+    /// against the embedded shim's ABI target. Always emits JSON.
+    /// Drives the desktop picker's macOS native-Ardour sub-mode
+    /// card; the picker uses it to show "found 9.5.0 ✓" /
+    /// "found 9.4.2 — ABI mismatch" / "not installed" with an
+    /// actionable download button.
+    DoctorArdour,
     /// Print the resolved config and exit.
     Backends,
     /// Print the path to config.yaml (creating it if it doesn't exist).

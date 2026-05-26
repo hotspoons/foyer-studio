@@ -37,6 +37,20 @@
             "file": "characters/oren-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/oren-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/oren-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/oren-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -93,6 +107,20 @@
           {
             "name": "idle",
             "file": "characters/raddy-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/raddy-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/raddy-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/raddy-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -153,6 +181,20 @@
             "file": "characters/clukr-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/clukr-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/clukr-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/clukr-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -209,6 +251,20 @@
           {
             "name": "idle",
             "file": "characters/fun-bot-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/fun-bot-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/fun-bot-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/fun-bot-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -269,6 +325,20 @@
             "file": "characters/vineria-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/vineria-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/vineria-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/vineria-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -325,6 +395,20 @@
           {
             "name": "idle",
             "file": "characters/gray-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/gray-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/gray-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/gray-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -385,6 +469,20 @@
             "file": "characters/brud-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/brud-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/brud-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/brud-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -441,6 +539,20 @@
           {
             "name": "idle",
             "file": "characters/garnold-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/garnold-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/garnold-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/garnold-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -501,6 +613,20 @@
             "file": "characters/owakcx-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/owakcx-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/owakcx-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/owakcx-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -557,6 +683,20 @@
           {
             "name": "idle",
             "file": "characters/sky-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/sky-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/sky-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/sky-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -617,6 +757,20 @@
             "file": "characters/mr-sun-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/mr-sun-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/mr-sun-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/mr-sun-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -673,6 +827,20 @@
           {
             "name": "idle",
             "file": "characters/durple-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/durple-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/durple-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/durple-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -733,6 +901,20 @@
             "file": "characters/mr-tree-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/mr-tree-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/mr-tree-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/mr-tree-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -789,6 +971,20 @@
           {
             "name": "idle",
             "file": "characters/simon-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/simon-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/simon-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/simon-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -849,6 +1045,20 @@
             "file": "characters/tunner-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/tunner-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/tunner-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/tunner-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -905,6 +1115,20 @@
           {
             "name": "idle",
             "file": "characters/mr-fun-computer-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/mr-fun-computer-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/mr-fun-computer-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/mr-fun-computer-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -965,6 +1189,20 @@
             "file": "characters/wenda-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/wenda-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/wenda-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/wenda-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -1021,6 +1259,20 @@
           {
             "name": "idle",
             "file": "characters/pinki-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/pinki-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/pinki-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/pinki-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -1081,6 +1333,20 @@
             "file": "characters/jevin-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/jevin-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/jevin-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/jevin-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -1137,6 +1403,20 @@
           {
             "name": "idle",
             "file": "characters/black-idle.svg"
+          }
+        ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/black-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/black-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/black-idle-look-right.svg"
           }
         ],
         "idle_alternate": [
@@ -1197,6 +1477,20 @@
             "file": "characters/flower-idle.svg"
           }
         ],
+        "idle_variants": [
+          {
+            "name": "blink",
+            "file": "characters/flower-idle-blink.svg"
+          },
+          {
+            "name": "look-left",
+            "file": "characters/flower-idle-look-left.svg"
+          },
+          {
+            "name": "look-right",
+            "file": "characters/flower-idle-look-right.svg"
+          }
+        ],
         "idle_alternate": [
           {
             "name": "idle2",
@@ -1245,7 +1539,12 @@
   },
   "empty_slot": {
     "file": "empty.svg",
-    "file_horror": "empty-horror.svg"
+    "file_horror": "empty-horror.svg",
+    "variants": {
+      "blink": "empty-idle-blink.svg",
+      "look-left": "empty-idle-look-left.svg",
+      "look-right": "empty-idle-look-right.svg"
+    }
   },
   "buttons": {
     "base": "button-base.svg",

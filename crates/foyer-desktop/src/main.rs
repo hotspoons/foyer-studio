@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use foyer_backend_host::HostBackend;
 use foyer_backend_stub::StubBackend;
-use foyer_config::{self as cfg, DesktopMode, DockerMode, DockerNetwork};
+use foyer_config::{self as cfg, DesktopMode, DockerMode, DockerNetwork, HostSubMode};
 use foyer_server::{Config, Server};
 use serde::Deserialize;
 use tao::event::{Event, WindowEvent};
@@ -157,11 +157,137 @@ fn run_from_config(reset: bool) -> Result<()> {
         .unwrap_or(false);
     match mode {
         Some(DesktopMode::Host) => {
-            run_host(Backend::Stub, None, "127.0.0.1:0".parse()?, fullscreen)
+            // Sub-mode controls whether we just spin up the stub
+            // (demo / no audio) or additionally launch the local
+            // Ardour install for a real low-latency audio path.
+            let sub = config.desktop.as_ref().and_then(|d| d.host_sub_mode);
+            match sub {
+                Some(HostSubMode::NativeArdour) => {
+                    run_host_native_ardour("127.0.0.1:0".parse()?, fullscreen)
+                }
+                _ => run_host(Backend::Stub, None, "127.0.0.1:0".parse()?, fullscreen),
+            }
         }
         Some(DesktopMode::Docker) => run_docker_mode(fullscreen),
         None => show_mode_picker(),
     }
+}
+
+/// Host mode + native Ardour. The desktop shell launches Ardour as a
+/// child (so foyer-desktop owns its lifecycle), waits for the
+/// Foyer shim's UDS to appear in `$XDG_RUNTIME_DIR/foyer/` (Linux)
+/// or `~/Library/Caches/foyer/` (macOS), then attaches the in-
+/// process foyer-server to it via HostBackend and points the
+/// WebView at the bound port.
+///
+/// macOS native-Ardour rendering note: Ardour on macOS is a native
+/// Cocoa app — its plugin UIs are NSView windows that pop up on
+/// the user's desktop, NOT through xpra. See `docs/DECISIONS.md`
+/// entry on the cross-OS desktop split.
+fn run_host_native_ardour(listen: SocketAddr, fullscreen: bool) -> Result<()> {
+    use std::process::Stdio;
+
+    // Resolve Ardour up front so we can surface a clean error before
+    // burning a Tokio runtime.
+    let foyer_bin = find_foyer_binary()
+        .ok_or_else(|| anyhow::anyhow!("`foyer` CLI not found alongside foyer-desktop"))?;
+    // Walk PATH + macOS app bundles via the foyer CLI's doctor so we
+    // don't duplicate the lookup logic here. The CLI prints a JSON
+    // blob; we just check the `installed`/`binary` fields. (Tiny
+    // subprocess, ~50 ms even on macOS.)
+    let ardour_json = std::process::Command::new(&foyer_bin)
+        .args(["doctor-ardour"])
+        .output()
+        .context("spawn `foyer doctor-ardour`")?;
+    if !ardour_json.status.success() {
+        return Err(anyhow::anyhow!("foyer doctor-ardour failed"));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&ardour_json.stdout).context("parse doctor-ardour JSON")?;
+    if !parsed
+        .get("installed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(anyhow::anyhow!(
+            "no local Ardour install found — use the picker's Re-check after installing"
+        ));
+    }
+    let ardour_binary = parsed
+        .get("binary")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("doctor-ardour: missing `binary` in JSON"))?
+        .to_string();
+
+    // Spawn Ardour. The shim, dropped by `foyer serve --backend
+    // ardour` on a prior run (or by install.sh), advertises a UDS
+    // in $XDG_RUNTIME_DIR/foyer or $HOME/Library/Caches/foyer that
+    // foyer-backend-host's `pick_single` knows how to find. We
+    // don't need to pass any env to Ardour — the shim is loaded by
+    // Ardour itself the moment the control-surface plugin slot is
+    // active in Ardour's prefs.
+    tracing::info!("spawning Ardour: {ardour_binary}");
+    let ardour_child = std::process::Command::new(&ardour_binary)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("spawn Ardour at {ardour_binary}"))?;
+    let child_guard = Arc::new(Mutex::new(Some(ardour_child)));
+
+    // Tokio runtime for foyer-server. Bind the listener first so we
+    // know the picked port before the WebView opens.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let listener = rt
+        .block_on(async { tokio::net::TcpListener::bind(listen).await })
+        .context("bind server listen address")?;
+    let actual = listener.local_addr()?;
+    drop(listener);
+    let url = format!("http://{}/", actual);
+
+    let server_cfg = Config {
+        tls: None,
+        listen: actual,
+        web_root: std::env::current_dir().ok().map(|d| d.join("web")),
+        web_overlays: Vec::new(),
+        jail_root: None,
+    };
+
+    rt.spawn(async move {
+        // Wait for the shim socket — Ardour takes 2-15 s to finish
+        // its boot + load our surface plugin. pick_single retries
+        // internally; we cap with a deadline so a broken install
+        // surfaces as a server-side error in the WebView.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let socket = loop {
+            match foyer_backend_host::discovery::pick_single() {
+                Ok(ad) => break ad.socket,
+                Err(e) => {
+                    if std::time::Instant::now() >= deadline {
+                        tracing::error!("shim discovery timed out: {e}");
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+        };
+        let b = match HostBackend::connect(socket.clone()).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("connect to shim at {}: {e}", socket.display());
+                return;
+            }
+        };
+        tracing::info!("attached to shim at {}", socket.display());
+        let server = Server::new(b);
+        if let Err(e) = server.run(server_cfg).await {
+            tracing::error!("server exited: {e}");
+        }
+    });
+
+    run_webview(url, fullscreen, Some(rt), Some(child_guard))
 }
 
 fn run_host(
@@ -389,7 +515,12 @@ fn show_mode_picker() -> Result<()> {
     let html_bytes = html.into_bytes();
     let event_loop: EventLoop<PickResult> =
         EventLoopBuilder::<PickResult>::with_user_event().build();
+    // Two proxy handles: one for the IPC trampoline (synchronous
+    // events dispatched by the page) and one for the event-loop
+    // closure itself (so the DMG-install worker thread can fire a
+    // Refresh when it completes).
     let proxy = event_loop.create_proxy();
+    let proxy_outer = proxy.clone();
     // Picker default: 980×640 so the dependency-check list, install
     // hints, and three audio-mode cards have room to breathe; the
     // user can grab any window edge to shrink it. `resizable(false)`
@@ -403,6 +534,13 @@ fn show_mode_picker() -> Result<()> {
         .with_inner_size(tao::dpi::LogicalSize::new(980.0, 640.0))
         .with_min_inner_size(tao::dpi::LogicalSize::new(720.0, 480.0))
         .build(&event_loop)?;
+    // The Ardour-download flow lives on a separate `foyer://ardour-
+    // download/` host inside the same custom protocol so we can
+    // route URI host segments to different inline HTML bodies.
+    // Compiled in via include_str! at the same site as the picker
+    // template so a single binary is fully self-contained.
+    let ardour_download_html = include_str!("./ardour_download.html");
+    let ardour_download_bytes = ardour_download_html.as_bytes().to_vec();
     let builder = WebViewBuilder::new()
         // Enable devtools so a white-screen failure mode is
         // diagnosable from inside the window — right-click → Inspect
@@ -411,17 +549,22 @@ fn show_mode_picker() -> Result<()> {
         .with_devtools(true)
         .with_custom_protocol("foyer".into(), move |_id, request| {
             tracing::info!(
-                "mode-picker custom-protocol request: {} {}",
+                "picker custom-protocol request: {} {}",
                 request.method(),
                 request.uri()
             );
-            // Always return the picker HTML — there's only one page
-            // in this window. A 200 with `text/html; charset=utf-8`
-            // is all webkit needs to render and run our inline
-            // script.
+            // Route by URI host segment. `foyer://localhost/...`
+            // serves the mode picker; `foyer://ardour-download/...`
+            // serves the Ardour-download flow. Anything else
+            // defaults to the picker.
+            let host = request.uri().host().unwrap_or("localhost");
+            let body = match host {
+                "ardour-download" => ardour_download_bytes.clone(),
+                _ => html_bytes.clone(),
+            };
             http::Response::builder()
                 .header("Content-Type", "text/html; charset=utf-8")
-                .body(std::borrow::Cow::Owned(html_bytes.clone()))
+                .body(std::borrow::Cow::Owned(body))
                 .unwrap()
         })
         .with_url("foyer://localhost/picker.html")
@@ -471,6 +614,42 @@ fn show_mode_picker() -> Result<()> {
                     tracing::warn!("mode-picker refresh: evaluate_script failed: {e}");
                 }
             }
+            Event::UserEvent(PickResult::DownloadArdour) => {
+                // Open the Ardour-download flow in the SAME window
+                // by navigating it at the dedicated `foyer://ardour-
+                // download/` host. The custom-protocol handler
+                // routes requests to either the picker HTML or the
+                // download landing page. After install the user
+                // navigates back via the breadcrumb (or hits "Re-
+                // check"), which re-loads the picker.
+                if let Err(e) = webview.load_url("foyer://ardour-download/index.html") {
+                    tracing::warn!("ardour-download: load_url failed: {e}");
+                }
+            }
+            Event::UserEvent(PickResult::ArdourDownloadBack) => {
+                if let Err(e) = webview.load_url("foyer://localhost/picker.html") {
+                    tracing::warn!("ardour-download back: load_url failed: {e}");
+                }
+            }
+            Event::UserEvent(PickResult::OpenExternal(url)) => {
+                if let Err(e) = open_in_browser(&url) {
+                    tracing::warn!("open external {url}: {e}");
+                }
+            }
+            Event::UserEvent(PickResult::ArdourDmgUrl(url)) => {
+                // Hand the DMG URL to a worker thread so the event
+                // loop stays responsive. The worker downloads,
+                // mounts, copies the .app into /Applications, then
+                // pushes a synthetic Refresh back into the picker
+                // via the existing proxy.
+                let proxy_clone = proxy_outer.clone();
+                std::thread::spawn(move || match install_ardour_dmg(&url) {
+                    Ok(_) => {
+                        let _ = proxy_clone.send_event(PickResult::Refresh);
+                    }
+                    Err(e) => tracing::error!("ardour-dmg install failed: {e}"),
+                });
+            }
             Event::UserEvent(choice) => {
                 if let Err(e) = persist_and_relaunch(choice) {
                     tracing::error!("persist + relaunch failed: {e}");
@@ -484,13 +663,38 @@ fn show_mode_picker() -> Result<()> {
 
 #[derive(Debug, Clone)]
 enum PickResult {
-    Host,
+    Host(HostWizardChoice),
     Docker(DockerWizardChoice),
     /// Re-run all dependency probes and push the new doctor JSON
     /// into the page via `window.applyDoctor(...)`. Fired by the
     /// "Re-check" button on every picker page. Does not exit the
     /// picker.
     Refresh,
+    /// Open the Ardour download flow in the same window. macOS
+    /// only. Does NOT exit the picker — the user finishes the
+    /// install, navigates back, then hits Re-check on the host
+    /// page.
+    DownloadArdour,
+    /// User clicked "Back" on the Ardour-download page — navigate
+    /// the WebView back to the picker without exiting.
+    ArdourDownloadBack,
+    /// Open `url` in the user's default browser. Sent from the
+    /// download page's "Donate & download" / "Just the free demo"
+    /// buttons. Doesn't exit the picker.
+    OpenExternal(String),
+    /// User got past the community.ardour.org form and we
+    /// captured the resulting .dmg URL. Rust downloads, mounts,
+    /// installs into /Applications, then bounces back to the
+    /// picker with a Refresh.
+    ArdourDmgUrl(String),
+}
+
+/// Host-page submit payload. Mirrors the JS:
+///   pick("host:" + JSON.stringify({ sub_mode: "native_ardour" }))
+#[derive(Debug, Clone, Deserialize)]
+struct HostWizardChoice {
+    #[serde(default)]
+    sub_mode: Option<String>,
 }
 
 /// Wizard output — everything the docker page collected from the
@@ -523,10 +727,33 @@ fn default_host_port() -> u16 {
 /// unrecognised returns `None` so the IPC handler can log it.
 fn parse_ipc_pick(body: &str) -> Option<PickResult> {
     if body == "host" {
-        return Some(PickResult::Host);
+        // Legacy host pick — no sub-mode. Default to stub so the
+        // user still gets *some* host-mode launch path. (Pre-M3
+        // picker only knew "host" or "docker:".)
+        return Some(PickResult::Host(HostWizardChoice { sub_mode: None }));
     }
     if body == "refresh" {
         return Some(PickResult::Refresh);
+    }
+    if body == "download-ardour" {
+        return Some(PickResult::DownloadArdour);
+    }
+    if body == "ardour-download-back" {
+        return Some(PickResult::ArdourDownloadBack);
+    }
+    if let Some(url) = body.strip_prefix("open-external:") {
+        return Some(PickResult::OpenExternal(url.into()));
+    }
+    if let Some(url) = body.strip_prefix("ardour-dmg-url:") {
+        return Some(PickResult::ArdourDmgUrl(url.into()));
+    }
+    if let Some(rest) = body.strip_prefix("host:") {
+        match serde_json::from_str::<HostWizardChoice>(rest) {
+            Ok(c) => return Some(PickResult::Host(c)),
+            Err(e) => {
+                tracing::warn!("mode-picker: host payload failed to parse: {e} (body={rest})");
+            }
+        }
     }
     if let Some(rest) = body.strip_prefix("docker:") {
         match serde_json::from_str::<DockerWizardChoice>(rest) {
@@ -547,8 +774,15 @@ fn persist_and_relaunch(pick: PickResult) -> Result<()> {
         .desktop
         .get_or_insert_with(cfg::DesktopConfig::default);
     match &pick {
-        PickResult::Host => {
+        PickResult::Host(c) => {
             desktop.mode = Some(DesktopMode::Host);
+            // Persist the sub-mode choice so the next bare launch
+            // picks the right host path without re-prompting. Unknown
+            // strings fall back to stub for safety.
+            desktop.host_sub_mode = Some(match c.sub_mode.as_deref() {
+                Some("native_ardour") => cfg::HostSubMode::NativeArdour,
+                _ => cfg::HostSubMode::Stub,
+            });
         }
         PickResult::Docker(choice) => {
             desktop.mode = Some(DesktopMode::Docker);
@@ -575,6 +809,16 @@ fn persist_and_relaunch(pick: PickResult) -> Result<()> {
             // loop intercepts it earlier. Defensive arm so a future
             // refactor that funnels everything through here doesn't
             // accidentally write config + exit on a refresh click.
+            return Ok(());
+        }
+        PickResult::DownloadArdour
+        | PickResult::ArdourDownloadBack
+        | PickResult::OpenExternal(_)
+        | PickResult::ArdourDmgUrl(_) => {
+            // Handled in the event loop, never reaches here.
+            // Defensive arm only — keeps the picker from
+            // exiting + writing config if a future refactor
+            // funnels these through `persist_and_relaunch`.
             return Ok(());
         }
     }
@@ -678,14 +922,14 @@ fn build_doctor_payload() -> String {
 }
 
 fn runtimes_doctor_json(foyer_bin: Option<&Path>) -> String {
-    let Some(bin) = foyer_bin else { return "[]".into() };
+    let Some(bin) = foyer_bin else {
+        return "[]".into();
+    };
     let out = std::process::Command::new(bin)
         .args(["doctor-runtimes"])
         .output();
     match out {
-        Ok(o) if o.status.success() => {
-            String::from_utf8(o.stdout).unwrap_or_else(|_| "[]".into())
-        }
+        Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap_or_else(|_| "[]".into()),
         _ => "[]".into(),
     }
 }
@@ -807,6 +1051,131 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Open a URL in the user's default browser. Cross-platform best-
+/// effort wrapper around the OS's open command. Errors propagate so
+/// the caller can log them but we don't surface them to the user —
+/// the picker already shows the URL plainly so they can copy-paste.
+fn open_in_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let cmd = ("open", vec![url]);
+    #[cfg(target_os = "windows")]
+    let cmd = ("cmd", vec!["/C", "start", "", url]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = ("xdg-open", vec![url]);
+    let status = std::process::Command::new(cmd.0)
+        .args(&cmd.1)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("spawn {} for url", cmd.0))?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("{} exited {status}", cmd.0));
+    }
+    Ok(())
+}
+
+/// Download an Ardour .dmg, mount it, copy the contained .app into
+/// `~/Applications/`, eject the disk image. macOS-only; on any other
+/// OS this returns an error.
+///
+/// Scaffolding: the iframe-based extraction in `ardour_download.html`
+/// is best-effort and silently no-ops when Ardour changes their
+/// download flow. When that scaffolding works the URL lands here;
+/// when it doesn't the user falls back to "Just the free demo"
+/// (default-browser route) and does the drag-into-Applications by
+/// hand. Either way the picker's "Re-check after installing" button
+/// reruns the doctor + flips the host page back into the
+/// native-Ardour ready state.
+fn install_ardour_dmg(url: &str) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Err(anyhow::anyhow!(".dmg install is macOS-only"));
+    }
+    // Save to a temp file. We can't pull `reqwest` into foyer-desktop
+    // without a non-trivial dep churn (it's a workspace-level dep but
+    // the desktop binary doesn't link it today); curl is on every
+    // Mac and gives us a progress bar + redirect handling for free.
+    let tmp_dir = tempdir_for_download()?;
+    let dmg_path = tmp_dir.join("ardour.dmg");
+    tracing::info!("downloading {url} → {}", dmg_path.display());
+    let status = std::process::Command::new("curl")
+        .args(["-fL", "--retry", "3", "-o"])
+        .arg(&dmg_path)
+        .arg(url)
+        .status()
+        .context("spawn curl for dmg download")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("curl exited {status} downloading {url}"));
+    }
+
+    // Mount the dmg. hdiutil's `-mountpoint` lets us pin where it
+    // lands so the copy step is deterministic.
+    let mount_dir = tmp_dir.join("mnt");
+    std::fs::create_dir_all(&mount_dir)?;
+    let status = std::process::Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-mountpoint"])
+        .arg(&mount_dir)
+        .arg(&dmg_path)
+        .status()
+        .context("hdiutil attach")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("hdiutil attach exited {status}"));
+    }
+
+    // Find the .app inside. Most Ardour DMGs ship a single .app at
+    // the root, occasionally beside an "Applications" symlink. We
+    // pick the first .app we see.
+    let app_src = std::fs::read_dir(&mount_dir)?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("app"))
+        .ok_or_else(|| anyhow::anyhow!("no .app found inside DMG"))?;
+
+    // Copy to ~/Applications (no sudo, no system-wide). The user can
+    // drag into /Applications later if they want it global.
+    let home = dirs_home().ok_or_else(|| anyhow::anyhow!("no $HOME"))?;
+    let target_parent = home.join("Applications");
+    std::fs::create_dir_all(&target_parent)?;
+    let target = target_parent.join(
+        app_src
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("dmg .app has no file name"))?,
+    );
+    // ditto preserves the bundle's resource forks + extended attrs;
+    // a plain cp -R drops them and Gatekeeper refuses to launch the
+    // resulting bundle.
+    let status = std::process::Command::new("ditto")
+        .arg(&app_src)
+        .arg(&target)
+        .status()
+        .context("ditto for app copy")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("ditto exited {status}"));
+    }
+
+    // Detach the dmg. If it fails (eject is rejected by Finder
+    // sometimes), best-effort — the temp dir will be cleaned up on
+    // reboot and the .app is already in place.
+    let _ = std::process::Command::new("hdiutil")
+        .args(["detach", "-force"])
+        .arg(&mount_dir)
+        .status();
+
+    tracing::info!("installed Ardour at {}", target.display());
+    Ok(())
+}
+
+fn tempdir_for_download() -> Result<std::path::PathBuf> {
+    let base = std::env::temp_dir();
+    let dir = base.join(format!("foyer-ardour-dl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
 /// Drop wrapper that sends SIGTERM to the held child on the way out,
 /// then waits briefly so the container's `--rm` cleanup runs before
 /// our process exits. Without this, closing the desktop window left
@@ -817,15 +1186,41 @@ impl Drop for ChildGuard {
     fn drop(&mut self) {
         let Ok(mut guard) = self.0.lock() else { return };
         if let Some(mut child) = guard.take() {
-            // Try graceful shutdown first. On unix that's SIGTERM —
-            // `foyer docker` traps it, sends SIGTERM into the
-            // container's PID 1, and the runtime's `--rm` cleans up.
-            // On Windows there is no SIGTERM equivalent for arbitrary
-            // child processes (CTRL_BREAK_EVENT only crosses console
-            // groups, which we don't share); fall back to the std
-            // Child::kill (TerminateProcess) immediately. The Docker
-            // Desktop daemon reaps the container's --rm out of band,
-            // so abrupt termination of the `foyer docker` shim is OK.
+            // Try graceful shutdown first.
+            //
+            // * **macOS (native-Ardour mode)**: Ardour is a Cocoa
+            //   app — SIGTERM works, but `osascript … quit` routes
+            //   through Cocoa's NSApplication terminate handler so
+            //   the unsaved-changes dialog still appears if the
+            //   user has edits. We try AppleScript first, then
+            //   SIGTERM as a fallback if Ardour hasn't gone away.
+            //   Best-effort: if Ardour is hung in a save dialog
+            //   the wait loop below catches the leak and escalates.
+            // * **Linux / docker child**: SIGTERM. `foyer docker`
+            //   traps it, sends SIGTERM into the container's PID 1,
+            //   and the runtime's `--rm` cleans up.
+            // * **Windows**: no SIGTERM equivalent for arbitrary
+            //   children (CTRL_BREAK_EVENT only crosses console
+            //   groups, which we don't share). Fall back to the
+            //   std Child::kill (TerminateProcess) immediately.
+            //   Docker Desktop reaps the container's --rm out of
+            //   band, so abrupt termination of the `foyer docker`
+            //   shim is OK.
+            #[cfg(target_os = "macos")]
+            {
+                // Best-effort polite quit. `osascript` is on the
+                // path of every Mac. If Ardour isn't actually the
+                // bundle name (user installed Ardour10.app, future
+                // version), the script no-ops and we fall through
+                // to SIGTERM below.
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell application \"Ardour9\" to quit"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                // Give Ardour a beat to wind down before we SIGTERM.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
             #[cfg(unix)]
             unsafe {
                 libc::kill(child.id() as libc::pid_t, libc::SIGTERM);

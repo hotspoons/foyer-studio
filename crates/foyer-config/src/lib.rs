@@ -212,6 +212,31 @@ pub struct DesktopConfig {
     /// in other apps; flip to `true` on a kiosk / studio rig.
     #[serde(default, skip_serializing_if = "is_default_false")]
     pub fullscreen: bool,
+    /// Sub-mode for `mode = host`. `stub` runs the in-process
+    /// foyer-server pointed at the dummy backend (demo mode — no
+    /// audio). `native_ardour` additionally launches the local
+    /// Ardour install as a child process, drops the shim into its
+    /// surfaces directory, and connects through the shim socket
+    /// for real low-latency audio. Linux + macOS only; Windows
+    /// host mode is unreachable (the picker disables it). Unset =
+    /// stub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_sub_mode: Option<HostSubMode>,
+}
+
+/// `DesktopConfig::host_sub_mode` discriminator. Captures the
+/// "demo / no-audio" vs "spawn Ardour for real audio" split inside
+/// the Host path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostSubMode {
+    /// foyer-server with the stub backend. No Ardour required.
+    Stub,
+    /// foyer-server attached to a live Ardour shim socket. The
+    /// desktop shell spawns Ardour as a child and waits for the
+    /// shim's UDS to appear before pointing the WebView at the
+    /// in-process server.
+    NativeArdour,
 }
 
 /// Run mode for `foyer-desktop`. The picker dialog writes this back

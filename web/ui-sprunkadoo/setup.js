@@ -28,6 +28,7 @@ import {
 } from "./components/sound-catalog.js";
 import { SLOT_GAIN_FLOOR_DB } from "./components/sprunki-stage.js";
 import { getPatch, PATCHES } from "./patches.js";
+import { pluginByUri } from "./plugin-catalog.js";
 
 const REGION_NAME = "Sprunki";
 const PROVISION_TIMEOUT_MS = 8000;
@@ -178,7 +179,20 @@ async function provisionSlot(store, ws, sprunkiStore, slot, i, tracks) {
   if (slot.patch_id) {
     const patch = getPatch(slot.patch_id);
     if (patch) {
-      await ensurePatchInstrument(store, ws, trackId, patch);
+      // Merge per-costume overrides on top of the patch's declared
+      // shape. Instrument URI is the big one: a kid in the Advanced
+      // section can swap AvlDrums Black Pearl → Red Zeppelin (or
+      // any installed instrument plugin), and ensurePatchInstrument
+      // honours that. Bank/program/preset apply post-load.
+      const override = sprunkiStore.patchOverride(slot.patch_id) || {};
+      const effective = {
+        ...patch,
+        instrument_uri: override.instrument_uri || patch.instrument_uri,
+        instrument_uri_fallbacks: override.instrument_uri
+          ? []   // explicit override doesn't fall through
+          : patch.instrument_uri_fallbacks,
+      };
+      await ensurePatchInstrument(store, ws, trackId, effective, override);
     }
   } else {
     await stripAllSprunkiInstruments(ws, () => {
@@ -272,13 +286,35 @@ async function createSlotTrack(store, ws, name) {
  *  Walks the URI fallback chain when the primary doesn't take. If
  *  the track already has a plugin matching the patch's primary URI,
  *  we leave it alone. */
-async function ensurePatchInstrument(store, ws, trackId, patch) {
+async function ensurePatchInstrument(store, ws, trackId, patch, override = {}) {
   const trackPlugins = () => {
     const t = tracksSnapshot(store).find((tr) => tr.id === trackId);
     return t?.plugins || [];
   };
   const trackHasPlugin = (uri) => trackPlugins().some((p) => p.uri === uri);
   const anyPlugin = () => trackPlugins().length > 0;
+  const findPluginByUri = (uri) => trackPlugins().find((p) => p.uri === uri) || null;
+  // Apply preset + params overrides AFTER the plugin is confirmed
+  // loaded. Each is idempotent: load_plugin_preset is a no-op if
+  // the preset is already active; controlSet for a param value is
+  // server-coalesced if identical.
+  const applyOverrides = async (uri) => {
+    if (!override) return;
+    const plugin = findPluginByUri(uri);
+    if (!plugin) return;
+    if (override.preset_id) {
+      ws.send({
+        type: "load_plugin_preset",
+        plugin_id: plugin.id,
+        preset_id: override.preset_id,
+      });
+    }
+    if (override.params) {
+      for (const [paramId, value] of Object.entries(override.params)) {
+        if (ws.controlSet) ws.controlSet(paramId, value);
+      }
+    }
+  };
 
   // Happy path: the right plugin is already loaded. DO NOT re-apply
   // the patch's default program — if the kid set a per-costume
@@ -293,42 +329,99 @@ async function ensurePatchInstrument(store, ws, trackId, patch) {
     // lingering from a prior swap. Clean those before returning so
     // the kid doesn't hear stacked instruments (Black Pearl + Red
     // Zeppelin both responding to drum hits, 2026-05-26 report).
+    rememberInstrumentUri(patch.instrument_uri);
     await removeForeignInstruments(ws, trackPlugins, patch);
+    await applyOverrides(patch.instrument_uri);
     return;
   }
 
-  // PATCH SWAP path — track already had a DIFFERENT instrument
-  // (e.g., Black Pearl drum kit and the kid drops a Red Zeppelin
-  // patch). Ardour's add_plugin doesn't auto-replace a tail-of-chain
-  // instrument: the new one lands ALONGSIDE the old, so MIDI hits
-  // trigger both layers. Remove existing instrument plugin(s) before
-  // we add the new one. Reported 2026-05-26: "slot 3 seems to have
-  // both black pearl and red zep drums."
-  await removeForeignInstruments(ws, trackPlugins, patch);
-  ws.send({ type: "add_plugin", track_id: trackId, plugin_uri: patch.instrument_uri });
-  await waitFor(() => trackHasPlugin(patch.instrument_uri), 1_500);
-  if (trackHasPlugin(patch.instrument_uri)) {
+  // PATCH SWAP path. Order: try to ADD the new instrument first,
+  // and only remove the previous one(s) after it lands. If add_plugin
+  // fails — Ardour's plugin catalog occasionally lists LV2 entries
+  // that fail to instantiate, e.g. a kid picked Drumkit which Ardour
+  // scanned but can't load — the previous instrument stays in place.
+  // Without this order, the failure path falls through to
+  // add_default_instrument which lands gmsynth (grand piano) and the
+  // kid hears the wrong sound, with no hint that their pick failed.
+  // The brief overlap (old + new active simultaneously) only lasts the
+  // few ms between add_plugin landing and removeForeignInstruments
+  // sending the remove command.
+  const isOverride = !!override?.instrument_uri;
+
+  const tryAddPlugin = async (uri) => {
+    if (!uri) return false;
+    rememberInstrumentUri(uri);
+    // Listen for the shim's add_plugin_unknown error so we can settle
+    // fast instead of waiting the full 1.5 s for a plugin that's never
+    // going to appear. The shim emits an `error` envelope with the
+    // failing URI in the message text.
+    let failed = false;
+    const onEnv = (ev) => {
+      const body = ev?.detail?.body;
+      if (body?.type !== "error") return;
+      if (body?.code !== "add_plugin_unknown") return;
+      if (typeof body?.message === "string" && body.message.includes(uri)) {
+        failed = true;
+      }
+    };
+    ws.addEventListener?.("envelope", onEnv);
+    ws.send({ type: "add_plugin", track_id: trackId, plugin_uri: uri });
+    await waitFor(() => failed || trackHasPlugin(uri), 1_500);
+    ws.removeEventListener?.("envelope", onEnv);
+    return !failed && trackHasPlugin(uri);
+  };
+
+  if (await tryAddPlugin(patch.instrument_uri)) {
+    await removeForeignInstruments(ws, trackPlugins, patch);
     await applyPatchProgram(ws, trackId, patch);
+    await applyOverrides(patch.instrument_uri);
     return;
   }
 
-  // Walk the fallback chain.
+  // Walk the fallback chain. removeForeignInstruments's keepers set
+  // includes fallbacks so the surviving fallback isn't stripped.
   const fallbacks = Array.isArray(patch.instrument_uri_fallbacks)
     ? patch.instrument_uri_fallbacks
     : [];
   for (const uri of fallbacks) {
-    if (anyPlugin()) break;
-    ws.send({ type: "add_plugin", track_id: trackId, plugin_uri: uri });
-    await waitFor(() => trackHasPlugin(uri), 1_500);
-    if (trackHasPlugin(uri)) break;
+    if (await tryAddPlugin(uri)) {
+      await removeForeignInstruments(ws, trackPlugins, patch);
+      await applyPatchProgram(ws, trackId, patch);
+      const live = trackPlugins().find((p) => p.uri === uri);
+      if (live) await applyOverrides(live.uri);
+      return;
+    }
   }
+
+  // Nothing landed. An EXPLICIT override that fails must not silently
+  // fall through to add_default_instrument — that's how the kid ends
+  // up with grand piano in place of their Drumkit pick. Leave the
+  // previous instrument (if any) in place and surface the failure
+  // so the preferences modal can show "couldn't load that plugin".
+  if (isOverride) {
+    console.warn(
+      `[sprunki] add_plugin failed for override URI ${patch.instrument_uri} on ${trackId}`,
+    );
+    globalThis.dispatchEvent?.(new CustomEvent("sprunki-plugin-load-failed", {
+      detail: {
+        trackId,
+        uri: patch.instrument_uri,
+        patchId: patch.id,
+      },
+    }));
+    return;
+  }
+
+  // Default-patch path: last resort, ask the server for anything that
+  // will make sound. Better than silence on a fresh slot.
   if (!anyPlugin()) {
-    // Last resort — ask the server to pick anything.
     ws.send({ type: "add_default_instrument", track_id: trackId });
     await waitFor(anyPlugin, 2_000);
   }
   if (anyPlugin()) {
     await applyPatchProgram(ws, trackId, patch);
+    const live = trackPlugins().find((p) => p?.uri);
+    if (live) await applyOverrides(live.uri);
   } else {
     console.warn(`[sprunki] no instrument landed for patch ${patch.id} on ${trackId}`);
   }
@@ -408,7 +501,18 @@ async function stripAllSprunkiInstruments(ws, trackPluginsFn) {
   }, 1_500);
 }
 
+/** Runtime set seeded by any instrument URI we've ever loaded onto a
+ *  track during this session. Belt-and-suspenders against the catalog
+ *  being slow to load — once we've asked Ardour to add_plugin(X), we
+ *  know X is an instrument even if the LV2 scan hasn't populated yet. */
+const SEEN_INSTRUMENT_URIS = new Set();
+
+function rememberInstrumentUri(uri) {
+  if (uri) SEEN_INSTRUMENT_URIS.add(uri);
+}
+
 function isSprunkiInstrumentUri(uri) {
+  if (!uri) return false;
   // Initialize on first use — PATCHES is imported at top of setup.js,
   // so it's available by the time any patch flow runs.
   if (SPRUNKI_INSTRUMENT_URIS.size === 0) {
@@ -419,7 +523,17 @@ function isSprunkiInstrumentUri(uri) {
       }
     }
   }
-  return SPRUNKI_INSTRUMENT_URIS.has(uri);
+  if (SPRUNKI_INSTRUMENT_URIS.has(uri)) return true;
+  if (SEEN_INSTRUMENT_URIS.has(uri)) return true;
+  // Custom URIs picked through the Advanced per-costume override
+  // picker — anything the live plugin catalog flags as role=instrument
+  // is fair game for cleanup on the next swap. Without this, a swap
+  // from Black Pearl → Helm → Vital stacks all three on the track:
+  // each new add_plugin lands the next instrument but the prior one
+  // isn't in the static PATCHES URI set, so removeForeignInstruments
+  // can't see it. Reported 2026-05-26.
+  const entry = pluginByUri(uri);
+  return entry?.role === "instrument";
 }
 
 async function applyPatchProgram(ws, trackId, patch) {

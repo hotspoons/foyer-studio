@@ -35,6 +35,8 @@ import {
   backdropUrl,
   muteButtonUrl,
   animationProfileFor,
+  idleVariantsFor,
+  ogCharacterById,
 } from "../sprunki-assets.js";
 
 // On-stage sprunki size, expressed as PERCENT of the stage
@@ -44,7 +46,7 @@ import {
 // art-bounding box; clipping handles the lower body. Tuned in
 // the 2026-05-25 second design pass after Rich flagged the
 // sprunkis as too small + floating above the grass.
-const SPRUNKI_W_PCT = 15;       /* % of stage width — 17 crowded the cast and clipped wide crowns (wizard hat, antennae) at the stage edges */
+const SPRUNKI_W_PCT = 12;       /* % of stage width. 17 → 15 → 12 over three passes; with wide crowns (wizard hat, antennae, rocket-top) the sprunki container's bbox needs room beyond the visible art so it doesn't clip at the stage edge */
 const SPRUNKI_ASPECT = 1.82;    /* H/W — taller box so head reads bigger */
 const SPRUNKI_H_PCT = SPRUNKI_W_PCT * SPRUNKI_ASPECT;  /* derived height % */
 
@@ -228,49 +230,11 @@ export class SprunkiStage extends LitElement {
                             without a sound assigned yet */
       filter: saturate(0.55) brightness(0.95);
     }
-    /* Empty (gray) sprunkis render via an inline SVG instead of
-       the OG Polo img, so we can animate eye-level idle behaviour
-       — blinking and looking around — by targeting individual eye
-       parts. The body shape mimics the OG Polo (rounded head, tall
-       trapezoid body, gray) so the visual swap is unobtrusive. */
-    .empty-sprunki {
-      width: 100%;
-      height: 100%;
-      display: block;
-      object-fit: contain;
-    }
-    /* Pupils translate horizontally on a long cycle = "looking
-       around"; staggered per-slot via --sway-delay so a row of
-       seven empty Polos doesn't blink in unison. */
-    .empty-sprunki .pupil {
-      transform-box: fill-box;
-      transform-origin: center;
-      animation: empty-look-around
-                 calc(6.4s + var(--sway-delay, 0s) * 1.9)
-                 ease-in-out infinite;
-    }
-    /* Eyelids (white rounded bars positioned over the eyes) squash
-       to a hairline briefly for the blink. The animation lives on
-       the lid scale so the pupil underneath stays put while the
-       lid sweeps across — closest "real eyelid" effect we can do
-       without per-frame asset swaps. */
-    .empty-sprunki .lid {
-      transform-box: fill-box;
-      transform-origin: center;
-      animation: empty-blink
-                 calc(4.8s + var(--sway-delay, 0s) * 1.4)
-                 ease-in-out infinite;
-    }
-    @keyframes empty-look-around {
-      0%, 100% { transform: translateX(0); }
-      18%      { transform: translateX(-3px); }
-      36%, 64% { transform: translateX(0); }
-      82%      { transform: translateX(3px); }
-    }
-    @keyframes empty-blink {
-      0%, 90%, 100% { transform: scaleY(0); }
-      93%, 97%      { transform: scaleY(1); }
-    }
+    /* Empty slots render as a plain <img> like the costumed cast.
+       Idle blink + look-around come from the same per-slot variant
+       scheduler — see _tickIdleSlot — which swaps the img src
+       between empty.svg / empty-idle-blink.svg / empty-idle-look-*.
+       Hard sprite swaps, no inline SVG, no CSS keyframes. */
     .sprunki.drop-target .sprunki-art {
       animation: pop 200ms ease-out;
     }
@@ -294,80 +258,28 @@ export class SprunkiStage extends LitElement {
          (100% - clip%) keeps the visible-bottom planted on scale
          changes. */
       transform-origin: center calc(100% - ${SPRUNKI_CLIP_PCT}cqh);
-      /* Subtle meter coupling — small breathing scale + a soft halo.
-         Tuned down from the previous 0.28 scale / 32 px halo (which
-         read as flailing). */
-      transform: scale(calc(var(--level-scale, 1) * (1 + var(--meter, 0) * 0.06)));
+      /* Scale is set ONCE by the slot's y-position via --level-scale;
+         no meter-driven scale interpolation. The previous formula
+         multiplied by (1 + meter * 0.06) which inherited audio-meter
+         noise from the 30 Hz meter stream, causing constant micro-
+         vibration at idle even though the meter wasn't above the
+         transient threshold. The brightness/halo retain the meter
+         coupling (low magnitude, visually graceful). */
+      transform: scale(var(--level-scale, 1));
       filter: brightness(calc(1 + var(--meter, 0) * 0.18))
               drop-shadow(0 0 calc(var(--meter, 0) * 8px)
                            color-mix(in srgb, var(--cc, #fff) 80%, transparent));
-      transition: transform 80ms cubic-bezier(0.2, 0.8, 0.2, 1.1),
-                  filter   60ms ease-out;
+      transition: filter 60ms ease-out;
       pointer-events: none;
     }
-    /* Each character has its own idle animation, chosen by the
-       manifest-declared animation.kind. Drums bob vertically;
-       bass / melody sway horizontally; vocal / fx tilt-look. The
-       per-slot --sway-delay staggers them so they never line up.
-       Period and direction also vary by --sway-delay so adjacent
-       slots are out of phase. */
-    .sprunki-art[data-anim-kind="bob"]  > .sprunki-body {
-      animation: kind-bob  calc(2.6s + var(--sway-delay, 0s)) ease-in-out infinite;
-    }
-    .sprunki-art[data-anim-kind="sway"] > .sprunki-body {
-      animation: kind-sway calc(3.4s + var(--sway-delay, 0s)) ease-in-out infinite;
-    }
-    .sprunki-art[data-anim-kind="look"] > .sprunki-body {
-      animation: kind-look calc(4.2s + var(--sway-delay, 0s)) ease-in-out infinite;
-    }
-    /* Hit reaction — driven by per-slot meter transient detection
-       in updateLevels. Each kind has its own brief reaction layered
-       on top of the idle motion. The .hit class is removed ~280 ms
-       later, leaving the idle loop running. */
-    .sprunki-art.hit[data-anim-kind="bob"]  > .sprunki-body {
-      animation: hit-bob  280ms cubic-bezier(0.25, 1.4, 0.5, 1) 1,
-                 kind-bob  calc(2.6s + var(--sway-delay, 0s)) ease-in-out infinite;
-    }
-    .sprunki-art.hit[data-anim-kind="sway"] > .sprunki-body {
-      animation: hit-sway 320ms cubic-bezier(0.4, 0, 0.2, 1) 1,
-                 kind-sway calc(3.4s + var(--sway-delay, 0s)) ease-in-out infinite;
-    }
-    .sprunki-art.hit[data-anim-kind="look"] > .sprunki-body {
-      animation: hit-look 360ms cubic-bezier(0.4, 0, 0.2, 1) 1,
-                 kind-look calc(4.2s + var(--sway-delay, 0s)) ease-in-out infinite;
-    }
-    @keyframes kind-bob {
-      0%, 100% { translate: 0 0; }
-      50%      { translate: 0 -2px; }
-    }
-    @keyframes kind-sway {
-      0%, 100% { translate: 0 0; }
-      33%      { translate: -2px 0; }
-      66%      { translate:  2px 0; }
-    }
-    @keyframes kind-look {
-      0%, 100% { transform: rotate(0deg); }
-      30%      { transform: rotate(-1.2deg); }
-      70%      { transform: rotate( 1.2deg); }
-    }
-    @keyframes hit-bob {
-      0%   { translate: 0 0; }
-      40%  { translate: 0 -5px; }
-      70%  { translate: 0 -1px; }
-      100% { translate: 0 0; }
-    }
-    @keyframes hit-sway {
-      0%   { translate: 0 0; }
-      25%  { translate: -4px 0; }
-      60%  { translate:  3px 0; }
-      100% { translate: 0 0; }
-    }
-    @keyframes hit-look {
-      0%   { transform: rotate(0deg); }
-      30%  { transform: rotate(-3deg); }
-      65%  { transform: rotate( 2deg); }
-      100% { transform: rotate(0deg); }
-    }
+    /* No body-level animation at all. "Looking alive" comes from
+       the JS-driven per-slot blink + look-around scheduler that
+       swaps the idle <img src>. Music-time reactions are a brief
+       FACE TWITCH (variant swap to blink / look-left / look-right)
+       on each step — not a body translate. The previous
+       hit-bob/sway/look keyframes were translating the whole body
+       through left/right/up poses, which Rich called "Terrance
+       and Phillip" — gone now. */
     /* Inner body layer — receives the per-character idle motion +
        on-hit reaction. Layered inside .sprunki-art so the outer
        layer can still hold the meter-driven scale/halo without
@@ -545,6 +457,10 @@ export class SprunkiStage extends LitElement {
      *  Polo. Gated server-side by parental unlock — by the time it
      *  arrives here the kid has already passed the gate. */
     scaryMode: { type: Boolean },
+    /** Active arrangement / pattern id — used to pick which board
+     *  out of `slot.boards` is currently playing so the per-slot
+     *  step-fire detector knows which cell grid to watch. */
+    activeArrangementId: { type: String },
     _dragSlotId: { state: true },
     _dropTargetId: { state: true },
     _dragOver: { state: true },
@@ -559,6 +475,8 @@ export class SprunkiStage extends LitElement {
     this.assetsReady = false;
     this.slotControls = {};
     this.scaryMode = false;
+    this.activeArrangementId = null;
+    this._lastFiredStep = {};  // slotId → last sequencer step we triggered a hit for
     this._dragSlotId = null;
     this._dropTargetId = null;
     this._dragOver = false;
@@ -566,6 +484,9 @@ export class SprunkiStage extends LitElement {
     this._slotActiveUntil = {};     // slotId → ts (perf.now) until we revert to idle
     this._levels = {};
     this._animTimer = null;         // 80 ms animation tick — drives BPM-clock fallback frame advance
+    this._idleAction = {};          // slotId → "blink"|"look-left"|"look-right"|null
+    this._idleTimers = {};          // slotId → setTimeout handle for next idle action
+    this._idleEndTimers = {};       // slotId → setTimeout handle for clearing current action
     this._zCounter = 1;             // monotonic stacking counter; incremented per pointerdown
     this._slotZ = {};               // slotId → z-index assigned when last touched
   }
@@ -573,10 +494,94 @@ export class SprunkiStage extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this._startAnimationTick();
+    this._startIdleSchedulers();
   }
   disconnectedCallback() {
     super.disconnectedCallback();
     this._stopAnimationTick();
+    this._stopIdleSchedulers();
+  }
+  updated(changed) {
+    super.updated?.(changed);
+    if (changed.has("slots") || changed.has("assetsReady")) {
+      this._reconcileIdleSchedulers();
+    }
+  }
+
+  // ── per-slot idle scheduler ────────────────────────────────────────
+  //
+  // While a sprunki has no audio peaks of its own (silent transport,
+  // empty board, between drum hits), it cycles through three idle
+  // gaze variants — blink, look-left, look-right — on a randomized
+  // per-slot timer so the cast stays alive without ever moving in
+  // unison.
+  //
+  // Each slot's next-action time is drawn fresh from a [2, 7] second
+  // band whenever its current action ends, so adjacent slots stay
+  // permanently out of phase. The action itself is held briefly
+  // (180 ms for blink, 600 ms for a look) before reverting to the
+  // resting idle frame.
+  _startIdleSchedulers() {
+    this._reconcileIdleSchedulers();
+  }
+  _stopIdleSchedulers() {
+    for (const id of Object.keys(this._idleTimers))
+      clearTimeout(this._idleTimers[id]);
+    for (const id of Object.keys(this._idleEndTimers))
+      clearTimeout(this._idleEndTimers[id]);
+    this._idleTimers = {};
+    this._idleEndTimers = {};
+  }
+  _reconcileIdleSchedulers() {
+    const liveIds = new Set((this.slots || []).map((s) => s.id));
+    // Cancel timers for slots that no longer exist.
+    for (const id of Object.keys(this._idleTimers)) {
+      if (!liveIds.has(id)) {
+        clearTimeout(this._idleTimers[id]);
+        delete this._idleTimers[id];
+        delete this._idleAction[id];
+      }
+    }
+    // Seed timers for new slots — staggered first-fire so the first
+    // round of blinks is already spread out.
+    for (const slot of (this.slots || [])) {
+      if (this._idleTimers[slot.id]) continue;
+      const initialDelay = 1500 + Math.random() * 4000;
+      this._idleTimers[slot.id] = setTimeout(
+        () => this._tickIdleSlot(slot.id), initialDelay,
+      );
+    }
+  }
+  _tickIdleSlot(slotId) {
+    const slot = (this.slots || []).find((s) => s.id === slotId);
+    if (!slot) return;
+    // Only fire idle gaze changes if the slot is NOT currently in a
+    // play-frame burst from an audio peak — that path owns the look
+    // for ACTIVE_HOLD_MS after each hit.
+    const now = performance.now();
+    const playingUntil = this._slotActiveUntil[slotId] || 0;
+    const skip = playingUntil > now;
+    if (!skip) {
+      // Pick the next action with a bias toward blinks (most common).
+      const r = Math.random();
+      const action = r < 0.55 ? "blink"
+                   : r < 0.78 ? "look-left"
+                   : "look-right";
+      this._idleAction[slotId] = action;
+      this.requestUpdate();
+      const holdMs = action === "blink" ? 180 : 600;
+      clearTimeout(this._idleEndTimers[slotId]);
+      this._idleEndTimers[slotId] = setTimeout(() => {
+        this._idleAction[slotId] = null;
+        this.requestUpdate();
+      }, holdMs);
+    }
+    // Schedule the next idle action; band randomized per call so no
+    // two slots fall into lockstep.
+    const nextDelay = 2000 + Math.random() * 5000;
+    this._idleTimers[slotId] = setTimeout(
+      () => this._tickIdleSlot(slotId), nextDelay,
+    );
   }
 
   // ── animation tick ──────────────────────────────────────────────
@@ -612,6 +617,13 @@ export class SprunkiStage extends LitElement {
   static get ACTIVE_THRESHOLD_DB() { return -38; }
   static get ACTIVE_HOLD_MS() { return 250; }   // freeze-on-play-frame hold after a hit
   static get BPM_TICK_FALLBACK_MS() { return 600; }  // how long without a meter hit before BPM ticks step in
+  /** Minimum gap between consecutive hit-animation triggers on the
+   *  same slot. Keeps the CSS keyframe from being re-restarted
+   *  inside its own running window, which would otherwise read as
+   *  rapid vibration rather than discrete dance beats. Tuned to
+   *  longer than the longest hit-keyframe (360 ms) plus a small
+   *  safety margin. */
+  static get HIT_REFRACTORY_MS() { return 420; }
   /** Below this dB the slot is treated as silent for animation
    *  purposes — the BPM tick won't bounce or advance the frame.
    *  Keeps populated sprunkis still when transport is rolling but
@@ -630,79 +642,150 @@ export class SprunkiStage extends LitElement {
   }
   _animTick() {
     const now = performance.now();
-    let touched = false;
-    // Animation is now driven entirely off per-slot audio peaks in
-    // `updateLevels` (transient detection + `.hit` class) — see that
-    // method for the per-character reaction. We keep the BPM clock
-    // around ONLY as a quiet-mode fallback: when transport is rolling
-    // but the engine has been silent for a while (stub backend with
-    // no audio, a slot whose patch hasn't loaded yet), tick the
-    // play-frame forward on costumed slots so they don't appear
-    // frozen. No bounce fires from here — the idle CSS animation
-    // already keeps each character gently in motion.
-    if (this._bpmTickShouldFire(now)) {
-      this._lastBpmTickAt = now;
-      for (const slot of (this.slots || [])) {
-        if (!slot.patch_id) continue;
-        // Only step the frame on slots that haven't seen a real
-        // audio transient recently — otherwise the live meter path
-        // owns the frame cadence.
-        const lastHit = this._slotActiveUntil[slot.id] || 0;
-        if (lastHit > now - 500) continue;
-        const patch = getPatch(slot.patch_id);
-        const frames = patch?.sprunki_id ? allPlayCostumeUrlsFor(patch.sprunki_id) : [];
-        if (!frames.length) continue;
-        this._playFrameIdx[slot.id] = ((this._playFrameIdx[slot.id] || 0) + 1) % frames.length;
-        touched = true;
-      }
-    }
-    // Costumed slots whose ACTIVE_HOLD_MS just elapsed need a
-    // re-render so we drop back to idle[0].
-    if (!touched && this._needsRenderForExpiry(now)) touched = true;
-    if (touched) this.requestUpdate();
+    // Hit reactions fire from TWO independent per-slot sources:
+    //
+    //   1. Audio-peak transients (live engine) — `updateLevels`.
+    //   2. Sequencer step-fires (works in stub mode too) — here.
+    //
+    // The sequencer driver checks the active pattern for each
+    // costumed slot, computes the current 16th-note step from
+    // transport.position, and fires a hit when the slot's pattern
+    // has a cell on the step we haven't fired yet. Each slot's
+    // pattern is unique, so the cast naturally syncopates — drums
+    // on their hit pattern, bass on theirs, etc. — no unison.
+    // _fireHit's refractory window prevents over-trigger from
+    // dense patterns (16ths on every step).
+    this._fireSequencerSteps(now);
+    if (this._needsRenderForExpiry(now)) this.requestUpdate();
   }
 
-  /** Fire the per-kind "hit" animation on a single slot. Idempotent
-   *  within a frame — restarts the keyframe by toggling the class
-   *  off and forcing a layout flush before adding it again, which
-   *  is the standard CSS way to re-trigger a one-shot keyframe. */
-  _fireHit(slotId) {
-    const el = this.renderRoot?.querySelector(`[data-slot="${slotId}"] .sprunki-art`);
-    if (!el) return;
-    el.classList.remove("hit");
-    void el.offsetWidth;
-    el.classList.add("hit");
-    clearTimeout(this._hitTimers?.[slotId]);
-    this._hitTimers ??= {};
-    this._hitTimers[slotId] = setTimeout(() => {
-      el.classList.remove("hit");
-    }, 360);
-  }
-
-  /** True when the next beat boundary has passed AND transport is
-   *  rolling. The interval is locked to **transport.position**, not
-   *  wall clock, so the cast lines up with the actual playhead even
-   *  if the JS event loop hiccups. Without this anchor a paused tab
-   *  resumed mid-loop would drift its dance off the audio by hundreds
-   *  of ms. Read BPM + sample rate each call so a tempo slide is
-   *  followed immediately. Falls back to 120 BPM / 48k if foyer-core's
-   *  clock isn't available (offline / boot-screen). */
-  _bpmTickShouldFire(_now) {
+  /** Per-slot MIDI/sequencer step driver. Walks each costumed
+   *  slot's active board and fires a hit when the transport's
+   *  current 16th-note step crosses a cell we haven't fired yet.
+   *  No-op when transport isn't rolling or the active arrangement
+   *  isn't seeded — the audio-meter path remains the canonical
+   *  driver when the live engine is producing real peaks. */
+  _fireSequencerSteps(_now) {
     const f = globalThis.__foyer;
     const playing = !!f?.store?.get?.("transport.playing");
-    if (!playing) return false;
+    if (!playing) {
+      this._lastFiredStep = {};
+      return;
+    }
     const bpm = Number(f?.store?.get?.("transport.tempo")) || 120;
     const sr = Number(f?.store?.get?.("audio.sample_rate")) || 48000;
     const pos = Number(f?.store?.get?.("transport.position")) || 0;
-    // Quarter-note pulse — fires on every beat, so the cast bops in
-    // time with the audible drum kick rather than running ahead at
-    // eighth-notes. Rich's call 2026-05-25: "sprunkis don't 100%
-    // correspond with the beats."
+    // Steps-per-second at 16th-note resolution (DEFAULT_RESOLUTION=4 → 4 steps/beat).
+    const samplesPerStep = (60 / bpm) * sr / 4;
+    if (!Number.isFinite(samplesPerStep) || samplesPerStep <= 0) return;
+    const currentStep = Math.floor(pos / samplesPerStep);
+    const activeKey = this.activeArrangementId;
+    for (const slot of (this.slots || [])) {
+      if (!slot.patch_id) continue;
+      const board = activeKey
+        ? slot.boards?.[activeKey]
+        : (slot.boards && slot.boards[Object.keys(slot.boards)[0]]);
+      if (!board) continue;
+      // Pattern length: bar-aligned (1 bar = 16 steps at the
+      // sprunkadoo resolution). We pick the smallest multiple of 16
+      // that contains every cell on this slot's board, so the
+      // sprunki's dance cycle stays aligned to the sequencer's
+      // pattern playback. Empty board → default to one bar (16).
+      let maxStep = 0;
+      for (const rowId of Object.keys(board)) {
+        const steps = board[rowId];
+        if (!Array.isArray(steps)) continue;
+        for (const s of steps) if (s > maxStep) maxStep = s;
+      }
+      const STEPS_PER_BAR = 16;
+      const patternSteps = Math.max(
+        STEPS_PER_BAR,
+        Math.ceil((maxStep + 1) / STEPS_PER_BAR) * STEPS_PER_BAR,
+      );
+      const stepInPattern = ((currentStep % patternSteps) + patternSteps) % patternSteps;
+      if (this._lastFiredStep[slot.id] === stepInPattern) continue;
+      // Does ANY row of this slot's pattern fire on this step?
+      let fires = false;
+      for (const rowId of Object.keys(board)) {
+        const steps = board[rowId];
+        if (!Array.isArray(steps)) continue;
+        if (steps.includes(stepInPattern)) { fires = true; break; }
+      }
+      this._lastFiredStep[slot.id] = stepInPattern;
+      if (fires) this._triggerHit(slot.id);
+    }
+  }
+
+  /** Single hit reaction: brief FACE TWITCH on the slot. Swaps the
+   *  idle gaze variant to "blink" (60 %), "look-left" (20 %) or
+   *  "look-right" (20 %) for ~140 ms then reverts. No body
+   *  translate, no play-frame swap, no CSS keyframe — just an eye
+   *  flicker matching the OG "characters react to their own
+   *  track" behavior.
+   *  Guarded by HIT_REFRACTORY_MS so dense patterns (16ths every
+   *  step) don't restart the twitch faster than the eye can read. */
+  _triggerHit(slotId) {
+    const now = performance.now();
+    this._hitFiredAt ??= {};
+    if (this._hitFiredAt[slotId] &&
+        now - this._hitFiredAt[slotId] < SprunkiStage.HIT_REFRACTORY_MS) {
+      return;
+    }
+    this._hitFiredAt[slotId] = now;
+    const r = Math.random();
+    const action = r < 0.6 ? "blink"
+                 : r < 0.8 ? "look-left"
+                 : "look-right";
+    this._idleAction[slotId] = action;
+    this.requestUpdate();
+    clearTimeout(this._idleEndTimers[slotId]);
+    this._idleEndTimers[slotId] = setTimeout(() => {
+      this._idleAction[slotId] = null;
+      this.requestUpdate();
+    }, action === "blink" ? 140 : 220);
+  }
+
+  /** Quarter-note beat index from transport.position, or null when
+   *  the transport isn't rolling. Locked to position (not wall
+   *  clock) so the cast lines up with the audible playhead even
+   *  if the JS event loop hiccups. Falls back to 120 BPM / 48 kHz
+   *  if the foyer-core clock isn't available. */
+  _bpmTickBeatIdx(_now) {
+    const f = globalThis.__foyer;
+    const playing = !!f?.store?.get?.("transport.playing");
+    if (!playing) return null;
+    const bpm = Number(f?.store?.get?.("transport.tempo")) || 120;
+    const sr = Number(f?.store?.get?.("audio.sample_rate")) || 48000;
+    const pos = Number(f?.store?.get?.("transport.position")) || 0;
     const samplesPerBeat = (60 / bpm) * sr;
-    const beatIdx = Math.floor(pos / samplesPerBeat);
-    if (beatIdx === this._lastBeatIdx) return false;
-    this._lastBeatIdx = beatIdx;
-    return true;
+    return Math.floor(pos / samplesPerBeat);
+  }
+
+  /** Per-category beat phase for the BPM-clock fallback. Returns
+   *  `{ period, offset }` so the fallback fires on
+   *  `beatIdx % period === offset`. Tuned so the cast NEVER hits
+   *  the same beat together — drums on quarters with offsets that
+   *  cycle per slot index, melody/bass on half-time, vocal/fx on
+   *  fourth-note offsets. */
+  _beatPhaseFor(category, slotIndex) {
+    switch (category) {
+      case "drums":
+        // Quarter pulses, but offset per slot so two drum sprunkis
+        // never bounce on the same beat (kick on 1+3, snare on 2+4
+        // type pattern — emergent from offsets, not hardcoded).
+        return { period: 2, offset: slotIndex % 2 };
+      case "bass":
+        // Half-time, anchored to beat 1.
+        return { period: 4, offset: (slotIndex % 4) };
+      case "melody":
+        return { period: 4, offset: (slotIndex % 4) };
+      case "vocal":
+        return { period: 8, offset: (slotIndex % 8) };
+      case "fx":
+        return { period: 6, offset: (slotIndex % 6) };
+      default:
+        return { period: 4, offset: slotIndex % 4 };
+    }
   }
   _needsRenderForExpiry(now) {
     for (const slotId in this._slotActiveUntil) {
@@ -764,22 +847,12 @@ export class SprunkiStage extends LitElement {
       this._displayedMeter[slotId] = next;
       el.style.setProperty("--meter", next.toFixed(3));
       // Rising-edge transient detection — fires the per-character
-      // hit animation only on THIS slot. Threshold tuned so a
-      // single drum hit fires once (jumps ~0.4 of envelope) but a
-      // held sustained level doesn't keep re-triggering. Each
-      // sprunki bounces only when its own track produces audio.
-      if (intensity > prev + 0.18 && intensity > 0.22) {
-        this._fireHit(slotId);
-        this._slotActiveUntil[slotId] = performance.now() + SprunkiStage.ACTIVE_HOLD_MS;
-        // Advance to the next play frame so the character cycles
-        // through its anim/anim2/anim3 costumes on each transient.
-        const slot = slotById.get(slotId);
-        const patch = slot?.patch_id ? getPatch(slot.patch_id) : null;
-        const frames = patch?.sprunki_id ? allPlayCostumeUrlsFor(patch.sprunki_id) : [];
-        if (frames.length) {
-          this._playFrameIdx[slotId] = ((this._playFrameIdx[slotId] || 0) + 1) % frames.length;
-          this.requestUpdate();
-        }
+      // hit animation only on THIS slot. Threshold tuned permissive
+      // enough to dance on real drum hits but loose enough that
+      // small meter wobbles don't retrigger. The HIT_REFRACTORY_MS
+      // guard in _fireHit is the real safety net.
+      if (intensity > prev + 0.20 && intensity > 0.25) {
+        this._triggerHit(slotId);
       }
     }
   }
@@ -978,27 +1051,31 @@ export class SprunkiStage extends LitElement {
     const scary = !!this.scaryMode;
     const patch = slot.patch_id ? getPatch(slot.patch_id) : null;
     if (!patch) {
-      // Empty slot. Static empty Polo — droopy-eyed, hands-down
-      // gray placeholder. Was cycling through gray's `play` frames
-      // (hands raised) which read as cat ears on stage; Rich's
-      // 2026-05-25 call: use the empty Polo, no cycling.
-      return emptySprunkiUrl({ scary });
+      // Empty slot — cycles through the same idle-gaze variants as
+      // the costumed cast (blink / look-left / look-right) via the
+      // _idleAction map populated by _tickIdleSlot. No inline SVG /
+      // CSS animation: hard sprite swap, single source of truth in
+      // build-foyer-originals.py's render_empty(gaze=...).
+      const emptyGaze = !scary ? (this._idleAction?.[slot.id] || null) : null;
+      return emptySprunkiUrl({ scary, gaze: emptyGaze });
     }
-    const now = performance.now();
-    // Scary mode prefers the `alternate` play bucket (4 horror
-    // frames per character in the new Foyer Originals pack) for
-    // beat hits and `idle_alternate` for the rest pose. If the
-    // current source doesn't have horror frames for this
-    // character we silently fall back to the normal bucket so a
-    // half-skinned pack doesn't render blanks.
-    const playFrames = scary
-      ? (allAlternatePlayCostumeUrlsFor(patch.sprunki_id).length
-          ? allAlternatePlayCostumeUrlsFor(patch.sprunki_id)
-          : allPlayCostumeUrlsFor(patch.sprunki_id))
-      : allPlayCostumeUrlsFor(patch.sprunki_id);
-    if (now < (this._slotActiveUntil[slot.id] || 0) && playFrames.length) {
-      const idx = (this._playFrameIdx?.[slot.id] || 0) % playFrames.length;
-      return playFrames[idx];
+    // No play-frame cycling — the OG play1/play2/play3 poses were
+    // big body lean/jump frames that read as "Terrance and Phillip"
+    // bobbing left/right/up. The on-beat reaction now lives entirely
+    // in the idle gaze variant (face twitch via _triggerHit) so the
+    // body stays planted and only the face responds to music.
+    // The per-slot scheduler may have flipped this slot into one of
+    // the idle gaze variants (blink / look-left / look-right) — honor
+    // that. Falls back to the base idle frame.
+    const idleAction = !scary ? this._idleAction?.[slot.id] : null;
+    if (idleAction) {
+      const variants = idleVariantsFor(patch.sprunki_id);
+      const url = (
+        idleAction === "blink"      ? variants.blink :
+        idleAction === "look-left"  ? variants.lookLeft :
+        idleAction === "look-right" ? variants.lookRight : null
+      );
+      if (url) return url;
     }
     const idle = scary
       ? (alternateIdleCostumeUrlsFor(patch.sprunki_id).length
@@ -1006,85 +1083,6 @@ export class SprunkiStage extends LitElement {
           : allIdleCostumeUrlsFor(patch.sprunki_id))
       : allIdleCostumeUrlsFor(patch.sprunki_id);
     return idle[0] || null;
-  }
-
-  /** Inline empty-sprunki SVG with animatable eye parts. We render
-   *  this instead of the OG empty Polo <img> for empty slots in
-   *  normal (non-scary) mode so the kid sees real eye-blinks and
-   *  pupils that look around — pure CSS animations target `.pupil`
-   *  and `.lid` paths, staggered per slot via --sway-delay. The
-   *  body shape mimics the OG Polo (rounded head, tall trapezoid
-   *  body) so swapping it in isn't visually jarring. */
-  _renderEmptyArt() {
-    // Polo-style empty placeholder: same anatomy + chill half-shut
-    // face as the cast (uniform eye color matching the gray body),
-    // brows, flat mouth — but with two animatable eye parts:
-    //   .pupil → the black pupil mass, translates LR for look-around
-    //   .lid   → a chill body-color overlay; brief scaleY collapse for blink
-    // The geometry mirrors render_face() in build-foyer-originals.py
-    // at the 130×270 viewBox used for thumbnails.
-    return html`
-      <svg class="empty-sprunki" viewBox="0 0 130 270" preserveAspectRatio="xMidYMax meet"
-           aria-hidden="true">
-        <!-- Body trapezoid -->
-        <path d="M44 175 L36 270 L94 270 L86 175 Z"
-              fill="#808080" stroke="#1a1a1a" stroke-width="2"/>
-        <!-- Neck shadow under the chin -->
-        <path d="M40 178 Q65 192 90 178" stroke="#5a5a5a"
-              stroke-width="7" fill="none" opacity="0.7"/>
-        <!-- Head -->
-        <ellipse cx="65" cy="100" rx="50" ry="46"
-                 fill="#808080" stroke="#1a1a1a" stroke-width="2.4"/>
-        <!-- Brows: thin arches, tilted outward -->
-        <g transform="rotate(-12 42 70)">
-          <path d="M33 70 Q42 64 51 70" stroke="#1a1a1a"
-                stroke-width="2" fill="none" stroke-linecap="round"/>
-        </g>
-        <g transform="rotate(12 88 70)">
-          <path d="M79 70 Q88 64 97 70" stroke="#1a1a1a"
-                stroke-width="2" fill="none" stroke-linecap="round"/>
-        </g>
-        <!-- Eyes: body-color sclera (eye blends with head like OG
-             gray polo), big black pupil masked by a chill lid -->
-        <g>
-          <ellipse cx="42" cy="100" rx="19" ry="19"
-                   fill="#808080" stroke="#1a1a1a" stroke-width="2"/>
-          <defs>
-            <clipPath id="empty-eye-L"><ellipse cx="42" cy="100" rx="18" ry="18"/></clipPath>
-          </defs>
-          <g clip-path="url(#empty-eye-L)">
-            <circle class="pupil" cx="42" cy="100" r="13" fill="#000"/>
-            <!-- chill half-shut lid: top half of eye in body color -->
-            <path d="M21 100 Q42 102 63 100 L63 78 L21 78 Z" fill="#808080"/>
-            <path d="M22 100 Q42 102 62 100" stroke="#1a1a1a"
-                  stroke-width="1.5" fill="none"/>
-          </g>
-          <!-- Blink lid: full-eye body-color overlay collapsed flat
-               by default (scaleY 0); a brief CSS keyframe pops it to
-               scaleY 1 for the blink instant. -->
-          <ellipse class="lid" cx="42" cy="100" rx="18" ry="18"
-                   fill="#808080"/>
-        </g>
-        <g>
-          <ellipse cx="88" cy="100" rx="19" ry="19"
-                   fill="#808080" stroke="#1a1a1a" stroke-width="2"/>
-          <defs>
-            <clipPath id="empty-eye-R"><ellipse cx="88" cy="100" rx="18" ry="18"/></clipPath>
-          </defs>
-          <g clip-path="url(#empty-eye-R)">
-            <circle class="pupil" cx="88" cy="100" r="13" fill="#000"/>
-            <path d="M67 100 Q88 102 109 100 L109 78 L67 78 Z" fill="#808080"/>
-            <path d="M68 100 Q88 102 108 100" stroke="#1a1a1a"
-                  stroke-width="1.5" fill="none"/>
-          </g>
-          <ellipse class="lid" cx="88" cy="100" rx="18" ry="18"
-                   fill="#808080"/>
-        </g>
-        <!-- Flat mouth — horizontal line, no smile curve -->
-        <line x1="55" y1="136" x2="75" y2="136"
-              stroke="#1a1a1a" stroke-width="2" stroke-linecap="round"/>
-      </svg>
-    `;
   }
 
   _renderRibbonButton(kind, isActive, label, handler) {
@@ -1127,11 +1125,9 @@ export class SprunkiStage extends LitElement {
       >
         <div class="sprunki-art" data-anim-kind=${animKind}>
           <div class="sprunki-body">
-          ${isEmpty && !this.scaryMode
-            ? this._renderEmptyArt()
-            : url
-              ? html`<img src=${url} alt=${patch?.label || ""} draggable="false" />`
-              : html`<span class="sprunki-chip">${((patch?.label) || "·").charAt(0).toUpperCase()}</span>`}
+          ${url
+            ? html`<img src=${url} alt=${patch?.label || ""} draggable="false" />`
+            : html`<span class="sprunki-chip">${((patch?.label) || "·").charAt(0).toUpperCase()}</span>`}
           </div>
         </div>
         ${patch ? html`

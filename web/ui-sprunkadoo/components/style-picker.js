@@ -1,16 +1,17 @@
 // Style picker — top-bar button that pops a combo of styles.
 //
 // Anatomy:
-//   <sprunkadoo-style-picker>           ← inline button (sparkles icon)
+//   <sprunkadoo-style-picker>           ← inline button (vinyl-record glyph)
 //     [click] → popover combo box       ← portal'd menu just below
 //       ↳ row per style:
 //          [swatch] [Style label]  [bpm hint]
 //     [pick] → emits `style-picked` { detail: { styleId } } to the app
 //
-// The button doubles as a visual indicator: when a style has been
-// applied, the swatch fills with the style's color (the sparkles icon
-// inherits its color via currentColor). The "currently applied"
-// style is whatever the app shell pushes in on `activeStyleId`.
+// Glyph design: a black 7" 45-rpm record with a colored center
+// label. The center swaps to the active style's color (or stays
+// neutral when nothing is picked), so the button doubles as a
+// visual indicator of which style is loaded. Reads as "music
+// style/genre" instantly without leaning on AI/magic iconography.
 //
 // We DO NOT confirm here — that's the app shell's job, because only
 // it knows whether the kid has authored beats. The picker is a pure
@@ -29,7 +30,7 @@ export class StylePicker extends LitElement {
     .trigger {
       width: 32px;
       height: 32px;
-      padding: 6px;
+      padding: 4px;
       border: 0;
       border-radius: 6px;
       background: transparent;
@@ -37,14 +38,24 @@ export class StylePicker extends LitElement {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      transition: background 0.12s, color 0.12s;
+      transition: background 0.12s, transform 0.18s;
       box-sizing: border-box;
-      color: rgba(255, 255, 255, 0.85);
     }
     .trigger:hover { background: rgba(255, 255, 255, 0.12); }
+    .trigger:hover svg { animation: spin 1.4s linear infinite; }
     .trigger:active { background: rgba(255, 255, 255, 0.22); }
-    .trigger.has-style { color: var(--sc, #fff); }
-    .trigger svg { width: 100%; height: 100%; display: block; }
+    .trigger svg {
+      width: 100%; height: 100%; display: block;
+      transform-origin: 50% 50%;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+    /* Vinyl center label uses the active-style color so the
+       button reads as "loaded" at a glance. Stays neutral when
+       no style is picked. */
+    .label-disc { fill: var(--sc, #888); }
 
     .menu {
       position: absolute;
@@ -135,18 +146,33 @@ export class StylePicker extends LitElement {
     return html`
       <button
         type="button"
-        class="trigger ${active ? "has-style" : ""}"
+        class="trigger"
         style=${active ? `--sc: ${active.color}` : ""}
         title=${active ? `Style: ${active.label}` : "Pick a style"}
         aria-expanded=${this._open ? "true" : "false"}
         @click=${this._toggle}
       >
-        <!-- Heroicons v2 outline / SparklesIcon — "transform" / vibe -->
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
-             fill="none" stroke="currentColor" stroke-width="1.5"
-             aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round"
-                d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+        <!-- 45-rpm vinyl record. Black disc with concentric grooves
+             and a colored center label; the label fills with the
+             active style's color via --sc so the button reads as
+             "currently loaded". Hover-spin handled in CSS. -->
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <!-- Disc -->
+          <circle cx="12" cy="12" r="11" fill="#0d0d0f" stroke="#000" stroke-width="0.6"/>
+          <!-- Grooves -->
+          <circle cx="12" cy="12" r="9.2" fill="none" stroke="#2a2a30" stroke-width="0.4"/>
+          <circle cx="12" cy="12" r="7.8" fill="none" stroke="#2a2a30" stroke-width="0.4"/>
+          <circle cx="12" cy="12" r="6.4" fill="none" stroke="#2a2a30" stroke-width="0.4"/>
+          <!-- Light-glint highlight: a thin arc on the upper-left
+               that gives the disc the "shiny vinyl" feel without
+               needing a gradient (Lit's css block can't carry
+               SVG <defs>). -->
+          <path d="M5 8 A 8 8 0 0 1 11 4" fill="none" stroke="#3a3a44" stroke-width="0.6" stroke-linecap="round"/>
+          <!-- Center label, painted in the active-style color -->
+          <circle cx="12" cy="12" r="4.4" class="label-disc"
+                  stroke="rgba(0,0,0,0.55)" stroke-width="0.5"/>
+          <!-- Spindle hole -->
+          <circle cx="12" cy="12" r="0.85" fill="#0d0d0f"/>
         </svg>
       </button>
       ${this._open ? html`
@@ -172,105 +198,3 @@ export class StylePicker extends LitElement {
 }
 
 customElements.define("sprunkadoo-style-picker", StylePicker);
-
-/** Lightweight confirm modal used by the app shell when applying a
- *  style would clobber custom beats. Plain inline element so the app
- *  doesn't need a portal — Lit's z-index + position:fixed is enough.
- *
- *  Emits `confirm` (proceed) or `cancel` (bail). Caller renders this
- *  conditionally and removes it on either event. */
-export class StyleConfirmModal extends LitElement {
-  static styles = css`
-    :host {
-      position: fixed;
-      inset: 0;
-      z-index: 100;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: rgba(0, 0, 0, 0.55);
-      backdrop-filter: blur(2px);
-    }
-    .card {
-      background: #1a1d2e;
-      color: #fff;
-      border-radius: 12px;
-      padding: 22px 24px;
-      max-width: 380px;
-      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
-      border: 1px solid rgba(255, 255, 255, 0.10);
-    }
-    h2 {
-      margin: 0 0 8px;
-      font: 800 18px/1.2 system-ui, sans-serif;
-    }
-    p {
-      margin: 0 0 18px;
-      font: 400 14px/1.4 system-ui, sans-serif;
-      color: rgba(255, 255, 255, 0.78);
-    }
-    .swatch {
-      display: inline-block;
-      width: 12px;
-      height: 12px;
-      border-radius: 3px;
-      background: var(--sc, #888);
-      margin-right: 6px;
-      vertical-align: middle;
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.20);
-    }
-    .row {
-      display: flex;
-      gap: 10px;
-      justify-content: flex-end;
-    }
-    button {
-      padding: 8px 14px;
-      border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.18);
-      background: rgba(255, 255, 255, 0.06);
-      color: #fff;
-      font: 700 13px/1 system-ui, sans-serif;
-      cursor: pointer;
-      transition: background 0.12s, transform 0.10s;
-    }
-    button:hover { background: rgba(255, 255, 255, 0.14); }
-    button.primary {
-      background: var(--sc, #4cbf56);
-      border-color: transparent;
-      color: #fff;
-    }
-    button.primary:hover { filter: brightness(1.1); }
-  `;
-
-  static properties = {
-    style_: { type: Object },
-  };
-
-  _fire(type) {
-    this.dispatchEvent(new CustomEvent(type, { bubbles: true, composed: true }));
-  }
-
-  render() {
-    const s = this.style_;
-    if (!s) return "";
-    return html`
-      <div class="card" style="--sc: ${s.color}">
-        <h2><span class="swatch"></span>Apply ${s.label}?</h2>
-        <p>
-          You've authored your own beats. Switching to
-          <strong>${s.label}</strong> will replace every performer's
-          loop with the new style. There's no undo.
-        </p>
-        <div class="row">
-          <button @click=${() => this._fire("cancel")}>Keep my beats</button>
-          <button class="primary" @click=${() => this._fire("confirm")}>
-            Apply ${s.label}
-          </button>
-        </div>
-      </div>
-    `;
-  }
-}
-
-customElements.define("sprunkadoo-style-confirm", StyleConfirmModal);
