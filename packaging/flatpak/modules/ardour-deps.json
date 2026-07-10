@@ -237,10 +237,10 @@
       "no-parallel-make": true,
       "sources": [
         {
-          "//": "Ardour",
+          "//": "Ardour. Mirrored to GitHub: code.soundsoftware.ac.uk (upstream host) times out from CI runners (2026-07-10). Same 2.9 release, tag archive.",
           "type": "archive",
-          "url": "https://code.soundsoftware.ac.uk/attachments/download/2588/vamp-plugin-sdk-2.9.0.tar.gz",
-          "sha256": "b72a78ef8ff8a927dc2ed7e66ecf4c62d23268a5d74d02da25be2b8d00341099"
+          "url": "https://github.com/vamp-plugins/vamp-plugin-sdk/archive/refs/tags/vamp-plugin-sdk-v2.9.tar.gz",
+          "sha256": "04e8b12002ccebbaf22e2f4e6a859f95c7715524e3fc598512687ee1f355592a"
         }
       ],
       "cleanup": [
