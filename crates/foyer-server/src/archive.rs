@@ -696,6 +696,11 @@ fn extract_tar_with_caps<R: Read>(
         // re-borrow `entry` mutably (for `Read::take`) below without
         // tripping the borrow checker on a still-live `header` ref.
         let entry_type = entry.header().entry_type();
+        // Only consumed by the cfg(unix) permissions block below —
+        // allow the dead binding on Windows rather than cfg-gating
+        // the read (keeping the header snapshot unconditional keeps
+        // the borrow-checker dance above it identical on every OS).
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let mode_bits = entry.header().mode().ok();
         match entry_type {
             tar::EntryType::Directory => {

@@ -48,7 +48,13 @@
 
 app-id: ai.patapsco.FoyerStudio
 runtime: org.gnome.Platform
-runtime-version: '48'
+# GNOME runtimes EOL when N+2 releases (~1 year). 48 EOL'd
+# 2026-03-24 (the first CI builds emitted end-of-life warnings —
+# check `flatpak install` output / build logs when bumping). 50 is
+# supported until ~2027-03; webkit2gtk-4.1 verified present in
+# gnome-build-meta's gnome-50 branch (elements/sdk/), which is the
+# thing wry can't live without — re-verify on every bump.
+runtime-version: '50'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -87,11 +93,12 @@ finish-args:
 
 # Users can `flatpak install` any org.freedesktop.LinuxAudio.Plugins.*
 # extension (Calf, LSP, x42, …) and Ardour inside Foyer picks them up.
-# Version tracks the GNOME runtime's freedesktop base (48 → 24.08).
+# Version tracks the GNOME runtime's freedesktop base (50 → 25.08,
+# per gnome-build-meta's freedesktop-sdk.bst junction).
 add-extensions:
   org.freedesktop.LinuxAudio.Plugins:
     directory: extensions/Plugins
-    version: '24.08'
+    version: '25.08'
     add-ld-path: lib
     merge-dirs: ladspa;lv2;vst;vst3
     subdirectories: true
