@@ -128,8 +128,7 @@ async fn launch_and_wait_for_shim(ctx: LaunchCtx<'_>) -> Result<ShimLaunch> {
     // session lock + then dies. The shim writes its project path in
     // the advert; we match on it before falling through to spawn.
     if let Some(ad) = discovery::find_for_project(project) {
-        if let Ok(stream) = std::os::unix::net::UnixStream::connect(&ad.socket) {
-            drop(stream);
+        if shim_socket_alive(&ad.socket).is_ok() {
             tracing::info!(
                 "reusing live shim at {} for already-open project {}",
                 ad.socket.display(),
@@ -312,9 +311,8 @@ async fn launch_and_wait_for_shim(ctx: LaunchCtx<'_>) -> Result<ShimLaunch> {
             if before.contains(&s.socket) {
                 continue;
             }
-            match std::os::unix::net::UnixStream::connect(&s.socket) {
-                Ok(stream) => {
-                    drop(stream);
+            match shim_socket_alive(&s.socket) {
+                Ok(()) => {
                     tracing::info!("shim advertised at {}", s.socket.display());
                     return Ok(ShimLaunch {
                         socket: s.socket,
@@ -348,6 +346,26 @@ async fn launch_and_wait_for_shim(ctx: LaunchCtx<'_>) -> Result<ShimLaunch> {
 }
 
 /// Return the enclosing `.app` bundle for a Mach-O exec path, if any.
+/// Liveness probe: can we open the shim's advertised Unix socket
+/// right now? Distinguishes a live shim from a stale advert file
+/// left by a crashed Ardour. Compiles (and returns false) on
+/// non-unix targets so the workspace clippy/build sweep on the
+/// Windows CI leg doesn't trip on `std::os::unix` — a shim socket
+/// can never exist there anyway (Windows is docker-only, DECISION
+/// 52).
+#[cfg(unix)]
+fn shim_socket_alive(socket: &Path) -> std::io::Result<()> {
+    std::os::unix::net::UnixStream::connect(socket).map(drop)
+}
+
+#[cfg(not(unix))]
+fn shim_socket_alive(_socket: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "shim sockets are unix-only",
+    ))
+}
+
 fn macos_app_bundle(exec: &Path) -> Option<PathBuf> {
     if !cfg!(target_os = "macos") {
         return None;

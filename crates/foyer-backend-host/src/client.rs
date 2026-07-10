@@ -33,6 +33,7 @@ use foyer_schema::{
 use futures::Stream;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
@@ -209,10 +210,29 @@ pub struct HostClient {
 }
 
 impl HostClient {
+    /// Connect to the shim's Unix domain socket. Everything below
+    /// this call is transport-generic (`from_halves` runs over any
+    /// AsyncRead/AsyncWrite pair — tests use an in-memory duplex),
+    /// but the shim itself only ever advertises a UDS, so on
+    /// non-unix targets this returns a clear error instead of
+    /// failing to compile. Windows drives the backend through
+    /// Docker, never a host shim — see DECISION 52.
+    #[cfg(unix)]
     pub async fn connect(cfg: HostClientConfig) -> Result<Self, ClientError> {
         let sock = UnixStream::connect(&cfg.socket_path).await?;
         let (r, w) = tokio::io::split(sock);
         Ok(Self::from_halves(r, w))
+    }
+
+    #[cfg(not(unix))]
+    pub async fn connect(cfg: HostClientConfig) -> Result<Self, ClientError> {
+        Err(ClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "shim sockets are unix-only; cannot connect to {} on this platform",
+                cfg.socket_path.display()
+            ),
+        )))
     }
 
     /// Build a client over arbitrary async halves — used by integration tests that

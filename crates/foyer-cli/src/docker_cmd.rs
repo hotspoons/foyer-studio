@@ -220,52 +220,61 @@ pub fn assemble(config: &Config, args: &DockerCmdArgs) -> Result<PlannedInvocati
             cmd_args.push("FOYER_RUNTIME_MODE=gui-dummy".into());
         }
         DockerMode::Jack => {
-            if cfg!(not(target_os = "linux")) {
+            // Compile-time gate, not `cfg!()`: the linux body calls
+            // `libc::geteuid()`, and `libc` is a cfg(unix) target
+            // dep — a runtime `if cfg!(...)` still compiles both
+            // branches, which is exactly what broke the Windows CI
+            // leg (E0433, libc unresolved).
+            #[cfg(not(target_os = "linux"))]
+            {
                 return Err(anyhow!(
                     "--jack mode requires Linux (Docker on macOS/Windows uses a VM, \
                      and JACK socket bind-mounts don't reach the host's audio system).\n\
                      Try --netjack for cross-platform JACK, or --integrated for no host audio."
                 ));
             }
-            let uid = unsafe { libc::geteuid() };
-            let xdg_runtime =
-                std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{uid}"));
-            let jack_dir = PathBuf::from(&xdg_runtime);
-            if !jack_dir.is_dir() {
-                tracing::warn!(
-                    "expected JACK / PipeWire-JACK socket dir at {} — bind-mounting anyway, \
+            #[cfg(target_os = "linux")]
+            {
+                let uid = unsafe { libc::geteuid() };
+                let xdg_runtime =
+                    std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{uid}"));
+                let jack_dir = PathBuf::from(&xdg_runtime);
+                if !jack_dir.is_dir() {
+                    tracing::warn!(
+                        "expected JACK / PipeWire-JACK socket dir at {} — bind-mounting anyway, \
                      but the container may fail to connect if no JACK-compatible server is running",
-                    jack_dir.display()
-                );
+                        jack_dir.display()
+                    );
+                }
+                // FOYER_RUNTIME_MODE=jack-headless flips the entrypoint
+                // away from the dummy AMS seed and into the
+                // hardour + jackd code path. FOYER_JACK_MODE=shm tells
+                // it to consume the host's running jackd / pipewire-jack
+                // server via the shared /dev/shm registry.
+                cmd_args.push("-e".into());
+                cmd_args.push("FOYER_RUNTIME_MODE=jack-headless".into());
+                cmd_args.push("-e".into());
+                cmd_args.push("FOYER_JACK_MODE=shm".into());
+                // Real-time scheduling and IPC: --ipc=host plus the
+                // shm/jack tmp bind mounts let libjack reach the host's
+                // POSIX shm registry and the JACK socket files.
+                cmd_args.push("--ipc=host".into());
+                cmd_args.push("-v".into());
+                cmd_args.push("/dev/shm:/dev/shm".into());
+                cmd_args.push("-v".into());
+                cmd_args.push("/tmp:/tmp:rw".into());
+                cmd_args.push("--device".into());
+                cmd_args.push("/dev/snd".into());
+                cmd_args.push("-v".into());
+                cmd_args.push(format!("{xdg_runtime}:{xdg_runtime}"));
+                cmd_args.push("-e".into());
+                cmd_args.push(format!("XDG_RUNTIME_DIR={xdg_runtime}"));
+                // Pass through the user's uid so socket perms line up.
+                cmd_args.push("--user".into());
+                cmd_args.push(format!("{uid}:{uid}"));
+                cmd_args.push("--group-add".into());
+                cmd_args.push("audio".into());
             }
-            // FOYER_RUNTIME_MODE=jack-headless flips the entrypoint
-            // away from the dummy AMS seed and into the
-            // hardour + jackd code path. FOYER_JACK_MODE=shm tells
-            // it to consume the host's running jackd / pipewire-jack
-            // server via the shared /dev/shm registry.
-            cmd_args.push("-e".into());
-            cmd_args.push("FOYER_RUNTIME_MODE=jack-headless".into());
-            cmd_args.push("-e".into());
-            cmd_args.push("FOYER_JACK_MODE=shm".into());
-            // Real-time scheduling and IPC: --ipc=host plus the
-            // shm/jack tmp bind mounts let libjack reach the host's
-            // POSIX shm registry and the JACK socket files.
-            cmd_args.push("--ipc=host".into());
-            cmd_args.push("-v".into());
-            cmd_args.push("/dev/shm:/dev/shm".into());
-            cmd_args.push("-v".into());
-            cmd_args.push("/tmp:/tmp:rw".into());
-            cmd_args.push("--device".into());
-            cmd_args.push("/dev/snd".into());
-            cmd_args.push("-v".into());
-            cmd_args.push(format!("{xdg_runtime}:{xdg_runtime}"));
-            cmd_args.push("-e".into());
-            cmd_args.push(format!("XDG_RUNTIME_DIR={xdg_runtime}"));
-            // Pass through the user's uid so socket perms line up.
-            cmd_args.push("--user".into());
-            cmd_args.push(format!("{uid}:{uid}"));
-            cmd_args.push("--group-add".into());
-            cmd_args.push("audio".into());
         }
         DockerMode::Netjack => {
             // NetJACK uses TCP — no socket bind-mounts. The container
