@@ -4,6 +4,13 @@
 //! This test exercises everything between sidecar Rust and the wire: command framing,
 //! event decoding, snapshot/ack correlation, audio egress routing, and ingress
 //! piping.
+//!
+//! Unix-only as a whole: the transport under test IS the Unix domain
+//! socket (the fake shim listens on one), so there's nothing
+//! meaningful to run on Windows — and `tokio::net::UnixListener`
+//! doesn't compile there (the CI leg clippy-sweeps tests too).
+
+#![cfg(unix)]
 
 use std::path::PathBuf;
 use std::time::Duration;
