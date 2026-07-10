@@ -33,7 +33,7 @@ impl RegionStore {
     }
 
     pub fn update(&mut self, id: &EntityId, patch: &foyer_schema::RegionPatch) -> Option<Region> {
-        for (_track, list) in self.by_track.iter_mut() {
+        for list in self.by_track.values_mut() {
             if let Some(r) = list.iter_mut().find(|r| r.id == *id) {
                 if let Some(s) = patch.start_samples {
                     r.start_samples = s;
@@ -220,7 +220,7 @@ impl RegionStore {
         if anchor != "start" && anchor != "end" {
             return Err("stretch: anchor must be start or end".into());
         }
-        for (_track_key, list) in self.by_track.iter_mut() {
+        for list in self.by_track.values_mut() {
             if let Some(r) = list.iter_mut().find(|r| r.id == *id) {
                 let old_len = r.length_samples;
                 if old_len == 0 {

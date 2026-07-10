@@ -130,7 +130,7 @@
             },
             {
               "type": "patch",
-              "path": "shared-modules/linux-audio/patches/raptor-libxml.patch"
+              "path": "../patches/raptor-libxml.patch"
             }
           ]
         }
