@@ -25,6 +25,9 @@ on:
       - 'crates/**'
       - 'shims/**'
       - 'web/**'
+      # tw.sh runs inside the foyer module (tailwind build) — script
+      # changes must re-cut the bundle too.
+      - 'scripts/dev/**'
       - '.github/workflows/flatpak.yml'
   pull_request:
     paths:
@@ -65,7 +68,10 @@ jobs:
           cache-key: flatpak-builder-${{ hashFiles('packaging/flatpak/**') }}
           arch: x86_64
           upload-artifact: true
-          artifact-name: foyer-studio-flatpak-x86_64
+          # NB: v6 has no `artifact-name` input (that's master-only);
+          # the artifact gets the action's default name — bundle name
+          # tagged with the arch: `ai.patapsco.FoyerStudio-x86_64.flatpak`.
+          # The publish job's download below must match it.
 
       - name: Summary
         run: |
@@ -109,7 +115,8 @@ jobs:
       - name: Download bundle artifact
         uses: actions/download-artifact@v4
         with:
-          name: foyer-studio-flatpak-x86_64
+          # The action's default artifact name: bundle + arch tag.
+          name: ai.patapsco.FoyerStudio-x86_64.flatpak
 
       - name: Create or update flatpak-latest release
         env:

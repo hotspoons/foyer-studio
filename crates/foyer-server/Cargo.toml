@@ -52,7 +52,13 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # tooling). Pure-Rust would be ideal but `zstd-rs` is the canonical
 # binding to upstream zstandard and ships with the C source bundled —
 # no system dep needed.
-zstd = "0.13"
+# default-features off: the only consumer is the streaming Decoder in
+# archive.rs (tar.zst import path). The default `legacy` feature drags
+# in the pre-1.0 zstd_v0x decoders, whose giant stack frames emit gcc
+# stack-probe symbols (___chkstk_ms) that MSVC's link.exe can't
+# resolve — it broke the Windows CI leg at link time (2026-07-10).
+# Nobody has a 2015-era zstd archive to import.
+zstd = { version = "0.13", default-features = false }
 # Streaming XML scrubber for `.ardour` session files. Used post-
 # extract to strip the `<Script>` blocks that Ardour's session
 # loader auto-executes (RCE class) and to validate path-bearing
