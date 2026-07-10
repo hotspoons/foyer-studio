@@ -830,6 +830,40 @@ tw cmd='help' *args='':
 jack cmd='help' *args='':
     ./scripts/dev/jack.sh {{cmd}} {{args}}
 
+# ─────────────────────────── flatpak ────────────────────────────────
+#
+# The Linux-native distribution: bundled Ardour (at .env's
+# ARDOUR_TAG) + shim + foyer + foyer-desktop, with JACK routed to
+# host PipeWire for real low-latency hardware audio. Manifest and
+# rationale live in packaging/flatpak/. Needs `flatpak-builder` and
+# the flathub remote configured (`flatpak remote-add --user --if-not-exists
+# flathub https://dl.flathub.org/repo/flathub.flatpakrepo`).
+#
+# First build compiles Ardour from source (~30-40 min); the state
+# dir under .flatpak-builder/ keeps it warm, so iterating on the
+# Rust/web side only pays the foyer module rebuild.
+
+# Build + install into the user's flatpak installation.
+flatpak-build:
+    flatpak-builder --user --install --install-deps-from=flathub --force-clean \
+        --state-dir=.flatpak-builder \
+        target/flatpak-build packaging/flatpak/ai.patapsco.FoyerStudio.yml
+
+# Run the installed app (desktop shell, native-Ardour host mode).
+flatpak-run *args='':
+    flatpak run ai.patapsco.FoyerStudio {{args}}
+
+# Export a single-file bundle like CI ships (dist/*.flatpak).
+flatpak-bundle: flatpak-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p dist
+    repo=target/flatpak-repo
+    flatpak-builder --user --force-clean --state-dir=.flatpak-builder \
+        --repo="$repo" target/flatpak-build packaging/flatpak/ai.patapsco.FoyerStudio.yml
+    flatpak build-bundle "$repo" dist/ai.patapsco.FoyerStudio.flatpak ai.patapsco.FoyerStudio
+    echo "wrote dist/ai.patapsco.FoyerStudio.flatpak"
+
 # ─────────────────────────── helm / kube ───────────────────────────
 #
 # Helpers for deploying the chart at charts/foyer-studio. They are

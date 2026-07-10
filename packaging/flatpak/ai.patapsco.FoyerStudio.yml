@@ -1,0 +1,207 @@
+# Foyer Studio flatpak — the Linux-native distribution.
+#
+# What this bundles, bottom to top:
+#   1. Ardour, built from source at the same tag the Docker image
+#      pins (`ARDOUR_TAG` in .env — keep the `tag:`/`commit:` pair
+#      below in sync when bumping it). Building from source, rather
+#      than layering on Flathub's org.ardour.Ardour base app, is
+#      deliberate: the Foyer shim ABI-gates on Ardour's major.minor
+#      (see crates/foyer-cli/src/ardour_locate.rs), and Flathub
+#      tracks upstream's release cadence (9.7 at time of writing),
+#      not ours. Same philosophy as Dockerfile.source: we control
+#      the Ardour build we ship against.
+#   2. The Foyer C++ shim, cmake-built against that exact source
+#      tree and installed into Ardour's own surfaces dir
+#      (/app/lib/ardour9/surfaces) so Ardour discovers it with zero
+#      runtime install step.
+#   3. The Rust workspace (`foyer` CLI + `foyer-desktop` shell),
+#      release-built with the shim + web tree embedded — the same
+#      artifacts `scripts/release/bundle.sh` ships.
+#
+# Audio path — why this is lower-friction than Docker:
+#   The freedesktop/GNOME runtime ships PipeWire's libjack as THE
+#   JACK implementation. Ardour's jack backend inside the sandbox
+#   therefore talks straight to the host PipeWire daemon through
+#   the `--filesystem=xdg-run/pipewire-0` socket below — native
+#   low-latency audio + MIDI against real hardware, no jackd-in-a-
+#   container, no /dev/shm bind-mount ceremony, no netjack hop.
+#   `--device=all` additionally exposes raw ALSA (/dev/snd) for
+#   Ardour's alsa backend and hardware MIDI controllers.
+#
+# Runtime — why GNOME, not bare freedesktop:
+#   foyer-desktop is tao + wry, which needs webkit2gtk-4.1 + GTK3
+#   at runtime. The GNOME runtime ships both; the freedesktop
+#   runtime ships neither (Flathub's Ardour gets away with
+#   freedesktop because it has no WebView). If a future GNOME
+#   runtime drops the GTK3 webkit2gtk-4.1, the fallback is a
+#   webkitgtk module in this manifest — check before bumping
+#   `runtime-version`.
+#
+# Build with:   just flatpak-build     (see Justfile)
+# CI builds the distributable .flatpak bundle — see
+# .github/workflows/flatpak.yml.
+#
+# Not yet Flathub-compliant: the foyer module uses
+# `--share=network` for cargo + the tailwind CLI download. Flathub
+# submission would need vendored cargo sources
+# (flatpak-cargo-generator) — see docs/DECISIONS.md.
+
+app-id: ai.patapsco.FoyerStudio
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: foyer-desktop
+
+finish-args:
+  # Window: foyer-desktop forces GDK_BACKEND=x11 (see
+  # crates/foyer-desktop/src/main.rs) — X11 (or XWayland) is the
+  # rendering path today.
+  - --share=ipc
+  - --socket=x11
+  # Audio. pipewire-0 is the low-latency JACK/PipeWire passthrough;
+  # pulseaudio is the fallback backend; device=all is raw ALSA +
+  # hardware MIDI + USB control surfaces.
+  - --filesystem=xdg-run/pipewire-0
+  - --socket=pulseaudio
+  - --device=all
+  # Quirks inherited from Flathub's Ardour manifest: an empty
+  # ALSA_CONFIG_PATH makes alsa-lib fall back to the runtime's
+  # config; TMPDIR=/var/tmp gives Ardour a tmp dir that survives
+  # sandbox-internal /tmp pressure for large interchange files.
+  - --env=ALSA_CONFIG_PATH=
+  - --env=TMPDIR=/var/tmp
+  # JACK device-reservation dance (org.freedesktop.ReserveDevice1)
+  # so Ardour can negotiate exclusive device access politely.
+  - --own-name=org.freedesktop.ReserveDevice1.*
+  # Sessions live wherever the user puts them; the in-UI session
+  # picker (launcher jail) needs to see the home tree.
+  - --filesystem=home
+  # Remote clients (phone UI, collaborators) connect to the embedded
+  # server; netjack + tunnel auth also need outbound.
+  - --share=network
+  # LV2 search path: user-installed bundles + the Flathub audio
+  # plugin extension point + Ardour's own bundled plugins.
+  - --env=LV2_PATH=/app/extensions/Plugins/lv2:/app/lib/lv2
+
+# Users can `flatpak install` any org.freedesktop.LinuxAudio.Plugins.*
+# extension (Calf, LSP, x42, …) and Ardour inside Foyer picks them up.
+# Version tracks the GNOME runtime's freedesktop base (48 → 24.08).
+add-extensions:
+  org.freedesktop.LinuxAudio.Plugins:
+    directory: extensions/Plugins
+    version: '24.08'
+    add-ld-path: lib
+    merge-dirs: ladspa;lv2;vst;vst3
+    subdirectories: true
+    no-autodownload: true
+
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /share/info
+  - /share/man
+  - '*.a'
+  - '*.la'
+
+modules:
+  # Ardour's build deps that the SDK doesn't carry — vendored from
+  # Flathub's org.ardour.Ardour manifest, pinned + checksummed.
+  - modules/ardour-deps.json
+
+  # ── Ardour + the Foyer shim, one module ─────────────────────────
+  # The shim cmake-links against the libs waf just built, so both
+  # steps share a build dir — exactly the Dockerfile.source
+  # sequence. Keep `tag`/`commit` in lockstep with ARDOUR_TAG in
+  # .env; the commit is the peeled target of the annotated tag.
+  - name: ardour
+    buildsystem: simple
+    build-options:
+      cppflags: -DGLIB_VERSION_MAX_ALLOWED=GLIB_VERSION_2_56 -DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_56
+    build-commands:
+      - python3 ./waf configure --prefix=/app --optimize --dist-target=$FLATPAK_ARCH
+        --no-phone-home --freedesktop --with-backends=jack,alsa,pulseaudio,dummy
+      - python3 ./waf build -j $FLATPAK_BUILDER_N_JOBS
+      - python3 ./waf install
+      # Shim: header + link inputs come from this very tree, so the
+      # ABI guard in shims/ardour/CMakeLists.txt sees the real 9.x
+      # version, not a guess.
+      - cmake -S foyer-src/shims/ardour -B foyer-shim-build
+        -DFOYER_ARDOUR_SOURCE=$PWD -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - cmake --build foyer-shim-build -j $FLATPAK_BUILDER_N_JOBS
+      # Into Ardour's own surfaces dir — discovered on boot, no
+      # runtime shim-install pass needed inside the sandbox.
+      - install -Dm755 foyer-shim-build/libfoyer_shim.so /app/lib/ardour9/surfaces/libfoyer_shim.so
+    cleanup:
+      - '*.a'
+    sources:
+      - type: git
+        url: https://github.com/Ardour/ardour.git
+        tag: '9.5'
+        commit: c664596f9d69b3f210404870760511798891355b
+      - type: dir
+        path: ../..
+        dest: foyer-src
+        skip:
+          - .flatpak-builder
+          - .git
+          - target
+          - dist
+          - sessions
+          - tests-ui/node_modules
+
+  # ── Foyer: Rust workspace (CLI + desktop shell) ──────────────────
+  # Network is on for this module only: cargo fetches crates and
+  # scripts/dev/tw.sh downloads the tailwind standalone binary.
+  # (Flathub submission would swap this for vendored sources.)
+  - name: foyer
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      build-args:
+        - --share=network
+      env:
+        CARGO_HOME: /run/build/foyer/cargo-home
+    build-commands:
+      # Tailwind before cargo — the release build embeds web/ via
+      # include_dir!, and tw.build.css is generated, not committed
+      # (same ordering constraint as Dockerfile.source).
+      - ./scripts/dev/tw.sh build
+      # FOYER_BUNDLED_SHIM stamps SHIM_PRESENT=1 into the binary;
+      # without it `foyer serve --backend ardour` refuses to launch
+      # even though the .so is sitting in /app (compile-time gate,
+      # see Dockerfile.source's identical note).
+      - FOYER_BUNDLED_SHIM=/app/lib/ardour9/surfaces/libfoyer_shim.so
+        cargo build --release --bin foyer --bin foyer-desktop
+      - install -Dm755 target/release/foyer /app/bin/foyer
+      - install -Dm755 target/release/foyer-desktop /app/bin/foyer-desktop
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .flatpak-builder
+          - .git
+          - target
+          - dist
+          - sessions
+          - tests-ui/node_modules
+
+  # ── App metadata: desktop entry, icon, appstream ─────────────────
+  - name: foyer-metadata
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 ai.patapsco.FoyerStudio.desktop /app/share/applications/ai.patapsco.FoyerStudio.desktop
+      - install -Dm644 ai.patapsco.FoyerStudio.metainfo.xml /app/share/metainfo/ai.patapsco.FoyerStudio.metainfo.xml
+      - install -Dm644 logo.svg /app/share/icons/hicolor/scalable/apps/ai.patapsco.FoyerStudio.svg
+      # Plugin-extension mount point declared in add-extensions.
+      - install -d /app/extensions/Plugins
+    sources:
+      - type: file
+        path: ai.patapsco.FoyerStudio.desktop
+      - type: file
+        path: ai.patapsco.FoyerStudio.metainfo.xml
+      - type: file
+        path: ../../web/logo.svg
+        dest-filename: logo.svg

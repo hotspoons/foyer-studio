@@ -48,3 +48,6 @@ foyer-studio/sessions/*
 .env.local
 
  scripts/dev/__pycache__/*
+
+# flatpak-builder state (just flatpak-build)
+.flatpak-builder/

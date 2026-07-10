@@ -5,15 +5,28 @@ name: ghcr-cleanup
 # `snapshot-<sha>` tags. Runs daily via cron and on manual dispatch.
 #
 # Retention policy:
-#   * Untagged versions older than 7 days  → delete (orphaned by
-#     mutable-tag overwrites — when a fresh push to a branch
-#     re-points `snapshot-latest`, the previous version's other
-#     tag-handles drop, leaving an untagged digest behind).
+#   * Versions tagged `latest`, `snapshot-latest`, `main-<sha>`,
+#     or any tag starting with `v` (release tags) → keep forever.
+#     Every merge to main is kept in perpetuity via its
+#     `main-<sha>` tag — main history is never pruned.
 #   * Versions whose tags are EXCLUSIVELY snapshot-<sha> (no
 #     `latest`, no `snapshot-latest`, no `main-*`, no `v*`)
 #     older than 14 days → delete.
-#   * Versions tagged `latest`, `snapshot-latest`, `main-<sha>`,
-#     or any tag starting with `v` (release tags) → keep forever.
+#   * Untagged versions older than 7 days → delete, but ONLY when
+#     no kept (tagged) version references them. This carve-out is
+#     load-bearing: docker.yml pushes per-arch images BY DIGEST
+#     (no tags) and ties them together with a tagged multi-arch
+#     manifest list. GHCR reports those per-arch children as
+#     "untagged" versions, so a naive untagged sweep deletes the
+#     amd64/arm64 halves out from under the protected
+#     `latest`/`main-<sha>` manifest lists — the tag survives but
+#     `docker pull` 404s with "manifest unknown" (real bug,
+#     2026-07: main images went unpullable ~7 days after merge).
+#     We therefore resolve every kept tag's manifest tree via the
+#     registry API and pin all referenced digests, recursing one
+#     level because build-push-action v6 nests an attestation
+#     index per arch. Only truly unreferenced untagged digests
+#     (orphaned by mutable-tag overwrites) are deleted.
 #
 # The 14-day retention is deliberately loose: a developer
 # previewing a feature branch on a Cloud Run side-deploy can pin
@@ -72,6 +85,12 @@ jobs:
         run: |
           set -eo pipefail
 
+          # Normalize: dispatch sends the literal string "false" when
+          # the box is unchecked; the `${DRY_RUN:+…}` expansions below
+          # only test set-ness, so collapse anything-but-"true" to
+          # empty.
+          [ "$DRY_RUN" = "true" ] || DRY_RUN=""
+
           # GHCR's API path differs for user-owned vs. org-owned
           # packages. Try the org endpoint first; on 404, fall
           # through to the user endpoint. The owner login string
@@ -95,72 +114,146 @@ jobs:
 
           delete_count=0
           keep_count=0
+          protected_child_count=0
 
           # `--paginate` iterates 100 versions per page until exhausted.
           # `--jq` flattens to one JSON object per line so the bash
           # while-loop can split fields without parsing JSON itself.
+          # `.name` is the version's manifest digest (sha256:…) — we
+          # need it to match untagged versions against the child
+          # digests referenced by kept manifest lists.
           gh api --paginate \
             -H "Accept: application/vnd.github+json" \
             "$BASE/versions" \
-            --jq '.[] | {id, updated_at, tags: .metadata.container.tags}' \
+            --jq '.[] | {id, name, updated_at, tags: .metadata.container.tags}' \
             > /tmp/versions.ndjson
 
           total=$(wc -l < /tmp/versions.ndjson)
           echo "::notice::scanning $total package versions"
 
+          # ── Pass 1: classify TAGGED versions ─────────────────────
+          # Kept ones contribute their digest to the protection walk;
+          # snapshot-only ones past the cutoff are queued for delete.
+          : > /tmp/kept_digests
+          : > /tmp/delete_queue      # lines: id<TAB>reason
+
           while read -r line; do
-            id=$(echo "$line" | jq -r .id)
-            updated_at=$(echo "$line" | jq -r .updated_at)
             tags=$(echo "$line" | jq -r '.tags | join(",")')
+            [ -z "$tags" ] && continue
+            id=$(echo "$line" | jq -r .id)
+            digest=$(echo "$line" | jq -r .name)
+            updated_at=$(echo "$line" | jq -r .updated_at)
             updated_unix=$(date -u -d "$updated_at" +%s)
 
-            # Bucket the version by tag composition.
-            keep_reason=""
-            delete_reason=""
-
-            if [ -z "$tags" ]; then
-              # Untagged digest — orphan from a mutable-tag overwrite.
-              if [ "$updated_unix" -lt "$UNTAGGED_CUTOFF" ]; then
-                delete_reason="untagged orphan, age=$(((NOW-updated_unix)/86400))d"
-              else
-                keep_reason="untagged but recent"
-              fi
+            IFS=',' read -ra tag_array <<< "$tags"
+            has_protected=0
+            for t in "${tag_array[@]}"; do
+              case "$t" in
+                latest|snapshot-latest|main-*|v[0-9]*)
+                  has_protected=1
+                  ;;
+              esac
+            done
+            if [ "$has_protected" = "1" ]; then
+              echo "$digest" >> /tmp/kept_digests
+              keep_count=$((keep_count + 1))
+            elif [ "$updated_unix" -lt "$SNAPSHOT_CUTOFF" ]; then
+              printf '%s\t%s\n' "$id" \
+                "snapshot-only, age=$(((NOW-updated_unix)/86400))d, tags=$tags" \
+                >> /tmp/delete_queue
             else
-              # Tagged. Protect anything carrying a non-snapshot tag.
-              IFS=',' read -ra tag_array <<< "$tags"
-              has_protected=0
-              for t in "${tag_array[@]}"; do
-                case "$t" in
-                  latest|snapshot-latest|main-*|v[0-9]*)
-                    has_protected=1
-                    ;;
-                esac
-              done
-              if [ "$has_protected" = "1" ]; then
-                keep_reason="protected tag(s): $tags"
-              else
-                # Every tag is a snapshot-<sha> or other transient.
-                if [ "$updated_unix" -lt "$SNAPSHOT_CUTOFF" ]; then
-                  delete_reason="snapshot-only, age=$(((NOW-updated_unix)/86400))d, tags=$tags"
-                else
-                  keep_reason="snapshot-only but recent, tags=$tags"
-                fi
-              fi
+              # Recent snapshot — kept, so its per-arch children are
+              # protected too (a 3-day-old snapshot's untagged amd64
+              # half must survive the 7-day untagged sweep… it can't
+              # be older than its parent, but belt-and-braces).
+              echo "$digest" >> /tmp/kept_digests
+              keep_count=$((keep_count + 1))
             fi
+          done < /tmp/versions.ndjson
 
-            if [ -n "$delete_reason" ]; then
-              if [ "$DRY_RUN" = "true" ]; then
-                echo "DRY  delete id=$id ($delete_reason)"
-              else
-                echo "DEL  id=$id ($delete_reason)"
-                gh api -X DELETE "$BASE/versions/$id" >/dev/null \
-                  || echo "::warning::delete failed for id=$id"
-              fi
-              delete_count=$((delete_count + 1))
+          # ── Protection walk: resolve kept manifests → child digests ─
+          # GHCR registry API (not the packages API): exchange the
+          # workflow token for a registry pull token, then GET each
+          # kept manifest and collect `.manifests[].digest`. Recurse
+          # up to depth 3: tag → manifest list → per-arch index
+          # (image + provenance attestation with build-push-action
+          # v6) → leaf image manifests (no `.manifests`, recursion
+          # bottoms out naturally).
+          IMAGE_PATH="$(echo "$OWNER/$PACKAGE" | tr '[:upper:]' '[:lower:]')"
+          REG_TOKEN=$(curl -sf -u "x:$GH_TOKEN" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:$IMAGE_PATH:pull" \
+            | jq -r .token)
+          if [ -z "$REG_TOKEN" ] || [ "$REG_TOKEN" = "null" ]; then
+            echo "::error::registry token exchange failed — refusing to prune untagged versions blind"
+            exit 1
+          fi
+
+          ACCEPT='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+
+          : > /tmp/protected_digests
+          collect_children() {
+            local digest="$1" depth="$2"
+            [ "$depth" -ge 3 ] && return 0
+            local mani
+            # A kept tag whose manifest fails to fetch is suspicious
+            # but not fatal — log and move on; its children simply
+            # stay unprotected-by-this-parent.
+            mani=$(curl -sf \
+              -H "Authorization: Bearer $REG_TOKEN" \
+              -H "Accept: $ACCEPT" \
+              "https://ghcr.io/v2/$IMAGE_PATH/manifests/$digest") || {
+              echo "::warning::manifest fetch failed for $digest"
+              return 0
+            }
+            local child
+            for child in $(echo "$mani" | jq -r '.manifests[]?.digest // empty'); do
+              echo "$child" >> /tmp/protected_digests
+              collect_children "$child" $((depth + 1))
+            done
+          }
+
+          sort -u /tmp/kept_digests > /tmp/kept_digests.uniq
+          while read -r d; do
+            collect_children "$d" 0
+          done < /tmp/kept_digests.uniq
+          sort -u /tmp/protected_digests > /tmp/protected_digests.uniq
+          protected_child_count=$(wc -l < /tmp/protected_digests.uniq)
+          echo "::notice::protecting $protected_child_count child digests referenced by $(wc -l < /tmp/kept_digests.uniq) kept manifests"
+
+          # ── Pass 2: classify UNTAGGED versions ────────────────────
+          while read -r line; do
+            tags=$(echo "$line" | jq -r '.tags | join(",")')
+            [ -n "$tags" ] && continue
+            id=$(echo "$line" | jq -r .id)
+            digest=$(echo "$line" | jq -r .name)
+            updated_at=$(echo "$line" | jq -r .updated_at)
+            updated_unix=$(date -u -d "$updated_at" +%s)
+
+            if grep -qxF "$digest" /tmp/protected_digests.uniq; then
+              # Per-arch child (or attestation) of a kept manifest
+              # list — deleting it would break `docker pull` on the
+              # kept tag even though the tag itself survives.
+              keep_count=$((keep_count + 1))
+            elif [ "$updated_unix" -lt "$UNTAGGED_CUTOFF" ]; then
+              printf '%s\t%s\n' "$id" \
+                "untagged orphan, age=$(((NOW-updated_unix)/86400))d" \
+                >> /tmp/delete_queue
             else
               keep_count=$((keep_count + 1))
             fi
           done < /tmp/versions.ndjson
+
+          # ── Apply deletions ───────────────────────────────────────
+          while IFS=$'\t' read -r id reason; do
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "DRY  delete id=$id ($reason)"
+            else
+              echo "DEL  id=$id ($reason)"
+              gh api -X DELETE "$BASE/versions/$id" >/dev/null \
+                || echo "::warning::delete failed for id=$id"
+            fi
+            delete_count=$((delete_count + 1))
+          done < /tmp/delete_queue
 
           {
             echo "## GHCR cleanup summary"
@@ -168,6 +261,7 @@ jobs:
             echo "| Action | Count |"
             echo "|---|---|"
             echo "| Versions kept | $keep_count |"
+            echo "| Child digests pinned by kept manifests | $protected_child_count |"
             echo "| Versions deleted${DRY_RUN:+ (dry run — none actually removed)} | $delete_count |"
             echo ""
             echo "Cutoffs:"

@@ -155,6 +155,19 @@ fn run_from_config(reset: bool) -> Result<()> {
         .as_ref()
         .map(|d| d.fullscreen)
         .unwrap_or(false);
+    // Flatpak launch: the sandbox bundles Ardour + shim + web tree,
+    // and Docker mode is impossible from inside it, so the host-vs-
+    // docker picker has no real choice to offer. Bare launches go
+    // straight to the native-Ardour host path via the sibling
+    // `foyer` CLI (which owns session bootstrap + shim activation).
+    // Explicit subcommands (`serve`, `connect`) still behave as
+    // usual for demos / remote-client use.
+    if in_flatpak() {
+        if matches!(mode, Some(DesktopMode::Docker)) {
+            tracing::warn!("desktop.mode=docker is not runnable inside the flatpak sandbox — using the bundled native-Ardour host mode");
+        }
+        return run_flatpak_host(fullscreen);
+    }
     match mode {
         Some(DesktopMode::Host) => {
             // Sub-mode controls whether we just spin up the stub
@@ -171,6 +184,82 @@ fn run_from_config(reset: bool) -> Result<()> {
         Some(DesktopMode::Docker) => run_docker_mode(fullscreen),
         None => show_mode_picker(),
     }
+}
+
+/// True when we're running inside a flatpak sandbox. The
+/// `/.flatpak-info` keyfile is mounted read-only into every flatpak
+/// app instance — the canonical detection probe (same one GTK and
+/// the portals use).
+fn in_flatpak() -> bool {
+    Path::new("/.flatpak-info").exists()
+}
+
+/// Flatpak host mode: spawn the sibling `foyer serve --backend
+/// ardour` and open the WebView on its port. Unlike
+/// `run_host_native_ardour` (which embeds foyer-server in-process
+/// and spawns a bare Ardour), delegating to the CLI reuses its whole
+/// launcher pipeline — session bootstrap, Foyer-shim activation in
+/// the session XML (`preflight_session` in
+/// crates/foyer-cli/src/runtime/ardour.rs), shim-socket discovery,
+/// orphan reattach. On a fresh flatpak install that pipeline is the
+/// difference between "session picker appears, everything works" and
+/// "bare Ardour boots with the surface present but inactive and
+/// discovery times out".
+///
+/// Inside the sandbox the seeded config resolves the `ardour`
+/// backend's executable to /app/bin/ardour9 via its PATH probe, and
+/// the web tree comes from the CLI's embedded bundle — no extra
+/// plumbing.
+fn run_flatpak_host(fullscreen: bool) -> Result<()> {
+    let foyer_bin = find_foyer_binary()
+        .ok_or_else(|| anyhow::anyhow!("`foyer` CLI not found alongside foyer-desktop"))?;
+
+    // Bind-and-drop on :0 to pick a free loopback port — same trick
+    // as `run_host`, but the port has to be known up front because
+    // the child owns the actual bind.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let port = {
+        let listener = rt
+            .block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await })
+            .context("probe for a free loopback port")?;
+        listener.local_addr()?.port()
+    };
+
+    tracing::info!(
+        "spawning `{} serve --backend ardour` on 127.0.0.1:{port}",
+        foyer_bin.display()
+    );
+    let child = std::process::Command::new(&foyer_bin)
+        .args(["serve", "--backend", "ardour", "--listen"])
+        .arg(format!("127.0.0.1:{port}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("spawn `foyer serve --backend ardour`")?;
+    let child = Arc::new(Mutex::new(Some(child)));
+
+    // Poll until the server binds. The serve path comes up fast —
+    // Ardour itself launches lazily when a session is picked in the
+    // UI — so 30 s is generous headroom, matching docker mode.
+    let url = format!("http://127.0.0.1:{port}/");
+    rt.block_on(async {
+        for _ in 0..60 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Err(anyhow::anyhow!(
+            "foyer serve never bound 127.0.0.1:{port} within 30 s — check its output above"
+        ))
+    })?;
+    run_webview(url, fullscreen, None, Some(child))
 }
 
 /// Host mode + native Ardour. The desktop shell launches Ardour as a

@@ -247,6 +247,33 @@ just ui-probe dump
 Useful for scripting reproducers or driving the UI from an
 automated agent that can't open a browser.
 
+## Flatpak (Linux native distribution)
+
+The flatpak bundles Ardour (built from source at `.env`'s
+`ARDOUR_TAG`), the shim, and the `foyer`/`foyer-desktop` binaries —
+see [../packaging/flatpak/](../packaging/flatpak/) and DECISION 56
+for the rationale. Ardour's JACK backend routes to host PipeWire
+through the sandbox's `pipewire-0` socket, so it's the low-friction
+path to real low-latency hardware audio on Linux.
+
+```bash
+just flatpak-build     # build + install into your user installation
+just flatpak-run       # launch (desktop shell, native-Ardour mode)
+just flatpak-bundle    # export dist/ai.patapsco.FoyerStudio.flatpak
+```
+
+Needs `flatpak-builder` and the flathub remote on the host — the
+dev container doesn't have the user namespaces flatpak wants, so
+build on a real machine or lean on CI
+([../.github/workflows/flatpak.yml](../.github/workflows/flatpak.yml)),
+which uploads the installable `.flatpak` bundle as an artifact on
+every main merge.
+
+When bumping `ARDOUR_TAG`, also update the `tag:`/`commit:` pair in
+the manifest's ardour module (the commit is the peeled target of
+the annotated tag: `git rev-parse 9.5^{commit}` in an Ardour
+checkout).
+
 ## Where things live
 
 - [../web/core/](../web/core) — renderless: ws, store, RBAC, audio,

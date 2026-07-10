@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Foyer Studio
+GenericName=DAW Control Surface
+Comment=Web-native control surface for the Ardour DAW
+Exec=foyer-desktop
+TryExec=foyer-desktop
+Icon=ai.patapsco.FoyerStudio
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+Keywords=Ardour;DAW;Audio;Music;Mixer;Studio;
+StartupNotify=true
+StartupWMClass=Foyer Studio

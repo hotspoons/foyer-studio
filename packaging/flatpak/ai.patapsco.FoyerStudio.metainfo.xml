@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata for the Foyer Studio flatpak.
+     Project license: the Rust sidecar + web UI are Apache-2.0 (see
+     docs/DECISIONS.md entry 15); the bundle also contains Ardour and
+     the Foyer shim, which are GPL-2.0+ — hence the compound
+     project_license below describing the bundle as distributed. -->
+<component type="desktop-application">
+  <id>ai.patapsco.FoyerStudio</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0 and GPL-2.0-or-later</project_license>
+  <name>Foyer Studio</name>
+  <summary>Web-native control surface for the Ardour DAW</summary>
+  <description>
+    <p>
+      Foyer Studio replaces the DAW's UI with one built on modern
+      browser capabilities: tiling and floating windows, schema-driven
+      plugin panels, keyboard-first commands, and remote collaboration
+      over WebSocket. The audio engine is a bundled Ardour, running
+      natively against your hardware through PipeWire's JACK layer —
+      true low-latency sound with none of the container friction.
+    </p>
+    <p>
+      Open the desktop window for a native experience, or point any
+      browser (phones included) at the embedded server to control the
+      same session from across the room.
+    </p>
+  </description>
+  <launchable type="desktop-id">ai.patapsco.FoyerStudio.desktop</launchable>
+  <url type="homepage">https://github.com/rsiomporas/foyer-studio</url>
+  <developer id="ai.patapsco">
+    <name>Patapsco AI</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-07-10">
+      <description>
+        <p>First flatpak-packaged build: bundled Ardour, PipeWire/JACK
+        hardware passthrough, native desktop shell.</p>
+      </description>
+    </release>
+  </releases>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Music</category>
+  </categories>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+</component>

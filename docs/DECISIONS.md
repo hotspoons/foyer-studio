@@ -2754,3 +2754,63 @@ Ardour is the engine we're using; treating their funding path
 as a thing to route around is the wrong way to behave as
 neighbors in the open-source ecosystem.
 
+
+## 56. Linux native distribution is a flatpak — bundled Ardour, PipeWire-JACK passthrough
+
+**Date:** 2026-07-10
+
+**Decision:** Ship a flatpak (`packaging/flatpak/`) as the
+low-friction Linux install: Ardour built from source at `.env`'s
+`ARDOUR_TAG`, the shim cmake-built against that same tree and
+installed into `/app/lib/ardour9/surfaces`, and the Rust workspace
+(`foyer` + `foyer-desktop`) on top. `foyer-desktop` is the flatpak's
+command; inside the sandbox it skips the host-vs-docker picker and
+delegates to the sibling `foyer serve --backend ardour`.
+
+**Sub-decisions and why:**
+
+1. **Flatpak over AppImage / deb / nix.** The audio story decides
+   it: the freedesktop runtime ships PipeWire's libjack as *the*
+   JACK implementation, so Ardour's jack backend inside the sandbox
+   talks to host PipeWire through one `--filesystem=xdg-run/pipewire-0`
+   hole — true low-latency hardware audio with none of Docker's
+   jackd/shm/netjack friction, and none of AppImage's
+   ship-every-library bloat. `--device=all` adds raw ALSA + hardware
+   MIDI. Users also get the `org.freedesktop.LinuxAudio.Plugins.*`
+   extension point (Calf/LSP/x42/… installable via
+   `flatpak install`) for free.
+   (Entry 44 rejected flatpak for *project snapshots* — that was
+   about per-project artifacts in registries, unrelated to app
+   distribution; it stands.)
+2. **Build Ardour from source, not `base: org.ardour.Ardour`.**
+   Flathub tracks upstream's cadence (9.7 today); the shim ABI-gates
+   on major.minor (entry 54), so basing on their app would couple
+   our shim to their bump schedule and fail at runtime, not build
+   time. Building at `ARDOUR_TAG` mirrors Dockerfile.source — one
+   version story across both distributions. Dep modules are
+   vendored from Flathub's manifest (same pinned tarballs +
+   sha256s), minus the video-timeline stack (ffmpeg/xjadeo/harvid)
+   we don't ship.
+3. **GNOME runtime, not bare freedesktop.** tao/wry needs
+   webkit2gtk-4.1 + GTK3; GNOME ships them, freedesktop doesn't,
+   and building webkitgtk ourselves is an hours-long module.
+4. **In-sandbox `foyer-desktop` delegates to `foyer serve`** rather
+   than reusing `run_host_native_ardour`'s bare-Ardour spawn: the
+   CLI launcher owns session bootstrap + shim activation in the
+   session XML, which is exactly what a virgin
+   `~/.var/app/...` config needs on first run. The bare-spawn path
+   presumes a prior `foyer serve`/install.sh pass — true on a
+   normal host, never true in a fresh sandbox.
+5. **Not yet Flathub-submittable.** The foyer module builds with
+   `--share=network` (cargo + tailwind CLI download). Submission
+   needs vendored cargo sources (flatpak-cargo-generator) and a
+   tailwind source pin — mechanical, deferred until we actually
+   want the listing. CI ships a single-file `.flatpak` bundle
+   artifact instead (`.github/workflows/flatpak.yml`).
+
+**Failure mode if re-litigated.** "Just ship an AppImage — it's one
+file." An AppImage has no JACK/PipeWire compat layer to inherit; it
+links the host's libjack, which on a modern distro may be real
+jackd2, pipewire-jack, or absent, and every combination produces a
+different first-run failure. The flatpak runtime pins exactly one
+answer.

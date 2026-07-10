@@ -1,0 +1,466 @@
+{
+  "name": "ardour-deps",
+  "buildsystem": "simple",
+  "build-commands": [],
+  "//": "Ardour 9.x build dependencies not present in the GNOME/freedesktop SDK. Vendored from the Flathub org.ardour.Ardour manifest (same pinned source URLs + sha256s) minus the video-timeline helpers (ffmpeg, xjadeo, harvid) Foyer does not ship. Patch paths are rebased to ../patches/.",
+  "modules": [
+    {
+      "name": "sigc++-2",
+      "cleanup": [
+        "/lib/sigc++-2.0"
+      ],
+      "build-options": {
+        "cxxflags": "-std=gnu++14"
+      },
+      "config-opts": [
+        "--disable-documentation"
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "https://download.gnome.org/sources/libsigc++/2.10/libsigc++-2.10.2.tar.xz",
+          "sha256": "b1ca0253379596f9c19f070c83d362b12dfd39c0a3ea1dd813e8e21c1a097a98"
+        }
+      ]
+    },
+    {
+      "name": "cairomm",
+      "build-options": {
+        "cxxflags": "-std=gnu++14"
+      },
+      "config-opts": [
+        "--disable-documentation"
+      ],
+      "cleanup": [
+        "/lib/cairomm-1.0"
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "http://cairographics.org/releases/cairomm-1.12.2.tar.gz",
+          "sha256": "45c47fd4d0aa77464a75cdca011143fea3ef795c4753f6e860057da5fb8bd599"
+        }
+      ]
+    },
+    {
+      "name": "glibmm",
+      "build-options": {
+        "cxxflags": "-std=gnu++14"
+      },
+      "config-opts": [
+        "--disable-documentation"
+      ],
+      "cleanup": [
+        "/lib/giomm-2.4",
+        "/lib/glibmm-2.4",
+        "/lib/*.so"
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "https://download.gnome.org/sources/glibmm/2.56/glibmm-2.56.1.tar.xz",
+          "sha256": "dac6872058adde263b7eb0bef07263ba65abb5abc7fd4ca337e81cc5d5f9ca87"
+        }
+      ]
+    },
+    {
+      "name": "pangomm",
+      "cleanup": [
+        "/lib/pangomm-1.4"
+      ],
+      "build-options": {
+        "cxxflags": "-std=gnu++14"
+      },
+      "config-opts": [
+        "--disable-documentation"
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "https://download.gnome.org/sources/pangomm/2.42/pangomm-2.42.0.tar.xz",
+          "sha256": "ca6da067ff93a6445780c0b4b226eb84f484ab104b8391fb744a45cbc7edbf56"
+        },
+        {
+          "type": "patch",
+          "path": "../patches/pangomm-api.patch"
+        }
+      ]
+    },
+    {
+      "name": "boost",
+      "buildsystem": "simple",
+      "cleanup": [
+        "/lib/libboost_*.so*"
+      ],
+      "build-commands": [
+        "./bootstrap.sh --with-libraries=atomic",
+        "./b2 install variant=release link=shared runtime-link=shared --prefix=/app -j $FLATPAK_BUILDER_N_JOBS"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://downloads.sourceforge.net/project/boost/boost/1.68.0/boost_1_68_0.tar.bz2",
+          "sha256": "7f6130bc3cf65f56a618888ce9d5ea704fa10b462be126ad053e80e553d6d8b7"
+        }
+      ]
+    },
+    {
+      "name": "lrdf",
+      "rm-configure": true,
+      "modules": [
+        {
+          "name": "raptor2",
+          "cleanup": [
+            "/share/gtk-doc"
+          ],
+          "config-opts": [
+            "--disable-documentation",
+            "--disable-static"
+          ],
+          "sources": [
+            {
+              "//": "Ardour",
+              "type": "archive",
+              "url": "http://download.librdf.org/source/raptor2-2.0.14.tar.gz",
+              "sha256": "cb447b7c684cbe60f1266d622691fd20fdcf7b91f4a470c6de5fc8e8961df1b2"
+            },
+            {
+              "type": "patch",
+              "path": "shared-modules/linux-audio/patches/raptor-libxml.patch"
+            }
+          ]
+        }
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "https://github.com/x42/LRDF/archive/0.5.1-rg.tar.gz",
+          "sha256": "0ea638dea753ac54b5f19fb8a99ed6f64978b47ba7ee1eaf75377f9956f4ae4c"
+        },
+        {
+          "type": "script",
+          "commands": [
+            "rm -fr m4",
+            "autoreconf -fiv"
+          ],
+          "dest-filename": "autogen.sh"
+        }
+      ]
+    },
+    {
+      "name": "liblo",
+      "cleanup": [
+        "/bin",
+        "*.so"
+      ],
+      "build-options": {
+        "cflags": "-Wno-error=stringop-truncation -Wno-error=maybe-uninitialized",
+        "cxxflags": "-Wno-error=stringop-truncation -Wno-error=maybe-uninitialized"
+      },
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "http://download.sf.net/sourceforge/liblo/liblo-0.28.tar.gz",
+          "sha256": "da94a9b67b93625354dd89ff7fe31e5297fc9400b6eaf7378c82ee1caf7db909"
+        }
+      ]
+    },
+    {
+      "name": "lv2",
+      "buildsystem": "simple",
+      "build-commands": [
+        "python3 ./waf configure --prefix=$FLATPAK_DEST --lv2dir=$FLATPAK_DEST/lib/lv2 --copy-headers",
+        "python3 ./waf build -j $FLATPAK_BUILDER_N_JOBS",
+        "python3 ./waf install"
+      ],
+      "cleanup": [
+        "/bin",
+        "/share"
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "http://ardour.org/files/deps/lv2-1.18.2-g611759d.tar.bz2",
+          "sha256": "e0f152a3d7310f7fc1c233a2c646b319d4615a821efe29bf7449283cb37c70ce"
+        }
+      ],
+      "post-install": [
+        "ln -sf lv2.pc $FLATPAK_DEST/lib/pkgconfig/lv2core.pc"
+      ]
+    },
+    {
+      "name": "sndfile",
+      "build-options": {
+        "cflags": "-std=c18"
+      },
+      "cleanup": [
+        "/bin",
+        "/share/doc"
+      ],
+      "sources": [
+        {
+          "//": "Ardour - version for Opus support",
+          "type": "archive",
+          "url": "http://ardour.org/files/deps/libsndfile-1.1.0-41-gd8503a66.tar.xz",
+          "sha256": "a1fb3f96588f700fa04de20e9516004231ffdc87f080e3faaa1a97571e639c7a"
+        }
+      ]
+    },
+    {
+      "name": "taglib",
+      "buildsystem": "cmake-ninja",
+      "config-opts": [
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+        "-DBUILD_SHARED_LIBS=ON"
+      ],
+      "cleanup": [
+        "/lib/*.so"
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "http://taglib.github.io/releases/taglib-1.9.1.tar.gz",
+          "sha256": "72d371cd1419a87ae200447a53bff2be219283071e80fd12337928cc967dc71a"
+        }
+      ]
+    },
+    {
+      "name": "vamp-plugin-sdk",
+      "no-parallel-make": true,
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "https://code.soundsoftware.ac.uk/attachments/download/2588/vamp-plugin-sdk-2.9.0.tar.gz",
+          "sha256": "b72a78ef8ff8a927dc2ed7e66ecf4c62d23268a5d74d02da25be2b8d00341099"
+        }
+      ],
+      "cleanup": [
+        "/bin",
+        "*.a"
+      ]
+    },
+    {
+      "name": "rubberband",
+      "buildsystem": "meson",
+      "build-options": {
+        "env": {
+          "Vamp_CFLAGS": " ",
+          "Vamp_LIBS": " "
+        }
+      },
+      "config-opts": [
+        "-Dfft=fftw"
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "http://breakfastquay.com/files/releases/rubberband-3.3.0.tar.bz2",
+          "sha256": "d9ef89e2b8ef9f85b13ac3c2faec30e20acf2c9f3a9c8c45ce637f2bc95e576c"
+        }
+      ],
+      "cleanup": [
+        "/bin",
+        "/share/ladspa",
+        "*.so"
+      ]
+    },
+    {
+      "name": "fftw3f",
+      "config-opts": [
+        "--enable-threads",
+        "--enable-shared",
+        "--disable-static",
+        "--enable-float"
+      ],
+      "build-options": {
+        "arch": {
+          "x86_64": {
+            "config-opts": [
+              "--enable-sse2",
+              "--enable-avx",
+              "--enable-avx-128-fma"
+            ]
+          },
+          "aarch64": {
+            "config-opts": [
+              "--enable-neon"
+            ]
+          }
+        }
+      },
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "http://www.fftw.org/fftw-3.3.8.tar.gz",
+          "sha256": "6113262f6e92c5bd474f2875fa1b01054c4ad5040f6b0da7c03c98821d9ae303"
+        }
+      ],
+      "cleanup": [
+        "/bin",
+        "*.so"
+      ]
+    },
+    {
+      "name": "aubio",
+      "buildsystem": "autotools",
+      "cleanup": [
+        "/bin"
+      ],
+      "build-options": {
+        "ldflags": "-lm"
+      },
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "http://aubio.org/pub/aubio-0.3.2.tar.gz",
+          "sha256": "dc1387b048610a6141f523c27314b7a60bd299c3d6789c372445ddc6511512cd"
+        },
+        {
+          "type": "shell",
+          "commands": [
+            "cp -p /usr/share/automake-*/config.{sub,guess} ."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "libusb",
+      "cleanup": [
+        "*.so"
+      ],
+      "no-parallel-make": true,
+      "config-opts": [
+        "--disable-static",
+        "--disable-udev"
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "https://github.com/libusb/libusb/releases/download/v1.0.20/libusb-1.0.20.tar.bz2",
+          "sha256": "cb057190ba0a961768224e4dc6883104c6f945b2bf2ef90d7da39e7c1834f7ff"
+        }
+      ]
+    },
+    {
+      "name": "lilv",
+      "buildsystem": "simple",
+      "build-commands": [
+        "python3 ./waf configure --prefix=$FLATPAK_DEST",
+        "python3 ./waf build -j $FLATPAK_BUILDER_N_JOBS",
+        "python3 ./waf install"
+      ],
+      "modules": [
+        {
+          "name": "serd",
+          "buildsystem": "simple",
+          "build-commands": [
+            "python3 ./waf configure --prefix=$FLATPAK_DEST",
+            "python3 ./waf build -j $FLATPAK_BUILDER_N_JOBS",
+            "python3 ./waf install"
+          ],
+          "sources": [
+            {
+              "//": "Ardour",
+              "type": "archive",
+              "url": "http://ardour.org/files/deps/serd-0.30.11-g36f1cecc.tar.bz2",
+              "sha256": "76afe98511351c3c50010d9f145cfd1f10b54a9565cb7889f0ca5158da806598"
+            }
+          ],
+          "cleanup": [
+            "/bin"
+          ]
+        },
+        {
+          "name": "sord",
+          "buildsystem": "simple",
+          "build-commands": [
+            "python3 ./waf configure --prefix=$FLATPAK_DEST",
+            "python3 ./waf build -j $FLATPAK_BUILDER_N_JOBS",
+            "python3 ./waf install"
+          ],
+          "sources": [
+            {
+              "//": "Ardour",
+              "type": "archive",
+              "url": "http://ardour.org/files/deps/sord-0.16.9-gd2efdb2.tar.bz2",
+              "sha256": "40168fc08f3b45fe2cc978bf3a2b14607dc8be2c59598bcac1523cbe59b9ba1a"
+            }
+          ],
+          "cleanup": [
+            "/bin"
+          ]
+        },
+        {
+          "name": "sratom",
+          "buildsystem": "simple",
+          "build-commands": [
+            "python3 ./waf configure --prefix=$FLATPAK_DEST",
+            "python3 ./waf build -j $FLATPAK_BUILDER_N_JOBS",
+            "python3 ./waf install"
+          ],
+          "sources": [
+            {
+              "//": "Ardour",
+              "type": "archive",
+              "url": "http://ardour.org/files/deps/sratom-0.6.8-gc46452c.tar.bz2",
+              "sha256": "9ca25888964d062fe9c7390e23fcb0de215da0f433ce032e8e570ad9bd772ed9"
+            }
+          ]
+        }
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "http://ardour.org/files/deps/lilv-0.24.13-g71a2ff5.tar.bz2",
+          "sha256": "fd3053f744d04bbd72aff8549576fc115499fd806da0f32d1ee3b9ef65a1e77c"
+        }
+      ],
+      "cleanup": [
+        "/bin",
+        "/etc"
+      ]
+    },
+    {
+      "name": "libwebsockets",
+      "buildsystem": "cmake-ninja",
+      "cleanup": [
+        "/bin",
+        "/share/libwebsockets-test-server",
+        "*.so"
+      ],
+      "build-options": {
+        "cflags": "-Wno-error=deprecated-declarations"
+      },
+      "config-opts": [
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+        "-DLWS_WITH_EXTERNAL_POLL=ON"
+      ],
+      "sources": [
+        {
+          "//": "Ardour",
+          "type": "archive",
+          "url": "http://ardour.org/files/deps/libwebsockets-4.3.0-14.tar.gz",
+          "sha256": "929de090e13a36719fc4df04dad2a667eff694987bc26bdd5f01d69374e90710"
+        },
+        {
+          "type": "patch",
+          "path": "../patches/libwebsocket-build.patch"
+        }
+      ]
+    }
+  ]
+}

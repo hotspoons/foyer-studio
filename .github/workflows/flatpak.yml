@@ -1,0 +1,80 @@
+name: flatpak
+
+# Build the Linux-native flatpak bundle (bundled Ardour + shim +
+# foyer + foyer-desktop — see packaging/flatpak/). Produces a
+# single-file `ai.patapsco.FoyerStudio.flatpak` artifact that
+# installs with `flatpak install --user <file>`.
+#
+# Cost profile: the first build compiles Ardour from source
+# (~30-40 min); the flatpak-builder cache keyed below keeps that
+# module warm across runs, so steady-state builds only pay for the
+# Rust workspace (~10 min). That's still too heavy for every branch
+# push, so triggers are: merges to main, changes to the packaging
+# tree itself on any branch, and manual dispatch.
+#
+# x86_64 only for now. The action can do aarch64 via QEMU but the
+# Ardour compile balloons past the job limit — revisit with native
+# arm64 runners if flatpak-on-arm demand shows up (the container
+# image ships both arches).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packaging/flatpak/**'
+      - 'crates/**'
+      - 'shims/**'
+      - 'web/**'
+      - '.github/workflows/flatpak.yml'
+  pull_request:
+    paths:
+      - 'packaging/flatpak/**'
+      - '.github/workflows/flatpak.yml'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  flatpak:
+    name: build .flatpak bundle (x86_64)
+    runs-on: ubuntu-24.04
+    container:
+      # Matches `runtime-version` in the manifest — bump together.
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      # flatpak-builder action from the Flathub infra team: installs
+      # the runtime/SDK/extensions from Flathub, runs flatpak-builder
+      # with a cached state dir, exports a single-file bundle, and
+      # uploads it as a workflow artifact.
+      # NB: the action's versioned tags (v6.x) live on the original
+      # `flatpak/` org repo; the maintained container images live on
+      # `flathub-infra` — mixed refs are correct, not a typo.
+      - name: Build bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: ai.patapsco.FoyerStudio.flatpak
+          manifest-path: packaging/flatpak/ai.patapsco.FoyerStudio.yml
+          # Ardour + deps only rebuild when the manifest (or a
+          # vendored patch) changes; the cache key deliberately
+          # ignores the Rust tree so cargo-only pushes reuse the
+          # warm Ardour module.
+          cache-key: flatpak-builder-${{ hashFiles('packaging/flatpak/**') }}
+          arch: x86_64
+          upload-artifact: true
+
+      - name: Summary
+        run: |
+          {
+            echo "## Flatpak bundle built"
+            echo ""
+            echo "Download the \`ai.patapsco.FoyerStudio.flatpak\` artifact, then:"
+            echo ""
+            echo '```bash'
+            echo "flatpak install --user ai.patapsco.FoyerStudio.flatpak"
+            echo "flatpak run ai.patapsco.FoyerStudio"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
