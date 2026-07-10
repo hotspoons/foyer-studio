@@ -65,6 +65,7 @@ jobs:
           cache-key: flatpak-builder-${{ hashFiles('packaging/flatpak/**') }}
           arch: x86_64
           upload-artifact: true
+          artifact-name: foyer-studio-flatpak-x86_64
 
       - name: Summary
         run: |
@@ -78,3 +79,61 @@ jobs:
             echo "flatpak run ai.patapsco.FoyerStudio"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Publish: rolling GitHub Release ────────────────────────────────
+  # Main merges re-point the `flatpak-latest` prerelease at the fresh
+  # bundle, so there's one permanent URL to hand people:
+  #
+  #   https://github.com/<repo>/releases/download/flatpak-latest/ai.patapsco.FoyerStudio.flatpak
+  #
+  # Why a Release and not something fancier:
+  #   * GHCR-OCI (truly "alongside the container image"): flatpak has
+  #     native OCI support, but clients can't discover/install from a
+  #     bare registry — that needs a flatpak index service (what
+  #     Fedora runs in front of registry.fedoraproject.org). Without
+  #     one, users end up downloading a file anyway.
+  #   * ostree repo on GitHub Pages (real `flatpak update` deltas):
+  #     this bundle is DAW-sized (bundled Ardour + LV2s) and would
+  #     blow through Pages' ~1 GB soft limit almost immediately.
+  #   * Releases: 2 GB/asset, stable URL, zero infra. Flathub remains
+  #     the long-term channel once cargo sources are vendored — see
+  #     DECISION 56.
+  publish:
+    name: publish rolling release (flatpak-latest)
+    needs: flatpak
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download bundle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: foyer-studio-flatpak-x86_64
+
+      - name: Create or update flatpak-latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          notes="Rolling flatpak build of \`main\` @ ${GITHUB_SHA::7} ($(date -u '+%Y-%m-%d %H:%M UTC')).
+
+          Install:
+          \`\`\`bash
+          flatpak install --user ai.patapsco.FoyerStudio.flatpak
+          flatpak run ai.patapsco.FoyerStudio
+          \`\`\`
+          The GNOME runtime is fetched from Flathub automatically on first install
+          (\`flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo\` if you've never used Flathub)."
+          if gh release view flatpak-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit flatpak-latest --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "Foyer Studio flatpak (rolling)" --notes "$notes"
+          else
+            gh release create flatpak-latest --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "Foyer Studio flatpak (rolling)" --notes "$notes"
+          fi
+          # --clobber replaces the previous main build's asset so the
+          # download URL never changes.
+          gh release upload flatpak-latest ai.patapsco.FoyerStudio.flatpak \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "::notice::published ai.patapsco.FoyerStudio.flatpak to the flatpak-latest release"

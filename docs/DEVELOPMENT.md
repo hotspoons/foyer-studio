@@ -267,7 +267,20 @@ dev container doesn't have the user namespaces flatpak wants, so
 build on a real machine or lean on CI
 ([../.github/workflows/flatpak.yml](../.github/workflows/flatpak.yml)),
 which uploads the installable `.flatpak` bundle as an artifact on
-every main merge.
+every main merge **and** re-points the rolling `flatpak-latest`
+GitHub Release at it. Installing on any PipeWire-era distro:
+
+```bash
+# one-time, if the machine has never used Flathub (runtime source):
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+curl -LO https://github.com/hotspoons/foyer-studio/releases/download/flatpak-latest/ai.patapsco.FoyerStudio.flatpak
+flatpak install --user ai.patapsco.FoyerStudio.flatpak
+flatpak run ai.patapsco.FoyerStudio
+```
+
+Updating = re-download + `flatpak install` again (bundles don't get
+delta updates; a Flathub listing would fix that — DECISION 56).
 
 When bumping `ARDOUR_TAG`, also update the `tag:`/`commit:` pair in
 the manifest's ardour module (the commit is the peeled target of
