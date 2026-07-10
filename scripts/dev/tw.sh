@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN_DIR="$ROOT_DIR/.bin"
 BIN="$BIN_DIR/tailwindcss"
+# Windows CI runs this under Git-Bash, where `uname -s` reports
+# MINGW64_NT-* (or MSYS/CYGWIN) and the binary needs its .exe suffix.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) BIN="$BIN.exe" ;;
+esac
 DOWNLOAD_BASE="https://github.com/tailwindlabs/tailwindcss/releases/latest/download"
 
 usage() {
@@ -33,12 +38,16 @@ install_tw() {
     # Tailwind v4 renamed the macOS asset from `darwin` to `macos`.
     # Normalise here so the URL still resolves on both v3 and v4 (v3
     # also publishes a `macos-*` symlink as of recent releases).
+    # Git-Bash on the Windows CI runner reports mingw64_nt-*; the
+    # published asset there is `tailwindcss-windows-x64.exe`.
+    ext=""
     case "$os" in
         linux) ;;
         darwin) os="macos" ;;
+        mingw*|msys*|cygwin*) os="windows"; ext=".exe" ;;
         *) echo "tw: unsupported OS: $os"; exit 1 ;;
     esac
-    url="$DOWNLOAD_BASE/tailwindcss-$os-$arch"
+    url="$DOWNLOAD_BASE/tailwindcss-$os-$arch$ext"
     echo "tw: downloading $url"
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$url" -o "$BIN"
