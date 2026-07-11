@@ -17,52 +17,45 @@ sitting at the workstation.
 
 ## Running it
 
-Three deployment shapes, ordered by "how fast can I see it work?" —
-Docker is first because it's a single command and needs nothing
-installed beyond Docker itself. Full setup recipes for each live in
-[docs/USAGE.md](docs/USAGE.md).
+Three install shapes, ordered by "what should I use?" — the Linux
+flatpak leads because it's one file, needs no container runtime,
+and is the only path that gives you bundled Ardour *and* real
+low-latency hardware audio. Full setup recipes live in
+[docs/USAGE.md](docs/USAGE.md); server-style container deploys
+(Docker, Cloud Run, Kubernetes) are covered
+[at the end of that doc](docs/USAGE.md#path-3--docker) and
+summarized at the end of this section.
 
-### 1. Docker — Foyer + Ardour + plugins, all in one image
+### 1. Flatpak — the Linux install
 
-The fastest path: nothing on your machine but Docker. The image
-bundles Ardour 9.5 (source-built from upstream during the image
-build), the shim, the autovocoder LV2, and ~200 LV2 plugins.
+Bundled Ardour 9.5 (source-built from upstream), the shim, and the
+native desktop shell in one sandbox — with real hardware audio: the
+flatpak runtime ships PipeWire's JACK layer, so the bundled Ardour
+talks straight to your host PipeWire daemon at native latency, and
+raw ALSA + hardware MIDI are exposed too. No privileged flags, no
+shm bind-mounts, no jackd babysitting.
 
 ```bash
-docker run --rm -it --name foyer-studio \
-  -p 3838:3838 --shm-size=1g \
-  --cap-add=SYS_NICE \
-  --ulimit rtprio=95 --ulimit memlock=-1 \
-  -v "$(pwd):/projects" \
-  ghcr.io/hotspoons/foyer-studio:latest
+# One-time, if this machine has never used Flathub (runtime source):
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+curl -LO https://github.com/hotspoons/foyer-studio/releases/download/flatpak-latest/ai.patapsco.FoyerStudio.flatpak
+flatpak install --user ai.patapsco.FoyerStudio.flatpak
+flatpak run ai.patapsco.FoyerStudio
 ```
 
-Open <http://localhost:3838>. This runs the **gui-dummy** mode —
-GUI Ardour painting onto an in-container Xvfb against the Foyer
-Dummy audio backend. No JACK, no soundcard, no `--privileged`.
-Works on Docker Desktop, Colima, and plain Linux; audio leaves the
-container only via Foyer's WebSocket egress.
-
-The three audio flags (`--cap-add=SYS_NICE` plus the two `--ulimit`
-lines) are what let Ardour's process thread acquire `SCHED_FIFO`
-priority — without them, MIDI synths and plugin-heavy sessions get
-preempted mid-cycle and you hear pops/dropouts. The entrypoint's
-seed probes the rtprio rlimit at boot and auto-pins Ardour to its
-**Realtime** driver when it's available. Drop the three flags if
-you're deploying somewhere that strips them (Cloud Run gen2) — see
-[docs/USAGE.md#when-you-cant-grant-sys_nice--rtprio](docs/USAGE.md#when-you-cant-grant-sys_nice--rtprio)
-for the buffer-size lever that's left.
-
-For real audio hardware via a host-running jackd (Linux only),
-flip into `jack-headless` mode with the privileged flags + JACK
-shm passthrough — full recipe in
-[docs/USAGE.md#path-1--docker](docs/USAGE.md#path-1--docker).
+The window opens straight into native-Ardour mode — pick a session
+and play. The `flatpak-latest` release is re-cut on every merge to
+main. Full recipe (LAN/phone access, Flathub plugin extensions,
+uninstall) in
+[docs/USAGE.md#path-1--flatpak-linux-recommended](docs/USAGE.md#path-1--flatpak-linux-recommended).
 
 ### 2. Host install — drives your own Ardour 9.5
 
-Best for laptops / studio machines: lowest latency, real audio
-hardware, your existing plugin collection. Linux + macOS (Apple
-Silicon and Intel).
+The macOS path (Apple Silicon and Intel — CoreAudio, your existing
+plugin collection), and the Linux alternative when you'd rather
+point Foyer at the Ardour you already have than use the bundled
+one.
 
 ```bash
 # Pulls the most recent passing CI build (no GitHub auth needed).
@@ -99,6 +92,28 @@ First boot clones and builds Ardour (~20 min on Apple Silicon).
 Subsequent runs are instant. See
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full workflow —
 UI overlays, the CI gate, the Justfile catalog.
+
+### Containers — Docker, Cloud Run, Kubernetes
+
+For server deploys — a browser-reachable mixing surface on a home
+server, Cloud Run, or a cluster — the multi-arch image bundles
+Ardour 9.5, the shim, and ~200 LV2 plugins:
+
+```bash
+docker run --rm -it --name foyer-studio \
+  -p 3838:3838 --shm-size=1g \
+  --cap-add=SYS_NICE \
+  --ulimit rtprio=95 --ulimit memlock=-1 \
+  -v "$(pwd):/projects" \
+  ghcr.io/hotspoons/foyer-studio:latest
+```
+
+Open <http://localhost:3838>. This is the **gui-dummy** mode — no
+soundcard needed; audio leaves the container via Foyer's WebSocket
+egress. Full recipes — the audio-flag rationale, host-JACK
+passthrough, env knobs, [Cloud Run](docs/USAGE.md#deploying-to-google-cloud-run),
+and the [helm chart](docs/USAGE.md#path-4--kubernetes-helm) — live in
+[docs/USAGE.md#path-3--docker](docs/USAGE.md#path-3--docker).
 
 ## Architecture (the one-paragraph version)
 

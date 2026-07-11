@@ -1,24 +1,298 @@
 # Foyer Studio — running it
 
-End-user doc for getting Foyer up against your own Ardour install or
-inside a container. Architecture lives in
+End-user doc for getting Foyer running — the Linux flatpak (bundled
+Ardour, recommended), against your own Ardour install, or inside a
+container. Architecture lives in
 [ARCHITECTURE.md](ARCHITECTURE.md); developer workflow (the dev
 container, UI variants, test gate) lives in [DEVELOPMENT.md](DEVELOPMENT.md).
 
-There are two supported deployment shapes:
+There are three supported deployment shapes:
 
-1. **Docker** — Foyer + Ardour + the shim + a curated LV2 plugin
-   pack all live inside a single image. The fastest way to see
-   the UI: nothing on your machine but Docker. Use this when you
-   want a one-shot deploy (Cloud Run, fly.io, a home server), or
-   when you don't care about driving studio gear directly and
-   just want a browser-reachable mixing surface.
+1. **Flatpak (Linux — recommended)** — bundled Ardour + shim +
+   native desktop shell in one sandbox, with JACK routed to the
+   host's PipeWire for real low-latency hardware audio. No
+   container runtime, no privileged flags, one file to install.
 2. **Host install** — `foyer` runs on your laptop / studio machine
-   and drives the Ardour you already have installed. macOS and Linux,
-   either Apple Silicon or x86_64 Linux. Use this when you want
-   real audio hardware and the lowest-latency path.
+   and drives the Ardour you already have installed. The macOS
+   path (Apple Silicon and Intel), and the Linux alternative when
+   you'd rather point Foyer at your own distro-packaged Ardour
+   than use the bundled one.
+3. **Containers — Docker / Cloud Run / Kubernetes** — covered at
+   the end of this doc. Use these for server deploys (a
+   browser-reachable mixing surface on a home server or in the
+   cloud), not for driving studio gear directly.
 
-## Path 1 — Docker
+## Path 1 — Flatpak (Linux, recommended)
+
+The flatpak is the native Linux install: bundled Ardour 9.5
+(source-built at the same tag the Docker image pins), the shim
+pre-installed in Ardour's surfaces directory, the Rust sidecar, and
+the `foyer-desktop` shell — with **real low-latency hardware
+audio**. The runtime ships PipeWire's JACK implementation, so
+Ardour's JACK backend inside the sandbox talks directly to your
+host PipeWire daemon; the sandbox also exposes raw ALSA and
+hardware MIDI (`--device=all`). None of Docker's jackd / shm /
+`--privileged` ceremony. Design rationale in
+[DECISIONS.md](DECISIONS.md) entry 56.
+
+### Install
+
+```bash
+# One-time, if this machine has never used Flathub (that's where
+# the GNOME runtime comes from):
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+curl -LO https://github.com/hotspoons/foyer-studio/releases/download/flatpak-latest/ai.patapsco.FoyerStudio.flatpak
+flatpak install --user ai.patapsco.FoyerStudio.flatpak
+```
+
+The [`flatpak-latest` release](https://github.com/hotspoons/foyer-studio/releases/tag/flatpak-latest)
+is re-cut on every merge to `main`. Updating is the same two
+commands again — single-file bundles don't delta-update (a Flathub
+listing would fix that; see DECISIONS.md entry 56 for what's left
+before submission).
+
+### Run
+
+```bash
+flatpak run ai.patapsco.FoyerStudio
+```
+
+The desktop shell opens straight into native-Ardour host mode: pick
+(or create) a session in the window and the mixer / timeline /
+transport attach automatically. There's no control-surface
+preference to tick — the launcher activates the bundled shim in the
+session on the way up.
+
+In Ardour's Audio/MIDI Setup, the **JACK** backend is the
+low-latency PipeWire path (PipeWire answers transparently; no jackd
+process involved). The **ALSA** backend also works when you want
+exclusive device access.
+
+### Reaching it from a phone / another device
+
+The desktop shell binds loopback only. To serve the LAN, run the
+CLI directly inside the sandbox:
+
+```bash
+flatpak run --command=foyer ai.patapsco.FoyerStudio \
+  serve --backend ardour --listen 0.0.0.0:3838 \
+  --tls-cert ~/.config/foyer/dev.pem --tls-key ~/.config/foyer/dev-key.pem
+```
+
+The TLS requirement and self-signed-cert recipe are identical to
+the host install — see
+[Reaching it from another device](#reaching-it-from-another-device)
+under Path 2.
+
+### LV2 plugin extensions
+
+The flatpak declares the shared `org.freedesktop.LinuxAudio.Plugins`
+extension point, so Flathub's plugin collections drop straight in:
+
+```bash
+flatpak install flathub org.freedesktop.LinuxAudio.Plugins.LSP
+flatpak install flathub org.freedesktop.LinuxAudio.Plugins.Calf
+```
+
+Ardour inside Foyer sees them on the next launch (`LV2_PATH` is
+pre-wired to the extension mount).
+
+### Sessions, config, uninstall
+
+- **Sessions** live wherever you put them under your home directory
+  (the sandbox has `--filesystem=home`).
+- **Config / state / recents** live in the flatpak-private XDG
+  tree: `~/.var/app/ai.patapsco.FoyerStudio/`.
+- **Uninstall**: `flatpak uninstall ai.patapsco.FoyerStudio` — add
+  `--delete-data` to also remove the config/state above.
+
+### Building the bundle yourself
+
+`just flatpak-build` / `just flatpak-bundle` on a host with
+`flatpak-builder` (the dev container can't run it — no user
+namespaces). Recipe details in
+[DEVELOPMENT.md](DEVELOPMENT.md#flatpak-linux-native-distribution);
+the manifest lives in [../packaging/flatpak/](../packaging/flatpak/).
+
+## Path 2 — host install against your own Ardour 9.5
+
+The installer drops a single `foyer` binary on your `$PATH` and
+copies the C++ shim into Ardour's surfaces directory so the next
+time you launch Ardour, **Preferences → Control Surfaces → Foyer
+Studio Shim** is the box you tick.
+
+### Prerequisites
+
+- **Ardour 9.5** (`ardour9`, or `Ardour9.app` on macOS) — the
+  current active build target. Earlier 9.x point releases (9.2,
+  9.3, 9.4) still load the shim because the runtime keeps backward-
+  compat for older 9.x ABIs (the MCP-advert path probes for absent
+  fields); 8.x and 10.x do not. Get it from
+  <https://community.ardour.org/download> — paying their suggested
+  donation is the right call.
+- **An audio backend Ardour can drive.** The shim is backend-agnostic;
+  pick whichever you'd already use with stand-alone Ardour:
+  - **macOS** — CoreAudio works out of the box (Ardour's default
+    on macOS). JACK via Homebrew's `jack` package or the
+    [jackaudio.org](https://jackaudio.org) installer is also fine.
+  - **Linux** — three first-class options, all supported equally:
+    - **PipeWire** (default on Fedora 36+, Ubuntu 22.10+, Arch,
+      most current GNOME/KDE installs). Install
+      `pipewire-jack` / `pipewire-jack-audio-connection-kit` so
+      Ardour can pick the "JACK" backend in the Audio/MIDI Setup
+      dialog — PipeWire's compat layer answers transparently, and
+      no extra `jackd` process is needed.
+    - **JACK 2** (`jackd2`) — the classic low-latency path, still
+      the right call for studio rigs with a dedicated audio
+      interface and no desktop sound mixing.
+    - **ALSA** — Ardour's ALSA backend if you're running headless /
+      JACK-less. Works but only one process at a time can hold the
+      device.
+- A browser. Chrome/Edge/Safari/Firefox all work. Mobile Safari
+  too — the UI is responsive.
+
+### Install
+
+```bash
+# Linux x86_64 / macOS (both Intel and Apple Silicon — the
+# installer auto-detects).
+curl -fsSL https://raw.githubusercontent.com/hotspoons/foyer-studio/main/install.sh \
+  | bash -s -- --latest-ci
+```
+
+The installer:
+
+1. Detects OS + arch.
+2. Downloads `foyer-<os>-<arch>.zip` from the most recent passing
+   CI build (no GitHub auth needed — proxied via nightly.link).
+3. Unpacks `foyer` into `$XDG_DATA_HOME/foyer/bin/` (or
+   `~/.local/share/foyer/bin/`).
+4. Installs the shim:
+   - **Linux:** `~/.config/ardour9/surfaces/libfoyer_shim.so`
+   - **macOS:** `~/Library/Preferences/Ardour9/surfaces/libfoyer_shim.dylib`
+5. Adds the install bin dir to `PATH` in your shell rc.
+
+Re-source your shell rc (`source ~/.zshrc`, `source ~/.bashrc`, or
+just open a new terminal). Verify:
+
+```bash
+foyer --version
+```
+
+### Wire Ardour to the shim
+
+One-time per machine:
+
+1. Launch Ardour.
+2. Open any session, or create a fresh one.
+3. **Preferences → Control Surfaces → Foyer Studio Shim** → tick
+   the **Enable** box, then **Edit** if you want to inspect the
+   socket path it advertises (defaults to `/tmp/foyer.sock`).
+4. Save the session. Ardour persists the surface activation per
+   session, so the next time you open this project the shim
+   re-attaches automatically.
+
+### Run
+
+With Ardour already running and the shim active, in another terminal:
+
+```bash
+foyer serve --backend ardour
+```
+
+Open <http://127.0.0.1:3838>. Foyer attaches over the shim's Unix
+socket and the mixer / timeline / transport reflect Ardour's live
+state. If you stop Ardour, Foyer surfaces a "backend lost" banner;
+relaunch Ardour and the sidecar reconnects on the next shim
+advertisement.
+
+If you want the launcher experience (no Ardour running yet — Foyer
+spawns it for you on a project pick), don't pre-launch Ardour:
+
+```bash
+foyer serve --backend ardour --jail ~/Music/Ardour
+```
+
+The `--jail` flag confines the file picker to that directory; click
+a session in the browser and Foyer execs Ardour with that project,
+waits for the shim socket, and attaches.
+
+### Reaching it from another device
+
+Plain HTTP only works from the host itself. To reach Foyer from a
+phone or tablet on the same LAN you need TLS — the browser refuses
+to load `AudioWorklet` over plain HTTP (which the mixer's
+**Listen** button needs):
+
+```bash
+foyer serve --backend ardour --listen 0.0.0.0:3838 \
+  --tls-cert ~/.config/foyer/dev.pem --tls-key ~/.config/foyer/dev-key.pem
+```
+
+If you don't have a cert pair, generate a self-signed one. Replace
+`192.168.1.42` with this machine's LAN IP so the cert is valid when
+the phone connects:
+
+```bash
+mkdir -p ~/.config/foyer
+openssl req -x509 -newkey rsa:2048 -nodes -days 1825 \
+  -keyout ~/.config/foyer/dev-key.pem \
+  -out    ~/.config/foyer/dev.pem \
+  -subj   "/CN=foyer-dev" \
+  -addext "subjectAltName = IP:192.168.1.42, DNS:localhost"
+```
+
+Find your LAN IP with `ipconfig getifaddr en0` (macOS) or
+`ip -4 addr show | grep inet` (Linux). Mobile browsers will
+surface a one-time warning that you accept; after that the
+origin is trusted enough for `getUserMedia` and the worklets.
+
+For sharing off-network — to a collaborator over the public
+internet — open **Session → Remote Access…** in the UI. That spins
+up a Cloudflare tunnel, mints an invite URL, and applies the
+per-role RBAC rules. See [SECURITY.md](SECURITY.md) for the threat
+model.
+
+### Uninstall
+
+```bash
+foyer-studio-uninstall            # if it's still on $PATH
+# or:
+~/.local/share/foyer/install.sh uninstall
+```
+
+Pass `--purge` to also wipe `~/.local/share/foyer/` (the install
+root, plus your config, recents, and saved layouts).
+
+### Optional: xpra for native plugin GUI projection
+
+Some plugins (sample-based drums, complex synths, custom-painted
+EQs) ship their own GUI that the schema-driven plugin panel can't
+reproduce. With **xpra** installed on the host, Foyer projects those
+GUIs into the plugin panel via an embedded HTML5 viewer — toggle
+between the schema knobs and the native GUI per plugin.
+
+If xpra isn't installed, the "Native GUI" toggle is hidden in the
+UI and foyer-server logs an info line at startup pointing here.
+Foyer otherwise runs identically.
+
+| Distro | Install command |
+|---|---|
+| **Debian trixie** (13)        | `sudo apt install xpra xpra-x11 xpra-html5` after adding the [xpra.org](https://xpra.org/install.html) apt repo (the trixie debs were dropped from Debian's main archive at release time). |
+| **Debian bookworm** (12) / Ubuntu 24.04+ | `sudo apt install xpra xpra-x11 xpra-html5` |
+| **Fedora / RHEL**             | `sudo dnf install xpra xpra-html5` |
+| **Arch**                      | `sudo pacman -S xpra` (xpra-html5 is an AUR package) |
+| **macOS**                     | `brew install --cask xpra` (or [download](https://xpra.org/install.html#macos) and install the .dmg) |
+
+`xpra-x11` is the X11-server side (modern xpra split it out from
+the `xpra` meta-package); without it `xpra start :NN` aborts with
+"you must install 'xpra-x11' to use 'seamless'". On Linux servers
+without a graphical environment, xpra brings its own Xvfb internally
+— no other X dependencies. Restart `foyer serve` after installing
+and the toggle appears.
+
+## Path 3 — Docker
 
 The published image bundles unmodified upstream Ardour 9.5
 (source-built from `https://github.com/Ardour/ardour.git@9.5`
@@ -324,182 +598,32 @@ anything beyond a public demo, mount a GCS bucket at `/projects`
 via [GCS Fuse](https://cloud.google.com/run/docs/configuring/services/cloud-storage-volume-mounts)
 — Foyer's upload/export flows just work against it.
 
-## Path 2 — host install against your own Ardour 9.5
+## Path 4 — Kubernetes (helm)
 
-The installer drops a single `foyer` binary on your `$PATH` and
-copies the C++ shim into Ardour's surfaces directory so the next
-time you launch Ardour, **Preferences → Control Surfaces → Foyer
-Studio Shim** is the box you tick.
-
-### Prerequisites
-
-- **Ardour 9.5** (`ardour9`, or `Ardour9.app` on macOS) — the
-  current active build target. Earlier 9.x point releases (9.2,
-  9.3, 9.4) still load the shim because the runtime keeps backward-
-  compat for older 9.x ABIs (the MCP-advert path probes for absent
-  fields); 8.x and 10.x do not. Get it from
-  <https://community.ardour.org/download> — paying their suggested
-  donation is the right call.
-- **An audio backend Ardour can drive.** The shim is backend-agnostic;
-  pick whichever you'd already use with stand-alone Ardour:
-  - **macOS** — CoreAudio works out of the box (Ardour's default
-    on macOS). JACK via Homebrew's `jack` package or the
-    [jackaudio.org](https://jackaudio.org) installer is also fine.
-  - **Linux** — three first-class options, all supported equally:
-    - **PipeWire** (default on Fedora 36+, Ubuntu 22.10+, Arch,
-      most current GNOME/KDE installs). Install
-      `pipewire-jack` / `pipewire-jack-audio-connection-kit` so
-      Ardour can pick the "JACK" backend in the Audio/MIDI Setup
-      dialog — PipeWire's compat layer answers transparently, and
-      no extra `jackd` process is needed.
-    - **JACK 2** (`jackd2`) — the classic low-latency path, still
-      the right call for studio rigs with a dedicated audio
-      interface and no desktop sound mixing.
-    - **ALSA** — Ardour's ALSA backend if you're running headless /
-      JACK-less. Works but only one process at a time can hold the
-      device.
-- A browser. Chrome/Edge/Safari/Firefox all work. Mobile Safari
-  too — the UI is responsive.
-
-### Install
+For cluster deploys there's an in-tree chart at
+[../charts/foyer-studio/](../charts/foyer-studio/) plus thin `just`
+wrappers — see the "helm / kube" section of the
+[Justfile](../Justfile) for the full knob catalog:
 
 ```bash
-# Linux x86_64 / macOS (both Intel and Apple Silicon — the
-# installer auto-detects).
-curl -fsSL https://raw.githubusercontent.com/hotspoons/foyer-studio/main/install.sh \
-  | bash -s -- --latest-ci
+just helm-render       # helm template, same value layering as deploy
+just helm-lint
+just helm-deploy       # release `foyer` into namespace `foyer-studio`
+just helm-uninstall
 ```
 
-The installer:
+`helm-deploy` discovers the active kube context, the cluster's
+IngressClass, and the current-commit image tag, then shells out to
+`helm upgrade --install`; extra args pass through verbatim so every
+native helm flag stays reachable. Deployment knobs come from the
+environment / `.env.local`: `FOYER_DOMAIN` (auto-generated and
+persisted if unset), `FOYER_HELM_VALUES`, `FOYER_IMAGE_REPO`,
+`FOYER_IMAGE_TAG`, `FOYER_TLS_SECRET`, `FOYER_INGRESS_CLASS`, and
+`FOYER_USE_GATEWAY=1` for Gateway-API-style attachment instead of
+Ingress.
 
-1. Detects OS + arch.
-2. Downloads `foyer-<os>-<arch>.zip` from the most recent passing
-   CI build (no GitHub auth needed — proxied via nightly.link).
-3. Unpacks `foyer` into `$XDG_DATA_HOME/foyer/bin/` (or
-   `~/.local/share/foyer/bin/`).
-4. Installs the shim:
-   - **Linux:** `~/.config/ardour9/surfaces/libfoyer_shim.so`
-   - **macOS:** `~/Library/Preferences/Ardour9/surfaces/libfoyer_shim.dylib`
-5. Adds the install bin dir to `PATH` in your shell rc.
-
-Re-source your shell rc (`source ~/.zshrc`, `source ~/.bashrc`, or
-just open a new terminal). Verify:
-
-```bash
-foyer --version
-```
-
-### Wire Ardour to the shim
-
-One-time per machine:
-
-1. Launch Ardour.
-2. Open any session, or create a fresh one.
-3. **Preferences → Control Surfaces → Foyer Studio Shim** → tick
-   the **Enable** box, then **Edit** if you want to inspect the
-   socket path it advertises (defaults to `/tmp/foyer.sock`).
-4. Save the session. Ardour persists the surface activation per
-   session, so the next time you open this project the shim
-   re-attaches automatically.
-
-### Run
-
-With Ardour already running and the shim active, in another terminal:
-
-```bash
-foyer serve --backend ardour
-```
-
-Open <http://127.0.0.1:3838>. Foyer attaches over the shim's Unix
-socket and the mixer / timeline / transport reflect Ardour's live
-state. If you stop Ardour, Foyer surfaces a "backend lost" banner;
-relaunch Ardour and the sidecar reconnects on the next shim
-advertisement.
-
-If you want the launcher experience (no Ardour running yet — Foyer
-spawns it for you on a project pick), don't pre-launch Ardour:
-
-```bash
-foyer serve --backend ardour --jail ~/Music/Ardour
-```
-
-The `--jail` flag confines the file picker to that directory; click
-a session in the browser and Foyer execs Ardour with that project,
-waits for the shim socket, and attaches.
-
-### Reaching it from another device
-
-Plain HTTP only works from the host itself. To reach Foyer from a
-phone or tablet on the same LAN you need TLS — the browser refuses
-to load `AudioWorklet` over plain HTTP (which the mixer's
-**Listen** button needs):
-
-```bash
-foyer serve --backend ardour --listen 0.0.0.0:3838 \
-  --tls-cert ~/.config/foyer/dev.pem --tls-key ~/.config/foyer/dev-key.pem
-```
-
-If you don't have a cert pair, generate a self-signed one. Replace
-`192.168.1.42` with this machine's LAN IP so the cert is valid when
-the phone connects:
-
-```bash
-mkdir -p ~/.config/foyer
-openssl req -x509 -newkey rsa:2048 -nodes -days 1825 \
-  -keyout ~/.config/foyer/dev-key.pem \
-  -out    ~/.config/foyer/dev.pem \
-  -subj   "/CN=foyer-dev" \
-  -addext "subjectAltName = IP:192.168.1.42, DNS:localhost"
-```
-
-Find your LAN IP with `ipconfig getifaddr en0` (macOS) or
-`ip -4 addr show | grep inet` (Linux). Mobile browsers will
-surface a one-time warning that you accept; after that the
-origin is trusted enough for `getUserMedia` and the worklets.
-
-For sharing off-network — to a collaborator over the public
-internet — open **Session → Remote Access…** in the UI. That spins
-up a Cloudflare tunnel, mints an invite URL, and applies the
-per-role RBAC rules. See [SECURITY.md](SECURITY.md) for the threat
-model.
-
-### Uninstall
-
-```bash
-foyer-studio-uninstall            # if it's still on $PATH
-# or:
-~/.local/share/foyer/install.sh uninstall
-```
-
-Pass `--purge` to also wipe `~/.local/share/foyer/` (the install
-root, plus your config, recents, and saved layouts).
-
-### Optional: xpra for native plugin GUI projection
-
-Some plugins (sample-based drums, complex synths, custom-painted
-EQs) ship their own GUI that the schema-driven plugin panel can't
-reproduce. With **xpra** installed on the host, Foyer projects those
-GUIs into the plugin panel via an embedded HTML5 viewer — toggle
-between the schema knobs and the native GUI per plugin.
-
-If xpra isn't installed, the "Native GUI" toggle is hidden in the
-UI and foyer-server logs an info line at startup pointing here.
-Foyer otherwise runs identically.
-
-| Distro | Install command |
-|---|---|
-| **Debian trixie** (13)        | `sudo apt install xpra xpra-x11 xpra-html5` after adding the [xpra.org](https://xpra.org/install.html) apt repo (the trixie debs were dropped from Debian's main archive at release time). |
-| **Debian bookworm** (12) / Ubuntu 24.04+ | `sudo apt install xpra xpra-x11 xpra-html5` |
-| **Fedora / RHEL**             | `sudo dnf install xpra xpra-html5` |
-| **Arch**                      | `sudo pacman -S xpra` (xpra-html5 is an AUR package) |
-| **macOS**                     | `brew install --cask xpra` (or [download](https://xpra.org/install.html#macos) and install the .dmg) |
-
-`xpra-x11` is the X11-server side (modern xpra split it out from
-the `xpra` meta-package); without it `xpra start :NN` aborts with
-"you must install 'xpra-x11' to use 'seamless'". On Linux servers
-without a graphical environment, xpra brings its own Xvfb internally
-— no other X dependencies. Restart `foyer serve` after installing
-and the toggle appears.
+Same single-replica constraint as Cloud Run above: Foyer's session
+state is per-instance, so keep the deployment at one replica.
 
 ## Logs and debugging
 
