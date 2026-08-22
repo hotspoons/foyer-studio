@@ -378,7 +378,7 @@ impl AudioHub {
                     // or is the shim already sending 220 Hz at
                     // 0.2?".  Once confirmed, remove.
                     chunks_seen += 1;
-                    if chunks_seen == 1 || chunks_seen % 100 == 0 {
+                    if chunks_seen == 1 || chunks_seen.is_multiple_of(100) {
                         let mut peak: f32 = 0.0;
                         let mut zero_xings: u32 = 0;
                         let mut prev = chunk[0];

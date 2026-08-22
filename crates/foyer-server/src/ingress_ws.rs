@@ -123,7 +123,7 @@ async fn handle(mut socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
         match msg {
             Ok(Message::Binary(buf)) => {
                 let recv_mono_ns = crate::audio::monotonic_nanos();
-                if buf.len() < HEADER_BYTES + 4 || (buf.len() - HEADER_BYTES) % 4 != 0 {
+                if buf.len() < HEADER_BYTES + 4 || !(buf.len() - HEADER_BYTES).is_multiple_of(4) {
                     tracing::warn!(
                         "/ws/ingress/{stream_id} misaligned binary len={}",
                         buf.len()
@@ -209,10 +209,12 @@ async fn handle(mut socket: WebSocket, state: Arc<AppState>, stream_id: u32) {
 
                 let pcm_bytes = &buf[HEADER_BYTES..];
                 let samples: Vec<f32> = pcm_bytes
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
-                if ch > 0 && samples.len() % ch != 0 {
+                if ch > 0 && !samples.len().is_multiple_of(ch) {
                     tracing::warn!(
                         "/ws/ingress/{stream_id} sample count {} not divisible by channels {}",
                         samples.len(),

@@ -77,7 +77,7 @@ pub async fn run_tests(
     };
     let picked: Vec<&Probe> = PROBES
         .iter()
-        .filter(|p| filter.as_ref().map_or(true, |ids| ids.contains(&p.id)))
+        .filter(|p| filter.as_ref().is_none_or(|ids| ids.contains(&p.id)))
         .collect();
 
     let started_all = std::time::Instant::now();

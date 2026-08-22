@@ -193,14 +193,12 @@ fn remove_user_dir_shim_if_ours() {
     let shim_name = format!("libfoyer_shim{}", shim_extension());
     let shim_path = surfaces.join(&shim_name);
     let stamp_path = surfaces.join(format!("{shim_name}.stamp"));
-    if shim_path.is_file() && stamp_path.is_file() {
-        if std::fs::remove_file(&shim_path).is_ok() {
-            let _ = std::fs::remove_file(&stamp_path);
-            tracing::info!(
-                "removed duplicate user-dir shim {} (Ardour bundles its own)",
-                shim_path.display()
-            );
-        }
+    if shim_path.is_file() && stamp_path.is_file() && std::fs::remove_file(&shim_path).is_ok() {
+        let _ = std::fs::remove_file(&stamp_path);
+        tracing::info!(
+            "removed duplicate user-dir shim {} (Ardour bundles its own)",
+            shim_path.display()
+        );
     }
 }
 

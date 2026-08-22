@@ -37,9 +37,12 @@
       ],
       "sources": [
         {
-          "//": "Ardour",
+          "//": "Ardour. mirror-urls: cairographics.org times out from CI runners intermittently (2026-08-22, same failure shape as the vamp host); Debian's .orig tarball is byte-identical (sha verified).",
           "type": "archive",
           "url": "http://cairographics.org/releases/cairomm-1.12.2.tar.gz",
+          "mirror-urls": [
+            "https://deb.debian.org/debian/pool/main/c/cairomm/cairomm_1.12.2.orig.tar.gz"
+          ],
           "sha256": "45c47fd4d0aa77464a75cdca011143fea3ef795c4753f6e860057da5fb8bd599"
         }
       ]

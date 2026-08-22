@@ -891,9 +891,9 @@ mod tests {
         // Body, then pad to 512.
         raw.extend_from_slice(body);
         let pad = (512 - body.len() % 512) % 512;
-        raw.extend(std::iter::repeat(0u8).take(pad));
+        raw.extend(std::iter::repeat_n(0u8, pad));
         // Two 512-byte zero blocks = end-of-archive.
-        raw.extend(std::iter::repeat(0u8).take(1024));
+        raw.extend(std::iter::repeat_n(0u8, 1024));
 
         // Wrap in gzip.
         let mut gz = Vec::new();
