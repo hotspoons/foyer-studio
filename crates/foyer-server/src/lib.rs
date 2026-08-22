@@ -647,6 +647,13 @@ pub(crate) struct AppState {
     /// tests that don't need it.
     pub(crate) mcp: RwLock<Option<foyer_mcp::FoyerMcpServer>>,
 
+    /// Agent Client Protocol bridge — the mirror image of `mcp`:
+    /// serves the in-process agent itself (prompts, streamed tool
+    /// calls, permission gates) to external ACP *clients* (Zed,
+    /// JetBrains, `foyer acp` relays) over `/acp/ws`. v1 + v2 are
+    /// negotiated per-connection. See docs/ACP.md.
+    pub(crate) acp: RwLock<Option<foyer_acp::FoyerAcpServer>>,
+
     /// WebLLM bridge — accepts `/llm/v1/*` HTTP traffic and relays
     /// it to whichever browser tab is currently registered via
     /// `/ws/webllm`. The agent harness points its config here when
@@ -1079,6 +1086,7 @@ impl Server {
             sequencer_coalescer: Arc::new(Mutex::new(HashMap::new())),
             agent: RwLock::new(None),
             mcp: RwLock::new(None),
+            acp: RwLock::new(None),
             webllm_bridge: std::sync::Arc::new(webllm_bridge::WebLlmBridge::new()),
             fe_renderer: RwLock::new(None),
             ui_director: RwLock::new(None),
@@ -1120,6 +1128,10 @@ impl Server {
         mcp.attach_backend(std::sync::Arc::downgrade(&backend))
             .await;
         *self.state.mcp.write().await = Some(mcp);
+        // And the ACP bridge — external clients drive the agent
+        // itself rather than bringing their own. It talks to the
+        // runtime directly, so no backend wiring of its own.
+        *self.state.acp.write().await = Some(foyer_acp::FoyerAcpServer::new(runtime.clone()));
         // Renderer installation is deferred to `run()` — see
         // `install_agent_renderers` below. Each renderer holds a
         // `Weak<AppState>`, and `Arc::get_mut` (which `run()` uses
@@ -1531,9 +1543,14 @@ pub(crate) async fn build_http_router(state: Arc<AppState>) -> Router {
     // axum state (the FoyerMcpServer), so we nest BEFORE
     // `with_state(state)` to avoid a state-type collision.
     let mcp_route = state.mcp.read().await.clone();
+    // Same state-type dance for the ACP bridge at `/acp/ws`.
+    let acp_route = state.acp.read().await.clone();
     let mut router = router.with_state(state);
     if let Some(mcp) = mcp_route {
         router = router.nest("/mcp", foyer_mcp::mcp_router(mcp));
+    }
+    if let Some(acp) = acp_route {
+        router = router.nest("/acp", foyer_acp::ws_router(acp));
     }
     let mut router = router
         .layer(TraceLayer::new_for_http())

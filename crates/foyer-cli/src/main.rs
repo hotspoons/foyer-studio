@@ -23,6 +23,7 @@ use clap::Parser;
 use foyer_backend_host::discovery;
 use foyer_config::{self as cfg, BackendKind, Config};
 
+mod acp_relay;
 mod ardour_locate;
 mod ardour_xml;
 mod cli;
@@ -37,7 +38,16 @@ use cli::{Cli, Command};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `foyer acp` speaks a line protocol on stdout — logs there
+    // would corrupt it. Peek at argv before installing the
+    // subscriber so that subcommand logs to stderr instead.
+    let writer = if std::env::args().nth(1).as_deref() == Some("acp") {
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr)
+    } else {
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stdout)
+    };
     tracing_subscriber::fmt()
+        .with_writer(writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 // Default: info for our crates, but mute chatty upstream
@@ -205,6 +215,10 @@ async fn main() -> Result<()> {
             foyer_snapshot::cli::run(&args).await
         }
         Command::ScrubRestore { input, output } => scrub_restore(&input, output.as_deref()),
+        Command::Acp { url } => {
+            let url = url.unwrap_or_else(|| acp_relay::default_url(&config));
+            acp_relay::run(url).await
+        }
         Command::Serve {
             backend,
             project,

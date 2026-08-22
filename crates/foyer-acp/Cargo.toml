@@ -1,0 +1,31 @@
+[package]
+name = "foyer-acp"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Agent Client Protocol bridge — serves the in-process Foyer agent to external ACP clients (v1 + v2)"
+
+[dependencies]
+foyer-agent = { workspace = true }
+foyer-schema = { workspace = true }
+
+agent-client-protocol = { workspace = true }
+
+tokio = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+# WS endpoint mounted into foyer-server's router. Version tracks
+# foyer-server's axum.
+axum = { version = "0.7", features = ["ws"] }
+
+[dev-dependencies]
+foyer-backend = { workspace = true }
+foyer-backend-stub = { workspace = true }
+tempfile = "3"
+serde.workspace = true
+tracing-subscriber = { workspace = true }

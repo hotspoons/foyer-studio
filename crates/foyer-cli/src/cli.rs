@@ -300,4 +300,16 @@ pub enum Command {
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
     },
+
+    /// Speak the Agent Client Protocol on stdio, relaying to a
+    /// running `foyer serve`'s `/acp/ws` endpoint. Point your ACP
+    /// client (Zed, JetBrains, …) at `foyer acp` to drive the
+    /// embedded Foyer agent — v1 and v2 both served. See docs/ACP.md.
+    Acp {
+        /// ACP WebSocket endpoint. Defaults to the configured
+        /// `server.listen` port on loopback:
+        /// `ws://127.0.0.1:3838/acp/ws`.
+        #[arg(long)]
+        url: Option<String>,
+    },
 }

@@ -231,6 +231,18 @@ NOT edit `index.html` or `boot.js`.
   MCP-agnostic and external clients get the SDK's protocol compliance
   for free. The bridge lives in [crates/foyer-mcp/](crates/foyer-mcp/),
   mounted at `/mcp` on the main axum router.
+- **ACP work uses `agent-client-protocol = "=2.0.0"`** (official
+  Zed-maintained SDK; the exact pin is deliberate — minor bumps track
+  v2-draft revisions and can change wire shapes). Foyer is the *agent*
+  side of ACP: [crates/foyer-acp/](crates/foyer-acp/) bridges the live
+  `AgentRuntime` to external ACP clients (Zed, JetBrains, …) at
+  `/acp/ws`, with `foyer acp` as a protocol-blind stdio↔WS relay for
+  editors that spawn subprocesses. v1 + v2 are negotiated
+  per-connection via the SDK's `AgentProtocolRouter` — never
+  hand-negotiate versions, and keep ACP types out of `foyer-agent`
+  (same containment rule as rmcp above). Mapping tables + the
+  v1-vs-v2 turn-model split live in [docs/ACP.md](docs/ACP.md);
+  rationale in DECISION 58.
 
 ## How to run + probe
 

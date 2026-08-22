@@ -2844,3 +2844,55 @@ only by major.minor.
 one" — it picks *per name lookup order*, both modules get dlopen'd,
 and a future Ardour that instantiates duplicates (or a user clicking
 the second row) double-binds the advert socket.
+
+## 58. ACP support: Foyer is the agent, served over WS with a stdio relay
+
+**Date:** 2026-08-22
+
+**Decision:** Speak the Agent Client Protocol as an **agent** via a
+new bridge crate ([crates/foyer-acp/](../crates/foyer-acp/)) built on
+the official `agent-client-protocol` SDK (Zed-maintained,
+Apache-2.0, pinned `=2.0.0` while v2 is a draft). Protocol v1
+(stable) and v2 (2026-07-20 draft) are both served; the SDK's
+`AgentProtocolRouter` picks the chain per-connection at `initialize`.
+Primary transport is ACP-over-WebSocket at `/acp/ws` on the main
+axum router (one JSON-RPC message per text frame); `foyer acp` is a
+protocol-blind stdio↔WS line relay for editors that only spawn
+subprocesses. Full design + mapping tables in [docs/ACP.md](ACP.md).
+
+**Sub-decisions and why:**
+
+1. **Agent side, not client side.** MCP (`/mcp`, entry 15's
+   containment pattern) already serves external agents that bring
+   their own brain. ACP completes the matrix: external *clients*
+   (Zed, JetBrains, custom UIs) drive Foyer's own embedded agent.
+   Hosting third-party ACP agents inside Foyer's UI is a different
+   feature and stays out of scope until someone wants it.
+2. **Bridge lives in the server process** because `AgentRuntime`
+   does. The runtime's primitives map 1:1 (`send_user_message` ↔
+   `session/prompt`, broadcast events ↔ `session/update`, the
+   autonomy gate's `AwaitingConfirm`/`confirm_tool` ↔
+   `session/request_permission`, `stop_current_turn` ↔
+   `session/cancel`) — the bridge is pure translation, zero new
+   agent capability, and `foyer-agent` keeps zero ACP types (same
+   rule as rmcp).
+3. **One shared conversation.** ACP sessions are the runtime's
+   persisted agent sessions; an ACP-driven turn streams into the
+   browser FAB and vice versa. That's the
+   backend-is-source-of-truth rule applied to agent state — two
+   surfaces never see two transcripts.
+4. **v1 scopes updates to the requesting turn; v2 streams
+   continuously** with running/idle `StateUpdate`s — matching each
+   version's contract (v2's draft explicitly decouples updates from
+   prompts). The v2 chain's per-connection pump also answers
+   permission gates for turns started elsewhere; first
+   `confirm_tool` wins against the FAB.
+5. **Exact-pin the SDK.** Minor bumps track draft revisions and can
+   change v2 wire shapes; bumps are deliberate, with the migration
+   notes read first.
+
+**Failure mode if re-litigated.** "Just expose ACP over stdio like
+everyone else" — the agent state lives in the long-running server,
+so a stdio-spawned agent process would have to boot its own backend
+(splitting the session) or reinvent the WS hop this design already
+makes explicit, badly.

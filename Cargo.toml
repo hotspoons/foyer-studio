@@ -11,6 +11,7 @@ members = [
     "crates/foyer-backend-host",
     "crates/foyer-agent",
     "crates/foyer-mcp",
+    "crates/foyer-acp",
     "crates/foyer-server",
     "crates/foyer-cli",
     "crates/foyer-desktop",
@@ -30,7 +31,9 @@ edition = "2021"
 # `license.workspace = true` — wrong: published crate metadata would
 # claim copyleft on code that's actually permissive.
 license = "Apache-2.0"
-rust-version = "1.75"
+# 1.88 is the floor set by `agent-client-protocol` (the ACP SDK);
+# everything else in the workspace was happy on 1.75.
+rust-version = "1.88"
 authors = ["Foyer Studio Contributors"]
 repository = "https://github.com/foyer-studio/foyer-studio"
 
@@ -46,12 +49,20 @@ foyer-backend-stub  = { path = "crates/foyer-backend-stub" }
 foyer-backend-host  = { path = "crates/foyer-backend-host" }
 foyer-agent         = { path = "crates/foyer-agent" }
 foyer-mcp           = { path = "crates/foyer-mcp" }
+foyer-acp           = { path = "crates/foyer-acp" }
 foyer-server        = { path = "crates/foyer-server" }
 foyer-cli           = { path = "crates/foyer-cli" }
 foyer-desktop       = { path = "crates/foyer-desktop" }
 foyer-config        = { path = "crates/foyer-config" }
 foyer-i18n          = { path = "crates/foyer-i18n" }
 foyer-snapshot      = { path = "crates/foyer-snapshot" }
+
+# Agent Client Protocol — official SDK (Zed-maintained, Apache-2.0).
+# `unstable_protocol_v2` compiles the v2-draft schema + the
+# AgentProtocolRouter used to serve v1 and v2 side by side. Pinned
+# exact while v2 is a draft: minor bumps of the SDK track draft
+# revisions and CAN change v2 wire shapes.
+agent-client-protocol = { version = "=2.0.0", features = ["unstable_protocol_v2"] }
 
 # serde stack
 serde       = { version = "1", features = ["derive"] }
