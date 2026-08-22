@@ -92,10 +92,19 @@ pub async fn run(url: String) -> Result<()> {
         Ok::<(), anyhow::Error>(())
     };
 
-    // Either direction ending ends the relay: stdin EOF = editor is
-    // done with us; WS close = server went away.
+    // WS→stdout runs as its own task so that when stdin hits EOF we
+    // can still DRAIN responses the server already has in flight —
+    // a one-shot pipe (`echo '…' | foyer acp`) would otherwise exit
+    // before the reply frame lands. The polite Close sent on stdin
+    // EOF makes the server close back, which ends the drain; the
+    // timeout is a backstop for a server that never does.
+    let mut ws_task = tokio::spawn(ws_to_stdout);
     tokio::select! {
-        r = stdin_to_ws => r,
-        r = ws_to_stdout => r,
+        r = stdin_to_ws => {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), &mut ws_task).await;
+            r
+        }
+        // Server hung up first — nothing left to relay.
+        r = &mut ws_task => r.context("ws relay task")?,
     }
 }
