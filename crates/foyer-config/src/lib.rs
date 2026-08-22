@@ -222,6 +222,15 @@ pub struct DesktopConfig {
     /// stub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_sub_mode: Option<HostSubMode>,
+    /// Listen address for the embedded server on host-mode launches
+    /// (flatpak included). Unset = `127.0.0.1:0` — loopback only, a
+    /// random free port, nothing reachable from the network. Set
+    /// `0.0.0.0:3838` to let phones / collaborators on the LAN reach
+    /// the same session the desktop window shows (the server's RBAC
+    /// still gates what each client may do). The WebView always
+    /// connects over loopback regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<std::net::SocketAddr>,
 }
 
 /// `DesktopConfig::host_sub_mode` discriminator. Captures the
@@ -985,6 +994,18 @@ mod tests {
         // Second call should re-read, not re-seed.
         let again = load_or_seed_at(&path).unwrap();
         assert_eq!(again.default_backend, cfg.default_backend);
+    }
+
+    #[test]
+    fn desktop_listen_parses_from_yaml() {
+        let yaml = "desktop:\n  mode: host\n  listen: 0.0.0.0:3838\n";
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let listen = cfg.desktop.as_ref().and_then(|d| d.listen).unwrap();
+        assert_eq!(listen, "0.0.0.0:3838".parse().unwrap());
+        // Unset stays None (loopback + random port is the caller's
+        // default, not the config's).
+        let cfg: Config = serde_yaml::from_str("desktop:\n  mode: host\n").unwrap();
+        assert!(cfg.desktop.as_ref().and_then(|d| d.listen).is_none());
     }
 
     #[test]

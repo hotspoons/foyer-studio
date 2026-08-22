@@ -2814,3 +2814,33 @@ links the host's libjack, which on a modern distro may be real
 jackd2, pipewire-jack, or absent, and every combination produces a
 different first-run failure. The flatpak runtime pins exactly one
 answer.
+
+## 57. An Ardour-adjacent shim beats the user-dir install
+
+**Date:** 2026-08-22
+
+**Decision:** When the resolved Ardour install carries a Foyer shim
+in its own surfaces dir (`<prefix>/lib/ardour<major>/surfaces/
+libfoyer_shim.so`, resolved relative to the binary at
+`<prefix>/bin/ardour<major>`), `ensure_ardour_ready` uses that copy
+and skips materializing the embedded blob into
+`$XDG_CONFIG_HOME/ardour<N>/surfaces/`. Any user-dir copy a previous
+Foyer run installed (identified by its sibling `.stamp` file) is
+removed.
+
+**Why:** The flatpak ships the shim at
+`/app/lib/ardour9/surfaces/` (DECISION 56), and the CLI's preflight
+would install a second, byte-identical copy under
+`~/.var/app/…/config/ardour9/surfaces/` on first launch. Ardour's
+`ControlProtocolManager::discover` appends every `.so` from every
+search-path dir — no basename dedup — so the user sees "Foyer Studio
+Shim" listed twice in Preferences → Control Surfaces, with
+which-copy-instantiates decided by scan order. The Ardour-adjacent
+copy is also the safer of the two by construction: it was built
+against exactly that Ardour tree, while the embedded blob matches
+only by major.minor.
+
+**Failure mode if re-litigated.** "Install both, Ardour will pick
+one" — it picks *per name lookup order*, both modules get dlopen'd,
+and a future Ardour that instantiates duplicates (or a user clicking
+the second row) double-binds the advert socket.

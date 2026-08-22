@@ -155,6 +155,14 @@ fn run_from_config(reset: bool) -> Result<()> {
         .as_ref()
         .map(|d| d.fullscreen)
         .unwrap_or(false);
+    // `desktop.listen` opens the embedded server beyond loopback
+    // (phones / collaborators on the LAN). Unset = loopback + random
+    // port, unreachable from the network.
+    let listen: SocketAddr = config
+        .desktop
+        .as_ref()
+        .and_then(|d| d.listen)
+        .unwrap_or_else(|| "127.0.0.1:0".parse().expect("static addr parses"));
     // Flatpak launch: the sandbox bundles Ardour + shim + web tree,
     // and Docker mode is impossible from inside it, so the host-vs-
     // docker picker has no real choice to offer. Bare launches go
@@ -166,7 +174,7 @@ fn run_from_config(reset: bool) -> Result<()> {
         if matches!(mode, Some(DesktopMode::Docker)) {
             tracing::warn!("desktop.mode=docker is not runnable inside the flatpak sandbox — using the bundled native-Ardour host mode");
         }
-        return run_flatpak_host(fullscreen);
+        return run_flatpak_host(listen, fullscreen);
     }
     match mode {
         Some(DesktopMode::Host) => {
@@ -175,10 +183,8 @@ fn run_from_config(reset: bool) -> Result<()> {
             // Ardour install for a real low-latency audio path.
             let sub = config.desktop.as_ref().and_then(|d| d.host_sub_mode);
             match sub {
-                Some(HostSubMode::NativeArdour) => {
-                    run_host_native_ardour("127.0.0.1:0".parse()?, fullscreen)
-                }
-                _ => run_host(Backend::Stub, None, "127.0.0.1:0".parse()?, fullscreen),
+                Some(HostSubMode::NativeArdour) => run_host_native_ardour(listen, fullscreen),
+                _ => run_host(Backend::Stub, None, listen, fullscreen),
             }
         }
         Some(DesktopMode::Docker) => run_docker_mode(fullscreen),
@@ -210,30 +216,51 @@ fn in_flatpak() -> bool {
 /// backend's executable to /app/bin/ardour9 via its PATH probe, and
 /// the web tree comes from the CLI's embedded bundle — no extra
 /// plumbing.
-fn run_flatpak_host(fullscreen: bool) -> Result<()> {
+fn run_flatpak_host(listen: SocketAddr, fullscreen: bool) -> Result<()> {
     let foyer_bin = find_foyer_binary()
         .ok_or_else(|| anyhow::anyhow!("`foyer` CLI not found alongside foyer-desktop"))?;
 
-    // Bind-and-drop on :0 to pick a free loopback port — same trick
+    // Bind-and-drop to resolve a port-0 listen address — same trick
     // as `run_host`, but the port has to be known up front because
-    // the child owns the actual bind.
+    // the child owns the actual bind. A fixed port passes through
+    // untouched (a collision surfaces as the child's bind error).
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let port = {
-        let listener = rt
-            .block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await })
-            .context("probe for a free loopback port")?;
-        listener.local_addr()?.port()
+    let listen = if listen.port() == 0 {
+        // The probe listener is a statement-scoped temporary: bind,
+        // read the resolved addr, drop — released before the child
+        // spawns and rebinds it.
+        rt.block_on(async { tokio::net::TcpListener::bind(listen).await })
+            .with_context(|| format!("probe for a free port on {listen}"))?
+            .local_addr()?
+    } else {
+        listen
     };
 
+    // The WebView always rides loopback; remote clients use the real
+    // interface. An unspecified listen IP (0.0.0.0 / ::) answers on
+    // loopback too, but a pinned concrete IP does not — connect the
+    // WebView to that same IP in that case.
+    let webview_host = if listen.ip().is_unspecified() {
+        "127.0.0.1".to_string()
+    } else {
+        listen.ip().to_string()
+    };
+    let port = listen.port();
+    if !listen.ip().is_loopback() {
+        tracing::info!(
+            "desktop.listen={listen} — remote clients can reach this session at http://<this-machine>:{port}/"
+        );
+    }
+
     tracing::info!(
-        "spawning `{} serve --backend ardour` on 127.0.0.1:{port}",
+        "spawning `{} serve --backend ardour` on {listen}",
         foyer_bin.display()
     );
     let child = std::process::Command::new(&foyer_bin)
         .args(["serve", "--backend", "ardour", "--listen"])
-        .arg(format!("127.0.0.1:{port}"))
+        .arg(listen.to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -244,10 +271,10 @@ fn run_flatpak_host(fullscreen: bool) -> Result<()> {
     // Poll until the server binds. The serve path comes up fast —
     // Ardour itself launches lazily when a session is picked in the
     // UI — so 30 s is generous headroom, matching docker mode.
-    let url = format!("http://127.0.0.1:{port}/");
+    let url = format!("http://{webview_host}:{port}/");
     rt.block_on(async {
         for _ in 0..60 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            if tokio::net::TcpStream::connect((webview_host.as_str(), port))
                 .await
                 .is_ok()
             {
@@ -256,7 +283,7 @@ fn run_flatpak_host(fullscreen: bool) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
         Err(anyhow::anyhow!(
-            "foyer serve never bound 127.0.0.1:{port} within 30 s — check its output above"
+            "foyer serve never bound {listen} within 30 s — check its output above"
         ))
     })?;
     run_webview(url, fullscreen, None, Some(child))
@@ -334,7 +361,7 @@ fn run_host_native_ardour(listen: SocketAddr, fullscreen: bool) -> Result<()> {
         .context("bind server listen address")?;
     let actual = listener.local_addr()?;
     drop(listener);
-    let url = format!("http://{}/", actual);
+    let url = webview_url(actual);
 
     let server_cfg = Config {
         tls: None,
@@ -398,6 +425,7 @@ fn run_host(
     let actual = listener.local_addr()?;
     drop(listener); // release before Server::run rebinds
 
+    let url = webview_url(actual);
     let config = Config {
         tls: None,
         listen: actual,
@@ -407,7 +435,6 @@ fn run_host(
     };
 
     // Launch the server in the runtime; it keeps running until the process exits.
-    let url = format!("http://{}/", actual);
     rt.spawn(async move {
         let err = match backend {
             Backend::Stub => {
@@ -503,6 +530,19 @@ fn run_docker_mode(fullscreen: bool) -> Result<()> {
         ))
     })?;
     run_webview(url, fullscreen, None, Some(child))
+}
+
+/// URL the WebView should open for a server bound at `actual`. The
+/// WebView always rides a locally-reachable address: an unspecified
+/// listen IP (0.0.0.0 / ::) answers on loopback, so navigate there
+/// instead of the ugly (if technically connectable) `http://0.0.0.0/`;
+/// a pinned concrete IP may NOT answer on loopback, so use it as-is.
+fn webview_url(actual: SocketAddr) -> String {
+    if actual.ip().is_unspecified() {
+        format!("http://127.0.0.1:{}/", actual.port())
+    } else {
+        format!("http://{actual}/")
+    }
 }
 
 /// Common WebView event loop. `_rt` and `child` are held alive for

@@ -135,12 +135,73 @@ pub fn ensure_ardour_ready(ardour_binary_override: Option<&Path>) -> Result<Aard
         .and_then(pick_shim_for)
         .or_else(|| SHIM_TABLE.first());
     let entry = entry.ok_or_else(|| anyhow!("no embedded shim available for this Foyer build"))?;
+    // An Ardour install that carries the Foyer shim in its own
+    // surfaces dir (the flatpak layout: /app/bin/ardour9 +
+    // /app/lib/ardour9/surfaces/libfoyer_shim.so) is authoritative —
+    // that copy was cmake-built against exactly that Ardour tree.
+    // Installing our embedded copy into the user surfaces dir as
+    // well would make Ardour list the surface twice: its module scan
+    // (ControlProtocolManager::discover) appends every .so from
+    // every search-path dir without deduping basenames. Skip the
+    // user-dir install and clean up any copy a pre-fix run left
+    // behind. See DECISION 57.
+    if let Some(shim_installed_at) = ardour_adjacent_shim(&binary) {
+        tracing::info!(
+            "Ardour install bundles the Foyer shim at {} — skipping user-dir install",
+            shim_installed_at.display()
+        );
+        remove_user_dir_shim_if_ours();
+        return Ok(AardourReady {
+            binary,
+            shim_installed_at,
+        });
+    }
     let shim_installed_at =
         install_shim_entry(entry).context("failed to install embedded Ardour shim")?;
     Ok(AardourReady {
         binary,
         shim_installed_at,
     })
+}
+
+/// Probe for a Foyer shim shipped alongside the Ardour install
+/// itself: `<prefix>/lib/ardour<major>/surfaces/libfoyer_shim.so`
+/// relative to a binary at `<prefix>/bin/ardour<major>`. This is the
+/// flatpak layout (and what a distro package that bundles the shim
+/// would look like). Returns None for dev trees and macOS .app
+/// bundles — neither carries a Foyer shim next to Ardour.
+fn ardour_adjacent_shim(binary: &Path) -> Option<PathBuf> {
+    let major = ARDOUR_VERSION.split('.').next().unwrap_or("9");
+    let prefix = binary.parent()?.parent()?;
+    let p = prefix
+        .join("lib")
+        .join(format!("ardour{major}"))
+        .join("surfaces")
+        .join(format!("libfoyer_shim{}", shim_extension()));
+    p.is_file().then_some(p)
+}
+
+/// Remove a user-dir shim that WE installed on an earlier run (the
+/// sibling `.stamp` file is the proof of ownership — hand-copied
+/// shims don't have one). Heals installs that ran before the
+/// adjacent-shim skip existed and would otherwise keep the duplicate
+/// forever. Best-effort: permission errors just leave the file.
+fn remove_user_dir_shim_if_ours() {
+    let Ok(surfaces) = ardour_surfaces_dir() else {
+        return;
+    };
+    let shim_name = format!("libfoyer_shim{}", shim_extension());
+    let shim_path = surfaces.join(&shim_name);
+    let stamp_path = surfaces.join(format!("{shim_name}.stamp"));
+    if shim_path.is_file() && stamp_path.is_file() {
+        if std::fs::remove_file(&shim_path).is_ok() {
+            let _ = std::fs::remove_file(&stamp_path);
+            tracing::info!(
+                "removed duplicate user-dir shim {} (Ardour bundles its own)",
+                shim_path.display()
+            );
+        }
+    }
 }
 
 /// Best-effort lookup of the Ardour binary. Order of preference:
